@@ -1,0 +1,8 @@
+# Changes here will be overwritten by Copier; do not edit manually.
+_commit: v0.6.0
+_src_path: gh:GongYuanCaiJi/repo-template
+copyright_year: '2026'
+language: python
+project_name: jobsalvo
+run_tests: false
+runner: ubuntu-latest

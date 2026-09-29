@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+*.lock
+!uv.lock
+*.tmp
+# 資料夾(JOBSALVO_HOME)不該放在 repo 裡;萬一放了也別 commit
+/board.html
+/*-marks.jsonl
+/card-summaries/
+/company-cache/
+/prepare/
+/ship/
+/.research/
+/.reconcile-manifest.json
+/jobsalvo.json
+/resume/
+/custom/
+/prefs.md
+/apply-rules.md
+/resume.md

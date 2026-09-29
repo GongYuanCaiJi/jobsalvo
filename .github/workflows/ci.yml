@@ -1,0 +1,17 @@
+name: ci
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: read # gitleaks in the shared CI lists the PR commits
+jobs:
+  ci:
+    uses: GongYuanCaiJi/.github/.github/workflows/ci.yml@main
+    with:
+      tests: false

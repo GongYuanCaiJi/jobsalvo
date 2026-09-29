@@ -1,0 +1,18 @@
+{
+  "board": {"title": "求職儀表板"},
+  "fetch": {"reader": true},
+  "agent": {"agents": [{"id": "primary", "runtime": "codex", "model": "", "effort": "max", "speed": "standard", "browser": true}]},
+  "resume": {
+    "langs": ["zh", "en"],
+    "base": "我是一個測試用的假人",
+    "profile_cmd": "echo profile",
+    "build_cmd": "echo build",
+    "variants": {
+      "general": {"label": "通用", "zh": "resume/general-zh.pdf", "en": "resume/general-en.pdf",
+                  "attachments": ["resume/portfolio.pdf"], "when": "大部分的缺"},
+      "data": {"label": "資料", "zh": "resume/data-zh.md", "enabled": false,
+               "attachments": {"zh": ["resume/cert-zh.pdf"], "en": []}}
+    }
+  },
+  "flow": {"replies_at": "09:00"}
+}

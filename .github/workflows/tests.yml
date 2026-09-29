@@ -1,0 +1,73 @@
+name: tests
+
+# 只在 PR 上跑:PR 跑的就是「合併後的樣子」(GitHub 的 merge commit),合併進 main 再跑一次是重複的。
+# 私人 repo 的 Actions 分鐘數有上限,以前 main 上那一輪佔了快四成。
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]   # draft 不跑;按 Ready for review 才跑
+
+# 同一個 PR 又推了新的,舊的那輪直接取消,不跑完
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      pull-requests: read   # paths-filter 讀這個 PR 改了哪些檔
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 看改了哪些檔:重的看板檢查(約 9 分鐘)只在改到它用得到的程式時才跑。
+      # 同一個 job 裡用步驟的 if 跳過,不另開 job(每個 job 各自裝環境、分鐘數各自進位,反而更貴)
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: changed
+        with:
+          filters: |
+            board:
+              - 'board/**'
+              - 'tools/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/ci.yml'
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: 安裝相依套件(uv 照 pyproject.toml / uv.lock,含開發用的 Playwright)
+        run: |
+          uv sync --frozen
+          sudo apt-get install -y -qq poppler-utils   # 不是 Mac,PDF 預覽改用 pdftoppm
+      - name: 讓無頭 Chrome 開得起來
+        # Ubuntu 24.04 預設限制一般使用者建立 namespace,Chrome 會開不起來或卡住。
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          google-chrome --version
+          google-chrome --headless=new --no-sandbox --disable-gpu --print-to-pdf=/tmp/smoke.pdf about:blank
+          test -s /tmp/smoke.pdf
+      - name: 單元測試
+        run: uv run --frozen python -m unittest discover -s tests
+      - name: 看板規矩檢查
+        if: steps.changed.outputs.board == 'true'
+        env:
+          BOARD_CHECK_TRACES: ${{ runner.temp }}/board-check-traces
+          BOARD_CHECK_WORKERS: '4'   # 分 4 組同時跑(GitHub 的機器 4 核)
+        run: uv run --frozen python tools/board_check.py --quiet
+      - name: 看板檢查失敗時,把那幾條的 Playwright 錄影存起來(在這次執行的 Artifacts 下載)
+        if: failure() && steps.changed.outputs.board == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: board-check-traces
+          path: ${{ runner.temp }}/board-check-traces
+          retention-days: 7
+      - name: 效能:400 多張卡的大看板,按下去 0.2 秒內畫完
+        if: steps.changed.outputs.board == 'true'
+        run: JOBSALVO_DEMO_EXTRA=400 uv run --frozen python tools/board_check.py --quiet --only 效能
+# 共用的檢查(pre-commit、gitleaks、Semgrep)在 ci.yml 呼叫共用 CI 跑;這裡只跑 jobsalvo 自己的單元測試和看板檢查。
+# 隱私掃描:字詞清單只放在本機 .git/info/private-words,不進版控,雲端沒有清單就跳過;
+# commit 前由 pre-commit 在本機掃,同步到公開鏡像前 mirror.yml 用密鑰裡的那份清單掃。

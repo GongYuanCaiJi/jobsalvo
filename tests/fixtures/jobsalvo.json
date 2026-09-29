@@ -1,0 +1,10 @@
+{
+  "agent": {"name": "Agent"},
+  "resume": {
+    "variants": {
+      "general": {"label": "通用版", "when": "大部分職缺", "zh": "resume/general-zh.pdf", "en": "resume/general-en.pdf"},
+      "tech": {"label": "技術版", "when": "要看技術細節的職缺", "zh": "resume/tech-zh.pdf", "en": "resume/tech-en.pdf",
+               "attachments": ["resume/portfolio.pdf"]}
+    }
+  }
+}

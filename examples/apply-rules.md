@@ -1,0 +1,3 @@
+- 表單上有「Apply with LinkedIn」就先按,讓 LinkedIn 帶入個人資料。
+- 連結欄填 GitHub:https://github.com/<你的帳號>
+- 「公司可以之後聯絡我其他職缺」這類勾選框要勾;把資料分享給第三方的同意框留給我。

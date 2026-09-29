@@ -1,0 +1,38 @@
+# commit 前只做幾秒就跑完的檢查;完整測試與看板規矩檢查交給 CI(.github/workflows/ci.yml)。
+# 裝:pre-commit install(clone 之後一次)。能用現成工具的一律用現成的,只有產品自己的規矩才寫在 tools/。
+repos:
+  - repo: local
+    hooks:
+      # 私人字串(真名、公司、本機路徑):字詞清單只放本機 .git/info/private-words,不進版控
+      - id: privacy-scan
+        name: 私人字串
+        entry: python3 tools/privacy_scan.py
+        language: system
+        pass_filenames: false
+  # 模組歸屬:卡片編號、名字清理、找可投遞夾各自只准在一支程式裡做(規則與測試在 .semgrep/,semgrep --test .semgrep/)
+  - repo: https://github.com/semgrep/pre-commit
+    rev: v1.178.0
+    hooks:
+      - id: semgrep
+        args: [--config, .semgrep/module-ownership.yml, --error, --metrics=off, --disable-version-check, --quiet]
+        exclude: ^\.semgrep/
+  # API 金鑰、密碼、權杖(認得幾百種長相;私人字串掃描只認得清單上的字,兩個不能互換)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+  # 出錯就吞掉(except 裡只有 pass)、沒用到的 import 和變數。真的該忽略的在那行寫 # noqa: S110 和原因
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff-check
+  # GitHub Actions 設定檔:語法、shell 寫法(actionlint);危險寫法、權限太寬(zizmor)
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.30.1
+    hooks:
+      - id: zizmor
+        args: [--config, .github/zizmor.yml]   # 範本的設定:自己的共用 CI 跟 main 走,其他 action 鎖 commit

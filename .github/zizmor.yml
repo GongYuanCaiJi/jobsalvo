@@ -1,0 +1,7 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Own shared CI is referenced by branch so one change reaches every repo.
+        "GongYuanCaiJi/*": ref-pin
+        "*": hash-pin

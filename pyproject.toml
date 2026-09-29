@@ -1,0 +1,22 @@
+# jobsalvo 用到的第三方套件只列在這裡。用 uv 管(https://docs.astral.sh/uv/concepts/projects/):
+# uv sync 照這份和 uv.lock 在 repo 的 .venv 建環境,程式都用 .venv 的 python 跑。安裝、更新、CI 都是 uv sync。
+[project]
+name = "jobsalvo"
+version = "0"
+requires-python = ">=3.11"
+dependencies = [
+    "Markdown==3.10.3",          # 履歷 Markdown 轉 PDF
+    "pypdf==6.19.0",             # 讀 PDF 頁數、比對頁面
+    "playwright==1.63.0",        # 開瀏覽器:讀網頁文字、截圖、看板檢查(用這台的 Chrome,不另外下載)
+]
+
+[tool.uv]
+package = false   # 這是應用程式,不是要發佈的套件
+exclude-newer = "7 days"   # 新版先等 7 天再用(https://docs.astral.sh/uv/concepts/resolution/#dependency-cooldowns),跟 Dependabot 一致
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# 只開這幾條:吞錯(S110)、光禿禿的 except(E722)、沒用到的 import / 變數(F401、F841)、用到沒定義的名字(F821)
+select = ["S110", "E722", "F401", "F821", "F841"]

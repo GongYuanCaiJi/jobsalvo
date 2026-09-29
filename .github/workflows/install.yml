@@ -1,0 +1,129 @@
+name: 乾淨的 Mac 上安裝
+
+# 在 GitHub 借一台全新的 Mac(沒有我們的設定、沒有資料、沒登入任何 agent),照 README 跑一次安裝,
+# 模擬新使用者第一次安裝。兩種新人各跑一次:
+#   1. 什麼 agent 都沒有 → 安裝要停下,講清楚要裝 Codex 或 Claude 並登入,不能噴錯誤堆疊
+#   2. 裝好、登入好一個 agent(假的 codex 指令,只回答「已登入」,不會真的派 agent)→ 一路裝完、看板起得來
+# Mac 機器在私人 repo 算 10 倍用量:只在動到安裝相關的檔時跑,另外每週一跑一次(抓 GitHub 機器更新造成的問題)。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]   # draft 不跑;按 Ready for review 才跑
+    paths:
+      - tools/install.sh
+      - tools/uninstall.sh
+      - tools/install_service.py
+      - tools/init.py
+      - tools/doctor.py
+      - tools/config.py
+      - tools/board_server.py
+      - tools/agent_run.py
+      - .github/workflows/install.yml
+  push:
+    branches: [main]
+    paths:
+      - tools/install.sh
+      - tools/uninstall.sh
+      - tools/install_service.py
+      - tools/init.py
+      - tools/doctor.py
+      - tools/config.py
+      - tools/board_server.py
+      - tools/agent_run.py
+      - .github/workflows/install.yml
+  schedule:
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+
+# Mac 機器在私人 repo 算 10 倍用量:同一個 PR 又推了新的,舊的那輪直接取消
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-mac:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      JOBSALVO_INSTALL_NO_OPEN: '1'
+      PYTHONUNBUFFERED: '1'       # 看板的紀錄立刻寫進檔,失敗時才看得到
+      PYTHONFAULTHANDLER: '1'     # 看板卡住時送 SIGABRT,Python 會把每條執行緒卡在哪一行印出來
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 這台機器上有什麼(新人的起點)
+        run: |
+          sw_vers
+          echo "python3 → $(command -v python3) $(python3 --version 2>&1)"
+          for c in codex claude command-code git; do echo "$c → $(command -v $c || echo 沒有)"; done
+      - name: 新人 1:什麼 agent 都沒有 → 安裝停下並講清楚
+        run: |
+          PATH="$(echo "$PATH" | tr ':' '\n' | grep -v -e '/codex' -e '/claude' | paste -sd: -)"
+          export PATH
+          set +e
+          out=$(JOBSALVO_HOME="$RUNNER_TEMP/new1" bash tools/install.sh 2>&1); code=$?
+          set -e
+          echo "$out"; echo "結束碼 $code"
+          [ "$code" -ne 0 ] || { echo "❌ 沒有 agent 卻裝完了"; exit 1; }
+          echo "$out" | grep -q '沒有裝好、登入好的 agent' || { echo "❌ 沒講清楚要裝 agent"; exit 1; }
+          if echo "$out" | grep -q 'Traceback'; then echo "❌ 噴了錯誤堆疊"; exit 1; fi
+          echo "✅ 停下來了,也講清楚要裝什麼"
+      - name: 新人 2:裝好、登入好一個 agent → 一路裝完、看板起得來
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          # 假的 codex:只回答「已登入」;真的被派工作就失敗(這一步不該派任何 agent)
+          # shellcheck disable=SC2016  # 單引號是故意的:$1 $2 要留給假的 codex 自己展開
+          printf '#!/bin/sh\nif [ "$1 $2" = "login status" ]; then echo "Logged in using ChatGPT"; exit 0; fi\necho "測試用的假 codex,不該被派工作" >&2; exit 1\n' > "$RUNNER_TEMP/fakebin/codex"
+          chmod +x "$RUNNER_TEMP/fakebin/codex"
+          export PATH="$RUNNER_TEMP/fakebin:$PATH"
+          home="$RUNNER_TEMP/new2"
+          JOBSALVO_HOME="$home" bash tools/install.sh 2>&1 | tee "$RUNNER_TEMP/install2.log"
+          grep -q 'jobsalvo 已就緒' "$RUNNER_TEMP/install2.log" || { echo "❌ 沒有裝完"; exit 1; }
+          curl -fsS http://127.0.0.1:8899/api/health | tee /dev/stderr | grep -q '"app": "jobsalvo"'
+          curl -fsS http://127.0.0.1:8899/api/settings > "$RUNNER_TEMP/settings.json"
+          python3 - "$RUNNER_TEMP/settings.json" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1], encoding='utf-8'))['doctor']
+          for c in d['checks']:
+              print(('✅' if c['ok'] else ('ℹ️' if c.get('required') is False else '⚠️')), c['label'], '|', c['detail'])
+          assert d['ok'], '環境檢查沒通過'
+          PY
+          curl -fsS http://127.0.0.1:8899/ | grep -q '<title>jobsalvo</title>' || { echo "❌ 看板頁面打不開"; exit 1; }
+          echo "✅ 裝完、看板起來了、設定頁與環境檢查正常"
+      - name: 新人 2 反安裝:看板停掉、開機啟動和快取清掉,求職資料夾留著
+        run: |
+          home="$RUNNER_TEMP/new2"
+          # 先改成開機自動啟動,才驗得到移除它
+          kill "$(cat "$home/.jobsalvo-server.pid")" 2>/dev/null || true; rm -f "$home/.jobsalvo-server.pid"; sleep 1
+          JOBSALVO_HOME="$home" python3 tools/install_service.py
+          for _ in $(seq 1 20); do curl -fsS http://127.0.0.1:8899/api/health >/dev/null 2>&1 && break; sleep 1; done
+          launchctl list | grep -q dev.jobsalvo || { echo "❌ 開機自動啟動沒裝起來,驗不到移除"; exit 1; }
+          JOBSALVO_HOME="$home" bash tools/uninstall.sh | tee "$RUNNER_TEMP/uninstall.log"
+          sleep 2
+          if curl -fsS http://127.0.0.1:8899/api/health >/dev/null 2>&1; then echo "❌ 看板還在跑"; exit 1; fi
+          if launchctl list | grep -q dev.jobsalvo; then echo "❌ 開機自動啟動還在"; exit 1; fi
+          if ls "$HOME"/Library/LaunchAgents/dev.jobsalvo.* >/dev/null 2>&1; then echo "❌ 開機啟動的設定檔還在"; exit 1; fi
+          [ ! -e "$HOME/.cache/jobsalvo" ] || { echo "❌ 快取還在"; exit 1; }
+          [ -f "$home/jobsalvo.json" ] || { echo "❌ 求職資料夾被刪了"; exit 1; }
+          echo "✅ 反安裝乾淨,資料留著"
+      - name: 失敗時印出看板自己的紀錄
+        if: failure()
+        run: |
+          pid="$RUNNER_TEMP/new2/.jobsalvo-server.pid"
+          if [ -f "$pid" ] && kill -0 "$(cat "$pid")" 2>/dev/null; then
+            echo "看板還活著,但沒回應:印出它卡在哪"; kill -ABRT "$(cat "$pid")"; sleep 2
+          else echo "看板已經不在了(啟動就結束)"; fi
+          for f in "$RUNNER_TEMP"/new2/.jobsalvo-server.log "$RUNNER_TEMP"/new2/board-server.log; do
+            [ -f "$f" ] && { echo "==== $f"; tail -80 "$f"; }
+          done
+          ls -la "$RUNNER_TEMP/new2" || true
+      - name: 收掉看板
+        if: always()
+        run: |
+          pid="$RUNNER_TEMP/new2/.jobsalvo-server.pid"
+          if [ -f "$pid" ]; then kill "$(cat "$pid")" || true; fi

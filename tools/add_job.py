@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+add_job —— 看板上「➕ 貼網址加入」:使用者自己找到的職缺,貼網址就進「🆕 待評估」。
+
+跟找缺那一輪同一套(research):程式抓取職缺頁文字,agent 依收到的文字對照使用者原話寫卡片摘要與對味程度。
+差別只有一個:這張是使用者自己要的,判斷結果不決定要不要加,一律加進去(判斷只拿來寫卡片)。
+抓不到頁面文字也照加,卡片標示待確認並寫進回報;只有直連 HTTP 404/410 才不加。
+
+用法:python3 tools/add_job.py --url <網址> [--url <網址> …] [--board B]
+"""
+import os, sys, time, argparse
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import config as cf
+import jobrun
+
+SP = os.environ.get('ADD_TMP') or cf.TMP
+STATUS = 'add_status.json'
+
+
+def run(urls, board, browser_required=True, run_agent=None):
+    import research as rs, prefs, page_fetch
+    st = lambda d: jobrun.write(os.path.join(SP, STATUS), d)
+    t0 = time.time()
+    fb, jobs = prefs.load(board)
+    have = {j['id'] for j in jobs}
+    urls = [u.strip() for u in urls if u.strip().startswith('http')]
+    new = [u for u in dict.fromkeys(urls) if u not in have]
+    if not new:
+        st({'phase': 'nothing', 'msg': '這幾個網址板上都已經有了' if urls else '沒有網址'})
+        return 0
+
+    st({'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(new), 'step': '檢查網址'})
+    cands, gone = [], []
+    for url, fetched in zip(new, page_fetch.fetch_many(new)):
+        if fetched.status == 'closed':
+            gone.append(url)
+            continue
+        cands.append({
+            'url': url,
+            'title': fetched.title or '職缺頁待確認',
+            'company': '',
+            'via': '手動加入',
+            'jd': fetched.text if fetched.readable else '',
+            'page_status': fetched.status,
+            'page_via': fetched.via,
+            'page_http_status': fetched.http_status,
+            'posted_at': fetched.posted_at,
+            'posted_src': fetched.posted_source,
+            'page_errors': list(fetched.errors),
+            'flag': [] if fetched.readable else ['程式無法取得職缺頁文字;保留待確認,不可猜測內容'],
+        })
+
+    res = {}
+    agent_error = ''
+    if cands:
+        st({'phase': 'judge', 'pid': os.getpid(), 't0': t0, 'n': len(cands), 'step': 'agent 讀取職缺並寫卡片摘要'})
+        import agent_run as ar
+        if run_agent is None:
+            run_agent = lambda p, of, required: ar.run(
+                p, of, cf.HOME, prefer_browser=required, web=required, board=board,
+            )
+        rd = os.path.join(rs.DIR, 'rounds', time.strftime('%Y%m%d-%H%M%S') + '-add')
+        os.makedirs(rd, exist_ok=True)
+        try:
+            res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add')
+        except ar.AgentRunError as e:
+            agent_error = f'判斷沒有完成:{e}'
+            try:
+                import agent_report
+                agent_report.report('貼網址加入', agent_error,
+                                    need='在「貼網址加入」按「看紀錄」確認後再重試', live=board)
+            except Exception:  # noqa: S110
+                pass
+
+    src = {'round': time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), 'mode': 'add', 'via': 'manual'}
+    empty = {'keep': False, 'fit': 0, 'why': 'agent 無法讀取職缺頁,請確認網址與登入狀態',
+             'cite': [], 'bad_cite': [], 'cat': '其他', 'card': {}}
+    entries = []
+    for candidate in cands:
+        result = res.get(candidate['url']) or empty
+        if not agent_error and not result.get('readable'):
+            try:
+                import agent_report
+                agent_report.report('貼網址加入', f'agent 無法確認職缺頁內容:{candidate["url"]}',
+                                    need='確認職缺網址與 agent 瀏覽器登入狀態,再重跑判斷',
+                                    job=candidate['url'], live=board)
+            except Exception:  # noqa: S110
+                pass
+        entry = rs.job_entry(candidate, result, src)
+        entry['chan'] = '直投'
+        entries.append(entry)
+    added = rs.add_entries(entries, board) if entries else 0
+    if gone:
+        try:
+            import agent_report
+            agent_report.report('貼網址加入', f'{len(gone)} 個網址確定已下架(HTTP 404/410 或官方資料端點),沒有加:' + '、'.join(gone[:3]),
+                                need='確認網址對不對', live=board)
+        except Exception:  # noqa: S110
+            pass
+    msg = f'加進待評估 {added} 張' + (f',{len(gone)} 張已下架沒加' if gone else '')
+    if agent_error:
+        msg += f';{agent_error}'
+    st({'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': added, 'n': len(new), 'msg': msg})
+    return added
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--url', action='append', default=[])
+    ap.add_argument('--board', default=cf.LIVE)
+    a = ap.parse_args()
+    try:
+        print('新增', run(a.url, a.board), '張')
+    except Exception as e:
+        jobrun.write(os.path.join(SP, STATUS), {'phase': 'failed', 'msg': f'沒加成:{e}', 'finished_at': time.time()})
+        raise
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,66 @@
+# 模組歸屬:卡片編號、卡片名字清理、找可投遞夾各自只准在一支程式裡做(其他地方要呼叫它,不能自己再寫一份)。
+# 規則寫法:https://semgrep.dev/docs/writing-rules/rule-syntax ;測試:semgrep --test .semgrep/(同名的 .py / .js 範例檔)
+rules:
+  - id: card-id-hash-outside-card
+    languages: [python]
+    severity: ERROR
+    message: 卡片編號(網址的 sha1 前幾碼)只准在 tools/card.py 算,這裡改呼叫 card.card_id_from_url
+    pattern-either:
+      - pattern: hashlib.sha1(...).hexdigest()[:6]
+      - pattern: hashlib.sha1(...).hexdigest()[:12]
+    paths:
+      exclude: [/tools/card.py, /tests/]
+
+  - id: card-name-cleanup-outside-card
+    languages: [python]
+    severity: ERROR
+    message: 卡片名字清理只准在 tools/card.py 做,這裡改呼叫 card.name
+    pattern-either:
+      - pattern: $X.target.replace(...)
+      - pattern: $X.get('target').replace(...)
+      - pattern: $X['target'].replace(...)
+      - pattern: re.sub($P, $R, <... $X.target ...>, ...)
+      - pattern: re.sub($P, $R, <... $X.get('target') ...>, ...)
+      - pattern: re.sub($P, $R, <... $X['target'] ...>, ...)
+      - patterns:
+          - pattern: re.sub($P, ...)
+          - metavariable-regex:
+              metavariable: $P
+              regex: '.*(·|・|（.*\\\[)'
+    paths:
+      exclude: [/tools/card.py, /tests/]
+
+  - id: ship-folder-scan-outside-ship
+    languages: [python]
+    severity: ERROR
+    message: 找可投遞夾只准在 tools/ship.py 做,這裡改呼叫 ship.folder
+    patterns:
+      - pattern-either:
+          - pattern: $M.$FN(<... cf.SHIP_DIR ...>, ...)
+          - pattern: $M.$FN(<... SHIP_DIR ...>, ...)
+          - pattern: $M.$FN(<... SHIP_ROOT ...>, ...)
+      - metavariable-regex:
+          metavariable: $FN
+          regex: ^(glob|listdir|scandir|walk|iterdir|rglob)$
+    paths:
+      exclude: [/tools/ship.py, /tests/]
+
+  - id: board-card-name-cleanup-outside-cardname
+    languages: [javascript]
+    severity: ERROR
+    message: 看板上的卡片名字清理只准在 cardName() 裡做(它照抄 tools/card.py),這裡改呼叫 cardName
+    patterns:
+      - pattern-either:
+          - pattern: $J.target.replace(...)
+          - pattern: |
+              $T = $J.target;
+              ...
+              $T = $T.replace(...);
+          - pattern: |
+              var $T = $J.target || $D;
+              ...
+              $T = $T.replace(...);
+      - pattern-not-inside: |
+          function cardName(...) { ... }
+    paths:
+      include: [board/]

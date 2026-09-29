@@ -1,0 +1,8 @@
+{
+  "resume": {
+    "langs": ["zh", "en"],
+    "resumes": [{"id": "general", "name": "通用", "files": {"zh": "resume/general-zh.pdf"}, "enabled": true, "when": ""}],
+    "variants": {"general": {"label": "舊的那份", "zh": "resume/old.pdf"}}
+  },
+  "search": {"exclude_words": ["實習"]}
+}

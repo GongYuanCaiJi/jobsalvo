@@ -1,0 +1,1190 @@
+{
+  "mark_values": [
+    {
+      "name": "null",
+      "value": null,
+      "base": null,
+      "normalized": null,
+      "same": true
+    },
+    {
+      "name": "empty string",
+      "value": "",
+      "base": null,
+      "normalized": null,
+      "same": true
+    },
+    {
+      "name": "empty list",
+      "value": [],
+      "base": {},
+      "normalized": null,
+      "same": true
+    },
+    {
+      "name": "empty object fields",
+      "value": {
+        "s": "",
+        "n": ""
+      },
+      "base": null,
+      "normalized": null,
+      "same": true
+    },
+    {
+      "name": "nested empty values",
+      "value": {
+        "cutv": {
+          "c1": {}
+        }
+      },
+      "base": null,
+      "normalized": null,
+      "same": true
+    },
+    {
+      "name": "key order and empty fields",
+      "value": {
+        "s": "like",
+        "n": "x"
+      },
+      "base": {
+        "n": "x",
+        "s": "like"
+      },
+      "normalized": {
+        "s": "like",
+        "n": "x"
+      },
+      "same": true
+    },
+    {
+      "name": "different mark",
+      "value": {
+        "s": "like"
+      },
+      "base": null,
+      "normalized": {
+        "s": "like"
+      },
+      "same": false
+    }
+  ],
+  "approvals": [
+    {
+      "name": "missing form",
+      "url": "https://rules.example/missing",
+      "state": {},
+      "blocked": true,
+      "problem": "這張還沒有表單紀錄"
+    },
+    {
+      "name": "missing approval",
+      "url": "https://rules.example/no-approval",
+      "state": {
+        "https://rules.example/no-approval": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "還沒確認送出"
+    },
+    {
+      "name": "pending answer",
+      "url": "https://rules.example/pending",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "Engineer",
+            "zh": "工程師",
+            "inf": "2026-01-01"
+          }
+        ],
+        "https://rules.example/pending": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "還有答案等你確認或填寫"
+    },
+    {
+      "name": "empty answer",
+      "url": "https://rules.example/empty",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "",
+            "zh": ""
+          }
+        ],
+        "https://rules.example/empty": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": ""
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "還有答案等你確認或填寫"
+    },
+    {
+      "name": "translation needed",
+      "url": "https://rules.example/translation",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "Engineer",
+            "zh": "工程師",
+            "tr": true
+          }
+        ],
+        "https://rules.example/translation": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "有答案你改了中文,英文還沒照著重翻"
+    },
+    {
+      "name": "page refill needed",
+      "url": "https://rules.example/refill",
+      "state": {
+        "https://rules.example/refill": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer",
+                "refill": true
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "有答案改過,網頁上還是舊的,先讓 agent 改"
+    },
+    {
+      "name": "unchanged approved snapshot",
+      "url": "https://rules.example/unchanged",
+      "state": {
+        "https://rules.example/unchanged": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": false,
+      "problem": null
+    },
+    {
+      "name": "platform attachment mismatch",
+      "url": "https://rules.example/attachment-mismatch",
+      "state": {
+        "https://rules.example/attachment-mismatch": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": false,
+            "issues": [
+              "平台附件「求職信」內容不同"
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "平台附件「求職信」內容不同"
+    },
+    {
+      "name": "direct upload is approvable",
+      "url": "https://rules.example/direct-upload",
+      "state": {
+        "https://rules.example/direct-upload": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": false,
+      "problem": null
+    },
+    {
+      "name": "changed after approval",
+      "url": "https://rules.example/changed",
+      "state": {
+        "https://rules.example/changed": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Developer"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "確認之後答案改過,要重新確認送出"
+    },
+    {
+      "name": "uncertain submit result",
+      "url": "https://rules.example/submit-failed",
+      "state": {
+        "https://rules.example/submit-failed": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "submit_fail": {
+              "cleared": false
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "上次送出沒確認成功,先確認到底送出沒有"
+    },
+    {
+      "name": "resume changed after fill",
+      "url": "https://rules.example/stale",
+      "state": {
+        "https://rules.example/stale": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            },
+            "stale": "履歷換了"
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "履歷換過了,網頁上傳的還是舊的,先讓 agent 重填"
+    },
+    {
+      "name": "already submitted",
+      "url": "https://rules.example/locked",
+      "state": {
+        "https://rules.example/locked": {
+          "form": {
+            "lock": true,
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "已經送出了"
+    },
+    {
+      "name": "fill failed without a reason",
+      "url": "https://rules.example/fill-no-reason",
+      "state": {
+        "https://rules.example/fill-no-reason": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": false,
+            "issues": []
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "填表檢查還有問題,先讓 agent 改好"
+    },
+    {
+      "name": "fill did not report delivery",
+      "url": "https://rules.example/no-delivery",
+      "state": {
+        "https://rules.example/no-delivery": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": []
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "填表檢查沒有回報這次直接上傳或使用哪一份平台履歷"
+    },
+    {
+      "name": "unknown delivery method",
+      "url": "https://rules.example/odd-delivery",
+      "state": {
+        "https://rules.example/odd-delivery": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fix",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "email"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "填表檢查沒有回報這次直接上傳或使用哪一份平台履歷"
+    },
+    {
+      "name": "fixed with platform profile is approvable",
+      "url": "https://rules.example/fixed-profile",
+      "state": {
+        "https://rules.example/fixed-profile": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fix",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "platform_profile"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": false,
+      "problem": null
+    },
+    {
+      "name": "cleared submit failure is approvable",
+      "url": "https://rules.example/cleared",
+      "state": {
+        "https://rules.example/cleared": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "no_profile"
+            },
+            "submit_fail": {
+              "cleared": true
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": false,
+      "problem": null
+    },
+    {
+      "name": "answer missing from the bank",
+      "url": "https://rules.example/missing-answer",
+      "state": {
+        "__ans__": [],
+        "https://rules.example/missing-answer": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "gone"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": ""
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "還有答案等你確認或填寫"
+    },
+    {
+      "name": "confirmed bank answer is approvable",
+      "url": "https://rules.example/confirmed",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "Engineer",
+            "zh": "工程師",
+            "at": "2026-01-01"
+          }
+        ],
+        "https://rules.example/confirmed": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": false,
+      "problem": null
+    }
+  ],
+  "approve_blockers": [
+    {
+      "name": "no form yet",
+      "url": "https://rules.example/b-none",
+      "state": {},
+      "problem": "這張還沒有表單紀錄"
+    },
+    {
+      "name": "agent has not filled it",
+      "url": "https://rules.example/b-unfilled",
+      "state": {
+        "https://rules.example/b-unfilled": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          }
+        }
+      },
+      "problem_contains": "還沒填這張"
+    },
+    {
+      "name": "filled and confirmed can be approved",
+      "url": "https://rules.example/b-ok",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "Engineer",
+            "zh": "工程師",
+            "at": "2026-01-01"
+          }
+        ],
+        "https://rules.example/b-ok": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          }
+        }
+      },
+      "problem": null
+    },
+    {
+      "name": "filled but an answer is still inferred",
+      "url": "https://rules.example/b-inf",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "Engineer",
+            "zh": "工程師",
+            "inf": "2026-01-01"
+          }
+        ],
+        "https://rules.example/b-inf": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          }
+        }
+      },
+      "problem": "還有答案等你確認或填寫"
+    },
+    {
+      "name": "filled but English needs re-translation",
+      "url": "https://rules.example/b-tr",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "Engineer",
+            "zh": "工程師",
+            "tr": true,
+            "at": "2026-01-01"
+          }
+        ],
+        "https://rules.example/b-tr": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          }
+        }
+      },
+      "problem": "有答案你改了中文,英文還沒照著重翻"
+    },
+    {
+      "name": "approval preview does not stick",
+      "url": "https://rules.example/b-keep",
+      "state": {
+        "https://rules.example/b-keep": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          }
+        }
+      },
+      "problem": null,
+      "approve_after": false
+    }
+  ],
+  "card_names": [
+    {
+      "target": "Risk Operations Specialist (SQL) · Northwind Graduate（[Lever](https://jobs.lever.co/northwind/1)）",
+      "expected": "Risk Operations Specialist (SQL) · Northwind Graduate"
+    },
+    {
+      "target": "**Senior Engineer**·[Acme Inc](https://acme.example/jobs/1)",
+      "expected": "Senior Engineer · Acme Inc"
+    },
+    {
+      "target": "Researcher (AI)・Northwind",
+      "expected": "Researcher (AI) · Northwind"
+    }
+  ],
+  "regex": [
+    {
+      "name": "category alternation and case-insensitive title",
+      "kind": "category",
+      "setting_name": "Technology",
+      "pattern": "engineer|developer",
+      "python_valid": true,
+      "browser_valid": true,
+      "expected_match": true,
+      "target": "Senior ENGINEER",
+      "body": "",
+      "category": "Technology",
+      "tags": []
+    },
+    {
+      "name": "tag case-insensitive body match",
+      "kind": "tag",
+      "setting_name": "Remote work",
+      "pattern": "remote|hybrid",
+      "python_valid": true,
+      "browser_valid": true,
+      "expected_match": true,
+      "target": "Product Analyst",
+      "body": "Remote-first team",
+      "category": "其他",
+      "tags": [
+        "Remote work"
+      ]
+    },
+    {
+      "name": "Python named group rejected",
+      "kind": "category",
+      "setting_name": "Python group",
+      "pattern": "(?P<role>engineer)",
+      "python_valid": true,
+      "browser_valid": false,
+      "expected_match": false,
+      "target": "Engineer",
+      "body": "",
+      "category": "其他",
+      "tags": []
+    },
+    {
+      "name": "JavaScript named group saved and classified",
+      "kind": "category",
+      "setting_name": "JavaScript group",
+      "pattern": "(?<role>engineer)",
+      "python_valid": false,
+      "browser_valid": true,
+      "expected_match": true,
+      "target": "Engineer",
+      "body": "",
+      "category": "JavaScript group",
+      "tags": []
+    },
+    {
+      "name": "invalid syntax identifies tag",
+      "kind": "tag",
+      "setting_name": "Broken tag",
+      "pattern": "(",
+      "python_valid": false,
+      "browser_valid": false,
+      "expected_match": false,
+      "target": "Engineer",
+      "body": "remote",
+      "category": "其他",
+      "tags": []
+    }
+  ],
+  "companies": [
+    {
+      "target": "【研究中心】資安研究員(台北、台南)｜範例資安研究院",
+      "expected": "範例資安研究院"
+    },
+    {
+      "target": "Security Engineer｜資安測試工程師·Example Labs（[現行頁](https://example.test/j/1)）",
+      "expected": "Example Labs"
+    },
+    {
+      "target": "Risk Analyst · Northwind",
+      "expected": "Northwind"
+    },
+    {
+      "target": "Acme · Product Designer",
+      "expected": "Acme"
+    },
+    {
+      "target": "Northwind Clinic · Nurse Practitioner",
+      "expected": "Northwind Clinic"
+    },
+    {
+      "target": "Example Foods · Accountant",
+      "expected": "Example Foods"
+    },
+    {
+      "target": "範例商店｜店長",
+      "expected": "範例商店"
+    },
+    {
+      "target": "資安工程師 · 範例律師事務所",
+      "expected": "範例律師事務所"
+    },
+    {
+      "target": "資安工程師 · 範例科技股份有限公司",
+      "expected": "範例科技"
+    },
+    {
+      "target": "資安工程師 · 範例科技",
+      "expected": "範例科技"
+    },
+    {
+      "target": "Security Engineer · Northwind, Inc.",
+      "expected": "Northwind"
+    },
+    {
+      "target": "Security Engineer · Northwind Co., Ltd.",
+      "expected": "Northwind"
+    },
+    {
+      "target": "Security Engineer · Contoso Pte. Ltd.",
+      "expected": "Contoso"
+    },
+    {
+      "target": "Security Engineer · Unlimited",
+      "expected": "Unlimited"
+    },
+    {
+      "target": "Security Engineer · 有限公司",
+      "expected": "有限公司"
+    },
+    {
+      "target": "Security Engineer · 範例分公司",
+      "expected": "範例分公司"
+    },
+    {
+      "target": "範例科技股份有限公司",
+      "expected": "範例科技"
+    },
+    {
+      "id": "https://jobs.lever.co/acme-inc/1",
+      "target": "Security Engineer",
+      "expected": "Acme"
+    },
+    {
+      "id": "https://jobs.lever.co/acme-labs/1",
+      "target": "Security Engineer",
+      "expected": "Acme Labs"
+    },
+    {
+      "target": "資安工程師 · 範例科技股份有限公司",
+      "alias": {
+        "範例科技": "範例集團"
+      },
+      "expected": "範例集團"
+    },
+    {
+      "target": "資安工程師 · 範例科技股份有限公司",
+      "alias": {
+        "範例科技股份有限公司": "範例科技(總公司)"
+      },
+      "expected": "範例科技(總公司)"
+    }
+  ],
+  "company_same": [
+    {
+      "a": "範例科技股份有限公司",
+      "b": "範例科技",
+      "same": true
+    },
+    {
+      "a": "Northwind, Inc.",
+      "b": "northwind",
+      "same": true
+    },
+    {
+      "a": "範例科技",
+      "b": "範例資訊",
+      "same": false
+    },
+    {
+      "a": "",
+      "b": "",
+      "same": false
+    }
+  ],
+  "deadlines": [
+    {
+      "name": "死線當天中午還來得及",
+      "deadline": "2026-09-27",
+      "now": "2026-09-27T12:00:00",
+      "passed": false
+    },
+    {
+      "name": "死線當天早上 8 點還來得及(以前用 UTC 會誤判)",
+      "deadline": "2026/9/27",
+      "now": "2026-09-27T08:30:00",
+      "passed": false
+    },
+    {
+      "name": "死線隔天剛過零點就算過了",
+      "deadline": "2026-09-27",
+      "now": "2026-09-28T00:05:00",
+      "passed": true
+    },
+    {
+      "name": "寫在一句話裡的日期也認得",
+      "deadline": "截止日期:2026.9.26 前",
+      "now": "2026-09-27T09:00:00",
+      "passed": true
+    },
+    {
+      "name": "沒有日期就不算過",
+      "deadline": "盡快",
+      "now": "2026-09-27T09:00:00",
+      "passed": false
+    }
+  ],
+  "merges": [
+    {
+      "name": "兩邊改不同格,兩邊都留下",
+      "base": {
+        "s": "meh"
+      },
+      "mine": {
+        "s": "grow",
+        "n": "我打的心得"
+      },
+      "theirs": {
+        "s": "meh",
+        "stage": "hr"
+      },
+      "value": {
+        "s": "grow",
+        "n": "我打的心得",
+        "stage": "hr"
+      },
+      "clash": []
+    },
+    {
+      "name": "同一格兩邊改成不一樣,留這台的並回報",
+      "base": {
+        "n": "舊的"
+      },
+      "mine": {
+        "n": "我這台"
+      },
+      "theirs": {
+        "n": "別台"
+      },
+      "value": {
+        "n": "我這台"
+      },
+      "clash": [
+        "n"
+      ]
+    },
+    {
+      "name": "兩邊改成一樣不算撞到",
+      "base": {
+        "s": "meh"
+      },
+      "mine": {
+        "s": "grow"
+      },
+      "theirs": {
+        "s": "grow"
+      },
+      "value": {
+        "s": "grow"
+      },
+      "clash": []
+    },
+    {
+      "name": "別台清掉的格子,這台沒動就跟著清",
+      "base": {
+        "s": "meh",
+        "n": "要刪的"
+      },
+      "mine": {
+        "s": "grow",
+        "n": "要刪的"
+      },
+      "theirs": {
+        "s": "meh"
+      },
+      "value": {
+        "s": "grow"
+      },
+      "clash": []
+    },
+    {
+      "name": "這台清掉的格子不會被別台的舊值補回來",
+      "base": {
+        "s": "meh",
+        "n": "要刪的"
+      },
+      "mine": {
+        "s": "meh"
+      },
+      "theirs": {
+        "s": "grow",
+        "n": "要刪的"
+      },
+      "value": {
+        "s": "grow"
+      },
+      "clash": []
+    },
+    {
+      "name": "伺服器上本來沒有這筆(別台新建的)",
+      "base": null,
+      "mine": {
+        "s": "grow"
+      },
+      "theirs": {
+        "n": "別台新建"
+      },
+      "value": {
+        "s": "grow",
+        "n": "別台新建"
+      },
+      "clash": []
+    },
+    {
+      "name": "陣列(想法)整個當一格:只有這台改就用這台的",
+      "base": [
+        {
+          "t": "a"
+        }
+      ],
+      "mine": [
+        {
+          "t": "a"
+        },
+        {
+          "t": "b"
+        }
+      ],
+      "theirs": [
+        {
+          "t": "a"
+        }
+      ],
+      "value": [
+        {
+          "t": "a"
+        },
+        {
+          "t": "b"
+        }
+      ],
+      "clash": []
+    },
+    {
+      "name": "陣列兩邊都改,留這台的並回報",
+      "base": [
+        {
+          "t": "a"
+        }
+      ],
+      "mine": [
+        {
+          "t": "b"
+        }
+      ],
+      "theirs": [
+        {
+          "t": "c"
+        }
+      ],
+      "value": [
+        {
+          "t": "b"
+        }
+      ],
+      "clash": [
+        "*"
+      ]
+    }
+  ]
+}
