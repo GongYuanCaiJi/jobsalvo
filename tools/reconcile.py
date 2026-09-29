@@ -28,6 +28,9 @@ import ship
 import source_sync
 
 MANIFEST = os.path.join(cf.HOME, '.reconcile-manifest.json')
+# 這一輪跑完了,只是有幾張卡的要寄的檔案沒建成(原因寫在那幾張卡上、📣 也報了)。仍是非 0(dda90c2:可投遞夾失敗不算成功),
+# 但跟「程式或來源檔壞了」(1)分開:看板伺服器據此知道驗收結果是這一輪新寫的,其他卡照常自動往下走。
+PACKAGE_PROBLEMS = 4
 BOARD_SRC = [os.path.join(cf.BOARD_SRC, f) for f in ('board.css', 'board.js', 'header.html')]
 APPLY_SHELL = os.path.join(HERE, 'apply_shell.py')
 
@@ -61,6 +64,28 @@ def stage_shell(man, force, check, live):
     man[key] = want
     print('  ✓ 看板外殼重灌')
     return True
+
+
+def _source_report(errors, live):
+    """來源檔(Markdown 排版、PDF 預覽)整理不出來就寫一則 📣,整理好了收掉。以前只印在這支的輸出裡:
+    背景跑的看不到,代投前的來源檢查叫他看的「整理要寄的檔案」回報也從來沒人寫,準備和填表就靜靜停著。
+    同一句話只加次數(agent_report 合併),每分鐘重試也不會洗版。"""
+    import agent_report
+    import board_doc as bd
+    src = '整理要寄的檔案'
+    msgs = [f'有一份要寄的檔案整理不出來:{message}' for message in errors]
+    try:
+        for msg in msgs:
+            agent_report.report(src, msg, need='檢查這份檔(Markdown 原稿排得出來嗎、PDF 打得開嗎),改好後回到看板會自己再試。'
+                                               '整理好之前,準備履歷和填表會先停著', live=live)
+        # 這一輪沒再出現的(修好了、那份檔不用了)收掉;回報不掛在哪一張卡上(job 是空的)。
+        # 先看有沒有要收的:沒有就不寫看板檔(每次存檔都會跑這支)
+        gone = lambda it: it.get('from') == src and it.get('msg') not in msgs
+        with open(live, encoding='utf-8') as f:
+            if any(gone(it) for it in agent_report.open_items(json.loads(bd.parse(f.read())['fb']))):
+                agent_report.resolve(None, '這份檔整理好了', live=live, only=gone)
+    except Exception as e:
+        print(f'  ⚠ 來源檔的問題沒寫進回報:{e}')
 
 
 def main():
@@ -109,6 +134,8 @@ def run(a):
         print(f'  來源檔變更:{os.path.basename(entry["path"])}')
     for message in source_errors:
         print(f'  ⚠ {message}')
+    if not a.check:
+        _source_report(source_errors, live)
     for diagnostic in source_diagnostics:
         print(f'來源診斷:{diagnostic}')
     if show_timings:
@@ -168,7 +195,9 @@ def run(a):
         print('  ⓘ 有卡未過投遞前驗收,原因已寫在看板;本輪重建正常。')
     elif status_failed:
         print(f'  ⚠ 投遞前驗收程式失敗(結束碼 {status_code})')
-    return 1 if package_failures or status_failed or source_errors or (a.check and source_changes) else 0
+    if status_failed or source_errors or (a.check and source_changes):
+        return 1
+    return PACKAGE_PROBLEMS if package_failures else 0
 
 
 if __name__ == '__main__':

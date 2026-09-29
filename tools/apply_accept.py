@@ -322,17 +322,13 @@ class Accept:
             e = next(e for e in fb['__ans__'] if e['k'] == k)
             e.update(v=WHY_V, zh=WHY_ZH, at=today)
             e.pop('inf', None)
-            for u, m in fb.items():            # 看板的 ansRefill:還沒送出的表單裡用到它的欄位標 refill
-                f = (m or {}).get('form') if isinstance(m, dict) else None
-                if f and not f.get('lock'):
-                    for x in f.get('f', []):
-                        if x.get('k') == k:
-                            x['refill'] = 1
+            fr.mark_refill(fb, k)              # 看板的 ansRefill
         if not k:
             return self.ok(2, '表單裡有「為什麼」那一欄可以補', False, '填表時沒記這一欄')
         bd.set_fb(mut, live=self.board, by='apply_accept')
         fb = self.fb()
-        self.ok(2, '網頁還是舊的時候不能核准', fr.approval_problem(fb, self.url) is not None, fr.approval_problem(fb, self.url))
+        st = fr.board_status(self.board)
+        self.ok(2, '網頁還是舊的時候不能核准', fr.approval_problem(fb, self.url, st) is not None, fr.approval_problem(fb, self.url, st))
 
     # ---- 3 修改 ----
     def step_fix(self):
@@ -369,7 +365,8 @@ class Accept:
             fb[self.url]['approve'] = {'at': datetime.datetime.now().isoformat(timespec='seconds'), 'snap': fr.snapshot(fb, self.url)}
         bd.set_fb(approve, live=self.board, by='apply_accept')
         fb = self.fb()
-        self.ok(5, '核准有效', fr.approval_problem(fb, self.url) is None, fr.approval_problem(fb, self.url))
+        st = fr.board_status(self.board)
+        self.ok(5, '核准有效', fr.approval_problem(fb, self.url, st) is None, fr.approval_problem(fb, self.url, st))
         snap = fr.snapshot(fb, self.url)
         t0, out = self.run('submit')
         fb = self.fb()

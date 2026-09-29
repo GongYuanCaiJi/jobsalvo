@@ -31,7 +31,7 @@ def _server():
     """外掛的 cua_repl 怎麼啟動:照 codex 自己用的那份設定(版本號資料夾取最新的)。"""
     vers = sorted(d for d in os.listdir(PLUGIN) if os.path.isfile(os.path.join(PLUGIN, d, '.mcp.json')))
     if not vers:
-        raise RuntimeError('找不到 Codex 的 Chrome 外掛(unified-computer-use)')
+        raise RuntimeError('找不到 Codex 的 Chrome 元件(unified-computer-use)')
     with open(os.path.join(PLUGIN, vers[-1], '.mcp.json'), encoding='utf-8') as f:
         return json.load(f)['mcpServers']['cua_repl']
 
@@ -170,6 +170,10 @@ def _lookup(url, board=None):
     a = (fb.get(url) or {}).get('apply') or {}
     if not a.get('session') or not a.get('tab_id'):
         raise LookupError('看板上沒有記這張是哪一段對話、哪個分頁')
+    import agent_chrome
+    if agent_chrome.gone_pages({url: fb[url]}):
+        # 分頁編號每個 Chrome 程序從頭數:Chrome 重開過,記著的編號可能剛好是別張卡的頁,不能拿它去截、去讀
+        raise LookupError(agent_chrome.GONE)
     return a['session'], a['tab_id'], a.get('runtime') or 'codex'
 
 
@@ -198,24 +202,32 @@ def read(session, tab_id, tries=3, runtime='codex', log=None):
 
 
 def release(session, tab_id, runtime='codex'):
-    """那一頁不用再留:以那段對話的身分接上、這一輪不重新標它就收尾,外掛會把它關掉。送成功之後用。"""
+    """那一頁不用再留(送成功之後用):換成空白頁、照樣交接留著。
+    不關、也不讓這一輪結束時被收掉:程式這邊收分頁,Codex 外掛會跟 agent 的 Chrome 斷線、不會自己連回來
+    (2026-09-29 實測),一次送好幾張時下一張就連不上。空白頁不是他在等的頁,close_if_idle 會連 Chrome 一起收掉。"""
     if runtime == 'claude-code':
-        _claude_tools(session, [('tabs_close_mcp', {'tabId': int(tab_id)})])
+        _claude_tools(session, [('tabs_close_mcp', {'tabId': int(tab_id)})], why=CLAUDE_RELEASE)
         return
     t = Tab(session, tab_id)
     try:
-        t.end_turn(keep=[])
+        t.js('await __t.goto("about:blank"); nodeRepl.write("ok")')
     finally:
-        t.close()
+        try:
+            t.end_turn(keep=['__t'])            # 換空白頁失敗也要交接、結束這一輪,不然外掛會跟 Chrome 斷線
+        finally:
+            t.close()
 
 
 # ---- Claude:分頁在 Claude in Chrome 替那段對話開的分頁群組裡,只有同一段對話拿得到(新的對話看不到)。
 # 官方沒有「程式直接接擴充功能」的門路,只有 claude -p --resume 那段對話(2026-09-29 實測:接回去看得到、截得到;
 # 開新對話看不到)。模型只負責照指示呼叫工具;頁面內容和截圖直接從工具的回傳拿(stream-json),不採信模型轉述。
 CLAUDE_READER_MODEL = 'sonnet'     # 照單呼叫兩三個工具就好;haiku 用不了 Claude in Chrome(回「requires permission」,2026-09-29 實測)
+# 開場白照實講這一次要做什麼:收分頁那次也寫「只讀,不改頁面」、接著又要它關分頁,前後矛盾,Claude 可能因此拒絕
+CLAUDE_LOOK = ('看板要再看一次現在的樣子(核對欄位、給使用者看截圖;頁面可能跟上次不一樣)。只讀,不改頁面、不點東西。')
+CLAUDE_RELEASE = ('這一張已經送出了,那一頁不用再留:照下面把那一個分頁關掉就好,不點頁面上的東西、不動其他分頁。')
 
 
-def _claude_run(session, steps_text, names, timeout=240):
+def _claude_run(session, steps_text, names, timeout=240, why=CLAUDE_LOOK):
     """以那段對話的身分跑一次 claude -p,照 steps_text 呼叫 Claude in Chrome 的工具;
     回每一個工具呼叫的 (工具名, 回傳內容, 有沒有出錯),照呼叫的順序。"""
     import agent_chrome, agent_run as ar
@@ -227,8 +239,7 @@ def _claude_run(session, steps_text, names, timeout=240):
     names = sorted(set(names) | ({'select_browser'} if dev else set()))
     # 照實講這是誰要的、要做什麼:講得像命令、藏東西,Claude 會當成注入拒絕(實測)
     # 每次帶時間:同一段對話裡同樣的請求重複好幾次,Claude 會起疑、不做(實測)
-    prompt = (f'(求職看板的自動核對,{time.strftime("%H:%M:%S")})你在 agent 的 Chrome 裡留著的那一頁,'
-              '看板要再看一次現在的樣子(核對欄位、給使用者看截圖;頁面可能跟上次不一樣)。只讀,不改頁面、不點東西。'
+    prompt = (f'(求職看板的自動核對,{time.strftime("%H:%M:%S")})你在 agent 的 Chrome 裡留著的那一頁,' + why +
               '請照下面做,做完簡短說一聲就好。\n' + first + steps_text)
     r = subprocess.run([exe, '-p', '--chrome', '--resume', session, '--model', CLAUDE_READER_MODEL,
                         '--output-format', 'stream-json', '--verbose', '--tools=',     # 內建工具全關,只剩 Chrome 的
@@ -259,10 +270,10 @@ def _text(content):
     return ''.join(c.get('text', '') for c in content if c.get('type') == 'text')
 
 
-def _claude_tools(session, calls, timeout=240):
+def _claude_tools(session, calls, timeout=240, why=CLAUDE_LOOK):
     """依序呼叫固定的幾個工具,回每個的回傳內容;沒呼叫到或出錯就是讀不到。"""
     steps = '\n'.join(f'{i}. mcp__claude-in-chrome__{n},參數 {json.dumps(a, ensure_ascii=False)}' for i, (n, a) in enumerate(calls, 1))
-    got = _claude_run(session, steps, [n for n, _ in calls], timeout)
+    got = _claude_run(session, steps, [n for n, _ in calls], timeout, why)
     out = []
     for name, _ in calls:
         mine = [x for x in got if x[0] == name]
@@ -288,17 +299,62 @@ _WHOLE = 'JSON.stringify((' + _CLAUDE_FN + ')())'
 LEN_JS = 'String(' + _WHOLE + '.length)'
 
 
-def chunk_js(i):
-    return str(int(i)) + ' + ":" + ' + _WHOLE + f'.slice({int(i)} * {CHUNK}, ({int(i)} + 1) * {CHUNK})'
+def chunk_js(i, whole=_WHOLE):
+    return str(int(i)) + ' + ":" + ' + whole + f'.slice({int(i)} * {CHUNK}, ({int(i)} + 1) * {CHUNK})'
+
+
+def self_read_steps(whole, what):
+    """叫 Claude 分段跑一支程式寫好的唯讀函式(whole 是回傳 JSON 字串的那一段)的步驟;查應徵進度核實補查來源也用這一套。"""
+    return ('1. text 一字不改用:String(' + whole + '.length)\n它回傳整串的長度 L。\n'
+            f'2. 對 I = 0、1…到 ceil(L / {CHUNK}) - 1 各跑一次,text 用下面這串、把開頭和 slice 裡的 I 換成那個數字(其他一字不改):\n'
+            + chunk_js(0, whole).replace('0 + ":"', 'I + ":"', 1).replace(f'slice(0 * {CHUNK}, (0 + 1) * {CHUNK})', f'slice(I * {CHUNK}, (I + 1) * {CHUNK})')
+            + f'\n這幾次可以在同一則訊息裡一起送出。{what}\n\n')
 
 
 # 接在 Claude 代投規矩後面(apply_rule);大括號很多,不走 str.format
 CLAUDE_SELF_READ = ('【填完、改完的最後一步】寫 fill.json 之前,在你留著的那一頁用 javascript_tool 跑一次下面這支唯讀函式,'
                     '讓程式自己核對頁面上的欄位(你不用看結果,也不用照它改什麼)。javascript_tool 的回傳超過 1000 字會被截掉,所以分段:\n'
-                    '1. text 一字不改用:' + LEN_JS + '\n它回傳整串的長度 L。\n'
-                    f'2. 對 I = 0、1…到 ceil(L / {CHUNK}) - 1 各跑一次,text 用下面這串、把開頭和 slice 裡的 I 換成那個數字(其他一字不改):\n'
-                    + chunk_js(0).replace('0 + ":"', 'I + ":"', 1).replace(f'slice(0 * {CHUNK}, (0 + 1) * {CHUNK})', f'slice(I * {CHUNK}, (I + 1) * {CHUNK})')
-                    + '\n這幾次可以在同一則訊息裡一起送出。\n\n')
+                    + self_read_steps(_WHOLE, ''))
+
+# 平台上存好的那份履歷(104 等),程式要跟母稿逐段比(profile_sync.check):Codex 由程式自己開頁讀(agent_chrome.read_pages);
+# Claude 的分頁只有它那段對話拿得到,所以比照上面,讓它在那一輪自己打開那一頁跑唯讀函式,程式從紀錄拿(#288)。
+# 比對只用得到網址、全文、連結;不帶註解、不帶反斜線(Claude 會改寫,程式碼就對不上)
+PROFILE_FN = ('() => ({url: location.href, title: document.title, text: document.body.innerText, '
+              'links: Array.from(document.links).map(a => a.href)})')
+_PROFILE_WHOLE = 'JSON.stringify((' + PROFILE_FN + ')())'
+PROFILE_LEN_JS = 'String(' + _PROFILE_WHOLE + '.length)'
+
+
+def profile_chunk_js(i):
+    return chunk_js(i, _PROFILE_WHOLE)
+
+
+# 平台履歷上的附件(#294):Claude 沒有把檔完整取回來的工具(回傳超過 1000 字截斷、把檔編碼回傳被安全過濾擋),
+# 所以不取檔:在那一頁裡對每個檔案連結算 SHA-256,只回網址、檔名、大小、雜湊(一個檔約 120 字),程式跟本機檔比。
+# javascript_tool 不等 Promise(回 {}),但收頂層 await:所以寫成「存進 window 再回它」(實測)。
+# 只算看起來是檔的連結(連結字或路徑有副檔名、或標了 download):平台自己「下載整份履歷」那種不算附件。
+# 2026-09-30 實測:平台履歷頁三個附件,算出來的雜湊跟本機三個檔一模一樣。不寫死任何平台:同網域、看起來是檔案的連結都算。
+ATTACH_JS = ('window.__jsAttach = await (async () => { const files = []; const seen = new Set(); '
+             'const ext = /[.](pdf|docx?|pptx?|odt|rtf|zip|png|jpe?g)$/i; '
+             'for (const a of Array.from(document.querySelectorAll("a[href]"))) { '
+             'const u = new URL(a.href, location.href); const name = (a.innerText || "").trim().split(String.fromCharCode(10))[0]; '
+             'if (u.origin !== location.origin || seen.has(u.href)) continue; '
+             'if (!(a.hasAttribute("download") || ext.test(name) || ext.test(u.pathname))) continue; '
+             'seen.add(u.href); const r = await fetch(u.href, {credentials: "include"}); '
+             'if (!r.ok || /text[/]html/i.test(r.headers.get("content-type") || "")) continue; '
+             'const b = await r.arrayBuffer(); '
+             'const h = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", b))).map(x => x.toString(16).padStart(2, "0")).join(""); '
+             'files.push({name: (name || u.pathname).slice(0, 60), size: b.byteLength, sha256: h}); } '
+             'return JSON.stringify({url: location.href, files: files}); })(); window.__jsAttach')
+
+
+CLAUDE_PROFILE_READ = ('【讀平台履歷給程式】用平台上存好的那份履歷投遞(delivery.method 是 platform_profile)時,程式要把平台上那一份'
+                       '跟母稿逐段比,但它自己打不開你的分頁,要你讀給它:在你的分頁群組另開一個分頁,打開程式給的平台履歷讀取網址'
+                       '(沒給就用你寫進 profile.url、看得到全文的那一頁),等它載好,在那個分頁用 javascript_tool 跑下面這支唯讀函式'
+                       '(你不用看結果)。申請表那一頁不要關。填表、修改那一輪在寫 fill.json 之前做;送出前核對那一輪在寫 pre-submit.json 之前做。\n'
+                       + self_read_steps(_PROFILE_WHOLE, '')
+                       + '3. 同一個分頁再用 javascript_tool 跑一次下面這段(一字不改),它只回平台上每個附件檔的檔名、大小和雜湊,'
+                       '程式拿來跟本機的附件比(不用下載、不用看結果):\n' + ATTACH_JS + '\n\n')
 
 
 def _same_js(a, b):
@@ -308,41 +364,103 @@ def _same_js(a, b):
 
 
 def page_from_log(log):
-    """從 Claude 那一輪的紀錄拿它最後一次跑 CLAUDE_SELF_READ 的結果,拼回那一頁;沒有完整的一次就是讀不到。"""
-    import re
+    """從 Claude 那一輪的紀錄拿它最後一次跑 CLAUDE_SELF_READ 的結果,拼回那一頁;沒有完整的一次就是讀不到。
+    log 可以是好幾份(逾時後收尾的那一輪接在原本那一輪後面),照順序讀,取最後一次完整的。"""
+    for page in reversed(self_reads(log)):
+        if isinstance(page, dict) and 'fields' in page:
+            return page
+    raise LookupError('Claude 這一輪沒有把那一頁完整讀給程式(紀錄裡找不到完整的一次)')
+
+
+def _same_page(a, b):
+    from urllib.parse import urlsplit
+    key = lambda u: (lambda p: (p.netloc.lower(), p.path.rstrip('/'), p.query))(urlsplit(str(u or '')))
+    return key(a) == key(b)
+
+
+def profile_from_log(log, url):
+    """Claude 照 CLAUDE_PROFILE_READ 讀的平台履歷頁,而且是程式要核對的那一份(網址一樣);沒有就是讀不到。"""
+    seen = []
+    for page in reversed(self_reads(log, _PROFILE_WHOLE)):
+        if isinstance(page, dict) and 'text' in page:
+            seen.append(page.get('url'))
+            if _same_page(page.get('url'), url):
+                return page
+    if seen:
+        raise LookupError(f'Claude 讀的是 {seen[0]},不是要核對的 {url}')
+    raise LookupError('Claude 這一輪沒有把平台履歷那一頁完整讀給程式')
+
+
+def _js_calls(log):
+    """紀錄裡每一次 javascript_tool 的 (程式碼, 工具真的回傳的字),照順序;出錯的不算。"""
     uses, calls = {}, []
-    with open(log, encoding='utf-8', errors='replace') as f:
-        for line in f:
-            try:
-                o = json.loads(line)
-            except ValueError:
+    lines = []
+    for one in ([log] if isinstance(log, str) else list(log or [])):
+        try:
+            with open(one, encoding='utf-8', errors='replace') as f:
+                lines += f.readlines()
+        except OSError:
+            continue
+    for line in lines:
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        msg = o.get('message') if isinstance(o, dict) else None
+        for c in (msg.get('content') or []) if isinstance(msg, dict) and isinstance(msg.get('content'), list) else []:
+            if not isinstance(c, dict):
                 continue
-            msg = o.get('message') if isinstance(o, dict) else None
-            for c in (msg.get('content') or []) if isinstance(msg, dict) and isinstance(msg.get('content'), list) else []:
-                if not isinstance(c, dict):
-                    continue
-                if c.get('type') == 'tool_use' and c.get('name', '').endswith('javascript_tool'):
-                    uses[c.get('id')] = (c.get('input') or {}).get('text') or ''
-                elif c.get('type') == 'tool_result' and c.get('tool_use_id') in uses and not c.get('is_error'):
-                    content = c.get('content') if isinstance(c.get('content'), list) else [{'type': 'text', 'text': str(c.get('content') or '')}]
-                    calls.append((uses[c['tool_use_id']], _text(content).split('\n\nTab Context:')[0]))
-    starts = [i for i, (code, _) in enumerate(calls) if _same_js(code, LEN_JS)]
-    for s0 in reversed(starts):                   # 從最後一次往回找第一個完整的
+            if c.get('type') == 'tool_use' and c.get('name', '').endswith('javascript_tool'):
+                uses[c.get('id')] = (c.get('input') or {}).get('text') or ''
+            elif c.get('type') == 'tool_result' and c.get('tool_use_id') in uses and not c.get('is_error'):
+                content = c.get('content') if isinstance(c.get('content'), list) else [{'type': 'text', 'text': str(c.get('content') or '')}]
+                calls.append((uses[c['tool_use_id']], _text(content).split('\n\nTab Context:')[0]))
+    return calls
+
+
+def attachments_from_log(log, url):
+    """Claude 照 CLAUDE_PROFILE_READ 第 3 步在平台履歷頁算的附件雜湊:只收程式碼一字不差、網址是要核對的那一份的最後一次。
+    回 [{name, size, sha256}];沒有就是沒核對到(LookupError)。"""
+    seen = []
+    for code, text in reversed(_js_calls(log)):
+        if not _same_js(code, ATTACH_JS):
+            continue
+        try:
+            got = json.loads(text[text.index('{'):text.rindex('}') + 1])
+        except ValueError:
+            continue
+        seen.append(got.get('url'))
+        if _same_page(got.get('url'), url) and isinstance(got.get('files'), list):
+            return [f for f in got['files'] if isinstance(f, dict) and f.get('sha256')]
+    if seen:
+        raise LookupError(f'Claude 算附件雜湊的是 {seen[0]},不是要核對的 {url}')
+    raise LookupError('Claude 這一輪沒有在平台履歷頁算附件雜湊')
+
+
+def self_reads(log, whole=_WHOLE):
+    """紀錄裡每一次完整跑完那支唯讀函式(whole)的結果,照順序;只收程式碼跟程式寫的一字不差、工具真的回傳的那幾次。"""
+    import re
+    len_js = 'String(' + whole + '.length)'
+    calls = _js_calls(log)
+    out = []
+    starts = [i for i, (code, _) in enumerate(calls) if _same_js(code, len_js)]
+    for s0 in starts:
         m = re.match(r'\s*"?(\d+)', calls[s0][1])
         if not m:
             continue
         n, parts = -(-int(m.group(1)) // CHUNK), {}
         for code, text in calls[s0 + 1:]:
-            if _same_js(code, LEN_JS):
+            if _same_js(code, len_js):
                 break
             m2 = re.match(r'(\d+):', text)
-            if m2 and int(m2.group(1)) < n and _same_js(code, chunk_js(m2.group(1))):
+            if m2 and int(m2.group(1)) < n and _same_js(code, chunk_js(m2.group(1), whole)):
                 parts[int(m2.group(1))] = text[m2.end():]
         if sorted(parts) == list(range(n)):
-            page = json.loads(''.join(parts[i] for i in range(n)))
-            if isinstance(page, dict) and 'fields' in page:
-                return page
-    raise LookupError('Claude 這一輪沒有把那一頁完整讀給程式(紀錄裡找不到完整的一次)')
+            try:
+                out.append(json.loads(''.join(parts[i] for i in range(n))))
+            except ValueError:
+                continue                          # 分段之間頁面變了,拼起來不是完整的一次
+    return out
 
 
 def claude_shot(session, tab_id, out):
@@ -367,7 +485,7 @@ _CONTACT = __import__('re').compile(r'@|^\+?[\d\s()-]{7,}$')   # 長得像 email
 
 # 網站的真人驗證(Cloudflare 的「請稍候…」「驗證您是人類」這類):agent 不替他按,也不規避。
 # 程式控制的瀏覽器常被擋、他在別的視窗過了也接不回來(驗證綁著瀏覽器身分),這種網站讓他自己投。
-HUMAN_CHECK = '這個網站要真人驗證,agent 沒辦法代投:按卡上的「🌐 在我的瀏覽器打開」自己投'
+HUMAN_CHECK = '這個網站要真人驗證,agent 沒辦法幫你填表:按卡上的「🌐 在我的瀏覽器打開」自己投'
 HUMAN_CHECK_WORDS = ('請稍候', '驗證您是人類', '正在執行安全驗證', 'verify you are human', 'just a moment',
                      'performing security verification', 'checking your browser')
 
@@ -439,13 +557,22 @@ def shot(session, tab_id, out, tries=3, runtime='codex'):
     _, imgs = _on_tab(session, tab_id,
                       lambda t: t.call('await nodeRepl.emitImage(await __t.screenshot({fullPage: true}));'), tries)
     if not imgs:
-        raise RuntimeError('外掛沒有傳回截圖')
+        raise RuntimeError('Codex 的 Chrome 元件沒有傳回截圖')
     with open(out, 'wb') as f:
         f.write(imgs[-1])
     return out
 
 
+def _stop_on_term():
+    """看板的 👀 時間到會先送 SIGTERM:轉成一般的結束,finally 裡的交接、宣告這一輪結束才跑得到
+    (被強制殺掉就跑不到,那一頁接在死掉的程序上,外掛跟 agent 的 Chrome 斷線)。
+    正在跑的 claude -p 也跟著收掉(subprocess.run 碰到例外會把子程序殺掉)。"""
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(3))
+
+
 def main():
+    _stop_on_term()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('cmd', choices=('read', 'shot'))
     ap.add_argument('--url', required=True)

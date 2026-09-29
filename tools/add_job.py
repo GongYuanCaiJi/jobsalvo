@@ -15,6 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config as cf
 import jobrun
+from research import web_agent     # 跟找缺同一支:不給操作 Chrome 的能力(#287)
 
 SP = os.environ.get('ADD_TMP') or cf.TMP
 STATUS = 'add_status.json'
@@ -29,7 +30,11 @@ def run(urls, board, browser_required=True, run_agent=None):
     urls = [u.strip() for u in urls if u.strip().startswith('http')]
     new = [u for u in dict.fromkeys(urls) if u not in have]
     if not new:
-        st({'phase': 'nothing', 'msg': '這幾個網址板上都已經有了' if urls else '沒有網址'})
+        # 已移除的卡也算板上有(去重用全部卡);只說「都有了」他在看板上找不到,要講它在哪、怎麼放回來
+        gone = sum(1 for u in dict.fromkeys(urls) if (fb.get(u) or {}).get('rm'))
+        msg = '這幾個網址板上都已經有了' + (
+            f'(其中 {gone} 張在「🗑 已移除」,要的話到那一頁按「↩︎ 放回看板」)' if gone else '')
+        st({'phase': 'nothing', 'msg': msg if urls else '沒有網址'})
         return 0
 
     st({'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(new), 'step': '檢查網址'})
@@ -59,9 +64,7 @@ def run(urls, board, browser_required=True, run_agent=None):
         st({'phase': 'judge', 'pid': os.getpid(), 't0': t0, 'n': len(cands), 'step': 'agent 讀取職缺並寫卡片摘要'})
         import agent_run as ar
         if run_agent is None:
-            run_agent = lambda p, of, required: ar.run(
-                p, of, cf.HOME, prefer_browser=required, web=required, board=board,
-            )
+            run_agent = web_agent(board)
         rd = os.path.join(rs.DIR, 'rounds', time.strftime('%Y%m%d-%H%M%S') + '-add')
         os.makedirs(rd, exist_ok=True)
         try:
@@ -85,7 +88,7 @@ def run(urls, board, browser_required=True, run_agent=None):
             try:
                 import agent_report
                 agent_report.report('貼網址加入', f'agent 無法確認職缺頁內容:{candidate["url"]}',
-                                    need='確認職缺網址與 agent 瀏覽器登入狀態,再重跑判斷',
+                                    need='確認職缺網址;要登入才看得到的職缺頁程式讀不到,請自己打開看',
                                     job=candidate['url'], live=board)
             except Exception:  # noqa: S110
                 pass

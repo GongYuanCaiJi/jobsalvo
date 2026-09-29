@@ -124,7 +124,9 @@ def build(path, extra=0):
             j['resume'] = {'recommend': resumes[0]['id'], 'lang': 'zh', 'pick_why': '示範:這份履歷最符合 JD'}
     marked = marks(js, resumes)
     js = js + extra_jobs(extra)
-    data = {'jobs': js, 'status': {}, 'research': [], 'bank': bank()}
+    # 投遞前驗收跑過、都過關:真的看板在卡進「可以投了」之前一定跑過(沒跑過連待你決定都推不過去)
+    status = {'schema_version': 2, 'at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'checked_links': True, 'issues': []}
+    data = {'jobs': js, 'status': status, 'research': [], 'bank': bank()}
     doc = bd.assemble(read('board.css'), bd.stat_first(read('header.html'), data), '', data,
                       json.dumps(marked, ensure_ascii=False), read('board.js'))
     with open(path, 'w', encoding='utf-8') as f:

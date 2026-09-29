@@ -31,6 +31,29 @@ import board_doc as bd
 from chrome_bin import chrome as _chrome   # 用哪個 Chrome 的單一真相(見 tools/chrome_bin.py)
 
 
+def sandbox_api(base, path, body=None, method=None, headers=None, timeout=10, raw=False):
+    """看板檢查打副本看板的 API 只走這一支:網址一定是自己開在本機的那一份(先驗過),不會打到別的地方。
+    body 是 dict 就送 JSON、bytes 就原樣送;回 JSON(raw=True 回位元組)。"""
+    base = str(base or '').rstrip('/')
+    u = urllib.parse.urlsplit(base)
+    if u.scheme != 'http' or u.hostname not in ('127.0.0.1', 'localhost') or not path.startswith('/api/'):
+        raise ValueError(f'看板檢查只打本機副本看板的 /api/:{base}{path}')
+    data = json.dumps(body).encode('utf-8') if isinstance(body, dict) else body
+    hdr = dict(headers or {}, **({'Content-Type': 'application/json'} if isinstance(body, dict) else {}))
+    req = urllib.request.Request(base + path, data=data, method=method or ('POST' if data is not None else 'GET'), headers=hdr)
+    # 上面驗過只打本機副本看板的 /api/
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        out = r.read()
+    return out if raw else json.loads(out)
+
+
+def sandbox_flow(base, **flow):
+    """透過副本伺服器的設定 API 改自動流程(跟他在設定頁按儲存同一條路)。"""
+    settings = sandbox_api(base, '/api/settings').get('settings') or {}
+    settings['flow'] = flow
+    return sandbox_api(base, '/api/settings', {'settings': settings})
+
+
 def free_port():
     s = socket.socket(); s.bind(('127.0.0.1', 0)); p = s.getsockname()[1]; s.close(); return p
 

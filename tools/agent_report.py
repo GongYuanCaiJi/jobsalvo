@@ -22,6 +22,7 @@ sys.path.insert(0, HERE)
 import board_doc as bd      # noqa: E402
 
 KEY = '__inbox__'
+KEEP_DONE = 200        # 處理好的只留最近這麼多則:看板每次都整份讀寫這一格,永遠不清會越來越肥
 
 
 def _now():
@@ -49,6 +50,10 @@ def apply_report(fb, src, msg, need='', job='', now=None):
     if job:
         it['job'] = job
     box.append(it)
+    done = sorted((x for x in box if x.get('done')), key=lambda x: (str(x.get('done')), str(x.get('at'))))
+    if len(done) > KEEP_DONE:
+        old = {id(x) for x in done[:len(done) - KEEP_DONE]}
+        box[:] = [x for x in box if id(x) not in old]
     return it
 
 
@@ -59,22 +64,23 @@ def report(src, msg, need='', job='', live=None):
     return out[0]
 
 
-def apply_resolve(fb, job, why, day=None):
-    """那張卡後來做成功了:它之前還開著的回報都收進「已處理」,寫上為什麼(看板照舊可以改回還沒處理)。回收了幾則。"""
+def apply_resolve(fb, job, why, day=None, only=None):
+    """那張卡後來做成功了:它之前還開著的回報都收進「已處理」,寫上為什麼(看板照舊可以改回還沒處理)。回收了幾則。
+    only(回報) 回 True 的才收:例如可投遞夾建好只收建置的回報,不要把「送出沒確認成功」一起收掉。"""
     day = day or datetime.date.today().isoformat()
     n = 0
     for it in fb.get(KEY, []):
-        if not it.get('done') and it.get('job') == job:
+        if not it.get('done') and it.get('job') == job and (only is None or only(it)):
             it['done'] = day
             it['res'] = why
             n += 1
     return n
 
 
-def resolve(job, why, live=None):
+def resolve(job, why, live=None, only=None):
     live = live or os.environ.get('AGENT_BOARD') or bd.LIVE
     out = []
-    bd.set_fb(lambda fb: out.append(apply_resolve(fb, job, why)), live=live, by='agent_report')
+    bd.set_fb(lambda fb: out.append(apply_resolve(fb, job, why, only=only)), live=live, by='agent_report')
     return out[0]
 
 

@@ -77,10 +77,13 @@ def stop_previous():
 
 def _techerr(ff, u):
     """把一張卡標成「技術錯誤」(看板本來就有那一頁,不另外開地方寫原因)。
-    技術錯誤跟喜歡/還好是同一個欄位,直接寫就把他原本的標記蓋掉了,先另存到 s0。"""
+    技術錯誤跟喜歡/還好是同一個欄位,直接寫就把他原本的標記蓋掉了,先另存到 s0;階段也清掉,另存到 app0。
+    看板「出錯了」那一頁的「放回原處」照這兩個放回去(board.js 手動標出錯了也存同一組)。
+    live_ok 是他之前按放回原處時說的「頁面沒壞」,又被判出錯了就不算了。"""
     e = ff.setdefault(u, {})
     if e.get('s') and e['s'] != 'techerr': e['s0'] = e['s']
-    e['s'] = 'techerr'; e.pop('app', None)
+    if e.get('app'): e['app0'] = e['app']
+    e['s'] = 'techerr'; e.pop('app', None); e.pop('live_ok', None)
 
 
 def jd_verdict(u, board_title='', fetched=None):
@@ -549,7 +552,10 @@ def main():
     def keep(j):
         if not str(j.get('id','')).startswith('http'): return False
         if only: return card.card_id_from_url(j['id']) in only
-        e=FB.get(j['id']); return a.scope=='all' or (isinstance(e,dict) and e.get('app')=='prep')
+        e=FB.get(j['id']) if isinstance(FB.get(j['id']),dict) else {}
+        # 按了 🗑 移除的(app 還在、多一個 rm)不跑:跟看板上的張數、代投、建置同一條(以前照樣派 agent 判、推進待你決定)
+        if e.get('rm'): return False
+        return a.scope=='all' or e.get('app')=='prep'
     def title(j): return card.name(j)
     rows=[(j['id'],title(j)) for j in d['data']['jobs'] if keep(j)]
     if a.limit: rows=rows[:a.limit]

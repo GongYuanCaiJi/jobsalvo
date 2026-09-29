@@ -339,6 +339,39 @@ class OrderedDispatch(unittest.TestCase):
         self.assertIn('Beacon 清單第 2 個', text)
         self.assertIn('啟動失敗', text)
 
+    def test_each_agent_gets_the_task_prepared_for_it(self):
+        # #288:代投第一家不能用、換手到另一家(Codex↔Claude)時,prompt 和 Chrome 檢查要照新的那一家做。
+        # prepare(agent) 回給那一家的 prompt;那一家的 Chrome 沒準備好就丟 AgentStartError,照啟動失敗換下一個
+        entries = [self.entry('cx', browser=True), self.entry('cc', 'claude-code', browser=True),
+                   self.entry('cx2', browser=True)]
+        prompts = []
+
+        def launch(prompt, outfile, _repo, agent, **kwargs):
+            prompts.append((agent['id'], prompt))
+            with open(outfile, 'a' if kwargs.get('append') else 'w', encoding='utf-8') as f:
+                if agent['id'] == 'cx':
+                    f.write(json.dumps({'type': 'turn.failed', 'error': {'message': 'Quota exceeded'}}) + '\n')
+            return FakeProcess(pid=100 + len(prompts))
+
+        def prepare(agent):
+            if agent['id'] == 'cc':
+                raise ar.AgentStartError('Claude 90 秒內看不到 agent 的 Chrome')
+            return 'TASK FOR ' + agent['id']
+
+        with (
+            tempfile.TemporaryDirectory(prefix='agent-prepare-') as d,
+            self.settings(entries),
+            patch.object(ar, 'launch', side_effect=launch),
+            patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
+        ):
+            log = os.path.join(d, 'task.log')
+            result = ar.run('ORIGINAL', log, d, browser_required=True, prepare=prepare)
+            with open(log, encoding='utf-8') as f:
+                text = f.read()
+        self.assertEqual(prompts, [('cx', 'TASK FOR cx'), ('cx2', 'TASK FOR cx2')])
+        self.assertEqual(result.agent_id, 'cx2')
+        self.assertIn('Claude 90 秒內看不到 agent 的 Chrome', text)      # 為什麼沒用 Claude,紀錄裡講得出來
+
     def test_pinned_agent_never_falls_through_to_another_entry(self):
         entries = [self.entry('primary'), self.entry('secondary')]
         seen = []
@@ -525,19 +558,19 @@ class ClaudeCodeRuntime(unittest.TestCase):
         with self.settings([self.entry('cm', 'command-code', browser=True)]):
             self.assertIsNone(ar.browser_runtime())               # Command Code 還是不能開瀏覽器
 
-    def test_search_prefers_browser_agents_but_can_use_a_web_agent(self):
-        # 找缺:有能開瀏覽器的先用它;只有 Claude Code(沒瀏覽器)也照樣找,用網路搜尋
+    def test_search_and_add_never_get_chrome_even_when_the_first_agent_can_browse(self):
+        # #287:找缺、加職缺不給操作 Chrome 的能力(Codex、Claude 都一樣);網頁由程式的 page_fetch 抓。
+        # 以前能開瀏覽器的 agent 排前面、開著 Chrome 做,沒有代投那把鎖,也沒限制只准用 agent 專用的 Chrome
+        import add_job
         seen = []
 
         def launch(_prompt, outfile, _repo, agent, **kwargs):
-            seen.append((agent['id'], kwargs.get('chrome')))
+            seen.append((agent['id'], kwargs.get('chrome'), kwargs.get('browser')))
             open(outfile, 'a' if kwargs.get('append') else 'w').close()
             return FakeProcess(pid=100 + len(seen))
 
-        for entries, want in (
-            ([self.entry('cc', 'claude-code'), self.entry('cx', browser=True)], [('cx', True)]),
-            ([self.entry('cc', 'claude-code')], [('cc', False)]),
-        ):
+        for entries in ([self.entry('cx', browser=True), self.entry('cc', 'claude-code')],
+                        [self.entry('cc', 'claude-code', browser=True)]):
             seen.clear()
             with (
                 tempfile.TemporaryDirectory(prefix='agent-search-') as d,
@@ -546,8 +579,42 @@ class ClaudeCodeRuntime(unittest.TestCase):
                 patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
                 patch.object(ar, '_claude_outcome', return_value={'is_error': False, 'subtype': 'success'}),
             ):
-                self.assertTrue(ar.run('task', os.path.join(d, 't.log'), d, prefer_browser=True).ok)
-            self.assertEqual(seen, want)
+                self.assertTrue(research.web_agent(d)('task', os.path.join(d, 's.log'), True).ok)
+                self.assertIs(add_job.web_agent, research.web_agent)      # 加職缺跟找缺同一支
+            self.assertEqual(seen, [(entries[0]['id'], False, None)])
+
+
+class NoChromeOutsideApply(unittest.TestCase):
+    """#287:不是代投的工作派出去時,兩家都真的沒有操作 Chrome 的工具(不只是 prompt 叫它別用)。"""
+
+    def test_codex_without_chrome_turns_off_the_browser_plugins_even_if_config_never_mentions_them(self):
+        agent = {'id': 'cx', 'runtime': 'codex', 'model': '', 'effort': 'max', 'browser': True}
+        with tempfile.TemporaryDirectory(prefix='codex-cfg-') as d:
+            with patch.object(ar, 'CODEX_CONFIG', os.path.join(d, 'none.toml')), \
+                    patch.object(ar, 'CODEX_SKILL_DIRS', ()), \
+                    patch.object(ar, 'codex_bin', return_value='/bin/codex'):
+                argv, _ = ar.argv_for(agent, 'TASK', '/repo', web=True)
+                apply_argv, _ = ar.argv_for(agent, 'TASK', '/repo', chrome=True, browser=ar.apply_overrides())
+        for name in ('chrome@openai-bundled', 'computer-use@openai-bundled', 'unified-computer-use@openai-bundled'):
+            self.assertIn(f'plugins.{name}.enabled=false', argv)
+            self.assertNotIn(f'plugins.{name}.enabled=false', apply_argv)   # 代投照舊留著
+
+    def test_claude_without_chrome_has_no_claude_in_chrome(self):
+        agent = {'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}
+        with tempfile.TemporaryDirectory(prefix='claude-settings-') as d:
+            with patch.object(ar, 'claude_bin', return_value='/bin/claude'), \
+                    patch.object(ar, 'CLAUDE_SETTINGS', os.path.join(d, 'none.json')):
+                argv, _ = ar.argv_for(agent, 'TASK', '/repo', web=True)
+        self.assertIn('--no-chrome', argv)
+        self.assertNotIn('--chrome', argv)
+        self.assertNotIn('claude-in-chrome', ' '.join(argv))
+
+    def test_web_rule_says_no_browser_and_points_at_the_program_fetcher(self):
+        rule = ar.browser_rule()
+        self.assertIn('【抓網頁鐵律】', rule)
+        self.assertIn('page_fetch.py', rule)                 # 照規則呼叫程式抓
+        self.assertIn('不准操作任何瀏覽器', rule)
+        self.assertNotIn('不要呼叫程式預抓', rule)            # 舊規矩叫它自己開瀏覽器、別叫程式抓
 
 
 class AgentSettingsMigration(unittest.TestCase):

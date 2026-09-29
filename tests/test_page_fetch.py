@@ -39,6 +39,23 @@ class ChromeFallbackLimit(unittest.TestCase):
         self.assertEqual(peak[0], page_fetch.CHROME_FALLBACK_WORKERS)
 
 
+class CommandLine(unittest.TestCase):
+    """找缺的 agent 沒有瀏覽器(#287):要讀某一頁就跑 page_fetch.py <網址>,程式抓好印出來。"""
+
+    def test_prints_the_page_text_and_says_plainly_when_it_cannot(self):
+        import io, page_fetch
+        from contextlib import redirect_stdout
+        ok = page_fetch.PageResult('https://ex.test/a', 'ok', text='Careers: Backend Engineer', title='Jobs', via='reader')
+        bad = page_fetch.PageResult('https://ex.test/b', 'unknown', errors=('direct: HTTP 401', 'reader: no readable text'))
+        for result, code, want in ((ok, 0, ['Careers: Backend Engineer', 'reader']),
+                                   (bad, 1, ['讀不到', 'HTTP 401', '登入'])):
+            out = io.StringIO()
+            with patch.object(page_fetch, 'fetch', return_value=result), redirect_stdout(out):
+                self.assertEqual(page_fetch.main([result.url]), code)
+            for w in want:
+                self.assertIn(w, out.getvalue())
+
+
 class AcceptLanguage(unittest.TestCase):
     """跟網站要哪種語言的頁面,照設定的履歷語言;中文、英文的人跟原本一樣。"""
 

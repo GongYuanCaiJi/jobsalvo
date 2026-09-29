@@ -144,7 +144,7 @@ def apply(cwd=APP):
             pass
     version = current(cwd)
     restart = os.environ.get('JOBSALVO_LAUNCHD') != '1'
-    msg = f'更新到 {version or "最新版"} 了' + (',重新啟動看板才會生效' if restart else ',看板會自己重新啟動')
+    msg = f'更新到 {version or "最新版"} 了' + (',重新啟動看板才會生效(怎麼重新啟動看 README「停止、重新啟動」;打開開機自動啟動之後,更新完會自己重新啟動)' if restart else ',看板會自己重新啟動')
     if need_uv:
         msg += '。轉 PDF、截圖要用的套件還沒準備好:先裝 uv(brew install uv),再重新整理看板'
     return {'ok': True, 'msg': msg, 'version': version, 'restart': restart}

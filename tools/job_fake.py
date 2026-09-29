@@ -81,6 +81,7 @@ def apply(board, sp, step, stage, url, limit=0):
     jobrun.write(path, dict(base, phase='run')); time.sleep(step)
     today = ar.today()
     done = []
+    status = fr.board_status(board)          # 核准規則也看投遞前驗收,跟真的一樣
 
     def mut(fb):
         for u, m in fb.items():
@@ -101,7 +102,7 @@ def apply(board, sp, step, stage, url, limit=0):
                     m['apply'] = ar.fill_record('fix', m['apply'], FAKE_FILL, [], m['apply']['session'], '', 'sandbox')
                     fr.apply_clear_refill(fb, u)
                     done.append(u)
-            elif fr.approval_problem(fb, u) is None:
+            elif fr.approval_problem(fb, u, status) is None:
                 ev = ar.submit_evidence({'confirm_text': '(沙箱假確認頁)', 'confirm_url': ''}, '')
                 fr.apply_mark_sent(fb, u, ev, today)
                 done.append(u)

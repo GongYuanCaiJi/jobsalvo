@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """查回音(reply_run)的規則:照證據改狀態、30 天沒回音記沒下文、他自己決定的不動、看不懂的不改只標出來。"""
-import os, sys, unittest
+import json, os, sys, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -111,6 +111,42 @@ class Findings(unittest.TestCase):
         self.assertEqual(rr.apply_findings(fb, {U: [it]}, DAY), {})
         self.assertEqual(len(fb[U]['replies']['items']), 1)
 
+    def test_same_thread_same_day_confirm_and_reject_are_two_replies(self):
+        """同一串信同一天先「已收到」再「很遺憾」:程式讀的是整串,兩則原文連結、日期都一樣,拒絕不能被當成重複。"""
+        fb = board()
+        link = 'https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th=abcdef1'
+        common = {'src': 'Gmail', 'date': DAY, 'link': link, 'source_ref': 'email:abcdef1', 'source_type': 'email'}
+        rr.apply_findings(fb, {U: [dict(common, kind='confirm', snippet='Thanks for applying'),
+                                   dict(common, kind='reject', snippet='Unfortunately')]}, DAY)
+        self.assertEqual([x['kind'] for x in fb[U]['replies']['items']], ['confirm', 'reject'])
+        self.assertEqual(fb[U]['oc'], 'rej')
+
+    def test_undone_reply_reported_again_in_other_words_does_not_move_the_card_back(self):
+        """他按「不對,復原」之後,agent 下一輪把同一封信的來源換個寫法再報一次:不能又改回「沒錄取」、也不多一則。"""
+        fb = board()
+        it = {'src': 'Gmail', 'date': DAY, 'kind': 'reject', 'snippet': 'x', 'source_ref': 'email:abcdef1',
+              'source_type': 'email', 'link': 'https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th=abcdef1'}
+        rr.apply_findings(fb, {U: [dict(it)]}, DAY)
+        f = fb[U]
+        rr.set_outcome(f, f['oc_auto']['from'], DAY)                  # 看板的「不對,復原」
+        del f['oc_auto']
+        again = dict(it, src='Gmail 郵件', subject='Re: 應徵結果',
+                     link='https://mail.google.com/mail/u/0/#all/abcdef1')
+        self.assertEqual(rr.apply_findings(fb, {U: [again]}, DAY), {})
+        self.assertNotIn('oc', f)
+        self.assertEqual(len(f['replies']['items']), 1)
+
+    def test_summary_names_the_status_change_not_the_evidence_note(self):
+        """只有送出頁證據的卡收到拒絕信:跑完那句要講「等回音 → 沒錄取」,不是「已找到確認信」。"""
+        fb = board(ev='送出頁是目前唯一證據')
+        res = rr.apply_findings(fb, {U: [{'src': 'Gmail', 'date': '2026-10-20', 'kind': 'reject',
+                                          'link': 'https://mail.google.com/mail/u/0/#all/abcdef1',
+                                          'source_ref': 'email:abcdef1', 'source_type': 'email',
+                                          '_source_verified': True}]}, DAY)
+        line = rr.summary(res, {U: {'target': 'Engineer · Acme'}})
+        self.assertIn('等回音 → 沒錄取', line)
+        self.assertNotIn('改了狀態:Engineer · Acme 已找到', line)
+
     def test_confirming_email_clears_weak_submission_evidence(self):
         fb = board(ev='送出頁是目前唯一證據;待查信箱與平台應徵紀錄')
         rr.apply_findings(fb, {U: [{'src': 'gmail', 'date': DAY, 'subject': 'Application received',
@@ -130,6 +166,60 @@ class Findings(unittest.TestCase):
         rr.apply_checked_evidence(fb, {U})
         self.assertIn('已查信箱', fb[U]['ev'])
         self.assertIn('未找到確認信或平台紀錄', fb[U]['ev'])
+
+
+class Removed(unittest.TestCase):
+    def test_card_removed_while_the_round_was_running_is_not_written(self):
+        """查應徵進度跑到一半(一輪最多 60 分鐘)他把卡移除了:跑完不能再改它的結果、加回音、推查過日期。"""
+        fb = board(rm=1)
+        before = dict(fb[U])
+        rr.apply_results(fb, {U: [{'src': 'Gmail', 'date': DAY, 'kind': 'interview',
+                                   'link': 'https://mail.example/iv', 'snippet': 'iv'}]}, {U}, DAY)
+        self.assertEqual(fb[U], before)
+
+
+class OneLetterManyCards(unittest.TestCase):
+    """同一家投了兩個缺,一封沒寫職稱的「很遺憾」信被 agent 同時掛到兩張(#289 決定 1):
+    分不出是哪一張就不自動改狀態;回音照記(兩張都有,不會被記成沒下文),卡上標「可能是這封」讓他自己按。"""
+    V = 'https://jobs.lever.co/x/2'
+
+    def letter(self, **kw):
+        return dict({'src': 'Gmail', 'date': DAY, 'kind': 'reject', 'source_type': 'email',
+                     'source_ref': 'email:abc123', 'link': 'https://mail.google.com/mail/u/0/#all/abc123',
+                     'snippet': '很遺憾這次無法進一步', '_source_verified': True}, **kw)
+
+    def test_same_letter_on_two_cards_changes_neither(self):
+        fb = dict(board(), **{self.V: {'app': 'sent', 'sent_at': '2026-09-22'}})
+        res, ghosts, _ = rr.apply_results(fb, {U: [self.letter()], self.V: [self.letter()]}, {U, self.V}, DAY)
+        for url, other in ((U, self.V), (self.V, U)):
+            self.assertNotIn('oc', fb[url])
+            self.assertNotIn('oc_auto', fb[url])
+            (item,) = fb[url]['replies']['items']
+            self.assertEqual(item['maybe'], [other])       # 卡上寫「同一封也對到哪一張」
+        self.assertEqual(ghosts, [])
+        self.assertNotIn('→', ';'.join(res.values()))
+        self.assertIn('可能是同一封', rr.summary(res, {}))
+
+    def test_interview_letter_on_two_auto_ghosted_cards_moves_neither(self):
+        ghost = {'oc': 'ghost', 'oc_at': {'ghost': '2026-10-20'}, 'oc_auto': {'s': 'ghost', 'from': '', 'at': '2026-10-20', 'by': '送出 30 天沒有回音'}}
+        fb = {U: dict(board()[U], **ghost), self.V: dict(board()[U], **ghost)}
+        rr.apply_findings(fb, {U: [self.letter(kind='interview')], self.V: [self.letter(kind='interview')]}, DAY)
+        self.assertEqual([fb[U]['oc'], fb[self.V]['oc']], ['ghost', 'ghost'])
+
+    def test_one_letter_one_card_still_moves_it(self):
+        fb = dict(board(), **{self.V: {'app': 'sent', 'sent_at': '2026-09-22'}})
+        rr.apply_findings(fb, {U: [self.letter()], self.V: [self.letter(source_ref='email:zzz999', link='https://mail.google.com/mail/u/0/#all/zzz999')]}, DAY)
+        self.assertEqual([fb[U]['oc'], fb[self.V]['oc']], ['rej', 'rej'])
+        self.assertNotIn('maybe', fb[U]['replies']['items'][0])
+
+    def test_the_platform_records_page_is_one_source_for_many_cards_and_is_not_ambiguous(self):
+        """平台應徵紀錄頁整頁是同一個 source_ref:兩張同一天投的 104 卡各有一筆確認,不是同一封信。"""
+        fb = dict(board(ev='只有送出頁'), **{self.V: {'app': 'sent', 'sent_at': '2026-09-22', 'ev': '只有送出頁'}})
+        rec = dict(self.letter(kind='confirm', source_type='application_record', source_ref='application_record:104',
+                               link='https://pda.104.com.tw/applyRecord'))
+        rr.apply_findings(fb, {U: [dict(rec)], self.V: [dict(rec)]}, DAY)
+        self.assertNotIn('ev', fb[U]); self.assertNotIn('ev', fb[self.V])
+        self.assertNotIn('maybe', fb[U]['replies']['items'][0])
 
 
 class CheckedDates(unittest.TestCase):
@@ -184,6 +274,32 @@ class Ghost(unittest.TestCase):
     def test_after_he_undoes_a_ghost_it_is_not_ghosted_again(self):
         fb = board(ghost_no=1)                                         # 看板「復原」會留這個
         self.assertEqual(rr.apply_ghost(fb, DAY, checked={U}), [])
+
+    def test_a_late_still_reviewing_mail_moves_an_auto_ghosted_card_back_to_waiting(self):
+        """自動記成沒下文之後公司來信「還在審」:確認信也是回音,照回音改回「等回音」,可以復原。"""
+        fb = board(sent_at='2026-09-01')
+        rr.apply_ghost(fb, '2026-10-05', checked={U})
+        res = rr.apply_findings(fb, {U: [{'src': 'Gmail', 'date': '2026-10-10', 'kind': 'confirm',
+                                          'link': 'https://mail.example/still', 'snippet': 'still reviewing'}]},
+                                '2026-10-10')
+        self.assertNotIn('oc', fb[U])
+        self.assertEqual((fb[U]['oc_auto']['s'], fb[U]['oc_auto']['from']), ('', 'ghost'))
+        self.assertIn('沒下文 → 等回音', res[U])
+
+    def test_auto_change_keeps_the_dates_from_before_so_undo_can_put_them_back(self):
+        """沒下文被回音改成面試:改之前的日期存著,他按「不對,復原」時看板原封放回,不留面試日期。"""
+        fb = board(sent_at='2026-09-01')
+        rr.apply_ghost(fb, '2026-10-05', checked={U})
+        rr.apply_findings(fb, {U: [{'src': 'Gmail', 'date': '2026-10-10', 'kind': 'interview',
+                                    'link': 'https://mail.example/iv', 'snippet': 'iv'}]}, '2026-10-10')
+        self.assertEqual(fb[U]['oc'], 'iv')
+        self.assertEqual(fb[U]['oc_auto']['from_at'], {'ghost': '2026-10-05'})
+
+    def test_a_confirmation_never_undoes_a_ghost_he_set_himself(self):
+        fb = board(oc='ghost', oc_at={'ghost': '2026-10-05'})      # 他自己按的沒下文(沒有 oc_auto)
+        rr.apply_findings(fb, {U: [{'src': 'Gmail', 'date': '2026-10-10', 'kind': 'confirm',
+                                    'link': 'https://mail.example/still', 'snippet': 'still reviewing'}]}, '2026-10-10')
+        self.assertEqual(fb[U]['oc'], 'ghost')
 
     def test_a_late_reply_moves_a_ghosted_card_back(self):
         fb = board()
@@ -336,6 +452,36 @@ class AgentResults(unittest.TestCase):
                 rr.apply_findings(fb, parsed.findings, DAY)
                 self.assertIn('ev', fb[U])
 
+    def test_one_malformed_row_is_dropped_alone_and_its_card_is_not_counted_as_checked(self):
+        """交件 20 則都對、只有一筆日期寫成 10/03:只丟那一筆(那張卡這輪不算查完,不推論沒下文),其他照收。"""
+        other, third = 'https://jobs.example/2', 'https://jobs.example/3'
+        raw = {'checked': [U, other, third],
+               'findings': [
+                   {'url': U, 'source': 'Gmail', 'date': DAY, 'summary': '面試邀請',
+                    'link': 'https://mail.example/iv', 'kind': 'interview'},
+                   {'url': other, 'source': 'Gmail', 'date': '10/03', 'summary': '拒絕',
+                    'link': 'https://mail.example/rej', 'kind': 'reject'}],
+               'job_ids': [{'platform': '104', 'id': 'good1', 'applied_at': '2026-10-01'},
+                           {'platform': '104', 'id': 'bad1', 'applied_at': '10/03'}],
+               'inaccessible': [{'source': '104', 'reason': '要登入', 'jobs': [third]}]}   # 缺 need
+        parsed = rr.parse_result(raw, [U, other, third])
+        self.assertEqual(parsed.findings[U][0]['kind'], 'interview')
+        self.assertNotIn(other, parsed.checked)
+        self.assertNotIn(third, parsed.checked)
+        self.assertIn(U, parsed.checked)
+        self.assertEqual([x['id'] for x in parsed.job_ids], ['good1'])
+        self.assertEqual(len(parsed.dropped), 3)
+
+    def test_a_finding_that_is_not_an_object_leaves_no_card_counted_as_checked(self):
+        """看不出是哪張卡的壞資料:這輪哪張都不算查完(不推論沒下文),但不丟掉其他卡查到的回音。"""
+        raw = {'checked': [U], 'findings': ['not an object', {
+            'url': U, 'source': 'Gmail', 'date': DAY, 'summary': '面試邀請',
+            'link': 'https://mail.example/iv', 'kind': 'interview'}]}
+        parsed = rr.parse_result(raw, [U])
+        self.assertEqual(parsed.checked, set())
+        self.assertEqual(parsed.findings[U][0]['kind'], 'interview')
+        self.assertEqual(len(parsed.dropped), 1)
+
     def test_findings_older_than_each_cards_last_check_are_ignored(self):
         other = 'https://jobs.example/2'
         raw = {'checked': [U, other], 'findings': [
@@ -348,6 +494,213 @@ class AgentResults(unittest.TestCase):
                                  since_dates={U: '2026-10-05', other: '2026-10-09'})
         self.assertEqual(parsed.findings[U], [])
         self.assertEqual(parsed.findings[other][0]['date'], '2026-10-10')
+
+
+class MainRun(unittest.TestCase):
+    """reply_run.main 整輪跑一次:不開 Chrome、不派 agent、不寫真的看板,agent 交件用假的。"""
+    IV = {'url': U, 'source': 'Gmail', 'date': DAY, 'summary': '面試邀請',
+          'link': 'https://mail.example/iv', 'kind': 'interview'}
+
+    def run_main(self, delivery=None, *, chrome_up=(True, ''), close_error=None, fb=None, unavailable=(),
+                 argv=(), program_reads=True, log_lines=(), reread=None):
+        import json, tempfile, shutil, agent_chrome
+        from unittest.mock import patch
+        d = tempfile.mkdtemp(prefix='reply-main-')
+        self.addCleanup(shutil.rmtree, d, True)
+        fb = fb if fb is not None else {U: {'app': 'sent', 'sent_at': '2026-09-01'}}
+        jobs = {u: {'id': u, 'target': 'Engineer · Acme', 'company': 'Acme'} for u in fb if u.startswith('http')}
+        self.statuses, self.reports, self.writes = [], [], []
+
+        def fake_run(prompt, log, home, **kw):
+            self.prompt = prompt
+            with open(log, 'w', encoding='utf-8') as f:
+                f.write(''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in log_lines))
+            if delivery is not None:
+                with open(os.path.join(d, 'replies.json'), 'w', encoding='utf-8') as f:
+                    json.dump(delivery, f)
+            return rr.ar.AgentResult('completed', 0)
+
+        def fake_set_fb(fn, live=None, by=''):
+            fn(fb)
+            self.writes.append(by)
+
+        with patch.object(rr, 'SP', d), patch.object(rr, 'load', return_value=(jobs, fb)), \
+             patch.object(rr, '_program_can_read', return_value=program_reads), \
+             patch.object(rr, '_copy_only_agent_id', return_value='cx'), \
+             patch.object(rr, '_read_pages', side_effect=lambda urls, *a, **k: {u: (reread or {}).get(u, {}) for u in urls}), \
+             patch.object(agent_chrome, 'wait_claude', return_value=chrome_up), \
+             patch.object(rr, 'collect_sources', return_value=(
+                 {'gmail': {'threads': []}, 'application_records': []}, list(unavailable))), \
+             patch.object(agent_chrome, 'ensure', return_value=chrome_up), \
+             patch.object(agent_chrome, 'close_if_idle', side_effect=close_error), \
+             patch.object(rr.jobrun, 'write', side_effect=lambda _p, data: self.statuses.append(data)), \
+             patch.object(rr.agent_report, 'report', side_effect=lambda *a, **k: self.reports.append((a, k))), \
+             patch.object(rr.bd, 'set_fb', side_effect=fake_set_fb), \
+             patch.object(rr.ar, 'run', side_effect=fake_run), \
+             patch.object(rr.ar, 'lean', return_value=[]), \
+             patch.object(rr.ar, 'apply_overrides', return_value=[]), \
+             patch('sys.argv', ['reply_run.py', '--board', os.path.join(d, 'board.html'), *argv]):
+            code = rr.main()
+        return code, fb
+
+    def test_chrome_cleanup_error_after_the_agent_finished_keeps_its_results(self):
+        """agent 已經交件了,收尾(關 agent 的 Chrome)出錯:照樣收它交的回音,不能整輪丟掉還說 agent 沒完成。"""
+        code, fb = self.run_main({'checked': [U], 'findings': [self.IV]}, close_error=RuntimeError('boom'))
+        self.assertEqual(code, 0)
+        self.assertEqual(fb[U]['oc'], 'iv')
+        self.assertEqual(self.statuses[-1]['phase'], 'done')
+        self.assertIn('收尾', self.statuses[-1]['msg'])
+        self.assertFalse([a for a, _k in self.reports if 'agent 沒完成' in a[1]])
+
+    def test_one_malformed_row_does_not_throw_away_the_whole_delivery(self):
+        other = 'https://jobs.example/2'
+        fb = {U: {'app': 'sent', 'sent_at': '2026-09-01'}, other: {'app': 'sent', 'sent_at': '2026-09-01'}}
+        bad = dict(self.IV, url=other, date='10/03')
+        code, fb = self.run_main({'checked': [U, other], 'findings': [self.IV, bad]}, fb=fb)
+        self.assertEqual(code, 0)
+        self.assertEqual(fb[U]['oc'], 'iv')
+        self.assertNotIn('replies', fb[other])                      # 那張這輪不算查完,查過日期不往前推
+        self.assertEqual(self.statuses[-1]['phase'], 'incomplete')
+        self.assertIn('格式不對', self.statuses[-1]['msg'])
+
+    def test_one_unreachable_source_is_one_report_and_the_older_ones_are_settled(self):
+        """Gmail 進不去、等回音的卡 3 張:回報只要一則(不是一張一則);前幾輪留下、這輪已經重查過的舊回報收掉。"""
+        urls = [U, 'https://jobs.example/2', 'https://jobs.example/3']
+        fb = {u: {'app': 'sent', 'sent_at': '2026-09-01'} for u in urls}
+        fb['__inbox__'] = [{'id': 'old', 'at': '2026-01-01T00:00:00', 'from': '查回音', 'n': 1,
+                            'msg': '104 應徵紀錄 無法進入:要登入', 'job': urls[1]}]
+        code, fb = self.run_main({'checked': [], 'findings': [], 'inaccessible': [
+            {'source': 'Gmail', 'reason': '要登入', 'need': '在 agent 的 Chrome 登入 Gmail', 'jobs': urls}]}, fb=fb)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.reports), 1)
+        self.assertTrue(fb['__inbox__'][0].get('done'))
+
+    def test_a_one_card_round_only_settles_that_cards_reports(self):
+        other = 'https://jobs.example/2'
+        fb = {U: {'app': 'sent', 'sent_at': '2026-09-01'}, other: {'app': 'sent', 'sent_at': '2026-09-01'}}
+        fb['__inbox__'] = [{'id': f'old{i}', 'at': '2026-01-01T00:00:00', 'from': '查回音', 'n': 1,
+                            'msg': '104 應徵紀錄 無法進入:要登入', 'job': u} for i, u in enumerate((U, other))]
+        self.run_main({'checked': [U], 'findings': []}, fb=fb, argv=['--url', U])
+        self.assertEqual([bool(it.get('done')) for it in fb['__inbox__']], [True, False])
+
+    def test_unusable_delivery_points_to_the_log_button_on_the_page_that_has_it(self):
+        """交件整份不能用:回報叫他去看紀錄,指的分頁名要是現在的「📮 已投出」(那一列沒跑成時有「看紀錄」)。"""
+        code, _fb = self.run_main({'findings': []})                    # 缺 checked
+        self.assertEqual(code, 1)
+        self.assertEqual(self.statuses[-1]['phase'], 'failed')
+        need = self.reports[-1][1]['need']
+        self.assertIn('📮 已投出', need)
+        self.assertIn('看紀錄', need)
+
+    def test_chrome_not_up_tells_him_the_button_that_exists_now(self):
+        """agent 的 Chrome 沒起來:回報要叫他按現在真的有的「🔌 連接 Codex」,不是已經廢掉的「agent 設定檔」(ADR 0003)。"""
+        code, _fb = self.run_main(chrome_up=(False, '還沒連接 agent 的 Chrome'))
+        self.assertEqual(code, 1)
+        need = self.reports[-1][1]['need']
+        self.assertNotIn('設定檔', need)
+        self.assertIn('連接 Codex', need)
+
+
+SEARCH = 'https://mail.google.com/mail/u/0/#search/' + 'after%3A2026%2F01%2F01%20(%22Acme%22)'
+THREAD = 'https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th=abc123def'
+
+
+def gmail_pages(threads=('abc123def',), bodies=('Thanks for applying',)):
+    """程式自己讀到的 Gmail 搜尋頁和列印檢視(完整的一頁,跟 agent_chrome.read_pages 回的一樣)。"""
+    n = len(threads)
+    search = {'url': SEARCH, 'title': 'Search results - Gmail', 'readyState': 'complete',
+              'text': f'Inbox\n1–{n} of {n}\n' + '\n'.join(f'mail {t}' for t in threads) if n else 'No messages matched your search',
+              'anchors': [{'href': f'https://mail.google.com/mail/u/0/#all/{t}', 'text': t} for t in threads]}
+    pages = {SEARCH: search}
+    for t in threads:
+        url = f'https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th={t}'
+        pages[url] = {'url': url, 'title': 'Gmail', 'readyState': 'complete', 'text': '\n'.join(bodies),
+                      'emailThreadPrintView': True, 'emailMessageCount': len(bodies), 'emailBodies': list(bodies)}
+    return pages
+
+
+def claude_log(pages):
+    """Claude 那一輪的 stream-json 紀錄:它在每一頁跑程式給的那支唯讀函式(先拿長度、再分段)。"""
+    import apply_tab
+    lines, k = [], 0
+    for page in pages:
+        whole = json.dumps(rr._digest(page), ensure_ascii=False)
+        calls = [(rr.VERIFY_LEN_JS, str(len(whole)))]
+        calls += [(apply_tab.chunk_js(i, rr._VERIFY_WHOLE), f'{i}:' + whole[i * apply_tab.CHUNK:(i + 1) * apply_tab.CHUNK])
+                  for i in range(-(-len(whole) // apply_tab.CHUNK))]
+        for code, out in calls:
+            k += 1
+            lines.append({'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': f't{k}', 'name': 'mcp__claude-in-chrome__javascript_tool',
+                 'input': {'action': 'javascript_exec', 'text': code}}]}})
+            lines.append({'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': f't{k}', 'content': [{'type': 'text', 'text': out}]}]}})
+    return lines
+
+
+class VerifiedFallback(unittest.TestCase):
+    """#289 決定 2:程式讀不到、交給 agent 補查的來源,agent 說「查過了」不夠;程式核實過那個來源真的讀完了,
+    那幾張卡才推論沒下文。Codex:程式跑完自己再讀一次;只用 Claude:Claude 在每一頁跑程式給的唯讀函式,
+    程式從紀錄拿工具的回傳(跟代投核對頁面同一套),不採信它的轉述。"""
+    run_main = MainRun.run_main
+    OLD = {U: {'app': 'sent', 'sent_at': '2026-01-02'}}
+    GMAIL = {'source_ref': 'email:search', 'source_type': 'email', 'url': SEARCH, 'source': 'Gmail',
+             'reason': '只裝 Claude Code:程式讀不了', 'need': '用 agent 專用 Chrome 補查 Gmail', 'jobs': [U]}
+
+    def fb(self):
+        return {U: dict(self.OLD[U])}
+
+    def test_claude_saying_checked_without_a_verified_read_is_not_ghosted(self):
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 program_reads=False)
+        self.assertEqual(code, 0)
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
+        self.assertEqual(fb[U]['replies']['at'], rr.today())          # 查過日期照樣往前推,下一輪搜尋範圍才會縮
+        self.assertIn('沒核實', self.statuses[-1]['msg'])
+
+    def test_claude_read_verified_from_its_own_tool_results_is_ghosted(self):
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 program_reads=False, log_lines=claude_log(gmail_pages().values()))
+        self.assertEqual(code, 0)
+        self.assertEqual(fb[U].get('oc'), 'ghost')
+        self.assertEqual(self.statuses[-1]['phase'], 'done')
+        self.assertIn(rr.VERIFY_LEN_JS, self.prompt)                  # prompt 交代它跑哪一支
+
+    def test_claude_skipping_one_mail_on_the_search_page_is_not_enough(self):
+        pages = gmail_pages(threads=('abc123def', 'zzz999yyy'))
+        pages.pop('https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th=zzz999yyy')
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 program_reads=False, log_lines=claude_log(pages.values()))
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
+
+    def test_codex_fallback_is_verified_by_the_program_reading_it_again(self):
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 reread=gmail_pages())
+        self.assertEqual(fb[U].get('oc'), 'ghost')
+
+    def test_codex_fallback_still_unreadable_by_the_program_is_not_ghosted(self):
+        login = {SEARCH: {'url': 'https://accounts.google.com/signin', 'title': 'Sign in', 'readyState': 'complete',
+                          'text': 'Sign in'}}
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL], reread=login)
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
+        self.assertIn('沒核實', self.statuses[-1]['msg'])
+
+    def test_more_results_than_one_page_is_not_ghosted_but_the_checked_date_moves_on(self):
+        """搜尋結果一頁放不下(1–50 of 234):核實不了,不推論沒下文;但查過日期要往前推,
+        不然下一輪又從送出日搜起、又放不下,永遠卡住。"""
+        pages = gmail_pages()
+        pages[SEARCH]['text'] = 'Inbox\n1–1 of 234\nmail abc123def'
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 program_reads=False, log_lines=claude_log(pages.values()))
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
+        self.assertEqual(fb[U]['replies']['at'], rr.today())
+
+    def test_a_source_without_a_page_the_program_can_check_never_infers_ghost(self):
+        """不是 Gmail 的信箱、公司名沒有能搜的字:程式核實不了,只能照回音改,不推論沒下文。"""
+        other = dict(self.GMAIL, url='https://outlook.office.com/mail/', reason='設定的信箱不是 Gmail')
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[other],
+                                 program_reads=False, log_lines=claude_log(gmail_pages().values()))
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
 
 
 class SourceCapture(unittest.TestCase):
@@ -393,6 +746,21 @@ class SourceCapture(unittest.TestCase):
         self.assertEqual(sources['gmail']['threads'][0]['source_ref'], 'email:thread-001')
         self.assertIn('A104XYZ', sources['application_records'][0]['text'])
         self.assertEqual(sources['application_records'][0]['source_ref'], 'application_record:jobs.104.com.tw')
+
+    def test_company_search_covers_the_short_name_and_his_aliases(self):
+        """「甲科技股份有限公司」的信常只署名「甲科技」;他在設定寫的公司別名也要搜。搜不到就會被當成沒回音、記成沒下文。"""
+        from unittest.mock import patch
+        import config as cf
+        settings = dict(cf.C, board=dict(cf.C.get('board') or {}, company_alias={'jia tech': '甲科技'}))
+        with patch.object(cf, 'C', settings):
+            terms = rr._gmail_terms('甲科技股份有限公司')
+        self.assertIn('甲科技', terms)
+        self.assertIn('jia tech', terms)
+
+    def test_a_common_first_word_is_not_searched_alone(self):
+        """「The Foo Desk」多搜一個 "The" 幾乎每封信都中,結果一頁放不下,整個 Gmail 搜尋被判沒讀完。"""
+        self.assertNotIn('The', rr._gmail_terms('The Foo Desk'))
+        self.assertIn('Acme', rr._gmail_terms('Acme Systems Inc.'))
 
     def test_company_search_literals_cannot_add_gmail_operators(self):
         jobs = {U: {'id': U, 'company': 'Acme") OR from:other@example.test'}}

@@ -207,6 +207,80 @@ class BuildCompletion(Tmp):
             bd.LIVE, bs.PILOT = old_live, old_pilot
             bs._build_state.clear(); bs._build_state.update(old_build)
 
+    def test_source_check_before_a_run_is_not_blocked_by_one_card_package_problem(self):
+        # 跑準備、填表前的來源檢查只管來源檔同步好了沒。來源同步好了、只是某張卡的要寄的檔案建不成(結束碼 4),
+        # 不該回「來源檔更新失敗」擋下這一輪(那時也沒有「整理要寄的檔案」回報可看)
+        import reconcile
+        import source_sync
+        old_live, old_state = bd.LIVE, bs.STATE
+        bd.LIVE = bs.STATE = self.path
+        getattr(bs, '_source_fail', {}).clear()
+        try:
+            with mock.patch.object(source_sync, 'stale', return_value=True):
+                for code, want in ((reconcile.PACKAGE_PROBLEMS, ''), (1, '來源檔更新失敗')):
+                    with self.subTest(code=code), \
+                            mock.patch.object(bs.subprocess, 'run', return_value=mock.Mock(returncode=code)):
+                        got = bs._source_preflight()
+                        self.assertTrue(got.startswith(want) if want else got == '', got)
+        finally:
+            bd.LIVE, bs.STATE = old_live, old_state
+
+    def test_source_failure_is_not_retried_every_minute(self):
+        # 來源檔一直同步失敗(排版要的 Chrome 不見了、原稿壞了):自動流程每分鐘都會走到來源檢查。
+        # 同一批來源檔剛失敗過,不再同步重跑一整輪 reconcile,直接回上次的原因;
+        # 他改了來源檔就馬上再試;過了一段時間也再試一次(可能是環境修好了)
+        import source_sync
+        old_live, old_state = bd.LIVE, bs.STATE
+        bd.LIVE = bs.STATE = self.path
+        getattr(bs, '_source_fail', {}).clear()
+        src = os.path.join(os.path.dirname(self.path), 'resume.md')
+        with open(src, 'w', encoding='utf-8') as f:
+            f.write('# 原稿\n')
+        entries = [{'kind': 'resume', 'id': 'r', 'lang': 'zh', 'path': src, 'style_path': None}]
+        now = [1000.0]
+        try:
+            with mock.patch.object(source_sync, 'stale', return_value=True), \
+                    mock.patch.object(source_sync, 'files', side_effect=lambda *a, **k: iter(entries)), \
+                    mock.patch.object(bs.time, 'time', side_effect=lambda: now[0]), \
+                    mock.patch.object(bs.subprocess, 'run', return_value=mock.Mock(returncode=1)) as run:
+                first = bs._source_preflight()
+                now[0] += 60
+                second = bs._source_preflight()
+                self.assertEqual(run.call_count, 1, '同一批來源檔一分鐘後又同步重跑了一整輪')
+                self.assertTrue(first.startswith('來源檔更新失敗') and second.startswith('來源檔更新失敗'), second)
+                with open(src, 'a', encoding='utf-8') as f:
+                    f.write('改過了\n')
+                os.utime(src, (now[0] + 5, now[0] + 5))
+                bs._source_preflight()
+                self.assertEqual(run.call_count, 2, '他改了來源檔,沒有馬上再試')
+                now[0] += bs.SOURCE_RETRY + 1
+                bs._source_preflight()
+                self.assertEqual(run.call_count, 3, '過了重試間隔還是不再試')
+        finally:
+            getattr(bs, '_source_fail', {}).clear()
+            bd.LIVE, bs.STATE = old_live, old_state
+
+    def test_one_card_package_problem_still_completes_the_round(self):
+        # 只有某幾張卡的要寄的檔案沒建成:這一輪照樣跑完、驗收結果寫進看板(那幾張各自被擋)。
+        # 以前一律不算跑完,其他卡的自動推進全部停住,等那一張修好
+        import reconcile
+        old_live, old_pilot, old_build = bd.LIVE, bs.PILOT, dict(bs._build_state)
+        bd.LIVE = self.path
+        bs._build_state.update(gen=7, running=False, again=False)
+        bs.PILOT = mock.Mock()
+        try:
+            with mock.patch.object(bs.subprocess, 'run', return_value=mock.Mock(returncode=reconcile.PACKAGE_PROBLEMS)):
+                self._tb()
+                for _ in range(100):
+                    if not bs._build_state['running']: break
+                    time.sleep(0.01)
+            self.assertFalse(bs._build_state['running'])
+            self.assertEqual(bs._build_state['gen'], 8)
+            bs.PILOT.kick.assert_called_once()
+        finally:
+            bd.LIVE, bs.PILOT = old_live, old_pilot
+            bs._build_state.clear(); bs._build_state.update(old_build)
+
 
 class HttpBase(Tmp):
     """起一個真的看板伺服器(臨時看板);只有工具方法,沒有測試,別的檔可以繼承它而不重跑這裡的測試。"""
@@ -598,6 +672,43 @@ class CutTailorEarlyExit(unittest.TestCase):
         self.assertIn('這輪照常判斷職缺,不選履歷、不選語言', text)
         self.assertNotIn('  resume ', text)
         self.assertNotIn('  lang ', text)
+
+    def test_removed_cards_in_prep_are_not_sent_to_the_agent(self):
+        """準備區裡按了 🗑 移除的卡(app 還是 prep、多一個 rm)不交給 agent 判、不推進待你決定、不佔「跑幾張」的名額。
+        以前照樣派 agent,直連 404 還被標成出錯了;看板按鈕上的張數本來就不算它。"""
+        import cut_tailor as ct
+        d = tempfile.mkdtemp(prefix='ct-')
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, 'board.html')
+        cases = [({JOBS[0]['id']: {'app': 'prep', 'rm': 1}, JOBS[1]['id']: {'app': 'prep'}}, [JOBS[1]['id']]),
+                 ({JOBS[0]['id']: {'app': 'prep', 'rm': 1}}, [])]
+        for fb, want in cases:
+            with self.subTest(fb=fb):
+                make_board(path, fb)
+                taken = []
+
+                def take(rows, out_dir=None):
+                    taken.extend(u for u, _ in rows)
+                    sys.exit('測試:要交給 agent 的卡到這裡就停,不抓頁面、不派 agent')
+                with mock.patch.object(ct, '_status'), mock.patch.object(ct, 'skip_approved', side_effect=take), \
+                        mock.patch.object(sys, 'argv', ['cut_tailor.py', '--board', path]):
+                    with self.assertRaises(SystemExit) as stop:
+                        ct.main()
+                self.assertEqual(taken, want)
+                if not want:
+                    self.assertIn('沒有卡', str(stop.exception))
+
+    def test_techerr_keeps_the_mood_and_stage_it_had_so_it_can_be_put_back(self):
+        """閘門標「出錯了」會蓋掉心情、清掉階段:兩個都另存(s0、app0),看板的「放回原處」照原樣放回;
+        之前按過放回原處(live_ok)的,再被標出錯了,那個「他說沒壞」就不算了。"""
+        import cut_tailor as ct
+        fb = {'u': {'s': 'like', 'app': 'prep', 'live_ok': 1}, 'n': {}}
+        ct._techerr(fb, 'u')
+        ct._techerr(fb, 'n')
+        self.assertEqual(fb['u'], {'s': 'techerr', 's0': 'like', 'app0': 'prep'})
+        self.assertEqual(fb['n'], {'s': 'techerr'})
+        ct._techerr(fb, 'u')                  # 再標一次:不把 techerr 存成原本的心情,原本存的也不丟
+        self.assertEqual(fb['u'], {'s': 'techerr', 's0': 'like', 'app0': 'prep'})
 
     def test_empty_prep_is_not_called_all_approved(self):
         """準備區是空的,不能說成「要跑的都被標成認可過了」。"""
@@ -1583,7 +1694,7 @@ class PrepSkips(Tmp):
         with open(os.path.join(out, ct.jid(a), 'fill.json'), 'w', encoding='utf-8') as fh:
             json.dump({'skip': True, 'reason': '職缺已關:網址導回職缺列表'}, fh, ensure_ascii=False)
         moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
-        self.assertEqual(read_fb(self.path)[a], {'s': 'techerr', 's0': 'meh'})
+        self.assertEqual(read_fb(self.path)[a], {'s': 'techerr', 's0': 'meh', 'app0': 'prep'})   # 原本的心情、階段都留著,可以放回原處
         self.assertTrue(bd.parse(read(self.path))['data']['jobs'][0]['dead'])
         self.assertEqual(moved['closed'], 1)
 
@@ -2028,6 +2139,76 @@ class ScriptWritesAreJournaled(Tmp):
         self.assertFalse(os.path.exists(bd.journal_path(self.path)))
 
 
+class OldShipFlagIsMigratedOnDisk(Tmp):
+    """舊資料的可投遞是 ship 布林(沒有 app)。以前只有看板頁面載入時在記憶體裡改成 app='ship'、從沒存回去:
+    卡停在「可以投了」,伺服器那邊的填表、送出、自動流程(都讀檔)卻看不到它;第一次改它還撞 409、卡跳回心情分頁。
+    伺服器起來時把它寫回檔案(記進流水帳)。"""
+
+    def test_server_start_writes_the_migration_back(self):
+        import apply_run
+        a, b = JOBS[0]['id'], JOBS[1]['id']
+        make_board(self.path, {a: {'s': 'like', 'ship': True}, b: {'s': 'like', 'ship': True, 'app': 'sent'}})
+        getattr(bs, 'migrate_marks', lambda _p: None)(self.path)
+        fb = read_fb(self.path)
+        self.assertEqual(fb[a], {'s': 'like', 'app': 'ship'})
+        self.assertEqual(fb[b], {'s': 'like', 'app': 'sent'})          # 已經往後走的不拉回可投遞
+        jobs = {j['id']: j for j in JOBS}
+        self.assertEqual(apply_run.eligible(jobs, fb, 'fill'), [a])     # 讀檔的程式看得到它
+        before = read(bd.journal_path(self.path))
+        bs.migrate_marks(self.path)                                     # 已經改過:不再動、不再記
+        self.assertEqual(read(bd.journal_path(self.path)), before)
+
+    def test_custom_records_get_their_language(self):
+        # 客製紀錄以前不分語言(resume:<id>):照紀錄裡原始檔的簽章認出是哪個語言的檔,改成 resume:<id>:<語言>。
+        # 認不出來的(原始檔後來換過)留著不動:看板上列成「這張現在不寄這份」,可以清掉
+        import hashlib
+        import config as cf
+        files = {}
+        for lang in ('zh', 'en'):
+            files[lang] = os.path.join(self.dir, f'base-{lang}.pdf')
+            with open(files[lang], 'wb') as f:
+                f.write(b'%PDF ' + lang.encode())
+        sig = {k: hashlib.sha256(open(v, 'rb').read()).hexdigest() for k, v in files.items()}
+        a, b = JOBS[0]['id'], JOBS[1]['id']
+        make_board(self.path, {
+            a: {'s': 'like', 'app': 'ready', 'custom_docs': {
+                'resume:general': {'id': 'resume:general', 'status': 'accepted', 'path': 'custom/a.pdf', 'source_sig': sig['en']},
+                'attachment:letter': {'status': 'review', 'candidate_source_sig': sig['zh']}}},
+            b: {'s': 'like', 'app': 'ready', 'custom_docs': {
+                'resume:general': {'status': 'accepted', 'path': 'custom/b.pdf', 'source_sig': 'changed-since'},
+                'resume:legacy': {'status': 'accepted', 'path': 'custom/c.pdf'}}},
+        })
+        with mock.patch.object(cf, 'RESUMES', {'general': {'id': 'general', 'files': dict(files)}}), \
+                mock.patch.object(cf, 'ATTACHMENTS', [{'id': 'letter', 'files': {'zh': files['zh']}}]):
+            bs.migrate_marks(self.path)
+            fb = read_fb(self.path)
+            self.assertEqual(sorted(fb[a]['custom_docs']), ['attachment:letter:zh', 'resume:general:en'])
+            self.assertEqual(fb[a]['custom_docs']['resume:general:en']['id'], 'resume:general:en')
+            self.assertEqual(sorted(fb[b]['custom_docs']), ['resume:general', 'resume:legacy'])   # 認不出來的不動
+            before = read(bd.journal_path(self.path))
+            bs.migrate_marks(self.path)                                 # 已經改過:不再動、不再記
+            self.assertEqual(read(bd.journal_path(self.path)), before)
+
+    def test_page_gets_each_source_file_signature(self):
+        # 看板要自己判斷「已收下的客製版還能不能用」(原始檔換過就不能):頁面拿到每份原始檔、每個語言的簽章,
+        # 跟客製紀錄裡的 source_sig 同一種算法
+        import hashlib
+        import config as cf
+        src = os.path.join(self.dir, 'base.pdf')
+        with open(src, 'wb') as f:
+            f.write(b'%PDF one')
+        resume = dict(cf.C['resume'], resumes=[{'id': 'general', 'files': {'zh': src}}],
+                      attachments=[{'id': 'letter', 'files': {'zh': src, 'en': ''}}])
+        with mock.patch.object(cf, 'C', dict(cf.C, resume=resume)):
+            page = bs.page_cfg()
+            want = {'zh': hashlib.sha256(b'%PDF one').hexdigest()}
+            self.assertEqual(page['resumes'][0].get('sigs'), want)
+            self.assertEqual(page['attachments'][0].get('sigs'), want)
+            with open(src, 'wb') as f:
+                f.write(b'%PDF two, longer')
+            self.assertEqual(bs.page_cfg()['resumes'][0]['sigs'], {'zh': hashlib.sha256(b'%PDF two, longer').hexdigest()})
+
+
 class AgentSandbox(unittest.TestCase):
     def test_agent_runs_outside_the_codex_sandbox(self):
         """沙盒擋掉 Chrome 需要的系統服務(在裡面開 Chrome 一定當掉),也會斷網;派工一律不開沙盒。"""
@@ -2359,6 +2540,14 @@ class PromptPreview(Http):
             self.assertEqual(code, 200)
             self.assertIn('抓網頁鐵律', json.loads(raw)['prompt'])
 
+    def test_replies_prompt_note_matches_how_many_it_really_checks(self):
+        """查應徵進度真的跑時照「跑幾張」只查前幾張,註記不能說「一次查完所有還在等的卡」。"""
+        code, raw, _ = self.req('/api/prompt?kind=replies')
+        self.assertEqual(code, 200)
+        note = json.loads(raw)['note']
+        self.assertNotIn('一次查完', note)
+        self.assertIn('跑幾張', note)
+
     def test_every_agent_button_has_a_prompt(self):
         """會派 agent 的按鈕,每一顆都要看得到它會送出去的東西:找缺三種＋判斷、準備區、代投三段。"""
         for q in ('kind=find&mode=deep', 'kind=find&mode=wide', 'kind=find&mode=dir', 'kind=judge', 'kind=prep',
@@ -2502,3 +2691,17 @@ class GhostAndScam(Tmp):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StatusSkipsRemoved(Tmp):
+    def test_removed_cards_are_not_checked_or_listed(self):
+        # 他已經移除的卡:驗收不再查它,也不列進「N 張沒過驗收」(以前兩頁各掛著看不到的卡的警告)
+        import board_status
+        urls = ['https://example.invalid/jobs/keep', 'https://example.invalid/jobs/removed']
+        make_board(self.path, {urls[0]: {'app': 'ready'}, urls[1]: {'app': 'ready', 'rm': 1}},
+                   jobs=[{'id': u, 'target': u} for u in urls])
+        with mock.patch.object(board_status, "check_shipping", return_value=["缺履歷"]), \
+             mock.patch.object(sys, "argv", ["board_status", "--board", self.path, "--write"]):
+            board_status.main()
+        status = bd.parse(read(self.path))['data']['status']
+        self.assertEqual([x['jid'] for x in status['issues']], urls[:1])

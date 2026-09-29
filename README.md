@@ -29,7 +29,7 @@
 - macOS、Google Chrome、git(沒有的話跑 `xcode-select --install`)。
 - 至少一個裝好、登入好的 agent:Codex CLI(`codex`)、Claude Code(`claude`)或 Command Code(`command-code`)。
   環境檢查只讀本機的登入紀錄,不送請求、不查額度。
-- 三種都能找缺、判斷、準備履歷;Command Code 不能用瀏覽器。會碰瀏覽器的兩件事:
+- 三種都能找缺、判斷、準備履歷;這些工作都不操作 Chrome(網頁由程式抓,要登入才看得到的頁會回報給你)。Command Code 不能用瀏覽器。會碰瀏覽器的只有兩件事:
   - **幫你填表**:Codex,或 Claude Code(模型要 Sonnet 或 Opus,Haiku 會被 Claude 的擴充功能擋)。兩種都一樣由程式自己讀回那一頁核對、截圖;只裝其中一種就好。用 Claude 時「Apply with LinkedIn」這類網頁自己開的授權小視窗做不到(Claude 看不到),改填一般表單。
   - **查應徵進度**:Codex 或 Claude Code 都可以。用 Codex 時程式先自己讀信箱和平台頁;用 Claude 時交給 Claude 在 agent 的 Chrome 裡讀。
   - 同一時間只讓一個 agent 用 Chrome(設定裡只能勾一個)。
@@ -46,13 +46,22 @@ bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/GongYuanCaiJi/
 
 程式裝在 `~/Applications/jobsalvo`,你的資料放在 `~/jobsearch`,看板開在 http://127.0.0.1:8899。
 要換地方(例如同一台電腦再裝一份試用),在指令前面加 `JOBSALVO_APP_DIR=…`、`JOBSALVO_HOME=…`、`JOBSALVO_PORT=…`;
-新建的資料夾有自己的暫存資料夾和 agent Chrome 連線紀錄,不會互相踩。
+新建的資料夾有自己的暫存資料夾和 agent Chrome 連線紀錄,不會互相踩;給的埠記在那個資料夾的設定裡(`board.port`),開機自動啟動、重跑安裝都用它。
 
-安裝程式依序:下載程式(已裝過就 `git pull --ff-only`)、裝 uv 並 `uv sync`、建資料夾(agent 清單照這台電腦裝了哪個 CLI 來定)、
-跑環境檢查(Chrome、git、至少一個能用的 agent;必要項沒過就列出處理方式並停止)、啟動看板並打開瀏覽器。
+安裝程式依序:下載程式(已裝過就 `git pull --ff-only`)、裝 uv 並 `uv sync`、建資料夾(agent 清單照這台電腦裝了、登入了哪個 CLI 來定;
+你還沒在設定頁存過 agent 清單的話,重跑安裝會照現在的狀況重新定)、跑環境檢查(Chrome、git、至少一個能用的 agent;
+必要項沒過就列出處理方式並停止,只差設定頁一顆「改用 X」時照樣啟動看板讓你按)、啟動看板並打開瀏覽器。
 第一次打開會落在「⚙ 設定」;「🚦 開始前」只要求上傳一份履歷。設定頁的「🩺 環境檢查」顯示同一份檢查結果。
 
-安裝程式啟動的看板只開在本機,重開機就不在了。要開機自動啟動,到「⚙ 其他」打開;這樣起的看板有裝 [Tailscale](https://tailscale.com/) 時也開在 Tailscale 位址,手機才連得到。
+安裝程式啟動的看板在背景跑、只開在本機,重開機就不在了。要開機自動啟動,到「⚙ 其他」打開:安裝程式起的那個看板會自己關掉,
+大約半分鐘後由開機自動啟動起的接手(重整頁面就好);這樣起的看板有裝 [Tailscale](https://tailscale.com/) 時也開在 Tailscale 位址,手機才連得到。
+
+停止、重新啟動(資料夾不在 `~/jobsearch` 的換成你的):
+
+| 看板是誰起的 | 停止 | 重新啟動 |
+|---|---|---|
+| 安裝程式 | `kill "$(cat ~/jobsearch/.jobsalvo-server.pid)"` | 先停止,再跑一次安裝指令 |
+| 開機自動啟動 | 「⚙ 其他」關掉開機自動啟動 | 按「更新」後會自己重新啟動;要手動就在終端機跑 `cd ~/Applications/jobsalvo && JOBSALVO_HOME=~/jobsearch uv run python tools/install_service.py` |
 
 | 設定頁的哪一塊 | 做什麼 |
 |---|---|
@@ -87,7 +96,7 @@ uv run python tools/board_server.py --state /tmp/demo.html --port 8898
 ## 更新
 
 「⚙ 其他」會顯示程式版本;GitHub 上的 main 有新的,就會出現「更新到 …」,按一下會快轉到最新的 main 並 `uv sync`。
-看板是開機自動啟動的會自己重啟;不是的話照提示重新啟動看板。重跑一次安裝指令也是同一件事。
+看板是開機自動啟動的會自己重啟;不是的話照上面「停止、重新啟動」重新啟動看板(只重跑安裝指令不會重啟還在跑的看板)。
 程式資料夾切在別的分支、或有沒提交的變更時,按鈕只說原因、不動,請自己用 git。
 
 ## 移除

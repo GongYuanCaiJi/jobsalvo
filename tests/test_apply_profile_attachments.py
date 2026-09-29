@@ -15,6 +15,16 @@ import form_record as fr      # noqa: E402
 
 
 URL = 'https://new-platform.example/jobs/1'
+# 投遞前驗收跑過、沒有問題(核准規則也看它;這支測的是平台履歷附件那一關,測試的看板路徑讀不到驗收結果)
+_passed = patch.object(fr, 'board_status', return_value={'schema_version': 2, 'checked_links': True, 'issues': []})
+
+
+def setUpModule():
+    _passed.start()
+
+
+def tearDownModule():
+    _passed.stop()
 
 
 class ProfileAttachments(unittest.TestCase):
@@ -122,6 +132,40 @@ class ProfileAttachments(unittest.TestCase):
         # 平台履歷附件核對不在檢查填表裡了(填完後、送出前才做,而且只在履歷/附件更新過時):直接測那一步
         return run._check_delivery_attachments(self.fb, URL, self.job, report, self.downloads)
 
+    def _claude_log(self, url, files, code=None):
+        """假的 Claude stream-json 紀錄:它在平台履歷頁跑了算附件雜湊的那段(或被改過的一段)。"""
+        import apply_tab
+        path = os.path.join(self.tmp, 'claude.log')
+        use = {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'u1', 'name': 'mcp__claude-in-chrome__javascript_tool',
+                                                               'input': {'action': 'javascript_exec', 'text': code or apply_tab.ATTACH_JS}}]}}
+        res = {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'u1', 'content': [
+            {'type': 'text', 'text': json.dumps({'url': url, 'files': files}, ensure_ascii=False) + '\n\nTab Context:\n- x'}]}]}}
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(use, ensure_ascii=False) + '\n' + json.dumps(res, ensure_ascii=False) + '\n')
+        return path
+
+    def test_claude_checks_attachments_by_hash_without_downloading(self):
+        # #294:只用 Claude 時沒有把檔取回來的工具。它在平台履歷頁算每個檔的雜湊,程式從紀錄拿、跟本機檔比
+        import hashlib
+        url = 'https://profiles.example/1'
+        same = {'name': 'cover.pdf', 'size': 11, 'sha256': hashlib.sha256(b'cover bytes').hexdigest()}
+        other = {'name': 'cover.pdf', 'size': 11, 'sha256': hashlib.sha256(b'Cover bytes').hexdigest()}
+        extra = {'name': 'old.pdf', 'size': 3, 'sha256': hashlib.sha256(b'old').hexdigest()}
+        report = {'delivery': {'method': 'platform_profile', 'profile_url': url, 'profile_kind': 'fixed'},
+                  'profile_attachments': []}
+        self.fb.setdefault(URL, {}).setdefault('apply', {})['delivery'] = report['delivery']
+
+        def check(log):
+            return run._check_delivery_attachments(self.fb, URL, self.job, report, self.downloads, force=True,
+                                                   hash_reader=run.claude_attachment_hashes([log]))
+        self.assertEqual(check(self._claude_log(url, [same])), [])
+        self.assertTrue(any('內容不同' in p for p in check(self._claude_log(url, [other]))))
+        self.assertTrue(any('少了' in p for p in check(self._claude_log(url, []))))
+        self.assertTrue(any('多出' in p for p in check(self._claude_log(url, [same, extra]))))
+        # 別的網址、被改過的程式碼算出來的,不採信
+        self.assertTrue(any('沒核對到' in p for p in check(self._claude_log('https://profiles.example/2', [same]))))
+        self.assertTrue(any('沒核對到' in p for p in check(self._claude_log(url, [same], code='(() => "x")()'))))
+
     def test_fill_check_does_not_download_platform_profile_attachments(self):
         # 填表只填申請表:平台履歷附件沒下載不算問題,說明裡也叫它不用下載
         with open(os.path.join(self.out, 'fill.json'), 'w', encoding='utf-8') as f:
@@ -160,8 +204,8 @@ class ProfileAttachments(unittest.TestCase):
                                          attachment_download_dir=self.downloads)
         self.assertIn("cua.getTab('5296'", prompt)
         self.assertIn('First Name [text]', prompt)
-        self.assertNotIn('開一個背景分頁,打開申請表單', prompt)
-        self.assertIn('開一個背景分頁,打開申請表單', plain)          # 程式開不起來時照舊自己開
+        self.assertNotIn('打開申請表單。那裡如果還有', prompt)
+        self.assertIn('打開申請表單。那裡如果還有', plain)          # 程式開不起來時照舊自己開
         self.assertIn('確定的動作合成一次呼叫', prompt)
 
     def test_platform_notes_are_kept_per_platform_and_handed_to_the_next_round(self):
@@ -203,6 +247,12 @@ class ProfileAttachments(unittest.TestCase):
         self.assertEqual(self._check(attachments=[{'name': '求職信', 'path': downloaded}]), [])
         self.assertFalse(os.path.exists(self.downloads))
 
+    def test_download_failure_is_not_called_missing(self):
+        # 2026-09-29 一張 104:平台上三個附件都在,只是 agent 下載逾時、一個都沒拿到;卡上卻寫三個都「少了」
+        got = self._check(attachments=[], extra={'problems': ['第一個附件 downloadMedia 等待 120 秒後逾時,沒有取得檔案']})
+        self.assertFalse(any('少了' in p for p in got), got)
+        self.assertTrue(any('沒下載到' in p and '逾時' in p for p in got), got)
+
     def test_missing_changed_and_extra_attachments_are_named(self):
         missing = self._check(attachments=[])
         self.assertTrue(any('求職信' in p and '少了' in p for p in missing), missing)
@@ -225,7 +275,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_accepted_custom_attachment_is_the_card_baseline(self):
         custom = self._put_home('custom/cover.pdf', b'accepted custom cover')
         self.fb[URL]['custom_docs'] = {
-            'attachment:cover': {'status': 'accepted', 'path': 'custom/cover.pdf'}
+            'attachment:cover:zh': {'status': 'accepted', 'path': 'custom/cover.pdf'}
         }
         downloaded = self._download('cover.pdf', b'cover bytes')
         problems = self._check(attachments=[{'name': '求職信', 'path': downloaded}])
@@ -524,7 +574,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_direct_upload_of_custom_documents_is_checked_by_downloaded_bytes(self):
         resume = self._put_home('custom/resume.pdf', b'accepted custom resume')
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {'status': 'accepted', 'path': 'custom/resume.pdf'},
+            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
         }
         actual_resume = self._download('resume.pdf', b'accepted custom resume')
         actual_cover = self._download('cover.pdf', b'cover bytes')
@@ -545,7 +595,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_no_profile_upload_of_custom_documents_is_checked_too(self):
         self._put_home('custom/resume.pdf', b'accepted custom resume')
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {'status': 'accepted', 'path': 'custom/resume.pdf'},
+            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
         }
         uploaded_resume = self._download('resume.pdf', b'wrong custom resume')
 
@@ -559,7 +609,7 @@ class ProfileAttachments(unittest.TestCase):
 
     def test_direct_upload_with_a_different_custom_file_is_a_problem(self):
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {
+            'resume:general:zh': {
                 'status': 'accepted',
                 'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
             },
@@ -580,7 +630,7 @@ class ProfileAttachments(unittest.TestCase):
 
     def test_direct_upload_needs_a_downloaded_copy_inside_the_temp_folder(self):
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {
+            'resume:general:zh': {
                 'status': 'accepted',
                 'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
             },
@@ -598,7 +648,7 @@ class ProfileAttachments(unittest.TestCase):
         import card
 
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {
+            'resume:general:zh': {
                 'status': 'accepted',
                 'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
             },
@@ -629,7 +679,7 @@ class ProfileAttachments(unittest.TestCase):
     def _combined_card_file(self, contents=b'combined card documents'):
         import card
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {
+            'resume:general:zh': {
                 'status': 'accepted',
                 'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
             },
@@ -658,7 +708,7 @@ class ProfileAttachments(unittest.TestCase):
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, 'ship.json'), 'w', encoding='utf-8') as f:
             json.dump({'files': ['resume.pdf', 'cover.pdf'], 'merged': 'combined.pdf'}, f)
-        self.fb[URL]['custom_docs'] = {'resume:general': {
+        self.fb[URL]['custom_docs'] = {'resume:general:zh': {
             'status': 'accepted', 'path': self._put_home('custom/resume.pdf', b'accepted custom resume')}}
         combined = self._put_home(os.path.relpath(os.path.join(folder, 'combined.pdf'), self.home), b'combined')
         with patch.dict(os.environ, {'APPLY_SHIP_ROOT': root}):
@@ -718,8 +768,8 @@ class ProfileAttachments(unittest.TestCase):
         custom_resume = self._put_home('custom/resume.pdf', b'accepted custom resume')
         custom_cover = self._put_home('custom/cover.pdf', b'accepted custom cover')
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {'status': 'accepted', 'path': 'custom/resume.pdf'},
-            'attachment:cover': {'status': 'accepted', 'path': 'custom/cover.pdf'},
+            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
+            'attachment:cover:zh': {'status': 'accepted', 'path': 'custom/cover.pdf'},
         }
         actual_resume = self._download('resume.pdf', b'accepted custom resume')
         actual_cover = self._download('cover.pdf', b'accepted custom cover')
@@ -750,7 +800,7 @@ class ProfileAttachments(unittest.TestCase):
         fixed_url = 'https://profiles.example/fixed/1'
         ps.remember(ps.profile_key(URL), 'zh', 'general', fixed_url)
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {
+            'resume:general:zh': {
                 'status': 'accepted',
                 'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
             },
@@ -881,7 +931,7 @@ class ProfileAttachments(unittest.TestCase):
 
         custom = self._put_home('custom/resume.pdf', b'accepted custom resume')
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {'status': 'accepted', 'path': 'custom/resume.pdf'},
+            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
         }
 
         profile = run.profile_step(
@@ -914,7 +964,8 @@ class ProfileAttachments(unittest.TestCase):
         self.assertNotIn('curl fallback', attachments)
         self.assertNotIn('不可用頁面程式、fetch/HTTP、直接 multipart 請求', run.FILL)
         self.assertIn('唯一例外是本輪明確標示為本機假驗收頁', run.FILL)
-        self.assertIn('不能關閉另一段 session 的舊分頁不算 problems', run.OPEN_STEP)
+        self.assertIn('舊分頁留著不算 problems', run.OPEN_STEP)
+        self.assertIn('不要關任何分頁', run.OPEN_STEP)                      # 關分頁會讓外掛斷線
 
         no_profile = run.profile_step(
             'https://unknown.example/jobs/1', 'zh', 'general', custom, None,
@@ -943,7 +994,7 @@ class ProfileAttachments(unittest.TestCase):
         }
         self._put_home('custom/resume.pdf', b'accepted custom resume')
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {'status': 'accepted', 'path': 'custom/resume.pdf'},
+            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
         }
 
         prompt = ps.attachment_step(self.job, self.fb, URL, self.downloads)
@@ -955,7 +1006,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_new_custom_profile_with_a_different_resume_is_a_problem(self):
         self._put_home('custom/resume.pdf', b'accepted custom resume')
         self.fb[URL]['custom_docs'] = {
-            'resume:general': {
+            'resume:general:zh': {
                 'status': 'accepted',
                 'path': 'custom/resume.pdf',
             },
@@ -1026,13 +1077,33 @@ class ProfileAttachments(unittest.TestCase):
                 mock.patch.object(run, '_pick', return_value=('zh', 'general')):
             self.assertEqual(run.profile_after(URL, report, self.out), [])
             check.assert_called_once_with(ps.profile_key(URL), 'zh', 'general', self.out,
-                                          reported=report['profile']['equivalents'])
+                                          reported=report['profile']['equivalents'], reader=None)
 
             self.assertEqual(
                 run.profile_after(URL, {'delivery': {'method': 'direct_upload'}}, self.out),
                 [],
             )
             check.assert_called_once()
+
+    def test_custom_profile_on_the_same_page_as_the_fixed_one_keeps_reported_equivalents(self):
+        # 104 的客製版跟固定版是同一頁:agent 回報的「平台用自己說法寫」講的就是程式要讀回的那一頁,要收
+        # (以前客製版一律丟掉,全部照原句比,每張都判「個人名片對不上」)
+        import unittest.mock as mock
+        import profile_sync as ps
+        page = {'read': 'https://profiles.example/preview?v=1', 'edit': 'https://profiles.example/edit?v=1'}
+        eq = [{'master': '可上班日：一個月內', 'platform': '一個月內可上班'}]
+        report = {'delivery': {'method': 'platform_profile', 'profile_url': page['read'], 'profile_kind': 'custom'},
+                  'profile': {'url': page['read'], 'equivalents': eq}}
+        with mock.patch.object(ps, 'platform_of', return_value=None), \
+                mock.patch.object(ps, 'where', return_value=page), \
+                mock.patch.object(ps, 'check', return_value=(page, [], '')) as check, \
+                mock.patch.object(run, '_pick', return_value=('zh', 'general')):
+            run.profile_after(URL, report, self.out)
+            self.assertEqual(check.call_args.kwargs['reported'], eq)
+            other = dict(page, read='https://profiles.example/preview?v=2')   # 客製版是另一頁:講的不是同一份,不收
+            with mock.patch.object(ps, 'where', return_value=other):
+                run.profile_after(URL, report, self.out)
+            self.assertIsNone(check.call_args.kwargs['reported'])
 
     def test_first_platform_profile_location_and_history_page_are_saved(self):
         delivery = {'method': 'platform_profile', 'profile_url': 'https://new-platform.example/profile',
@@ -1082,6 +1153,30 @@ class ProfileAttachments(unittest.TestCase):
             self.assertIn('不要點下載連結', step)
             self.assertNotIn('fetch(href', step)
             self.assertNotIn('照檔名到那裡找', step)
+
+    def test_the_fetch_rule_is_given_per_runtime(self):
+        # 取檔規則是 Codex 外掛的做法(downloadMedia、timeout_ms、REPL、renameSync);Claude 收到同一份再加對照表,
+        # 對照表又叫它 base64 回傳(javascript_tool 超過 1000 字會截斷,編碼回傳會被安全過濾擋,ADR 0003):兩邊矛盾。
+        # 照執行者給:Claude 照實講取不回、寫進 problems,不叫它試做不到的路
+        self.fb[URL]['apply'] = {'delivery': {'method': 'platform_profile', 'profile_kind': 'fixed',
+                                              'profile_url': 'https://profiles.example/1'}}
+        codex = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, verify_profile=True)
+        claude = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, verify_profile=True,
+                                         runtime='claude-code')
+        self.assertIn('downloadMedia()', codex)
+        for word in ('downloadMedia', 'timeout_ms', 'renameSync', 'REPL', 'base64'):
+            self.assertNotIn(word, claude)
+        self.assertIn('problems', claude)
+        self.assertIn('upload_readback', claude)          # 申請表上傳檔走「讀不回、程式核對本機檔」那條
+        self.assertIn('profile_attachments(和 fixed_profile 的 attachments)回報空清單', claude)   # 卡上才寫「沒下載到」,不是「沒回報」
+        rule = run.ar.apply_rule('claude-code')
+        self.assertNotIn('base64', rule)                  # 對照表不再教一條做不到的路
+        self.assertNotIn('downloadMedia', self.ps.attachment_step(
+            self.job, self.fb, URL, self.downloads, verify_profile=False, runtime='claude-code'))
+        with patch.object(run.ar, 'claude_paired_device', return_value='dev'):
+            prompt, _out = run.pre_submit_prompt(URL, self.job, self.fb, self.out, self.downloads,
+                                                 runtime='claude-code')
+        self.assertNotIn('downloadMedia', prompt)
 
     def test_after_fill_check_does_not_refetch_unchanged_attachments(self):
         # 附件沒變時,填完後的核對不要再叫 agent 把平台上的附件全部下載一次

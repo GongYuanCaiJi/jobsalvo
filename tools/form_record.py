@@ -69,6 +69,23 @@ def _entry(fb, k):
     return None
 
 
+def page_up(m):
+    """agent 填好的那一頁還在它的 Chrome 裡(記到分頁、沒被標成不見)。答案改了要不要標 refill 看這個:
+    還沒填過(或頁面不見了、要整張重填)的卡,雇主網頁上沒有舊答案可以重打,重填時照新的答案填就好。
+    跟看板的 pageUp 同一條。"""
+    a = (m.get('apply') or {}) if isinstance(m, dict) else {}
+    return a.get('stage') in ('fill', 'fix') and bool(a.get('tab_id')) and not a.get('gone') and not a.get('sent')
+
+
+def mark_refill(fb, k):
+    """答案 k 改了值:還沒送出、頁面還在的表單裡用到它的欄位標 refill(雇主網頁上還是舊字,送出前照答案庫重打)。"""
+    for url, f in _forms(fb):
+        if not f.get('lock') and page_up(fb[url]):
+            for x in f.get('f', []):
+                if x.get('k') == k:
+                    x['refill'] = 1
+
+
 def _forms(fb):
     for url, m in fb.items():
         f = m.get('form') if isinstance(m, dict) else None
@@ -221,9 +238,10 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         for kk in ('opt', 'lim'):
             if x.get(kk): y[kk] = x[kk]
         out.append(y)
-    cur['form'] = {'plat': plat, 'f': out, 'at': at or today}
+    # 記到秒:代投核對「這一輪有沒有記表單」要跟這一輪開始的時間比,只有日期的話同一天第二輪沒記也會過
+    cur['form'] = {'plat': plat, 'f': out, 'at': at or datetime.datetime.now().isoformat(timespec='seconds')}
     cur.pop('approve', None)          # 表單重記過,他核准的就不是這一份了,要重新核准
-    bad = validate(fb)
+    bad = validate(fb, [url])
     if bad:
         raise ValueError('記完不對:' + ';'.join(bad))
     return [e['k'] for e in _bank(fb) if e.get('k') not in before]
@@ -259,8 +277,10 @@ def record_fill(path, url, live=None):
     return record(url, fill.get('platform') or '', fields_from_fill(fill), live=live)
 
 
-def validate(fb):
-    """「答案只在答案庫」有沒有被破壞。回傳問題清單,空的就是沒事。"""
+def validate(fb, urls=None):
+    """「答案只在答案庫」有沒有被破壞。回傳問題清單,空的就是沒事。
+    urls:只看這幾張表單(加上答案庫本身);None 是整個看板(--check)。記表單、翻譯只看自己動到的:
+    以前一張壞掉(例如外部送出時還標著 refill),之後每一張都記不進去、每一次都翻不了。"""
     bad = []
     ks = [e.get('k') for e in _bank(fb)]
     dup = sorted({k for k in ks if ks.count(k) > 1})
@@ -268,6 +288,8 @@ def validate(fb):
         bad.append(f'答案庫有重複的 k:{dup}')
     have = set(ks)
     for url, f in _forms(fb):
+        if urls is not None and url not in urls:
+            continue
         for x in f.get('f', []):
             src, q = x.get('src'), x.get('q')
             if src not in SRCS:
@@ -305,12 +327,8 @@ def apply_translate(fb, k, en=None, zh=None):
         e['v'] = en
         e.pop('tr', None)
         if changed:
-            for url, f in _forms(fb):
-                if not f.get('lock'):
-                    for x in f.get('f', []):
-                        if x.get('k') == k:
-                            x['refill'] = 1
-    bad = validate(fb)
+            mark_refill(fb, k)
+    bad = validate(fb, [])            # 只動到答案庫這一條和沒送出表單的 refill 標記
     if bad:
         raise ValueError('翻完不對:' + ';'.join(bad))
     return e
@@ -354,8 +372,13 @@ def apply_clear_refill(fb, url, q=None):
     return n
 
 
+def _blank(s):
+    """空白也算空,跟看板的 trim() 一樣連 BOM(\\ufeff)一起去掉:Python 的 strip() 不去 BOM。"""
+    return not str(s or '').replace('\ufeff', '').strip()
+
+
 def _empty(e):
-    return not str(e.get('v') or '').strip() and not str(e.get('zh') or '').strip()
+    return _blank(e.get('v')) and _blank(e.get('zh'))
 
 
 def answers_pending(fb, url):
@@ -386,21 +409,42 @@ def snapshot(fb, url):
     return out
 
 
-def approval_problem(fb, url):
-    """這張的核准還能不能拿去送出。None = 可以;不行就回原因(看板顯示同一句)。"""
+def board_status(board):
+    """看板上投遞前驗收的結果(看板資料的 status),核准規則要看它。讀不到回 None:核准一律擋(不知道驗收過沒有)。"""
+    try:
+        with open(board, encoding='utf-8') as f:
+            return bd.parse(f.read())['data'].get('status')
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def approval_problem(fb, url, status=None):
+    """這張的核准還能不能拿去送出。None = 可以;不行就回原因(看板顯示同一句)。
+    status:看板資料的 status(投遞前驗收的結果,board_status 讀);沒給就當成還沒驗收過,擋。"""
     m = fb.get(url) or {}
     f = m.get('form')
     if not f:
         return '這張還沒有表單紀錄'
     if f.get('lock'):
         return '已經送出了'
+    if m.get('rm'):
+        return '這張已經移除了'
     sf = (m.get('apply') or {}).get('submit_fail')
     if sf and not sf.get('cleared'):
         return '上次送出沒確認成功,先確認到底送出沒有'     # 不確定就重送,可能變成投兩次
+    if (m.get('apply') or {}).get('sent'):
+        # agent 在這一頁按過送出(已投出又退回來的卡):那一頁現在是「已收到申請」,不是表單;重填會換新的紀錄
+        return '這張 agent 已經送出過了;要再投一次,先讓 agent 重填'
+    # 投遞前驗收(職缺下架、要寄的檔案有問題、客製檔還沒處理完):確認之後才驗收失敗也要擋送出。
+    # 跟看板 shipBlocked 同一支規則(autopilot.ship_blocked)
+    import autopilot
+    gate = autopilot.ship_blocked(fb, {'id': url}, status)
+    if gate:
+        return gate
     apply = m.get('apply') or {}
     if apply.get('stage') in ('fill', 'fix'):
         if not apply.get('ok'):
-            return (apply.get('issues') or ['填表檢查還有問題,先讓 agent 改好'])[0]
+            return (apply.get('issues') or [''])[0] or '填表檢查還有問題,先讓 agent 改好'     # 空字串也用預設句(跟看板一樣)
         delivery = apply.get('delivery') or {}
         if delivery.get('method') not in ('direct_upload', 'no_profile', 'platform_profile'):
             return '填表檢查沒有回報這次直接上傳或使用哪一份平台履歷'

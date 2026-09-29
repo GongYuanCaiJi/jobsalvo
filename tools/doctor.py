@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -125,6 +126,10 @@ def check_environment(agents=None):
         command, name, install, login = RUNTIMES[runtime]
         ok, detail = states[runtime] = agent_state(runtime)
         path_found = not detail.startswith('找不到')
+        path = _runtime_path(runtime) if path_found and not ok else ''
+        if path and not shutil.which(command):
+            # 只在 App 裡或官方安裝位置找到(不在 PATH 上):照指令名打只會 command not found,寫實際路徑
+            login = login.replace(f'跑 {command}', f'跑 {shlex.quote(path)}', 1)
         checks.append({
             'key': runtime.replace('-', '_'),
             'label': f'{name}(設定裡的 agent)',
@@ -188,9 +193,24 @@ def check_environment(agents=None):
             'detail': ('已連接過 agent 專用的 Chrome(自己一個程序,在背景開,不會出現在你的畫面上)' if linked else
                        '還沒連接;幫你填表與查應徵進度會先停著，找缺不受影響。'),
             'fix': ('' if linked else
-                    '到看板「⚙ 設定 → 🤖 Agent 與瀏覽器」:1. 按「🔑 打開 agent 的 Chrome」,在那個視窗裝 Codex 的 Chrome 外掛'
+                    '到看板「⚙ 設定 → 🤖 Agent 與瀏覽器」:1. 按「🔑 打開 agent 的 Chrome」,在那個視窗裝 Codex 的擴充功能(商店上叫 ChatGPT)'
                     '(或 Claude 的擴充功能)、登入要用的網站 2. 按「🔌 連接」。'
                     '一步一步的教學:docs/agent-chrome.md'),
+        })
+    if 'codex' in browser_runtimes:
+        # Codex 上傳、下載前會先問「允許嗎?」,背景沒人能按就卡住:只讀它的設定看允許了沒,不替他寫
+        import agent_chrome
+        # 要允許哪些網站從他自己的卡和平台履歷推出來(每個人投的網站不一樣);沒允許,第一次傳履歷就卡住,所以是必要的
+        missing = agent_chrome.codex_sites_missing()
+        words = {'uploads': '上傳履歷', 'downloads': '下載平台附件'}
+        checks.append({
+            'key': 'codex_sites',
+            'label': 'Codex 可以在你要投的網站上傳、下載',
+            'ok': not missing,
+            'detail': ('你要投的網站都允許了(還沒有要投的卡時也算)' if not missing else
+                       ';'.join(words[k] + '還沒允許:' + '、'.join(v) for k, v in missing.items())),
+            'fix': '' if not missing else ('把下面這一段貼進 ~/.codex/browser/config.toml(已經有這幾段就整段換掉,原本允許的網站都留著):\n'
+                                           + agent_chrome.codex_sites_snippet(missing)),
         })
 
     return {
@@ -200,20 +220,26 @@ def check_environment(agents=None):
 
 
 def main(argv=None):
+    """結束碼:0 通過;2 只差看板設定頁上的一顆「改用 X」(安裝程式照樣啟動看板讓他按);1 其他沒過。"""
     parser = argparse.ArgumentParser(description='檢查 jobsalvo 的執行環境')
     parser.add_argument('--json', action='store_true', help='輸出機器可讀 JSON')
     args = parser.parse_args(argv)
     result = check_environment()
+    failed = [item for item in result['checks'] if item.get('required', True) and not item['ok']]
+    board_fix = bool(failed) and all(item.get('action') for item in failed)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         for item in result['checks']:
             status = '通過' if item['ok'] else ('提醒' if item.get('required') is False else '未通過')
             print(f"{status}｜{item['label']}：{item['detail']}")
-            if item['fix']:
-                print(f"  處理方式：{item['fix']}")
+            # 終端機沒有按鈕可按:有「改用 X」的那一列改講去看板哪裡按
+            fix = (f"打開看板,在「⚙ 設定」的「🩺 環境檢查」按「{item['action']['label']}」。"
+                   if item.get('action') else item['fix'])
+            if fix:
+                print(f"  處理方式：{fix}")
         print('環境檢查通過' if result['ok'] else '環境尚未就緒')
-    return 0 if result['ok'] else 1
+    return 0 if result['ok'] else 2 if board_fix else 1
 
 
 if __name__ == '__main__':

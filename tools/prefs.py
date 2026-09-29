@@ -123,18 +123,27 @@ def without_tracking(text):
     return head.rstrip('\n') + ('\n\n' + rest[nxt.start():] if nxt else '\n')
 
 
-def apply_agent_note(candidate, path=None):
-    """接受 agent 的假設更新,但逐字保留使用者自訂區。核對用的那段不存。"""
+def apply_agent_note(candidate, path=None, base=None):
+    """接受 agent 的假設更新,但逐字保留使用者自訂區。核對用的那段不存。回:agent 有沒有動自訂區。
+    base:交給 agent 的那一份筆記。整理跟找缺同時跑、可以跑很久,這段時間他在看板上改的以現在的為準:
+    自訂區一律留現在的,跟交給它的那份比才知道 agent 有沒有動(以前跟現在的比,他自己加的也算成 agent 改的);
+    他在這段時間刪掉(或改寫成自訂)的假設,agent 照舊版原樣寫回來的那幾行不要。"""
     path = path or PREF
-    old_custom, _old_agent = note_sections(path)
+    old_custom, old_agent = note_sections(path)
     new_custom = _note_section(candidate, NOTE_CUSTOM)
     new_agent = _note_section(candidate, NOTE_AGENT)
     if new_custom is None or new_agent is None:
         raise ValueError('偏好筆記缺少使用者自訂或 Agent 假設區')
     new_agent = without_tracking(new_agent).rstrip('\n')
-    changed = new_custom != old_custom
-    _write_note(old_custom if changed else new_custom, new_agent, path)
-    return changed
+    base_custom, base_agent = old_custom, old_agent
+    if base is not None:
+        base_custom = _note_section(base, NOTE_CUSTOM) or ''
+        base_agent = _note_section(base, NOTE_AGENT) or ''
+    dropped = {line for line in base_agent.splitlines() if line.strip()} - set(old_agent.splitlines())
+    if dropped:
+        new_agent = '\n'.join(line for line in new_agent.splitlines() if line not in dropped)
+    _write_note(old_custom, new_agent, path)
+    return new_custom != base_custom
 
 
 def save_note_from_ui(custom, agent, path=None):

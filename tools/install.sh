@@ -4,7 +4,6 @@
 set -euo pipefail
 
 repo='GongYuanCaiJi/jobsalvo'
-port="${JOBSALVO_PORT:-8899}"
 data_home="${JOBSALVO_HOME:-$HOME/jobsearch}"
 script_dir=''
 script_source="${BASH_SOURCE[0]:-}"
@@ -60,7 +59,14 @@ python="$app_dir/.venv/bin/python3"
 # 以前檢查的是預設清單(Codex),只裝 Claude Code 的人在這裡就被擋掉
 mkdir -p "$data_home"
 JOBSALVO_HOME="$data_home" "$python" "$app_dir/tools/init.py" "$data_home" >/dev/null
-JOBSALVO_HOME="$data_home" "$python" "$app_dir/tools/doctor.py"
+# 埠照資料夾的設定(board.port;安裝時給過 JOBSALVO_PORT 會記在那裡,開機自動啟動用的也是它),預設 8899
+port="${JOBSALVO_PORT:-$(JOBSALVO_HOME="$data_home" "$python" -c 'import sys; sys.path.insert(0, sys.argv[1]); import config; print(config.PORT)' "$app_dir/tools")}"
+# 結束碼 2 = 只差看板設定頁上的一顆「改用 X」:照樣啟動看板讓他按(停在這裡他就沒有按鈕可按);其他沒過的停下
+doctor_rc=0
+JOBSALVO_HOME="$data_home" "$python" "$app_dir/tools/doctor.py" || doctor_rc=$?
+if [[ "$doctor_rc" != 0 && "$doctor_rc" != 2 ]]; then
+  exit "$doctor_rc"
+fi
 url="http://127.0.0.1:$port"
 
 probe_port() {
@@ -128,4 +134,8 @@ fi
 if [[ "${JOBSALVO_INSTALL_NO_OPEN:-0}" != 1 ]]; then
   open "$url"
 fi
-echo "jobsalvo 已就緒：$url"
+if [[ "$doctor_rc" == 2 ]]; then
+  echo "看板開好了：$url;還差一步:照上面環境檢查說的,在「⚙ 設定」的「🩺 環境檢查」按「改用 …」。"
+else
+  echo "jobsalvo 已就緒：$url"
+fi

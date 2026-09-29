@@ -5,6 +5,7 @@
 import datetime, json, os, shutil, tempfile, unittest
 from unittest import mock
 import _env  # noqa: F401
+import agent_chrome
 import autopilot as ap
 import board_doc as bd
 import demo
@@ -18,8 +19,9 @@ def data(*ids, **kw):
     return {'jobs': [dict({'id': i}, **kw.get(i, {})) for i in ids], 'status': kw.get('status', OKST)}
 
 
-def run(d, fb, gen=0, building=False, running=None, now=NOW, real=True, cfg=CFG):
-    return ap.plan(d, fb, verified_gen=gen, build_running=building, running=running or {}, now=now, cfg=cfg, real=real)
+def run(d, fb, gen=0, building=False, running=None, now=NOW, real=True, cfg=CFG, last=None):
+    return ap.plan(d, fb, verified_gen=gen, build_running=building, running=running or {}, now=now, cfg=cfg, real=real,
+                   replies_last=last)
 
 
 def auto(**kw):
@@ -77,10 +79,21 @@ class PlanTest(unittest.TestCase):
 
     def test_blocked_cards_stay(self):
         fb = {'__auto__': auto(seen={'a': 0, 'b': 0}), 'a': {'app': 'ready'},
-              'b': {'app': 'ready', 'custom_docs': {'resume:x': {'status': 'review', 'name': '履歷'}}}}
+              'b': {'app': 'ready', 'resume_id': 'general',
+                    'custom_docs': {'resume:general:zh': {'status': 'review', 'name': '履歷'}}}}
         st = {'schema_version': 2, 'checked_links': True, 'issues': [{'jid': 'a', 'msg': '職缺已下架'}]}
         self.assertEqual(run(data('a', 'b', status=st), fb, gen=1)['advance'], [])
         self.assertEqual(run(data('a', 'b', status=None), fb, gen=1)['advance'], [])
+
+    def test_custom_record_of_a_file_this_card_no_longer_sends_does_not_block(self):
+        # 客製檔等你看的時候換了這張的履歷:舊履歷那筆紀錄留著(換回來還在),但不會寄出去,不能擋推進。
+        # 以前擋推進看的是每一筆紀錄,要寄的檔案那邊只看現在這幾份,卡永遠卡在待你決定,也沒有按鈕解得開
+        fb = {'__auto__': auto(seen={'b': 0}),
+              'b': {'app': 'ready', 'resume_id': 'tech',
+                    'custom_docs': {'resume:general:zh': {'status': 'review', 'name': '通用版'}}}}
+        self.assertEqual(run(data('b'), fb, gen=1)['advance'], ['b'])
+        fb['b']['custom_docs']['resume:tech:zh'] = {'status': 'working', 'name': '技術版'}
+        self.assertEqual(run(data('b'), fb, gen=1)['advance'], [])
 
     def test_blocked_company_stays_in_ready(self):
         url = 'https://jobs.lever.co/acme/example'
@@ -106,6 +119,15 @@ class PlanTest(unittest.TestCase):
         fb['__auto__']['tried'] = ['fill:a:new']
         self.assertEqual(run(data('a', 'b'), fb)['fill'], 'b')
 
+    def test_apply_again_is_filled_again(self):
+        # 第一次是自動填的(fill:a:new 用掉了),被拒後他按「🔁 再投一次」:表單和填表紀錄收進 tries、回到可投遞。
+        # 卡上寫「排隊中:會自動填這張」,自動流程就要真的再填一次
+        fb = {'__auto__': auto(tried=['fill:a:new']), 'a': {'app': 'ship', 'tries': [{'app': 'sent', 'form': {'lock': 1}}]}}
+        p = run(data('a'), fb)
+        self.assertEqual(p['fill'], 'a')
+        fb['__auto__']['tried'] += p['tried']
+        self.assertIsNone(run(data('a'), fb)['fill'])                        # 這一次也只填一次
+
     def test_fill_skips_filled_approved_sent_and_running(self):
         fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': False, 'at': 't1'}},
               'b': {'app': 'ship', 'approve': {'at': 'x'}}, 'c': {'app': 'ship', 'form': {'lock': 1}},
@@ -128,9 +150,22 @@ class PlanTest(unittest.TestCase):
         fb['a'] = dict(held)
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=0))['fill'], 'c')   # 0 = 不限
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=None))['fill'], 'c')  # 沒設 = 預設 5,才停 2 張
+        self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=''))['fill'], 'c')    # 設定頁那格清空 = 預設 5
 
     def test_stale_fill_is_refilled_once(self):
         fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': 't1', 'stale': '履歷換了'}}}
+        p = run(data('a'), fb)
+        self.assertEqual(p['fill'], 'a')
+        fb['__auto__']['tried'] = p['tried']
+        self.assertIsNone(run(data('a'), fb)['fill'])
+
+    def test_page_gone_is_refilled_once(self):
+        # agent 的 Chrome 關過:那一頁不在了。卡住的卡平常等他,但頁面不見不是他要處理的事,自動重填
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': '2026-01-05T09:00:00', 'tab_id': '7'}}}
+        with mock.patch('agent_chrome.pid', return_value=None):
+            gone = agent_chrome.gone_pages(fb)
+        self.assertEqual(gone, ['a'])
+        agent_chrome.mark_gone(fb, gone)
         p = run(data('a'), fb)
         self.assertEqual(p['fill'], 'a')
         fb['__auto__']['tried'] = p['tried']
@@ -199,6 +234,18 @@ class PlanTest(unittest.TestCase):
         p = run(data('a', 'b'), fb)
         self.assertEqual(p['fix'], 'a'); self.assertIsNone(p['fill'])
 
+    def test_an_uncertain_submit_is_not_touched_automatically(self):
+        # 送出沒確認成功(可能其實送出去了):自動流程不替它重打、也不重填,等他先確認到底送出沒有
+        sf = {'at': 't1', 'problems': ['沒看到成功頁面']}
+        fb = self._filled(submit_fail=sf)
+        fb['__auto__']['rf'] = {'a': {'sig': ap.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
+        self.assertIsNone(run(data('a'), fb)['fix'])
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': False, 'gone': True,
+                                                                  'at': 't1', 'session': 's1', 'submit_fail': sf}}}
+        self.assertIsNone(run(data('a'), fb)['fill'])
+        sf['cleared'] = True                                                 # 他確認過沒送出:照常
+        self.assertEqual(run(data('a'), fb)['fill'], 'a')
+
     def test_replies_once_a_day_after_the_time(self):
         fb = {'__auto__': auto(), 'a': {'app': 'sent'}}
         self.assertTrue(run(data('a'), fb)['replies'])
@@ -206,6 +253,32 @@ class PlanTest(unittest.TestCase):
         fb['__auto__']['replies_day'] = '2026-01-05'
         self.assertFalse(run(data('a'), fb)['replies'])
         self.assertFalse(run(data('a'), {'__auto__': auto(), 'a': {'app': 'sent', 'oc': 'rej'}})['replies'])
+
+    def test_failed_replies_run_is_retried_hourly_that_day_at_most_three_times(self):
+        """#289 決定 3:排程那一輪沒跑成(failed,或跑到一半死掉 died),當天每小時再試一次,最多再試 3 次。"""
+        def last(phase, mins, key='finished_at'):
+            return {'phase': phase, key: (NOW - datetime.timedelta(minutes=mins)).timestamp()}
+        fb = {'__auto__': auto(replies_day='2026-01-05'), 'a': {'app': 'sent'}}
+        self.assertTrue(run(data('a'), fb, last=last('failed', 61))['replies'])
+        self.assertTrue(run(data('a'), fb, last=last('died', 61, 't0'))['replies'])
+        self.assertFalse(run(data('a'), fb, last=last('failed', 30))['replies'])        # 還不到一小時
+        self.assertFalse(run(data('a'), fb, last=last('done', 120))['replies'])
+        self.assertFalse(run(data('a'), fb, last=last('incomplete', 120))['replies'])   # 部分完成不是沒跑成
+        self.assertFalse(run(data('a'), fb, last=last('failed', 11 * 60))['replies'])   # 昨天沒跑成的不算今天的
+        fb['__auto__']['replies_retry'] = {'day': '2026-01-05', 'n': 2}
+        self.assertTrue(run(data('a'), fb, last=last('failed', 61))['replies'])
+        fb['__auto__']['replies_retry'] = {'day': '2026-01-05', 'n': 3}
+        self.assertFalse(run(data('a'), fb, last=last('failed', 61))['replies'])
+        fb['__auto__']['replies_retry'] = {'day': '2026-01-04', 'n': 3}                   # 昨天的次數不算
+        self.assertTrue(run(data('a'), fb, last=last('failed', 61))['replies'])
+
+    def test_board_uses_the_same_retry_numbers(self):
+        """已投出最上面那一列寫的「幾點自動再試、第幾次」跟這裡的規則同一組數字。"""
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'board', 'board.js'),
+                  encoding='utf-8') as f:
+            js = f.read()
+        want = f'var REPLY_RETRY={{max:{ap.REPLY_RETRY_MAX},gap:{ap.REPLY_RETRY_GAP}}};'
+        self.assertTrue(want in js, f'board.js 沒有 {want}')
 
     def test_invalid_saved_replies_time_never_wraps_to_another_hour(self):
         fb = {'__auto__': auto(), 'a': {'app': 'sent'}}
@@ -241,6 +314,26 @@ class PilotStepTest(unittest.TestCase):
 
     def sent(self):
         return {i for i, m in self.fb().items() if isinstance(m, dict) and m.get('app') == 'sent'}
+
+    def test_a_retry_of_a_failed_replies_run_is_counted(self):
+        now = datetime.datetime.now()
+        if now.hour < 1:
+            self.skipTest('剛過午夜:一小時前是昨天,本來就不重試')
+        fin = max(now.replace(hour=0, minute=0, second=1).timestamp(), now.timestamp() - 3700)
+        if now.timestamp() - fin < 3600:
+            self.skipTest('一小時前是昨天')
+        st = {'replies': {'phase': 'failed', 'finished_at': fin}}
+        self.pilot().step()                                    # 第一次:盤點
+        today = datetime.date.today().isoformat()
+        bd.set_fb(lambda f: f['__auto__'].update(replies_day=today), live=self.board, by='test')
+        calls = []
+        p = ap.Pilot(self.board, lambda kind, args: (calls.append(kind), (200, {}))[1], lambda k: st.get(k, {}),
+                     lambda: {'gen': 0, 'running': False}, lambda: False)
+        with mock.patch.object(ap, 'flow', return_value=dict(CFG, auto_prep=False, auto_advance=False,
+                                                             auto_fill=False, replies_at='00:00')):
+            p.step()
+        self.assertEqual(calls, ['replies'])
+        self.assertEqual(self.fb()['__auto__']['replies_retry'], {'day': today, 'n': 1})
 
     def test_end_to_end_on_a_board_file(self):
         before = self.sent()

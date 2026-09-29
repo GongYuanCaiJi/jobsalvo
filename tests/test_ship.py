@@ -199,6 +199,24 @@ class PackageReconcile(unittest.TestCase):
         self.assertEqual(failed, [])
         self.assertIsNone(ship.folder(self.url))
 
+    def test_card_put_back_from_techerr_builds_even_though_the_page_was_marked_dead(self):
+        """「🔧 出錯了」按「放回原處」= 他說頁面沒壞(live_ok):dead 是程式當時的判斷,不再擋要寄的檔案;
+        頁面真的活著時 board_status 會把 dead 清掉,還是 404 就照樣報在待處理。"""
+        self.job = {**self.job, 'dead': True}
+        self._write_board()
+        parsed = read_board(self.board)
+        marks = json.loads(parsed['fb'])
+        marks[self.url]['live_ok'] = 1
+        with open(self.board, 'w', encoding='utf-8') as target:
+            target.write(bd.assemble(':root{}', '<b id="stat-first">0</b>', '', parsed['data'],
+                                     json.dumps(marks), '/*app v1*/'))
+
+        did, failed = ship.reconcile_packages({}, force=True, check_only=False, board=self.board)
+
+        self.assertTrue(did)
+        self.assertEqual(failed, [])
+        self.assertIsNotNone(ship.folder(self.url))
+
     def test_reconcile_does_not_build_a_package_for_a_removed_card(self):
         self._write_board()
         parsed = read_board(self.board)
@@ -477,6 +495,41 @@ class PackageReconcile(unittest.TestCase):
         with mock.patch.object(reconcile.subprocess, 'run', side_effect=run):
             self.assertEqual(self._run(), 0)
 
+    def _two_ready_cards(self, waiting):
+        other = 'test://jobs/99'
+        fb = {self.url: dict({'app': 'ready', 'resume_id': 'general', 'lang': 'zh'}, **waiting),
+              other: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'}}
+        data = bd.assemble(':root{}', '<b id="stat-first">0</b>', '',
+                           {'jobs': [self.job, {'id': other, 'target': 'Other · Beta'}]},
+                           json.dumps(fb), '/*app v1*/')
+        with open(self.board, 'w', encoding='utf-8') as f:
+            f.write(data)
+        return other
+
+    def test_one_card_waiting_on_customization_is_not_a_failed_round(self):
+        # 一張卡的客製檔在等你看是刻意的等待,不是建置壞了。以前算成「可投遞夾本輪建置失敗」、整輪結束碼 1,
+        # 伺服器的建置輪數不前進,所有卡的「驗收過就自動進可以投了」都停住,準備區每輪也報重建失敗。
+        other = self._two_ready_cards({'custom_docs': {'resume:general:zh': {'status': 'review', 'name': '通用版'}}})
+        self.assertEqual(self._run(), 0)
+        parsed = self._board_data()
+        self.assertEqual(agent_report.open_items(json.loads(parsed['fb'])), [])
+        issues = parsed['data']['status']['issues']
+        self.assertEqual([x['jid'] for x in issues], [self.url])      # 等你看的那張照樣擋著,原因寫客製
+        self.assertIn('等你看', issues[0]['msg'])
+        self.assertTrue(ship._build_states()[other]['ok'])
+
+    def test_one_card_build_failure_still_finishes_the_round_for_the_others(self):
+        # 真的建不成(這張選的語言沒有檔)照舊回報、照舊非 0(dda90c2:可投遞夾失敗不算成功);
+        # 但要跟「程式本身壞了」分開,伺服器才知道這一輪跑完了、其他卡的驗收結果是新的
+        other = self._two_ready_cards({'lang': 'en'})
+        self.settings['resume']['langs'] = ['zh', 'en']
+        self._write_settings()
+        self.assertEqual(self._run(), reconcile.PACKAGE_PROBLEMS)
+        parsed = self._board_data()
+        self.assertEqual([x['jid'] for x in parsed['data']['status']['issues']], [self.url])
+        self.assertEqual(len(agent_report.open_items(json.loads(parsed['fb']))), 1)
+        self.assertTrue(ship._build_states()[other]['ok'])
+
     def test_default_builder_failure_blocks_stale_package_until_rebuilt(self):
         self.assertEqual(self._run(), 0)
         package = ship.folder(self.url, name=card.name(self.job))
@@ -543,6 +596,34 @@ class PackageReconcile(unittest.TestCase):
                 v2 = hashlib.sha256(f.read()).hexdigest()
             self.assertNotEqual(v1, v2)
             self.assertIn('Original v2', settings_api.pdf_text(os.path.join(package, info['files'][0])))
+
+    def test_source_file_that_cannot_be_rendered_is_reported_and_cleared_when_fixed(self):
+        # Markdown 排不成 PDF(找不到 Chrome、原稿壞了):以前只印在 reconcile 的輸出裡,背景跑的看不到,
+        # 代投前的來源檢查叫他去看的「整理要寄的檔案」回報也從來沒人寫;準備和填表就這樣靜靜停著
+        source = os.path.join(self.home, 'resume', 'source.md')
+        with open(source, 'w', encoding='utf-8') as f:
+            f.write('# Resume\n')
+        self.settings['resume']['resumes'][0]['files']['zh'] = source
+        self._write_settings()
+
+        def mine(fb):
+            return [x for x in agent_report.open_items(fb) if x.get('from') == '整理要寄的檔案']
+        broken = mock.patch.object(source_sync.markdown_pdf, 'render',
+                                   side_effect=source_sync.markdown_pdf.RenderError('找不到可以排版的 Chrome'))
+        with broken, mock.patch.object(ship.pdf_preview, 'generate', return_value=None):
+            self.assertNotEqual(self._run(), 0)
+            self.assertNotEqual(self._run(), 0)
+        reports = mine(json.loads(self._board_data()['fb']))
+        self.assertEqual(len(reports), 1)                       # 同一件事只加次數,不洗版
+        self.assertIn('找不到可以排版的 Chrome', reports[0]['msg'])
+        self.assertEqual(reports[0]['n'], 2)
+        self.assertIn('準備履歷和填表', reports[0]['need'])
+
+        rendered = lambda path, output, *a, **k: _tiny_pdf(output, 'rendered')
+        with mock.patch.object(source_sync.markdown_pdf, 'render', side_effect=rendered), \
+                mock.patch.object(ship.pdf_preview, 'generate', return_value=None):
+            self.assertEqual(self._run(), 0)
+        self.assertEqual(mine(json.loads(self._board_data()['fb'])), [])
 
     def test_external_sources_are_copied_and_attachment_change_only_rebuilds_its_packages(self):
         root = os.path.join(self.tmp, 'outside')
@@ -688,6 +769,28 @@ class PackageReconcile(unittest.TestCase):
         self.assertEqual(os.path.basename(migrated), f'Engineer_·_Acme-{card.card_id_from_url(self.url)}')
         self.assertTrue(os.path.isdir(migrated))
         self.assertFalse(os.path.exists(old))
+
+    def test_card_leaving_the_flow_keeps_the_fill_screenshots(self):
+        # 可以投了、填過的卡按 😐/👎 退出流程:可重生的要寄的檔案清掉,代投留下的 .apply(填表截圖、交件紀錄)留著,
+        # 按復原回到流程後「填表時的截圖」還在。以前整個夾子連 .apply 一起刪
+        self.assertEqual(self._run(), 0)
+        package = ship.folder(self.url, name=card.name(self.job))
+        shot = os.path.join(package, '.apply', 'fill.png')
+        os.makedirs(os.path.dirname(shot))
+        with open(shot, 'wb') as f:
+            f.write(b'png')
+        bd.set_fb(lambda fb: fb[self.url].pop('app'), live=self.board, by='test')
+
+        cleaned, _unknown = ship.clean_orphans(False, self.board)
+        self.assertEqual(cleaned, [os.path.basename(package)])
+        self.assertTrue(os.path.isfile(shot))
+        self.assertEqual(os.listdir(package), ['.apply'])
+        self.assertEqual(ship.clean_orphans(False, self.board)[0], [])   # 只剩 .apply:不再每輪報「已清」
+
+        bd.set_fb(lambda fb: fb[self.url].update(app='ready'), live=self.board, by='test')
+        self.assertEqual(self._run(), 0)
+        self.assertTrue(os.path.isfile(shot))
+        self.assertTrue(ship.info(self.url).get('files'))
 
 
 if __name__ == '__main__':

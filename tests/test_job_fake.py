@@ -68,9 +68,9 @@ class JobFakeMatchesApplyRun(_FakeBoard):
         job_fake.apply(self.board, self.dir, 0, 'fill', u)
         fb = self._fb()
         self.assertEqual(fr.validate(fb), [])
-        self.assertEqual(fr.approval_problem(fb, u), '還沒確認送出')
+        self.assertEqual(fr.approval_problem(fb, u, fr.board_status(self.board)), '還沒確認送出')
         bd.set_fb(lambda f: f[u].__setitem__('approve', {'snap': fr.snapshot(f, u)}), live=self.board)
-        self.assertIsNone(fr.approval_problem(self._fb(), u))
+        self.assertIsNone(fr.approval_problem(self._fb(), u, fr.board_status(self.board)))
         job_fake.apply(self.board, self.dir, 0, 'submit', '')
         m = self._fb()[u]
         self.assertEqual(m['app'], 'sent')

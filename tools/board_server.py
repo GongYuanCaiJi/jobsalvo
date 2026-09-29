@@ -80,6 +80,24 @@ def _watch_code(servers, version, interval=10, stop=None):
             threading.Thread(target=server.shutdown, daemon=True).start()
         return
 
+SERVERS=[]   # main 綁好的伺服器;要讓出埠時(交給開機自動啟動)從這裡停
+
+def hand_over_to_launchd(delay=1.0):
+    """開機自動啟動裝好了,這個看板卻不是 launchd 起的(安裝指令在背景起的,沒有終端機可以按 Ctrl-C):
+    回完話就自己關,讓出埠給 launchd 起的那個(它每 30 秒重試一次)。關法跟程式更新後一樣(_watch_code):
+    停掉伺服器,main 的收尾照常跑。安裝指令記的 pid 是自己的就一起清掉。"""
+    def go():
+        pidfile=os.path.join(cf.HOME,'.jobsalvo-server.pid')
+        try:
+            with open(pidfile,encoding='utf-8') as f: mine=f.read().strip()==str(os.getpid())
+            if mine: os.remove(pidfile)
+        except OSError:
+            pass
+        for server in SERVERS:
+            threading.Thread(target=server.shutdown,daemon=True).start()
+    t=threading.Timer(delay,go); t.daemon=True; t.start()
+    return t
+
 import gzip as _gz, hashlib as _hl
 _GZ={}
 def _gzip(b):
@@ -96,6 +114,7 @@ def read_doc():
 
 def page_cfg():
     """頁面要知道、但屬於設定不屬於資料的東西。每次送出時從設定現讀,不存進看板檔。"""
+    import ship
     C = cf.C
     resumes = [item for item in C['resume'].get('resumes', []) if item.get('enabled', True)]
     attachments = [item for item in C['resume'].get('attachments', []) if item.get('enabled', True)]
@@ -103,26 +122,29 @@ def page_cfg():
     def file_langs(item):
         files = item.get('files')
         if not isinstance(files, dict):
-            return [], []
+            return [], [], {}
         present = [lang for lang, path in files.items() if path]
         previews = [lang for lang, path in files.items()
                     if path and str(path).lower().endswith(('.pdf', '.md', '.markdown'))]
-        return present, previews
+        # 每個語言原始檔的簽章:已收下的客製版記著它是從哪一份原始檔做的,對不上(原始檔換過)就不寄,
+        # 看板照這個在卡上講清楚、預覽也換回原始檔(跟 ship.documents 同一條判斷)
+        sigs = {lang: ship.source_sig(cf.path(path)) for lang, path in files.items() if path}
+        return present, previews, sigs
 
     resume_rows = []
     for item in resumes:
-        present, previews = file_langs(item)
+        present, previews, sigs = file_langs(item)
         resume_rows.append({'id': item['id'], 'name': item.get('name') or item['id'],
                             'when': item.get('when', ''), 'file_langs': present,
-                            'preview_langs': previews})
+                            'preview_langs': previews, 'sigs': sigs})
     attachment_rows = []
     for item in attachments:
-        present, previews = file_langs(item)
+        present, previews, sigs = file_langs(item)
         resume_ids = item.get('resume_ids')
         attachment_rows.append({'id': item['id'], 'name': item.get('name') or item['id'],
                                  'short': item.get('short', ''),
                                  'resume_ids': resume_ids if isinstance(resume_ids, list) else [],
-                                 'file_langs': present, 'preview_langs': previews})
+                                 'file_langs': present, 'preview_langs': previews, 'sigs': sigs})
     return {'agent': cf.AGENT, 'langs': cf.LANGS,
             'resumes': resume_rows, 'attachments': attachment_rows,
             'categories': C['board']['categories'], 'tags': C['board']['tags'],
@@ -316,15 +338,19 @@ def trigger_build():
         _build_state['running']=True
     def _run():
         try:
+            import reconcile
             while True:
                 result=subprocess.run([sys.executable,os.path.join(HERE,'reconcile.py')],cwd=REPO,
                                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                # 只有幾張卡的要寄的檔案沒建成也算跑完:驗收結果已寫進看板,那幾張各自被擋。
+                # 以前一張卡建不成,輪數就不前進,所有卡的自動推進都停住
+                done=result.returncode in (0,reconcile.PACKAGE_PROBLEMS)
                 with _BUILD_LOCK:
-                    if result.returncode==0:
+                    if done:
                         _build_state['gen']+=1
                     if not _build_state['again']:
                         _build_state['running']=False
-                        if result.returncode==0 and PILOT: PILOT.kick()  # 成功驗收才可能推進
+                        if done and PILOT: PILOT.kick()  # 驗收跑完才可能推進
                         return
                     _build_state['again']=False
         except Exception:
@@ -348,6 +374,23 @@ def trigger_source_sync():
         return
 
 
+# 來源檔一直同步失敗(排版要的 Chrome 不見了、原稿壞了)時,自動流程每分鐘都會走到來源檢查。
+# 同一批來源檔剛失敗過,就直接回上次的原因,不再同步重跑一整輪 reconcile(排版、連結全部再來一次)。
+# 他改了來源檔(大小或修改時間變了)馬上再試;沒改的話隔 SOURCE_RETRY 秒再試一次(可能是環境修好了)。
+# 失敗的原因 reconcile 已經寫進 📣 回報(同一句只記一則),這裡不再另外報。
+SOURCE_RETRY=600
+_source_fail={}
+
+def _source_key():
+    import source_sync
+    out=[]
+    for e in source_sync.files(STATE):
+        for p in (e.get('path'),e.get('style_path')):
+            if not p: continue
+            try: st=os.stat(p); out.append((p,st.st_mtime_ns,st.st_size))
+            except OSError: out.append((p,None,None))
+    return repr(sorted(out,key=repr))
+
 def _source_preflight():
     """Synchronize changed configured files before an agent uses them."""
     if not STATE or not bd.LIVE:
@@ -362,11 +405,21 @@ def _source_preflight():
                 break
         time.sleep(1)
     if not source_sync.stale(reconcile.MANIFEST, board=STATE):
+        _source_fail.clear()
         return ''
+    key=_source_key()
+    last=dict(_source_fail)   # 另一條執行緒可能同時清掉它
+    if last.get('key')==key and time.time()-last.get('t',0)<SOURCE_RETRY:
+        return last['msg']
     result = subprocess.run([sys.executable, os.path.join(HERE, 'reconcile.py'),
                              '--board', STATE], cwd=REPO, capture_output=True, text=True)
-    if result.returncode:
-        return '來源檔更新失敗，請先查看「整理要寄的檔案」回報。'
+    # 來源同步好了、只是有幾張卡的要寄的檔案沒建成(那幾張各自擋、各自回報)不算來源失敗,這一輪照跑
+    if result.returncode not in (0, reconcile.PACKAGE_PROBLEMS):
+        msg='來源檔更新失敗，請先查看「整理要寄的檔案」回報。'
+        _source_fail.update(key=key,t=time.time(),
+            msg=msg+f'({time.strftime("%H:%M",time.localtime(time.time()))} 試過;改了來源檔會馬上再試,沒改的話 {SOURCE_RETRY//60} 分鐘後再試)')
+        return msg
+    _source_fail.clear()
     return ''
 
 # ---- 看板上的「跑」:跑準備區、找新職缺 ----
@@ -427,6 +480,57 @@ def first_run(state):
     import init
     init.scaffold(cf.HOME)
     cf.reload(cf.HOME)
+
+def migrate_marks(state):
+    """舊資料一次改成現在的樣子,寫回檔案(記進流水帳):伺服器的填表、送出、自動流程讀的都是檔案。
+    可投遞以前是 ship 布林、沒有 app。以前只有看板頁面在記憶體裡改,從沒存回去:
+    卡停在「可以投了」,讀檔的程式都看不到它。已經往後走(有 app)的不拉回可投遞,只拿掉舊欄位。
+    客製紀錄以前不分語言:照原始檔簽章補上語言(ship.migrate_custom_keys)。"""
+    import copy, ship
+    with open(state,encoding='utf-8') as source: fb0=json.loads(bd.parse(source.read())['fb'])
+    old=[k for k,f in fb0.items() if isinstance(f,dict) and 'ship' in f]
+    custom=ship.migrate_custom_keys(copy.deepcopy(fb0))
+    if not old and not custom: return
+    def mut(fb):
+        for k in old:
+            f=fb.get(k)
+            if isinstance(f,dict) and 'ship' in f:
+                if f.pop('ship') and not f.get('app'): f['app']='ship'
+        if custom: ship.migrate_custom_keys(fb)
+    bd.set_fb(mut, live=state, by='board_server')
+
+def page_gone(u):
+    """👀 截不到那一頁時:agent 的 Chrome 在這張填好之後關掉或重開過,就把它改標成「頁面不見了,要重填」
+    (自動流程每分鐘也會做同一件事)。外掛一時沒連上這種不確定的情況不動。
+    副本不看:agent 的 Chrome 整台電腦只有一個,副本的卡不是它填的,拿它的程序判斷會把副本的卡亂標。"""
+    import agent_chrome
+    if not is_real():
+        return False
+    try:
+        gone=[x for x in agent_chrome.gone_pages(json.loads(bd.parse(read_doc())['fb'])) if x==u]
+        if gone: bd.set_fb(lambda d: agent_chrome.mark_gone(d,gone), live=STATE, by='board_server')
+        return bool(gone)
+    except Exception:
+        return False
+
+
+# 👀 截一張最多等多久:Claude 那邊 apply_tab 自己叫 claude -p 最多 240 秒,外層要比它長,不然先被砍的是外層
+LIVE_TIMEOUT={'codex':60,'claude-code':300}
+
+
+def _run_then_stop(argv,timeout):
+    """跑一支子程序,回結束碼;時間到先請它結束(SIGTERM),等一下還不走才強制,回 None。
+    apply_tab 收到 SIGTERM 會照常跑 finally:把那一頁交接、宣告這一輪結束。以前 subprocess.run 的逾時直接強制結束,
+    那一頁接在死掉的程序上,外掛跟 agent 的 Chrome 斷線,等他核對的頁接不回來。"""
+    p=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    try:
+        return p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.terminate()
+        try: p.wait(timeout=20)
+        except subprocess.TimeoutExpired: p.kill(); p.wait()
+        return None
+
 
 def run_sp(kind):
     """進度狀態放哪。真的看板用設定的 tmp;副本各自放在自己旁邊,不會蓋到真的那一份。"""
@@ -585,11 +689,11 @@ def start_run(kind,args):
         stage=args.get('stage'); url=str(args.get('url') or '')
         note=re.sub(r'\s+',' ',str(args.get('note') or '')).strip()[:500]
         if stage not in ('fill','fix','submit'): return 400,{'msg':'不知道要填表、修改還是送出'}
-        fb=json.loads(bd.parse(read_doc())['fb'])
+        doc=bd.parse(read_doc()); fb=json.loads(doc['fb']); status=doc['data'].get('status')
         if stage=='submit':
-            urls=[url] if url else [u for u,m in fb.items() if isinstance(m,dict) and m.get('app')=='ship']
-            ok=[u for u in urls if fr.approval_problem(fb,u) is None]
-            if not ok: return 400,{'msg':fr.approval_problem(fb,url) if url else '沒有核准有效的卡'}
+            urls=[url] if url else [u for u,m in fb.items() if isinstance(m,dict) and m.get('app')=='ship' and not m.get('rm')]
+            ok=[u for u in urls if fr.approval_problem(fb,u,status) is None]
+            if not ok: return 400,{'msg':fr.approval_problem(fb,url,status) if url else '沒有核准有效的卡'}
         if stage=='fix':
             # 修改是叫回填這張的那一隻 agent 在原本那一頁上改:一次一張,那段對話要在
             m=fb.get(url) or {}
@@ -607,12 +711,16 @@ def start_run(kind,args):
         args={'urls':urls}
     if kind in ('apply', 'replies') and is_real():
         import agent_chrome
-        if not agent_chrome.connected():
+        if not agent_chrome.configured():
             return 409, {'needs_browser':True,
                          'msg':'這個動作需要 agent 專用的 Chrome。請到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「連接」，再試一次。'}
     with _RUN_LOCK:
         st=run_status(kind)
         if st.get('running'): return 409,st
+        # 代投和查應徵進度都用 agent 的 Chrome:一邊收尾會把 Chrome 關掉,另一邊就斷了。單飛一起算
+        other={'apply':'replies','replies':'apply'}.get(kind)
+        if other and run_status(other).get('running'):
+            return 409,{'other':True,'msg':('查應徵進度' if other=='replies' else '幫你填表')+'正在用 agent 的 Chrome,等它跑完再按'}
         sp=run_sp(kind); os.makedirs(sp,exist_ok=True)
         env=dict(os.environ); env[RUNS[kind]['env']]=sp
         if kind in ('research', 'suggest'): env['JOBSALVO_RESUME_TEXT']=args['resume_text']
@@ -703,16 +811,34 @@ class H(BaseHTTPRequestHandler):
             # 代投那張分頁「現在」的整頁畫面:agent 的視窗開在螢幕外(不搶他的畫面),他要看真的頁面就看這張。
             # apply_tab 用填這張的那段對話的身分當場截,不經過 agent、不動那一頁。
             from urllib.parse import urlparse, parse_qs
-            import subprocess, tempfile
+            import tempfile
             q=parse_qs(urlparse(self.path).query); u=(q.get('u') or [''])[0]
+            ast=run_status('apply')
+            if ast.get('running') and ast.get('url')==u:
+                # agent 正拿著這一頁在填/改/送:這時用同一段對話去截,會搶它的分頁、甚至把它那一輪收掉
+                return self._send(409,'Agent 正在處理這一張,跑完再看(進度在最上面的「🚀 填表進度」)','text/plain; charset=utf-8')
             out=os.path.join(tempfile.gettempdir(),'apply-live-%d.jpg'%os.getpid())
             # Claude 填的那一頁要接回那段 Claude 對話才截得到(一次十幾秒、算一次用量):不自動重截,他按一次截一次
             try: rt=((json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}).get('apply') or {}).get('runtime') or 'codex'
             except ValueError: rt='codex'
+            if rt=='claude-code' and (ast.get('running') or run_status('replies').get('running')):
+                # Claude 的 👀 是再叫一個 Claude 進 agent 的 Chrome 截圖:同一時間只准一個 agent 在裡面
+                # (另一個 Claude 會把正在跑的那一輪用的瀏覽器選走)。先給那一頁填好時截的圖:填完、交接之後 agent 不再動它,
+                # 畫面就是現在的樣子;標明是幾點截的,跑完再按一次截現在的(Codex 可以同時截,這裡是最接近的做法)
+                import apply_run
+                saved=os.path.join(apply_run.out_dir(u,STATE,run_sp('apply')),'fill.png')
+                if u and os.path.isfile(saved):
+                    with open(saved,'rb') as fh: body=fh.read()
+                    self.send_response(200); self.send_header('Content-Type','image/png')
+                    self.send_header('X-Refresh','0'); self.send_header('X-Shot-At',str(int(os.path.getmtime(saved))))
+                    self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+                    return
+                return self._send(409,'幫你填表或查應徵進度正在用 agent 的 Chrome,Claude 同一時間只能一個在裡面:跑完再按 👀',
+                                  'text/plain; charset=utf-8')
             try:
-                r=subprocess.run([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
-                                 capture_output=True,timeout=60 if rt=='codex' else 240)
-                ok=bool(u) and r.returncode==0 and os.path.isfile(out)
+                code=_run_then_stop([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
+                                    LIVE_TIMEOUT.get(rt,60))
+                ok=bool(u) and code==0 and os.path.isfile(out)
             except Exception:
                 ok=False
             if ok:
@@ -720,8 +846,12 @@ class H(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type','image/jpeg')
                 self.send_header('X-Refresh','4' if rt=='codex' else '0')
                 self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            elif page_gone(u):
+                self._send(404,'那一頁已經不在了(agent 的 Chrome 關掉或重開過)。卡上已改成要重填:按卡上的「▶ 讓 agent 重填這張」。',
+                           'text/plain; charset=utf-8')
             else:
-                self._send(404,'你 Chrome 裡找不到 agent 填這張的那一頁(可能被關掉了)。要重新填一次:按卡上的「▶ 讓 agent 填表單」。',
+                # 程序還是填好那時候的那一個:頁面應該還在,只是這次接不上(外掛一時斷線這類),不叫他重填
+                self._send(503,'這次接不上 agent 的 Chrome 裡的那一頁,頁面應該還在。等一下再按一次 👀。',
                            'text/plain; charset=utf-8')
         elif self.path.startswith('/api/shot?'):
             # agent 填表/送出時截的圖(可投遞夾的 .apply/ 裡)。只給這兩張,路徑由網址算,不收任何路徑參數。
@@ -921,15 +1051,28 @@ class H(BaseHTTPRequestHandler):
             return self._json(400,{'ok':False,'msg':'看板送來的資料格式不對,重新整理看板再試一次'})
         act=self.path[len('/api/settings/'):] if self.path.startswith('/api/settings/') else ''
         if act=='skill':
-            skill,msg=sa.create_skill(body.get('name'),body.get('content'))
+            skill,msg=sa.create_skill(body.get('name'),body.get('content'),body.get('kind'))
             if skill: note_saved()
             return self._json(200 if skill else 400,{'ok':bool(skill),'skill':skill,'msg':msg})
         if act=='browser':
             import agent_chrome
+            # agent 的 Chrome 資料夾整台電腦只有一個:副本(沙箱、截圖、介面檢查)按了會關掉、叫出真的那一個
+            if not is_real():
+                return self._json(400,{'ok':False,'msg':'這是副本,不動 agent 的 Chrome'})
+            a=body.get('act')
+            # 連接會把 agent 的 Chrome 關掉重開、或再叫一個 agent 進去:代投、查應徵進度正在用它時不准
+            if a in ('setup','claude') and (run_status('apply').get('running') or run_status('replies').get('running')):
+                return self._json(409,{'ok':False,'msg':'幫你填表或查應徵進度正在用 agent 的 Chrome,等它跑完再按連接'})
             try:
-                ok,msg={'setup':agent_chrome.setup,'claude':agent_chrome.claude_setup}.get(body.get('act'),agent_chrome.show)()
+                if a=='setup': ok,msg=agent_chrome.setup(STATE,force=bool(body.get('force')))
+                elif a=='claude':   # 他登入時的背景輪詢也要叫 Claude 進去:代投、查應徵進度在跑就先跳過那一次
+                    ok,msg=agent_chrome.claude_setup(busy=lambda: bool(run_status('apply').get('running') or run_status('replies').get('running')),
+                                                     board=STATE)
+                else: ok,msg=agent_chrome.show()
             except Exception as e:
                 ok,msg=False,f'沒成功:{str(e)[:120]}'
+            if ok is None:      # 有填好等他核對的頁,連接會把它們關掉:先問他
+                return self._json(409,{'ok':False,'confirm':True,'msg':msg})
             return self._json(200 if ok else 400,{'ok':ok,'msg':msg})
         if act=='use_agent':
             # 環境檢查「至少一個能用的 agent」那一列的「改用 X」:把這台電腦上能用的那一種放到 agent 清單最前面
@@ -961,17 +1104,19 @@ class H(BaseHTTPRequestHandler):
             r=subprocess.run([sys.executable,os.path.join(HERE,'install_service.py')]+(['--remove'] if body.get('act')=='remove' else []),
                              capture_output=True,text=True,env=dict(os.environ,JOBSALVO_HOME=cf.HOME))
             msg=(r.stdout or r.stderr).strip()[-400:]
-            if r.returncode==0 and body.get('act')!='remove':
-                # 開機啟動會自己起一個看板;現在這個是手動起的,兩個搶同一個埠,launchd 那個會一直重試。
-                msg+='\n裝好了。把你現在手動起的看板關掉(終端機按 Ctrl-C),launchd 會接手,幾秒後重整這一頁。'
+            if r.returncode==0 and body.get('act')!='remove' and os.environ.get('JOBSALVO_LAUNCHD')!='1':
+                # 開機啟動會自己起一個看板;現在這個不是它起的,兩個搶同一個埠,launchd 那個會一直重試。
+                # 安裝指令起的看板在背景、沒有終端機可以按 Ctrl-C:回完話自己關,交給 launchd
+                hand_over_to_launchd()
+                msg+='\n裝好了。這個看板馬上會自己關掉,交給開機自動啟動接手:大約半分鐘後重整這一頁。'
             return self._json(200 if r.returncode==0 else 400,{'ok':r.returncode==0,'msg':msg})
         bad=PILOT.save_settings(lambda: sa.save(body)) if PILOT else sa.save(body)
-        if bad: return self._json(400,{'ok':False,'msg':';'.join(bad)})
+        if bad: return self._json(409 if sa.CONFLICT in bad else 400,{'ok':False,'msg':';'.join(bad)})
         note_saved()
         with _PV_LOCK: _PV_CACHE.clear()
         trigger_build()
         if PILOT: PILOT.kick()
-        return self._json(200,{'ok':True})
+        return self._json(200,{'ok':True,'version':sa.version()})   # 同一頁接著再存(上傳後自動存)要帶這一版
     def do_GET_prompt(self):
         """看板上每一顆會派 agent 的按鈕旁邊的「📝 prompt」:按下去會送給 agent 的那一份,當場組給他看。
         prompt 是程式寫的,不用等跑完才知道它拿什麼去問。組的時候不派 agent、不連網、不寫任何檔。
@@ -1003,7 +1148,7 @@ class H(BaseHTTPRequestHandler):
                     note='你還沒寫方向。在框裡寫的那一句,會放進下面「他說:『…』」的位置。'
             elif kind=='replies':
                 import reply_run; p=reply_run.preview(STATE)
-                note='這份會一次查完「已投出」裡所有還在等的卡;卡片清單照你按下去那一刻的看板。'
+                note='這份列出「已投出」裡所有還在等的卡;真的跑時照你選的「跑幾張」只查前幾張。卡片清單照你按下去那一刻的看板。'
             elif kind=='apply' and stage in ('fill','fix','submit'):
                 import apply_run; p=apply_run.preview(stage, board=STATE)
                 meta=getattr(apply_run,'preview_meta',None); m=None
@@ -1209,6 +1354,8 @@ def main():
         hosts=resolve_hosts(a.host)
         for h in hosts:
             srvs.append(ThreadingHTTPServer((h,a.port),H))
+        SERVERS[:]=srvs
+        migrate_marks(STATE)   # 舊資料寫回成現在的樣子:自動流程第一次盤點、頁面第一次載入之前
         start_pilot()  # 所有埠先綁好，首次盤點仍在開始接受 HTTP 前完成
         RUNNING_VERSION=code_version()
         launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1'

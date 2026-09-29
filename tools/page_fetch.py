@@ -544,3 +544,24 @@ def fetch(url):
         if attempt + 1 < RETRIES:
             time.sleep(RETRY_WAIT)
     return PageResult(parts.geturl(), 'unknown', errors=tuple(errors))
+
+
+def main(argv=None):
+    """給沒有瀏覽器的 agent 用(#287):`python3 page_fetch.py <網址>`,印出程式抓到的文字;抓不到照實說每條路敗在哪。"""
+    import argparse
+    ap = argparse.ArgumentParser(description='抓一個網頁的文字(直接抓 → 閱讀代理 → 無頭 Chrome)')
+    ap.add_argument('url')
+    result = fetch(ap.parse_args(argv).url)
+    if result.readable:
+        print(f'狀態: ok;路徑: {result.via};標題: {result.title}\n\n{result.text}')
+        return 0
+    if result.status == 'closed':
+        print(f'狀態: closed(職缺已下架,HTTP {result.http_status or "無"};路徑: {result.via})')
+        return 1
+    print('狀態: 讀不到這一頁(可能要登入、或網站擋程式讀取);不要猜內容,要登入的照規矩回報。\n'
+          + '\n'.join('- ' + e for e in result.errors))
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

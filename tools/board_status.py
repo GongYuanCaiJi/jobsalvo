@@ -231,6 +231,8 @@ def main():
     untouched = 0
     for j in jobs:
         f = FB.get(j['id']) or {}
+        if f.get('rm'):
+            continue                   # 他已經移除的卡不驗(也不連外問 agent);以前照樣列進「N 張沒過驗收」,頁面上卻看不到那張
         if f.get('app') in stages:
             stages[f['app']].append(j)
         elif f.get('s'):

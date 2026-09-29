@@ -78,13 +78,21 @@ def require_success(results):
         raise AgentRunError(failed)
     return results
 
-# 每個 agent 的 prompt 前面都加這段:抓網頁走設定裡的抓網頁指令(或 curl),不准動使用者正在用的瀏覽器。
+# 不是代投的 agent(找缺、加職缺、客製、判斷…)prompt 前面加這段:它們沒有操作 Chrome 的能力(#287,派出去時 Chrome 工具也關了),
+# 要讀網頁用網路搜尋工具,或叫程式的 page_fetch 抓(直接抓 → 閱讀代理 → 無頭 Chrome);要登入的網站就回報。
+def page_fetch_cmd():
+    """給 agent 跑的抓網頁指令。用程式自己這個 Python(裝好套件的那一個):最後一條路無頭 Chrome 要 Playwright,
+    agent 的 python3 不一定是它。"""
+    import shlex
+    return f'{shlex.quote(sys.executable)} {shlex.quote(cf.tool("page_fetch.py"))}'
+
+
 def browser_rule():
     return (
-        '【抓網頁鐵律】讀取會改版的職缺、回音或其他網頁時,由你直接用可用的瀏覽器或 web tools 閱讀;'
-        '不要呼叫程式預抓頁面內容的指令,不要用 shell 抓網頁正文或解析 DOM。'
-        '只有程式固定檢查 HTTP 狀態或職缺代號時才交給程式。'
-        '需要登入或遇到 CAPTCHA 時停止並照實回報,不要嘗試繞過。\\n\\n'
+        '【抓網頁鐵律】這一輪你沒有、也不准操作任何瀏覽器(包括使用者本人的 Chrome 和 agent 專用的 Chrome)。'
+        '要讀網頁:用你手上的網路搜尋工具,或跑 '
+        f'`{page_fetch_cmd()} <網址>`(程式抓好印出文字;抓不到會照實說每條路敗在哪)。'
+        '網頁要登入、要驗證碼(CAPTCHA)才看得到:停下照【回報】的規矩回報,不要嘗試繞過,也不要猜內容。\n\n'
     )
 
 # 代投(填表單、送出)是唯一需要真的操作網頁的任務。它用 Codex 自己的 Chrome 外掛,
@@ -119,8 +127,7 @@ APPLY_RULE_CLAUDE=('【瀏覽器鐵律(代投)】只准用 Claude in Chrome 的�
  '- 填欄位、點按鈕(setValue、click、fill)→ form_input、computer(左鍵點 ref);同一頁好幾欄用 browser_batch 一次做完\n'
  '- 選檔上傳(playwright filechooser + setFiles)→ file_upload,給上傳欄的 ref 和檔案的絕對路徑\n'
  '- 交接分頁(markHandoff())→ 那個分頁不要關,把它的 tabId 寫進 fill.json 的 tab_id\n'
- '- 取平台上的檔(downloadMedia)→ javascript_tool 在頁面裡 fetch(href, {{credentials: "include"}}) 轉成 base64 回傳,'
- '再用 Bash 解碼寫進指定的暫存資料夾\n\n')
+ '- 取平台上的檔(downloadMedia)→ 你沒有做法,照【取檔方式(用 Claude 時)】寫進 problems\n\n')
 
 
 def claude_paired_device():
@@ -134,7 +141,7 @@ def apply_rule(runtime='codex'):
     if runtime == 'claude-code':
         import apply_tab
         return APPLY_RULE_CLAUDE.format(agent=cf.AGENT, device=claude_paired_device()
-                                        or '(還沒連接 agent 專用的 Chrome,先停下回報)') + apply_tab.CLAUDE_SELF_READ
+                                        or '(還沒連接 agent 專用的 Chrome,先停下回報)') + apply_tab.CLAUDE_SELF_READ + apply_tab.CLAUDE_PROFILE_READ
     try:
         with open(cf.BROWSER_STATE,encoding='utf-8') as f: inst=json.load(f).get('instance')
     except (OSError,ValueError):
@@ -180,14 +187,15 @@ def lean(chrome=False):
             cfg=f.read()
     except OSError:
         cfg=''
-    keep={'computer-use@openai-bundled','chrome@openai-bundled',
-          'unified-computer-use@openai-bundled'} if chrome else set()
+    browser_plugins=('chrome@openai-bundled','computer-use@openai-bundled','unified-computer-use@openai-bundled')
+    keep=set(browser_plugins) if chrome else set()
     # 記憶也關:agent 每輪開頭會去搜使用者的個人記憶檔(判斷職缺那輪 7 步裡 3 步在讀它),跟這份工作無關,
     # 還會把他其他專案的東西帶進來。claude 那邊一樣關(claude_lean 的 autoMemoryEnabled)
     out=['-c','features.hooks=false','-c','features.plugin_hooks=false','-c','features.memories=false']
     for n in dict.fromkeys(re.findall(r'^\[mcp_servers\.([^.\]]+)\]',cfg,re.M)):
         out+=['-c',f'mcp_servers.{n}.enabled=false']
-    for n in dict.fromkeys(re.findall(r'^\[plugins\."([^"]+)"\]',cfg,re.M)):
+    # 不是代投:操作瀏覽器的外掛一律關,設定檔裡沒寫到的也關(內建的外掛可能沒寫進設定檔就開著,#287)
+    for n in dict.fromkeys(re.findall(r'^\[plugins\."([^"]+)"\]',cfg,re.M) + ([] if chrome else list(browser_plugins))):
         if n not in keep:
             out+=['-c',f'plugins.{n}.enabled=false']   # 名稱加引號 Codex 會默默忽略,外掛就沒關掉
     # skill 也關:codex 會把這台電腦裝的所有 skill 列給 agent,它看到就想先讀說明
@@ -420,10 +428,6 @@ def browser_runtime(agent_id=None):
     return agents[0].get('runtime') if agents else None
 
 
-def _can_browse(agent):
-    return bool(agent.get('browser') and _runtime_supports_browser(agent.get('runtime')))
-
-
 def _eligible_agents(browser_required, agent_id=None):
     agents = (cf.C.get('agent') or {}).get('agents') or []
     if agent_id:
@@ -567,10 +571,10 @@ def _attempt_line(log, agent):
     log.write(f'{cf.AGENT}（{agent.get("id") or "Codex"}）使用 {mode}\n')
 
 
-def _failure_line(outfile, agent, index, reason):
+def _failure_line(outfile, agent, index, reason, detail=''):
     label = _REASON_LABELS.get(reason, reason)
     with open(outfile, 'a', encoding='utf-8') as f:
-        f.write(f'\n{_agent_label(agent, index)}：{label}\n')
+        f.write(f'\n{_agent_label(agent, index)}：{label}' + (f'({detail})' if detail else '') + '\n')
 
 
 def runs_log():
@@ -599,15 +603,14 @@ def _record(outfile, agent, index, started, result, prompt):
 
 def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
         browser_required=False, browser=None, resume=None, board=None, web=True,
-        agent_id=None, on_start=None, launcher=None, waiter=None, prefer_browser=False):
+        agent_id=None, on_start=None, launcher=None, waiter=None, prepare=None):
     """依序試用符合瀏覽器需求的 agent;只在 runtime 明確不可用時換手。
-    prefer_browser(找缺):能開瀏覽器的排前面、開著瀏覽器做;沒有的話只能上網搜尋的也可以。"""
+    prepare(agent):輪到這個 agent 時回給它的 prompt(代投換手到另一家時照那一家重組、重做 Chrome 檢查,#288);
+    那一家的 Chrome 沒準備好就丟 AgentStartError,照啟動失敗換下一個。"""
     browser_required = bool(browser_required or chrome)
     launch_agent = launcher or launch
     wait_for_agent = waiter or wait_done
     agents, selection_error = _eligible_agents(browser_required, agent_id)
-    if prefer_browser and not browser_required:
-        agents = sorted(agents, key=lambda a: not _can_browse(a))
     if not agents:
         return AgentResult('unavailable', reason=selection_error)
 
@@ -618,15 +621,17 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
         except OSError:
             log_offset = 0
         started = time.time()
+        task = prompt
         try:
-            proc = launch_agent(prompt, outfile, repo, agent, browser=browser, resume=resume,
+            task = prepare(agent) if prepare else prompt
+            proc = launch_agent(task, outfile, repo, agent, browser=browser, resume=resume,
                                 board=board, web=web, append=index > 1,
-                                chrome=browser_required or (prefer_browser and _can_browse(agent)))
-        except AgentStartError:
+                                chrome=browser_required)
+        except AgentStartError as e:
             reason = 'startup'
-            _failure_line(outfile, agent, index, reason)
+            _failure_line(outfile, agent, index, reason, str(e.error)[:200])
             result = AgentResult('unavailable', reason=reason, agent_id=agent.get('id'))
-            _record(outfile, agent, index, started, result, prompt)
+            _record(outfile, agent, index, started, result, task)
         else:
             if on_start:
                 on_start(proc)
@@ -640,7 +645,7 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
                 reason=getattr(raw_result, 'reason', None), agent_id=agent.get('id'),
             )
             if result.status == 'timeout':
-                _record(outfile, agent, index, started, result, prompt)
+                _record(outfile, agent, index, started, result, task)
                 return result
             if result.status == 'completed' and (
                     (runtime == 'claude-code' and _claude_failed(_log_text(outfile, log_offset)))
@@ -649,14 +654,14 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
             if result.status == 'failed':
                 reason = _failure_reason(runtime, result.returncode, _log_text(outfile, log_offset))
                 if reason is None:
-                    _record(outfile, agent, index, started, result, prompt)
+                    _record(outfile, agent, index, started, result, task)
                     return result
                 _failure_line(outfile, agent, index, reason)
                 if reason == 'authentication':
                     _report_authentication(agent, index, board, outfile)
                 result = AgentResult('unavailable', result.returncode, result.pid,
                                      reason=reason, agent_id=agent.get('id'))
-            _record(outfile, agent, index, started, result, prompt)
+            _record(outfile, agent, index, started, result, task)
             if result.ok:
                 return result
             if result.status != 'unavailable':

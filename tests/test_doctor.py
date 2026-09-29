@@ -54,6 +54,36 @@ class AgentCapability(unittest.TestCase):
         _r, checks = self.run_case(['codex'], {})
         self.assertIn('安裝 Codex CLI', checks['codex']['fix'])
 
+    def test_codex_found_only_inside_the_app_says_the_real_path_to_log_in(self):
+        # ChatGPT App 裡附的 codex 不在 PATH 上:叫他在終端機打「codex login」只會得到 command not found
+        app = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
+        with mock.patch.object(doctor, '_runtime_path', return_value=app), \
+                mock.patch.object(doctor, '_logged_in', return_value=False), \
+                mock.patch.object(doctor.shutil, 'which', return_value=None):
+            row = {c['key']: c for c in doctor.check_environment(agents('codex'))['checks']}['codex']
+        self.assertIn(app + ' login', row['fix'])
+
+    def test_terminal_never_says_press_a_button_and_install_can_go_on_to_the_board(self):
+        # 安裝程式在終端機跑環境檢查,那時看板還沒開:不能只叫他「按「改用 X」」。
+        # 只差這一顆按鈕時回 2,安裝程式照樣把看板打開讓他按;其他沒過的照舊回 1 停下來。
+        import io, contextlib
+        def main_with(configured, installed):
+            out = io.StringIO()
+            with mock.patch.object(doctor, '_runtime_path', side_effect=lambda r, which=None: f'/fake/{r}' if r in installed else None), \
+                    mock.patch.object(doctor, '_logged_in', side_effect=lambda r, p: installed[r]), \
+                    mock.patch.object(doctor, 'check_environment', wraps=lambda: real(agents(*configured))), \
+                    mock.patch('chrome_bin.find', return_value='/fake/chrome'), \
+                    contextlib.redirect_stdout(out):
+                code = doctor.main([])
+            return code, out.getvalue()
+        real = doctor.check_environment
+        code, text = main_with(['codex'], {'claude-code': True})
+        self.assertEqual(code, 2, text)
+        line = next(l for l in text.splitlines() if '改用 Claude Code' in l)
+        self.assertIn('看板', line)
+        code, _ = main_with(['codex'], {})
+        self.assertEqual(code, 1)
+
     def test_login_is_read_from_local_status_commands_only(self):
         ok = mock.Mock(returncode=0, stdout='Logged in using ChatGPT', stderr='')
         no = mock.Mock(returncode=1, stdout='Not logged in', stderr='')

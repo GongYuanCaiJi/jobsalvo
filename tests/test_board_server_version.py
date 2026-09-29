@@ -65,5 +65,76 @@ class BoardServerVersion(unittest.TestCase):
         self.assertIn('<key>JOBSALVO_LAUNCHD</key><string>1</string>', install_service.plist())
 
 
+class BackgroundBoardHandsOverToLaunchd(unittest.TestCase):
+    """安裝指令用 nohup 在背景起的看板沒有終端機可以按 Ctrl-C:打開開機自動啟動時要有人把它停掉,
+    不然兩個搶同一個埠,launchd 那個每 30 秒重試一次、永遠起不來。launchctl 一律換成假的,不真的跑。"""
+
+    def _run_main(self, home, ps_command, ppid=1):
+        import signal
+        calls = []
+        alive = {'pid': True}
+
+        def run(argv, *a, **k):
+            calls.append(list(argv))
+            return mock.Mock(returncode=0, stdout=ps_command if argv[0] == 'ps' else '', stderr='')
+
+        def kill(pid, sig):
+            calls.append(['kill', pid, sig])
+            if sig == 0 and not alive['pid']:
+                raise ProcessLookupError
+            if sig == signal.SIGTERM:
+                alive['pid'] = False
+        with mock.patch.object(install_service.subprocess, 'run', side_effect=run), \
+                mock.patch.object(install_service.os, 'kill', side_effect=kill), \
+                mock.patch.object(install_service.os, 'getppid', return_value=ppid), \
+                mock.patch.object(install_service.cf, 'HOME', home), \
+                mock.patch.object(install_service, 'PLIST', os.path.join(home, 'x.plist')), \
+                mock.patch('time.sleep'), \
+                mock.patch.object(sys, 'argv', ['install_service.py']):
+            install_service.main()
+        return calls
+
+    def test_installing_autostart_stops_the_board_the_installer_started(self):
+        import signal
+        with tempfile.TemporaryDirectory(prefix='svc-') as home:
+            with open(os.path.join(home, '.jobsalvo-server.pid'), 'w') as f:
+                f.write('4321\n')
+            calls = self._run_main(home, '/x/.venv/bin/python3 /x/tools/board_server.py --host 127.0.0.1 --port 8899')
+            kill = calls.index(['kill', 4321, signal.SIGTERM])
+            boot = next(i for i, c in enumerate(calls) if c[:2] == ['launchctl', 'bootstrap'])
+            self.assertLess(kill, boot, '要先停掉背景的看板,launchd 起的那個才綁得到埠')
+            self.assertFalse(os.path.exists(os.path.join(home, '.jobsalvo-server.pid')))
+
+    def test_a_reused_pid_or_the_calling_board_is_left_alone(self):
+        import signal
+        with tempfile.TemporaryDirectory(prefix='svc-') as home:
+            pidfile = os.path.join(home, '.jobsalvo-server.pid')
+            for command, ppid in (('/usr/bin/some-other-program', 1),                     # pid 被別的程式拿去用了
+                                  ('/x/python3 /x/tools/board_server.py', 4321)):        # 看板設定頁按的:看板自己回完話會關
+                with self.subTest(command=command):
+                    with open(pidfile, 'w') as f:
+                        f.write('4321')
+                    calls = self._run_main(home, command, ppid=ppid)
+                    self.assertNotIn(['kill', 4321, signal.SIGTERM], calls)
+
+
+    def test_the_board_itself_shuts_down_and_clears_its_pid(self):
+        # 設定頁按的:install_service 不動叫它的看板,看板回完話自己停掉伺服器(main 的收尾照常跑)
+        stopped = threading.Event()
+
+        class Server:
+            def shutdown(self):
+                stopped.set()
+        with tempfile.TemporaryDirectory(prefix='svc-') as home:
+            pidfile = os.path.join(home, '.jobsalvo-server.pid')
+            with open(pidfile, 'w') as f:
+                f.write(str(os.getpid()))
+            with mock.patch.object(board_server.cf, 'HOME', home), \
+                    mock.patch.object(board_server, 'SERVERS', [Server()], create=True):
+                board_server.hand_over_to_launchd(delay=0).join(timeout=1)
+                self.assertTrue(stopped.wait(1))
+            self.assertFalse(os.path.exists(pidfile))
+
+
 if __name__ == '__main__':
     unittest.main()

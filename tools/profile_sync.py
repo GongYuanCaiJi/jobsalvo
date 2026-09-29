@@ -605,8 +605,24 @@ def _pair_reported_files(expected, actual, positional_fallback=False):
     return pairs, remaining
 
 
+def _pair_hashes(expected, files):
+    """用 Claude 時(沒下載檔,只有平台上每個檔的雜湊):先按雜湊配對,再按檔名兜底;回法跟 _pair_reported_files 一樣。"""
+    remaining = [dict(f) for f in files]
+    pairs = []
+    for entry in expected:
+        digest = _sha_file(entry[2])
+        i = next((k for k, f in enumerate(remaining) if f.get('sha256') == digest), None)
+        if i is not None:
+            pairs.append((entry, remaining.pop(i), True))
+            continue
+        aliases = {os.path.basename(entry[1]).casefold(), os.path.basename(entry[2]).casefold()}
+        i = next((k for k, f in enumerate(remaining) if os.path.basename(str(f.get('name') or '')).casefold() in aliases), None)
+        pairs.append((entry, remaining.pop(i) if i is not None else None, False))
+    return pairs, remaining
+
+
 def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
-                               force=False):
+                               force=False, hash_reader=None):
     profile_url = str(delivery.get('profile_url') or '').strip()
     profile_kind = delivery.get('profile_kind')
     fingerprint = attachment_fingerprint(job, fb, delivery)
@@ -618,7 +634,7 @@ def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
 
     problems = []
     source_report = report
-    if field == 'fixed_profile_attachments':
+    if field == 'fixed_profile_attachments' and not hash_reader:   # 用 Claude 時不靠 agent 回報,照登記的網址從紀錄拿雜湊
         fixed = report.get('fixed_profile')
         if not isinstance(fixed, dict):
             problems.append('agent 沒回報固定平台履歷的網址和附件')
@@ -630,7 +646,19 @@ def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
             return problems
         source_report = {'fixed_profile_attachments': fixed.get('attachments')}
 
-    actual = _reported_downloads(source_report, field, download_dir, problems)
+    label = '固定平台履歷附件' if field == 'fixed_profile_attachments' else '平台附件'
+    hashed = None
+    if hash_reader:
+        # 用 Claude 時(#294):不下載,Claude 在平台履歷頁算每個檔的雜湊,程式從它那一輪的紀錄拿(不採信它轉述)
+        try:
+            hashed = hash_reader(profile_url)
+        except LookupError as e:
+            problems.append(f'{label}沒核對到:{e}')
+            remember_attachment_check(profile_url, fingerprint, profile_kind, False)
+            return problems
+        actual = []
+    else:
+        actual = _reported_downloads(source_report, field, download_dir, problems)
     expected = []
     for item in attachment_sources(job, fb, delivery):
         source = item.get('effective_path')
@@ -640,8 +668,14 @@ def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
         else:
             expected.append((item, name, source))
 
-    pairs, remaining = _pair_reported_files(expected, actual)
-    label = '固定平台履歷附件' if field == 'fixed_profile_attachments' else '平台附件'
+    agent_problems = [str(x).strip() for x in (report.get('problems') or []) if str(x).strip()]
+    if hashed is None and expected and not actual and agent_problems:
+        # 一個都沒拿到、agent 自己講了原因(下載逾時、被拒):平台上不一定少,是沒核對到。照它的原因寫,不寫「少了」
+        import agent_chrome                   # Codex 沒被允許下載的,照實講要改哪個檔
+        problems.append(f'{label}沒下載到,內容沒核對:{agent_chrome.explain_blocked(agent_problems[0][:150])}')
+        remember_attachment_check(profile_url, fingerprint, profile_kind, False)
+        return problems
+    pairs, remaining = _pair_hashes(expected, hashed) if hashed is not None else _pair_reported_files(expected, actual)
     for (item, name, source), downloaded, same_bytes in pairs:
         if downloaded is None:
             problems.append(f'{label}「{name}」少了')
@@ -737,7 +771,7 @@ def _check_uploaded_files(job, fb, url, report, download_dir):
 
 
 def check_attachments(job, fb, url, report, download_dir, force=False,
-                      expected_delivery=None, verify_profile=True):
+                      expected_delivery=None, verify_profile=True, hash_reader=None):
     """依 agent 回報的投遞方式檢查平台附件或申請表實際上傳檔。
     verify_profile=False:平台履歷上的附件這一輪沒下載,不核對(填完後、送出前另外核對)。"""
     if not isinstance(report, dict):
@@ -768,7 +802,7 @@ def check_attachments(job, fb, url, report, download_dir, force=False,
 
     problems = _check_profile_attachments(
         job, fb, report, download_dir, delivery, 'profile_attachments',
-        force=force,
+        force=force, hash_reader=hash_reader,
     )
     if profile_kind == 'custom':
         fixed = fixed_profile_delivery(job, fb, url)
@@ -779,7 +813,7 @@ def check_attachments(job, fb, url, report, download_dir, force=False,
         else:
             problems.extend(_check_profile_attachments(
                 job, fb, report, download_dir, fixed,
-                'fixed_profile_attachments', force=True,
+                'fixed_profile_attachments', force=True, hash_reader=hash_reader,
             ))
     return problems
 
@@ -803,20 +837,40 @@ def profile_attachments_fresh(job, fb, url):
 # 在頁面裡 fetch → 外掛跑 evaluate 的環境根本沒有 fetch/XMLHttpRequest;
 # locator.downloadMedia() → 外掛自己的下載,不搶前景、回傳確切路徑,但同一頁下載第二個檔會跳「要下載多個檔案」的詢問,
 # 沒人按就卡到逾時(實測卡 120 秒、REPL 被重置)。所以一個檔開一個新分頁。
+# 2026-09-29 一張 104:下載第一個附件超過 js 預設的 30 秒,REPL 被重置,申請表那一頁沒交接過、接不回來(Debugger unattached),
+# 整輪白做。下載前先把申請表那頁交接、下載那一次把時間放寬;下載完的分頁不關(程式這邊關分頁,外掛會跟 Chrome 斷線)。
+# 卡住的真正原因:Codex 下載前要先問「允許從這個網站下載?」,背景沒人按(直接跑回「could not complete the permission request
+# to download files」)。要在 ~/.codex/browser/config.toml 的 [downloads] allowed 列上那個網站(docs/agent-chrome.md)。
 FETCH_FILE_RULE = (
-    '取檔方式(一定要照做):一個檔開一個新的背景分頁(cua.createBrowserTab 開那個檔所在的頁面),'
+    '取檔方式(一定要照做):開始下載之前,先對申請表那一頁呼叫 markHandoff()(REPL 萬一被重置,交接過的分頁才接得回來)。'
+    '一個檔開一個新的背景分頁(cua.createBrowserTab 開那個檔所在的頁面),'
     '在那個分頁對那個檔的連結呼叫 tab.playwright.locator(...).downloadMedia(),它會回傳存好的完整路徑;'
+    '呼叫 downloadMedia 的那一次 js 帶 timeout_ms: 120000(預設 30 秒,大一點的檔下載不完、REPL 會被重置)。'
     '用 REPL 的 await import("node:fs") 把「回傳的那個路徑」搬(renameSync,不是複製)進暫存資料夾,'
-    '再關掉那個分頁,下一個檔再開新分頁。同一個分頁連續下載第二個檔會跳「要下載多個檔案」的詢問,沒人按就卡住。'
+    '那個分頁換成空白頁(await tab.goto("about:blank"))留著、不要關(關分頁會讓外掛跟這個 Chrome 斷線),'
+    '下一個檔再開新分頁。同一個分頁連續下載第二個檔會跳「要下載多個檔案」的詢問,沒人按就卡住。'
     '不要點下載連結、不要把檔案網址開成分頁(會觸發 Chrome 的一般下載,Chrome 會跳到最前面、把使用者的畫面切走);'
     '也不要去翻使用者的「下載」資料夾找檔,只搬 downloadMedia 回傳的那個路徑。'
     '取不到(逾時、被拒)就把原因寫進 problems 並停止,不要改用點連結或開分頁。'
 )
 
 
-def attachment_step(job, fb, url, download_dir, force=False, verify_profile=True):
+# 用 Claude 時的取檔:Claude in Chrome 沒有把檔完整取回來的工具。javascript_tool 的回傳超過 1000 字會被截斷,
+# 把檔編碼後分段回傳會被安全過濾擋(看起來像偷資料,ADR 0003);點下載連結是 Chrome 一般下載,會把 Chrome 叫到前面。
+# 所以不取檔:平台履歷上的附件改由它在那一頁算雜湊(apply_tab.ATTACH_JS),程式從紀錄拿來比(#294)。
+FETCH_FILE_RULE_CLAUDE = (
+    '取檔方式(用 Claude 時):你現在沒有能把平台上的檔完整取回來的做法,不要嘗試(不要點下載連結、不要把檔案內容編碼回傳)。'
+    '申請表上傳的檔:照上面「沒有下載回來的入口」那條回報(uploaded_files 空清單、upload_readback 寫 unavailable、'
+    'uploaded_from 列你放進上傳欄的本機檔),程式自己核對那個檔。'
+    '平台履歷上的附件:不用取回,照【讀平台履歷給程式】第 3 步在平台履歷頁跑那段算雜湊的程式就好(程式拿雜湊跟本機的檔比);'
+    'profile_attachments(和 fixed_profile 的 attachments)回報空清單,不用寫進 problems。'
+)
+
+
+def attachment_step(job, fb, url, download_dir, force=False, verify_profile=True, runtime='codex'):
     """告訴 agent 回報投遞方式,並核對實際使用的附件。
-    verify_profile=False(填表、修改):平台履歷附件這一輪不下載核對,程式填完後只在需要時另外核對。"""
+    verify_profile=False(填表、修改):平台履歷附件這一輪不下載核對,程式填完後只在需要時另外核對。
+    runtime:取檔規則照執行者給(Codex 外掛的做法 Claude 做不到)。"""
     import ship
     try:
         host = (urlsplit(str(url)).hostname or '').casefold()
@@ -905,7 +959,7 @@ def attachment_step(job, fb, url, download_dir, force=False, verify_profile=True
         'uploaded_files 留空清單、寫 "upload_readback":"unavailable",並在 uploaded_from 回報你放進上傳欄的本機檔 '
         '{"uploaded_from":[{"name":"申請表上顯示的檔名","path":"你交給 setFiles 的完整路徑"}]},程式會自己核對那個檔;'
         '這不算卡住,不要寫進 problems。'
-    ) + FETCH_FILE_RULE
+    ) + (FETCH_FILE_RULE_CLAUDE if runtime == 'claude-code' else FETCH_FILE_RULE)
     request += (
         '需要選本機檔案時,使用 Agent Chrome 的 Playwright filechooser:先 waitForEvent("filechooser"),'
         '再點檔案欄位,最後對 chooser 呼叫 setFiles([完整檔案路徑])。選擇後要確認頁面已收到檔案;'

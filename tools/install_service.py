@@ -7,13 +7,13 @@ install_service —— 讓看板開機自己起、被殺自己回來(macOS launc
 再 launchctl 載入。跑 tools/board_serve.sh 而不是直接跑 python:每次起動都會在紀錄檔多一行,
 「被殺又自動重開」的無限迴圈才看得出來(數起動行數就知道)。
 
-  uv run python tools/install_service.py            # 裝好並啟動
+  uv run python tools/install_service.py            # 裝好並啟動(安裝指令在背景起的看板會先停掉,由它接手)
   uv run python tools/install_service.py --print    # 只印 plist,不裝
   uv run python tools/install_service.py --remove   # 停掉並移除
 
 查狀態:grep -c 起動 <紀錄檔>(數字一直長 = 在無限重啟);launchctl list | grep jobsalvo(第二欄是上次的結束碼)。
 """
-import os, sys, argparse, subprocess
+import os, sys, time, signal, argparse, subprocess
 from xml.sax.saxutils import escape
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -70,6 +70,36 @@ def plist():
 '''
 
 
+def stop_manual_board(home=None):
+    """安裝指令用 nohup 在背景起的看板(pid 記在 <資料夾>/.jobsalvo-server.pid)沒有終端機可以按 Ctrl-C。
+    裝開機自動啟動之前先把它停掉:不然兩個搶同一個埠,launchd 起的那個綁不到、每 30 秒重試一次。
+    只停真的是看板的那個程序(pid 可能早被別的程式拿去用);叫這支程式的就是那個看板時(設定頁的按鈕)不動它,
+    看板回完話會自己關。回停掉的 pid,沒停回 None。"""
+    pidfile = os.path.join(home or cf.HOME, '.jobsalvo-server.pid')
+    try:
+        with open(pidfile, encoding='utf-8') as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    if pid == os.getppid():
+        return None
+    command = subprocess.run(['ps', '-p', str(pid), '-o', 'command='], capture_output=True, text=True).stdout or ''
+    if 'board_server.py' not in command:
+        return None
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):              # 等它真的放掉埠,launchd 那個一起來就綁得到
+            time.sleep(0.1)
+            os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    try:
+        os.remove(pidfile)
+    except OSError:
+        pass
+    return pid
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--print', dest='pr', action='store_true')
@@ -83,11 +113,13 @@ def main():
         if os.path.exists(PLIST):
             os.remove(PLIST)
         print('已停掉並移除。'); return 0
+    stopped = stop_manual_board()
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
     with open(PLIST, 'w', encoding='utf-8') as f:
         f.write(plist())
     r = subprocess.run(['launchctl', 'bootstrap', dom, PLIST])
-    print(f'{"已裝好" if r.returncode == 0 else "裝好了但啟動失敗"}:{PLIST}\n看板:http://localhost:{cf.PORT}')
+    print(f'{"已裝好" if r.returncode == 0 else "裝好了但啟動失敗"}:{PLIST}\n看板:http://localhost:{cf.PORT}'
+          + (f'\n原本在背景跑的看板(pid {stopped})停掉了,改由開機自動啟動接手。' if stopped else ''))
     return r.returncode
 
 

@@ -90,7 +90,7 @@ def feedback_records(fb, jobs=()):
     return rows
 
 
-def build_prompt(url, title, items, feedback, report_path):
+def build_prompt(url, title, items, feedback, report_path, jd=''):
     payload = []
     for item in items:
         skill, error = _read_skill(item)
@@ -111,18 +111,20 @@ def build_prompt(url, title, items, feedback, report_path):
         })
     return (
         '你正在 jobsalvo 看板替一張卡客製履歷與附件。\n'
-        '請用可用的 Chrome 直接讀取以下職缺網址上的 JD，再按每份檔案自己的客製 skill 修改。\n'
+        '下面是程式從職缺網址抓好的 JD 原文，按每份檔案自己的客製 skill 修改。這一輪不上網、不開任何瀏覽器。\n'
         '只能讀原檔與 skill；不要改原檔、設定、skill 或看板資料。不要編造使用者沒有的經歷、能力、數字或成果。\n'
         '每一份檔案都必須輸出一個 PDF 到指定的 output_pdf，頁數不得超過該檔案的 max_pages。Markdown 原稿的頁數是內建排版產生之可投遞 PDF 的頁數。程式會檢查輸出檔及頁數。\n'
         '一張卡的所有檔案由你一次完成。若某份檔案不能完成，仍需說明原因，其他可完成的檔案照常輸出。\n\n'
-        f'卡片:{title}\nJD:{url}\n\n'
+        f'卡片:{title}\n職缺網址:{url}\n--- JD 原文開始 ---\n{jd}\n--- JD 原文結束 ---\n\n'
         '本輪檔案與使用者指示(JSON):\n'
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + '\n\n其他卡片尚未處理的內容回饋(JSON):\n'
         + json.dumps(feedback, ensure_ascii=False, indent=2)
         + '\n\n請把跨卡回饋中「至少兩張卡都提到的同一個問題」整理到 '
-        + report_path + '，格式為 {"reports":[{"issue":"問題","recommendation":"建議調整哪份履歷或哪個 skill","occurrences":2}]}。'
-        + '每個問題只列一次，occurrences 填實際提到的次數；只有一次的問題不要列。沒有重複問題也要寫 {"reports":[]}。'
+        + report_path + '，格式為 {"reports":[{"issue":"問題","recommendation":"建議調整哪份履歷或哪個 skill","occurrences":2,'
+        + '"feedback_ids":["提到這個問題的那幾則回饋的 id"]}]}。'
+        + '每個問題只列一次，occurrences 填實際提到的次數，feedback_ids 列出歸進這個問題的回饋 id；只有一次的問題不要列。'
+        + '沒有重複問題也要寫 {"reports":[]}。'
         + '只回報建議，不要修改任何設定或 skill。全部完成後 stdout 只印 @@CUSTOMIZE_DONE@@。\n'
     )
 
@@ -163,8 +165,9 @@ def _set_entries(board, url, updates):
         for item_id, entry in updates.items():
             prev = docs.get(item_id) or {}
             docs[item_id] = copy.deepcopy(entry)
-            # 換成另一份檔(新收下、換了檔):agent 已經填好的那一頁上傳的是舊檔,要重填
-            if entry.get('status') == 'accepted' and (prev.get('status') != 'accepted' or prev.get('path') != entry.get('path')):
+            # 換成另一份檔(新收下、換了檔):agent 已經填好的那一頁上傳的是舊檔,要重填。
+            # 只看檔有沒有真的換:已收下的再客製一次沒成功,會退回原本收下的那一份(path 沒變),頁上的就是它
+            if entry.get('status') == 'accepted' and prev.get('path') != entry.get('path'):
                 fr.mark_stale(fb, url, f'「{entry.get("name") or item_id}」換成客製版了')
     return bd.set_fb(mutate, live=board, by='customize')
 
@@ -240,6 +243,11 @@ def validate_output(source, output, page_counter=None, *, page_source=None, sour
     return '', source_pages, output_pages
 
 
+def _still_running(entry, run_id):
+    """這份還是這一輪在客製的。跑的期間他自己上傳、改回原始檔,就以他的為準:這一輪的產出不收、失敗也不算他的。"""
+    return entry.get('status') == 'working' and entry.get('run_id') == run_id
+
+
 def finish_outputs(board, url, items, run_id, feedback_ids=(), report_path=None,
                    page_counter=None, reporter=None, report_writer=None):
     """收下 worker 的檔案,只把通過檢查的版本放到「等你看」。"""
@@ -253,6 +261,8 @@ def finish_outputs(board, url, items, run_id, feedback_ids=(), report_path=None,
         item_id = original['id']
         item = by_id.get(item_id) or original
         old = copy.deepcopy((state.get('custom_docs') or {}).get(item_id) or {})
+        if not _still_running(old, run_id):
+            continue                     # 以前照樣改回「等你看」,收下還會把他上傳的換掉
         output_rel = original['output_rel']
         output = sa.safe_rel(output_rel)
         source = item.get('source')
@@ -285,7 +295,8 @@ def finish_outputs(board, url, items, run_id, feedback_ids=(), report_path=None,
             old.pop('last_error', None)
             old.pop('previous_status', None)
         updates[item_id] = old
-    _set_entries(board, url, updates)
+    if updates:
+        _set_entries(board, url, updates)
     for item, reason in failures:
         _report_invalid(board, url, title, item, reason, reporter)
     feedback_ok = process_feedback_reports(board, report_path, feedback_ids, report_writer)
@@ -301,6 +312,7 @@ def process_feedback_reports(board, path, feedback_ids=(), report_writer=None):
         reports = payload.get('reports') if isinstance(payload, dict) else None
         if not isinstance(reports, list):
             return False
+        covered = set()
         for report in reports:
             if not isinstance(report, dict):
                 continue
@@ -315,9 +327,16 @@ def process_feedback_reports(board, path, feedback_ids=(), report_writer=None):
             writer = report_writer or agent_report.report
             for _ in range(min(occurrences, 100)):
                 writer('客製回饋', issue, recommendation, live=board)
+            ids = report.get('feedback_ids')
+            if isinstance(ids, list):
+                covered.update(x for x in ids if isinstance(x, str))
     except Exception:
         return False
-    wanted = set(feedback_ids)
+    # 只標歸進回報的那幾則:只提過一次的留著,之後別張卡也提到才湊得到兩次。
+    # 以前這一輪交給 agent 的全部標成處理過,同一個問題幾乎永遠湊不到兩次
+    wanted = set(feedback_ids) & covered
+    if not wanted:
+        return True
     def mutate(fb):
         for state in fb.values():
             docs = state.get('custom_docs') if isinstance(state, dict) else None
@@ -422,7 +441,9 @@ def clear(url, item_id, board=None):
     data, fb = _read_board(board)
     _job_data, state, items = _card_items(data, fb, url)
     legacy_resume = item_id == 'resume:legacy' and bool(state.get('custom_file'))
-    if not legacy_resume and not any(x['id'] == item_id for x in items):
+    current = legacy_resume or any(x['id'] == item_id for x in items)
+    # 換了履歷、語言或附件之後留下的舊紀錄(不在這張現在要寄的檔裡)也能清掉:卡上只給這一顆
+    if not current and item_id not in (state.get('custom_docs') or {}):
         return False, '這張卡沒有這份檔案'
     def mutate(all_fb):
         card_state = all_fb.setdefault(url, {})
@@ -431,6 +452,8 @@ def clear(url, item_id, board=None):
             docs.pop(item_id, None)
             if not docs:
                 card_state.pop('custom_docs', None)
+        if not current:
+            return                       # 舊紀錄本來就沒寄出去:要寄的檔沒變,已填好的頁和核准都不用動
         if item_id.startswith('resume:'):
             card_state.pop('custom_file', None)
         import form_record as fr
@@ -466,6 +489,21 @@ def upload_custom(url, item_id, name, data, board=None):
     old.pop('error', None)
     _set_entries(board, url, {item_id: old})
     return saved, ''
+
+
+class JobPageUnreadable(RuntimeError):
+    pass
+
+
+def _job_page_text(url):
+    """程式抓職缺頁的文字(page_fetch:直接抓 → 閱讀代理 → 無頭 Chrome)。抓不到就不派 agent,照實講。"""
+    import page_fetch
+    page = page_fetch.fetch(url)
+    if page.readable:
+        return page.text
+    why = '職缺已下架' if page.status == 'closed' else '可能要登入,或網站擋程式讀取'
+    raise JobPageUnreadable(f'程式讀不到這個職缺頁的 JD({why}),沒有派 agent 客製:'
+                            + ('; '.join(page.errors)[:160] or page.status))
 
 
 def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None):
@@ -523,23 +561,29 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
     _status = lambda value: jobrun.write(status_path, value)
     feedback = feedback_records(fb, data.get('jobs') or [])
     report_path = os.path.join(run_dir, 'feedback_reports.json')
-    prompt = build_prompt(url, card.name(job), selected, feedback, report_path)
     prompt_path = os.path.join(run_dir, 'customize_prompt.txt')
     output_log = os.path.join(run_dir, 'customize.out')
     try:
-        with open(prompt_path, 'w', encoding='utf-8') as f:
-            f.write(prompt)
         # graceful:看板按停止時先收工,只停 agent,已經寫好的客製版照常檢查(見 jobrun.control)
         _status({'phase': 'agent', 'pid': os.getpid(), 't0': t0, 'n': len(selected), 'url': url, 'graceful': True})
+        # JD 由程式先抓好放進 prompt;客製的 agent 不給操作 Chrome 的能力、也不上網(#287,Codex、Claude 都一樣)。
+        # 以前叫它「用可用的 Chrome」自己讀,卻不在代投那把鎖裡,也沒限制只准用 agent 專用的 Chrome
+        jd = _job_page_text(url)
+        prompt = build_prompt(url, card.name(job), selected, feedback, report_path, jd)
+        with open(prompt_path, 'w', encoding='utf-8') as f:
+            f.write(prompt)
         launch_override = None
         if launcher is not None:
             def launch_override(prompt_text, outfile, repo, _agent, **options):
                 return launcher(prompt_text, outfile, repo, model='main', board=board,
-                                chrome=options.get('chrome', True))
+                                chrome=options.get('chrome', False))
         result = agent_run.run(
-            prompt, output_log, cf.HOME, model='main', board=board, browser_required=True,
+            prompt, output_log, cf.HOME, model='main', board=board, web=False,
             launcher=launch_override, waiter=waiter,
         )
+    except JobPageUnreadable as e:
+        result = None
+        worker_error = str(e)
     except FileNotFoundError as e:
         result = None
         worker_error = f'找不到 agent 執行程式:{str(e)[:120]}'
@@ -554,10 +598,11 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
             output = sa.safe_rel(item['output_rel'])
             if output and os.path.isfile(output):
                 os.remove(output)
-        _set_entries(board, url, {
-            item['id']: _failed_entry(item, worker_error, board, url, card.name(job))
-            for item in selected
-        })
+        failed = {item['id']: _failed_entry(item, worker_error, board, url, card.name(job), run_id)
+                  for item in selected}
+        failed = {item_id: entry for item_id, entry in failed.items() if entry is not None}
+        if failed:
+            _set_entries(board, url, failed)
         _status({'phase': 'failed', 'n': len(selected), 'done': 0, 'msg': worker_error,
                  't0': t0, 'finished_at': time.time(), 'url': url})
         return {'ok': False, 'msg': worker_error}
@@ -574,10 +619,12 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
     return result_data
 
 
-def _failed_entry(item, reason, board, url, title):
+def _failed_entry(item, reason, board, url, title, run_id):
     data, fb = _read_board(board)
     state = fb.get(url) or {}
     old = copy.deepcopy((state.get('custom_docs') or {}).get(item['id']) or {})
+    if not _still_running(old, run_id):
+        return None
     previous = old.pop('previous_status', '')
     old['status'] = 'accepted' if old.get('path') else ('rework' if previous == 'rework' else 'failed')
     old['error'] = reason

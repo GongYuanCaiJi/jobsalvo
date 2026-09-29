@@ -63,7 +63,8 @@ def _files():
 
 
 def skill_files():
-    """使用者新增的客製 skill;設定頁只需要路徑與顯示名稱。"""
+    """使用者新增的做法(改履歷的規則、找缺與判斷的做法);設定頁要路徑、顯示名稱、哪一種。
+    兩種放同一個資料夾,靠第一行的記號分:kind 是 'resume' 或 'research';沒記號的(自己放進去的舊檔)是 '',兩邊都列。"""
     root = cf.path('custom/skills')
     out = []
     try:
@@ -77,29 +78,31 @@ def skill_files():
         if not os.path.isfile(path):
             continue
         rel = os.path.relpath(path, cf.HOME).replace('\\', '/')
-        label = os.path.splitext(name)[0]
+        label, kind = os.path.splitext(name)[0], ''
         try:
             with open(path, encoding='utf-8') as f:
                 first = f.readline().rstrip('\r\n')
-            match = re.match(r'<!-- jobsalvo-skill: (.*?) -->$', first)
+            match = re.match(r'<!-- jobsalvo-(research-)?skill: (.*?) -->$', first)
             if match:
-                label = match.group(1)
+                label, kind = match.group(2), 'research' if match.group(1) else 'resume'
         except (OSError, UnicodeError):
             pass
-        out.append({'path': rel, 'name': label})
+        out.append({'path': rel, 'name': label, 'kind': kind})
     return out
 
 
-def create_skill(name, content):
-    """在使用者資料夾新增一份文字 skill,回傳 (資料, 問題)。"""
+def create_skill(name, content, kind=''):
+    """在使用者資料夾新增一份文字做法,回傳 (資料, 問題)。kind='research' 是找缺與判斷的做法,其他是改履歷的規則。"""
+    kind = 'research' if kind == 'research' else 'resume'
+    word = '找缺與判斷的做法' if kind == 'research' else '改履歷的規則'
     name = re.sub(r'\s+', ' ', str(name or '')).strip()
     content = str(content or '').strip()
     if not name:
-        return None, '先寫改履歷的規則的名稱'
+        return None, f'先寫{word}的名稱'
     if not content:
-        return None, '先寫改履歷的規則的內容'
+        return None, f'先寫{word}的內容'
     if len(content.encode('utf-8')) > 256 * 1024:
-        return None, '改履歷的規則不能超過 256 KB'
+        return None, f'{word}不能超過 256 KB'
     slug = re.sub(r'[^a-z0-9_-]+', '-', name.lower()).strip('-_')[:48]
     if not slug:
         slug = 'skill-' + hashlib.blake2s(name.encode('utf-8'), digest_size=6).hexdigest()
@@ -113,19 +116,20 @@ def create_skill(name, content):
     rel = f'custom/skills/{slug}.md'
     full = safe_rel(rel)
     if not full:
-        return None, '改履歷的規則路徑不安全'
+        return None, f'{word}路徑不安全'
     tmp = full + '.tmp'
     try:
         with open(tmp, 'w', encoding='utf-8') as f:
-            f.write(f'<!-- jobsalvo-skill: {name} -->\n\n{content}\n')
+            mark = 'jobsalvo-research-skill' if kind == 'research' else 'jobsalvo-skill'
+            f.write(f'<!-- {mark}: {name} -->\n\n{content}\n')
         os.replace(tmp, full)
     except OSError as e:
         try:
             os.remove(tmp)
         except OSError:
             pass
-        return None, f'改履歷的規則存檔失敗:{str(e)[:100]}'
-    return {'path': rel, 'name': name}, ''
+        return None, f'{word}存檔失敗:{str(e)[:100]}'
+    return {'path': rel, 'name': name, 'kind': kind}, ''
 
 
 def get():
@@ -152,7 +156,8 @@ def get():
             for key, item in cf.RESEARCH_SKILLS.items()
         ],
         'home': cf.HOME,
-        'browser_ok': agent_chrome._mine(),
+        # 最近一次實際連上的時間(跟 Claude 那一列一樣);以前只記了外掛身分、沒記時間的,講「連接過」
+        'browser_ok': (agent_chrome.conf().get('codex_checked') or True) if agent_chrome._mine() else '',
         'agent_chrome_made': os.path.isdir(os.path.join(agent_chrome.data_dir(), 'Default')),
         'chrome_profiles': chrome_bin.profiles(),
         # 只講「上次按連接時確認看得到」的時間:沒按過或沒確認過就是還沒連接,不拿「記過編號」當成連得上
@@ -162,7 +167,22 @@ def get():
         'migration_notices': migration_notices,
         'render_warnings': render_warnings,
         'git_history': _git_history_status(),
+        'version': version(),          # 放最後:上面讀設定時可能順手把舊格式改寫進檔
     }
+
+
+# 設定頁手上的是打開時讀的那一份,按儲存送回整份。中間別處存過(另一個分頁、找缺那一列的分鐘數、「改用 X」),
+# 整份寫回就把人家剛存的蓋掉,畫面上什麼都看不出來。存檔時帶回打開時的版本,對不上就擋下來叫他重讀。
+CONFLICT = '設定在別的地方改過了(另一個分頁、找缺那一列的分鐘數、「改用 X」…),這一頁手上的是舊的:按「重新讀取」拿最新的再改'
+
+
+def version():
+    """jobsalvo.json 現在這一版的代號(內容的雜湊);沒有這個檔回空字串。"""
+    try:
+        with open(os.path.join(cf.HOME, cf.NAME), 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return ''
 
 
 def _retire_legacy_builder():
@@ -431,8 +451,11 @@ def _check_files(item, label, langs, bad):
     files = item.get('files') or {}
     if not isinstance(files, dict):
         bad.append(f'{label} 的語言檔格式不對')
-    elif any(lang not in langs or not isinstance(path, str) for lang, path in files.items()):
-        bad.append(f'{label} 有未設定的語言或無效檔案路徑')
+    elif any(lang not in langs for lang in files):
+        extra = '、'.join(lang for lang in files if lang not in langs)
+        bad.append(f'{label} 有「履歷有哪些語言」沒勾的語言({extra})的檔:把那個語言勾回來再存')
+    elif any(not isinstance(path, str) for path in files.values()):
+        bad.append(f'{label} 有無效的檔案路徑')
     styles = item.get('styles') or {}
     if not isinstance(styles, dict) or any(lang not in langs or not isinstance(path, str) or
                                            not path.lower().endswith('.css') for lang, path in styles.items()):
@@ -473,6 +496,10 @@ def _check(settings):
                     bad.append(f'第 {i} 個 agent 瀏覽器能力格式不對')
                 if entry.get('runtime') == 'command-code' and entry.get('browser') is True:
                     bad.append(f'第 {i} 個 Command Code agent 目前不支援瀏覽器')
+                # Haiku 過不了 Claude in Chrome 的權限檢查(回「requires permission」):選了每次填表都會失敗
+                if (entry.get('runtime') == 'claude-code' and entry.get('browser') is True
+                        and 'haiku' in str(entry.get('model') or '').lower()):
+                    bad.append(f'第 {i} 個 agent 用 Claude 操作 Chrome 時不能選 Haiku(Claude in Chrome 會擋):模型改成 Sonnet、Opus 或留空')
                 if entry.get('runtime') == 'codex' and entry.get('speed', 'standard') not in ('standard', 'fast'):
                     bad.append(f'第 {i} 個 Codex agent 速度要選標準或快速')
             if sum(1 for e in agents if isinstance(e, dict) and e.get('browser') is True) > 1:
@@ -487,7 +514,7 @@ def _check(settings):
         else:
             for task, item in cf.RESEARCH_SKILLS.items():
                 if not _skill_ok(skills.get(task, '')):
-                    bad.append(f'{item["label"]} skill 找不到或不是 custom/skills/ 底下的文字檔')
+                    bad.append(f'「{item["label"]}」選的做法找不到了:重新選一份,或選產品附的預設')
 
     r = settings.get('resume') or {}
     langs = r.get('langs')
@@ -515,8 +542,8 @@ def _check(settings):
         if not str(item.get('name') or '').strip():
             bad.append(f'履歷 {rid!r} 要有名稱')
         if not _skill_ok(item.get('skill', '')):
-            bad.append(f'履歷 {rid!r} 的改履歷的規則找不到或不是 custom/skills/ 底下的文字檔')
-        _check_files(item, f'履歷 {rid!r}', langs, bad)
+            bad.append(f'履歷「{item.get("name") or rid}」選的改履歷的規則找不到了:重新選一份,或用產品附的通用規則')
+        _check_files(item, f'履歷「{item.get("name") or rid}」', langs, bad)
 
     attachments = r.get('attachments', [])
     if not isinstance(attachments, list):
@@ -536,8 +563,8 @@ def _check(settings):
         if not str(item.get('name') or '').strip():
             bad.append(f'附件 {aid!r} 要有名稱')
         if not _skill_ok(item.get('skill', '')):
-            bad.append(f'附件 {aid!r} 的改履歷的規則找不到或不是 custom/skills/ 底下的文字檔')
-        _check_files(item, f'附件 {aid!r}', langs, bad)
+            bad.append(f'附件「{item.get("name") or aid}」選的改履歷的規則找不到了:重新選一份,或用產品附的通用規則')
+        _check_files(item, f'附件「{item.get("name") or aid}」', langs, bad)
         eligible = item.get('resume_ids') or []
         if not isinstance(eligible, list) or any(not isinstance(rid, str) or not SLUG.match(rid) for rid in eligible):
             bad.append(f'附件 {aid!r} 的履歷限制格式不對')
@@ -552,9 +579,13 @@ def _check(settings):
                 bad.append('每天查應徵進度的時間要寫成 09:00 這種格式,或留空不自動查')
         cap = fl.get('fill_max')
         if cap not in (None, '') and not re.fullmatch(r'[0-9]{1,3}', str(cap).strip()):
-            bad.append('自動填表最多停幾張要寫數字(0 或空的是不限)')
+            bad.append('自動填表最多停幾張要寫數字(0 是不限,空的照預設 5)')
     if find_minutes_problem((settings.get('search') or {}).get('find_minutes')):
         bad.append(find_minutes_problem((settings.get('search') or {}).get('find_minutes')))
+    # 跟設定頁那一格的範圍一樣。以前不驗:清空存成 0,下一次查應徵進度就把還沒回音的已投出卡全部記成沒下文
+    ghost = (settings.get('replies') or {}).get('ghost_days')
+    if ghost is not None and not (isinstance(ghost, int) and not isinstance(ghost, bool) and 7 <= ghost <= 120):
+        bad.append('沒下文天數要寫 7~120 的整數')
     mail_url = str((settings.get('replies') or {}).get('mail_url') or '').strip()
     if mail_url and not re.match(r'https://[^\s/]+', mail_url):
         bad.append('信箱網址要是 https:// 開頭的完整網址')
@@ -583,8 +614,11 @@ def find_minutes_problem(value):
 
 
 def save(body):
-    """body = {settings: 整份使用者設定, texts: {rules, apply_rules}}。回問題清單。"""
-    bad = []
+    """body = {settings: 整份使用者設定, texts: {rules, apply_rules}, version: 設定頁打開時的版本}。回問題清單。
+    沒帶 version 的(讀了最新的檔才改的:「改用 X」、找缺分鐘數、檢查程式)不比對。"""
+    if 'version' in body and body['version'] != version():
+        return [CONFLICT]
+    s = None
     if 'settings' in body:
         s = body['settings']
         if not isinstance(s, dict):
@@ -594,20 +628,46 @@ def save(body):
         bad = _check(s)
         if bad:
             return bad
+    # 先驗完、再寫文字、最後寫 jobsalvo.json:寫到一半失敗時設定檔還是原來那版,他改好再按一次不會被版本擋下來。
+    # 以前先寫設定檔,後面寫文字失敗就丟例外、連線斷掉,畫面說沒存成,設定其實已經換了
+    t = body.get('texts') or {}
+    try:
+        if 'preferences_custom' in t or 'preferences_agent' in t:
+            import prefs
+            old_custom, old_agent = prefs.note_sections()
+            prefs.save_note_from_ui(t.get('preferences_custom', old_custom),
+                                    t.get('preferences_agent', old_agent))
+        elif 'rules' in t:
+            write_hard_rules(str(t['rules']))
+        if 'apply_rules' in t:
+            _write(cf.APPLY_RULES, str(t['apply_rules']))
+    except OSError as e:
+        return [f'「你的喜好」或「填表做法」沒存成({e.strerror or e}),設定也還沒動;處理好再按一次']
+    if s is not None:
         if legacy_profile_cmd:
             cf.queue_profile_cmd_removal_notice()
-        cf.save(s)
-    t = body.get('texts') or {}
-    if 'preferences_custom' in t or 'preferences_agent' in t:
-        import prefs
-        old_custom, old_agent = prefs.note_sections()
-        prefs.save_note_from_ui(t.get('preferences_custom', old_custom),
-                                t.get('preferences_agent', old_agent))
-    elif 'rules' in t:
-        write_hard_rules(str(t['rules']))
-    if 'apply_rules' in t:
-        _write(cf.APPLY_RULES, str(t['apply_rules']))
-    return bad
+        try:
+            cf.save(_without_untouched_defaults(s, cf.user_settings()))
+        except OSError as e:
+            return [f'設定檔沒存成({e.strerror or e});「你的喜好」和「填表做法」已經存好,處理好再按一次']
+    return []
+
+
+def _without_untouched_defaults(new, old):
+    """設定頁送來的是整份(找缺、agent、分類…從實際生效的值起頭,含預設)。他沒設過、值又跟預設一樣的欄位不寫進檔:
+    寫了就變成「他自己設的」,之後產品改了預設(docs/adr/0001 更新跟 main)他拿不到,也分不出哪些是自己設的。
+    檔裡原本就有的照留。"""
+    new = copy.deepcopy(new)
+    for sec, defaults in cf.DEFAULTS.items():
+        cur = new.get(sec)
+        if not isinstance(defaults, dict) or not isinstance(cur, dict):
+            continue
+        mine = old.get(sec) if isinstance(old.get(sec), dict) else {}
+        for key in [k for k in cur if k not in mine and k in defaults and cur[k] == defaults[k]]:
+            del cur[key]
+        if not cur and sec not in old:
+            del new[sec]
+    return new
 
 
 def safe_rel(rel, allow_external_symlink=False):

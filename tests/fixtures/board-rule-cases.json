@@ -632,6 +632,311 @@
       },
       "blocked": false,
       "problem": null
+    },
+    {
+      "name": "job closed after approval (acceptance failed later)",
+      "url": "https://rules.example/closed-later",
+      "state": {
+        "https://rules.example/closed-later": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "status": {
+        "schema_version": 2,
+        "checked_links": true,
+        "issues": [
+          {
+            "jid": "https://rules.example/closed-later",
+            "msg": "職缺已下架"
+          }
+        ]
+      },
+      "blocked": true,
+      "problem": "驗收未通過：職缺已下架"
+    },
+    {
+      "name": "custom file still being reviewed after approval",
+      "url": "https://rules.example/custom-pending",
+      "state": {
+        "https://rules.example/custom-pending": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          },
+          "custom_docs": {
+            "cv": {
+              "status": "review",
+              "name": "客製履歷"
+            }
+          }
+        }
+      },
+      "status": {
+        "schema_version": 2,
+        "checked_links": true,
+        "issues": []
+      },
+      "blocked": true,
+      "problem": "客製履歷 的客製版等你看，收下或退回後才能送出"
+    },
+    {
+      "name": "acceptance has not run",
+      "url": "https://rules.example/no-acceptance",
+      "state": {
+        "https://rules.example/no-acceptance": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "status": null,
+      "blocked": true,
+      "problem": "投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)"
+    },
+    {
+      "name": "links not checked yet",
+      "url": "https://rules.example/links-unchecked",
+      "state": {
+        "https://rules.example/links-unchecked": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "status": {
+        "schema_version": 2,
+        "checked_links": false,
+        "issues": []
+      },
+      "blocked": true,
+      "problem": "職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)"
+    },
+    {
+      "name": "an unconfirmed link does not block",
+      "url": "https://rules.example/soft-link",
+      "state": {
+        "https://rules.example/soft-link": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "delivery": {
+              "method": "direct_upload"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "status": {
+        "schema_version": 2,
+        "checked_links": true,
+        "issues": [
+          {
+            "jid": "https://rules.example/soft-link",
+            "msg": "無法確認",
+            "soft": true
+          }
+        ]
+      },
+      "blocked": false,
+      "problem": null
+    },
+    {
+      "name": "answer that is only a byte-order mark counts as empty",
+      "url": "https://rules.example/bom",
+      "state": {
+        "__ans__": [
+          {
+            "k": "a1",
+            "q": "Role",
+            "v": "﻿",
+            "zh": ""
+          }
+        ],
+        "https://rules.example/bom": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "bank",
+                "k": "a1"
+              }
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "﻿"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "還有答案等你確認或填寫"
+    },
+    {
+      "name": "fill failed with an empty reason",
+      "url": "https://rules.example/empty-issue",
+      "state": {
+        "https://rules.example/empty-issue": {
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": false,
+            "issues": [
+              ""
+            ]
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "blocked": true,
+      "problem": "填表檢查還有問題,先讓 agent 改好"
+    },
+    {
+      "name": "agent already submitted this page, then moved back to ship",
+      "url": "https://rules.example/sent-then-back",
+      "state": {
+        "https://rules.example/sent-then-back": {
+          "app": "ship",
+          "form": {
+            "f": [
+              {
+                "q": "Role",
+                "src": "resume",
+                "v": "Engineer"
+              }
+            ]
+          },
+          "apply": {
+            "stage": "fill",
+            "ok": true,
+            "issues": [],
+            "tab_id": "1",
+            "session": "s1",
+            "delivery": {
+              "method": "direct_upload"
+            },
+            "sent": {
+              "at": "2026-01-01T00:00:00",
+              "text": "Thanks for applying"
+            }
+          },
+          "approve": {
+            "snap": {
+              "Role": "Engineer"
+            }
+          }
+        }
+      },
+      "status": {
+        "schema_version": 2,
+        "checked_links": true,
+        "issues": []
+      },
+      "blocked": true,
+      "problem": "這張 agent 已經送出過了;要再投一次,先讓 agent 重填"
     }
   ],
   "approve_blockers": [
@@ -1185,6 +1490,455 @@
       "clash": [
         "*"
       ]
+    },
+    {
+      "name": "答案庫照 k 一條一條合:這台改了一條、agent 同時新開一條,兩條都留",
+      "key": "k",
+      "base": [
+        {
+          "k": "nat",
+          "v": "Taiwan"
+        }
+      ],
+      "mine": [
+        {
+          "k": "nat",
+          "v": "Taiwan (R.O.C.)"
+        }
+      ],
+      "theirs": [
+        {
+          "k": "nat",
+          "v": "Taiwan"
+        },
+        {
+          "k": "a1b2c3d4",
+          "v": "新答案"
+        }
+      ],
+      "value": [
+        {
+          "k": "nat",
+          "v": "Taiwan (R.O.C.)"
+        },
+        {
+          "k": "a1b2c3d4",
+          "v": "新答案"
+        }
+      ],
+      "clash": []
+    },
+    {
+      "name": "回報照 id 一則一則合:這台收掉一則、程式同時寫了一則新的,兩則都留",
+      "key": "id",
+      "base": [
+        {
+          "id": "r1",
+          "msg": "舊的"
+        }
+      ],
+      "mine": [
+        {
+          "id": "r1",
+          "msg": "舊的",
+          "done": "2026-01-01"
+        }
+      ],
+      "theirs": [
+        {
+          "id": "r1",
+          "msg": "舊的"
+        },
+        {
+          "id": "r2",
+          "msg": "新的"
+        }
+      ],
+      "value": [
+        {
+          "id": "r1",
+          "msg": "舊的",
+          "done": "2026-01-01"
+        },
+        {
+          "id": "r2",
+          "msg": "新的"
+        }
+      ],
+      "clash": []
+    },
+    {
+      "name": "答案庫同一條兩邊改成不一樣:留這台的,只回報那一條",
+      "key": "k",
+      "base": [
+        {
+          "k": "a",
+          "v": "1"
+        },
+        {
+          "k": "b",
+          "v": "x"
+        }
+      ],
+      "mine": [
+        {
+          "k": "a",
+          "v": "2"
+        },
+        {
+          "k": "b",
+          "v": "x"
+        }
+      ],
+      "theirs": [
+        {
+          "k": "a",
+          "v": "3"
+        },
+        {
+          "k": "b",
+          "v": "y"
+        }
+      ],
+      "value": [
+        {
+          "k": "a",
+          "v": "2"
+        },
+        {
+          "k": "b",
+          "v": "y"
+        }
+      ],
+      "clash": [
+        "a"
+      ]
+    },
+    {
+      "name": "答案庫別台刪掉的那條,這台沒動就跟著刪;這台新加的留著",
+      "key": "k",
+      "base": [
+        {
+          "k": "a",
+          "v": "1"
+        },
+        {
+          "k": "b",
+          "v": "2"
+        }
+      ],
+      "mine": [
+        {
+          "k": "a",
+          "v": "1"
+        },
+        {
+          "k": "b",
+          "v": "2"
+        },
+        {
+          "k": "c",
+          "v": "3"
+        }
+      ],
+      "theirs": [
+        {
+          "k": "a",
+          "v": "1"
+        }
+      ],
+      "value": [
+        {
+          "k": "a",
+          "v": "1"
+        },
+        {
+          "k": "c",
+          "v": "3"
+        }
+      ],
+      "clash": []
+    },
+    {
+      "name": "填表紀錄裡各改各的欄位:這台標履歷換過、程式同時記送出結果不明,兩邊都留下(以前整筆被這台蓋掉,擋重送的記號不見)",
+      "base": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "7"
+        }
+      },
+      "mine": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "7",
+          "stale": "履歷換過了"
+        }
+      },
+      "theirs": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "7",
+          "submit_fail": {
+            "at": "2026-01-01T00:00:00",
+            "pending": true,
+            "problems": [
+              "送出途中停掉了"
+            ]
+          }
+        }
+      },
+      "value": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "7",
+          "stale": "履歷換過了",
+          "submit_fail": {
+            "at": "2026-01-01T00:00:00",
+            "pending": true,
+            "problems": [
+              "送出途中停掉了"
+            ]
+          }
+        }
+      },
+      "clash": []
+    },
+    {
+      "name": "填表紀錄裡兩邊改了同一欄:只記那一欄撞到,別的欄照合",
+      "base": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "7"
+        }
+      },
+      "mine": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "7",
+          "stale": "換成中文版"
+        }
+      },
+      "theirs": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "",
+          "gone": true,
+          "stale": "換成英文版"
+        }
+      },
+      "value": {
+        "app": "ship",
+        "apply": {
+          "stage": "fill",
+          "ok": true,
+          "tab_id": "",
+          "gone": true,
+          "stale": "換成中文版"
+        }
+      },
+      "clash": [
+        "apply.stale"
+      ]
     }
-  ]
+  ],
+  "custom_pending": {
+    "cfg": {
+      "langs": [
+        "zh",
+        "en"
+      ],
+      "resumes": [
+        {
+          "id": "general",
+          "name": "通用版",
+          "files": {
+            "zh": "resume/general-zh.pdf",
+            "en": "resume/general-en.pdf"
+          }
+        },
+        {
+          "id": "second",
+          "name": "第二版",
+          "files": {
+            "zh": "resume/second-zh.pdf"
+          }
+        }
+      ],
+      "attachments": [
+        {
+          "id": "letter",
+          "name": "求職信",
+          "files": {
+            "zh": "resume/letter-zh.pdf"
+          },
+          "resume_ids": [
+            "general"
+          ]
+        }
+      ]
+    },
+    "job": {
+      "id": "https://jobs.example/custom",
+      "resume": {
+        "recommend": "general",
+        "lang": "zh"
+      }
+    },
+    "cases": [
+      {
+        "name": "這張現在寄的履歷在等你看:擋",
+        "mark": {
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "review",
+              "name": "通用版"
+            }
+          }
+        },
+        "problem": "通用版 的客製版等你看，收下或退回後才能送出"
+      },
+      {
+        "name": "這張現在寄的附件正在客製:擋",
+        "mark": {
+          "custom_docs": {
+            "attachment:letter:zh": {
+              "status": "working",
+              "name": "求職信"
+            }
+          }
+        },
+        "problem": "求職信 正在客製，完成後才能送出"
+      },
+      {
+        "name": "退回重寫中:擋",
+        "mark": {
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "rework",
+              "name": "通用版"
+            }
+          }
+        },
+        "problem": "通用版 的客製版退回重寫中，完成後才能送出"
+      },
+      {
+        "name": "已收下、產出未通過的不擋",
+        "mark": {
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "accepted",
+              "name": "通用版",
+              "path": "custom/x.pdf"
+            },
+            "attachment:letter:zh": {
+              "status": "failed",
+              "name": "求職信"
+            }
+          }
+        },
+        "problem": ""
+      },
+      {
+        "name": "換了履歷,舊履歷那筆等你看的紀錄不擋",
+        "mark": {
+          "resume_id": "second",
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "review",
+              "name": "通用版"
+            }
+          }
+        },
+        "problem": ""
+      },
+      {
+        "name": "附件只給另一份履歷用:換了履歷之後不擋",
+        "mark": {
+          "resume_id": "second",
+          "custom_docs": {
+            "attachment:letter:zh": {
+              "status": "working",
+              "name": "求職信"
+            }
+          }
+        },
+        "problem": ""
+      },
+      {
+        "name": "附件沒有這個語言的檔:換了語言之後不擋",
+        "mark": {
+          "lang": "en",
+          "custom_docs": {
+            "attachment:letter:en": {
+              "status": "review",
+              "name": "求職信"
+            }
+          }
+        },
+        "problem": ""
+      },
+      {
+        "name": "換了履歷,新履歷那份也在等你看:擋新的那份",
+        "mark": {
+          "resume_id": "second",
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "review",
+              "name": "通用版"
+            },
+            "resume:second:zh": {
+              "status": "review",
+              "name": "第二版"
+            }
+          }
+        },
+        "problem": "第二版 的客製版等你看，收下或退回後才能送出"
+      },
+      {
+        "name": "換了語言,另一個語言那份在等你看的紀錄不擋",
+        "mark": {
+          "lang": "en",
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "review",
+              "name": "通用版"
+            }
+          }
+        },
+        "problem": ""
+      },
+      {
+        "name": "換了語言,這個語言那份在等你看:擋",
+        "mark": {
+          "lang": "en",
+          "custom_docs": {
+            "resume:general:zh": {
+              "status": "accepted",
+              "name": "通用版",
+              "path": "custom/x.pdf"
+            },
+            "resume:general:en": {
+              "status": "review",
+              "name": "通用版"
+            }
+          }
+        },
+        "problem": "通用版 的客製版等你看，收下或退回後才能送出"
+      }
+    ]
+  }
 }

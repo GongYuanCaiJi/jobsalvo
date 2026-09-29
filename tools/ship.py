@@ -62,6 +62,60 @@ def _digest(path):
     return h.hexdigest()
 
 
+_SIG_CACHE = {}
+
+
+def source_sig(path):
+    """原始檔的簽章(跟客製紀錄的 source_sig 同一種算法)。看板每次載入都要算每一份,照大小、修改時間記住。"""
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError):
+        return ''
+    key = (path, st.st_mtime_ns, st.st_size)
+    if key not in _SIG_CACHE:
+        if len(_SIG_CACHE) > 256:
+            _SIG_CACHE.clear()
+        _SIG_CACHE[key] = _digest(path)
+    return _SIG_CACHE[key]
+
+
+def item_key(kind, item_id, lang):
+    """一筆客製紀錄的 key:每份檔、每個語言各記一筆。換語言不會拿另一個語言的客製版去寄,換回來那一份也還在。"""
+    return f'{kind}:{item_id}:{lang}'
+
+
+def migrate_custom_keys(fb):
+    """舊的客製紀錄 key 沒有語言(resume:<id>、attachment:<id>)。照紀錄裡原始檔的簽章認出是哪個語言的檔,
+    改成 <kind>:<id>:<語言>;認不出來的(原始檔後來換過)留著不動,看板上列成「這張現在不寄這份」,可以清掉。
+    resume:legacy(更早的 custom_file)不分語言,不動。回改了幾筆。"""
+    def files_of(kind, item_id):
+        if kind == 'resume':
+            return (cf.RESUMES.get(item_id) or {}).get('files') or {}
+        item = next((a for a in cf.ATTACHMENTS if str(a.get('id') or '') == item_id), None)
+        return (item or {}).get('files') or {}
+
+    moved = 0
+    for state in fb.values():
+        docs = state.get('custom_docs') if isinstance(state, dict) else None
+        if not isinstance(docs, dict):
+            continue
+        for key in list(docs):
+            kind, _, item_id = key.partition(':')
+            entry = docs[key]
+            if kind not in ('resume', 'attachment') or not item_id or ':' in item_id or key == 'resume:legacy' \
+                    or not isinstance(entry, dict):
+                continue
+            want = {entry.get('source_sig'), entry.get('candidate_source_sig')} - {None, ''}
+            langs = [lang for lang, rel in files_of(kind, item_id).items()
+                     if rel and source_sig(cf.path(rel)) in want]
+            new = item_key(kind, item_id, langs[0]) if len(langs) == 1 else ''
+            if not new or new in docs:
+                continue
+            docs[new] = dict(docs.pop(key), id=new) if 'id' in entry else docs.pop(key)
+            moved += 1
+    return moved
+
+
 def _custom_entry(fb, url, item_id, kind):
     f = fb.get(url) or {}
     docs = f.get('custom_docs') if isinstance(f.get('custom_docs'), dict) else {}
@@ -114,7 +168,7 @@ def documents(j, fb):
     resume = cf.RESUMES.get(resume_id) or {}
     src = cf.master(resume_id, lang) if resume_id else None
     if src or (fb.get(url) or {}).get('custom_file'):
-        item_id = 'resume:' + (resume_id or 'legacy')
+        item_id = item_key('resume', resume_id, lang) if resume_id else 'resume:legacy'
         entry = _custom_entry(fb, url, item_id, 'resume')
         rel = (resume.get('files') or {}).get(lang, '')
         if not resume_id:
@@ -140,7 +194,7 @@ def documents(j, fb):
         if not rel:
             continue
         source = cf.path(rel)
-        item_id = 'attachment:' + str(attachment.get('id') or '')
+        item_id = item_key('attachment', str(attachment.get('id') or ''), lang)
         entry = _custom_entry(fb, url, item_id, 'attachment')
         out.append({
             'id': item_id, 'kind': 'attachment', 'name': str(attachment.get('name') or os.path.basename(rel)),
@@ -155,7 +209,12 @@ def documents(j, fb):
 
 
 def customization_problem(j, fb):
-    for item in documents(j, fb):
+    items = documents(j, fb)
+    if not items:
+        # 算不出這張會寄哪幾份(跟看板 custCurrent 回 null 一樣):每一筆客製紀錄都算,寧可多擋,不要放行
+        items = [{'name': (e or {}).get('name') or '有一份檔案', 'entry': e}
+                 for e in (((fb.get(j['id']) or {}).get('custom_docs')) or {}).values() if isinstance(e, dict)]
+    for item in items:
         status = (item.get('entry') or {}).get('status')
         if status == 'review':
             return f'{item["name"]} 的客製版等你看，收下或退回後才能送出'
@@ -248,7 +307,8 @@ def source_items(j, fb):
     items = []
     for document in documents(j, fb):
         kind = document['kind']
-        item_id = ('custom' if own else f'resume:{resume_id}:{lang}') if kind == 'resume' else document['id']
+        # 附件在可投遞夾紀錄裡的 id 不帶語言(客製紀錄的 key 才分語言):照舊寫,已建好的可投遞夾不會因為升級整批重建
+        item_id = ('custom' if own else f'resume:{resume_id}:{lang}') if kind == 'resume' else document['id'].rsplit(':', 1)[0]
         path = document.get('effective_path')
         if not path:
             continue
@@ -476,13 +536,11 @@ def _sync_report(url, message, board):
         return None
     if message:
         return agent_report.report('可投遞夾建置', '可投遞夾本輪建置失敗', need=message, job=url, live=board)
-    return agent_report.resolve(url, '可投遞夾重新建置並驗收通過', live=board)
+    return agent_report.resolve(url, '可投遞夾重新建置並驗收通過', live=board,
+                                only=lambda it: it.get('from') == '可投遞夾建置')
 
 
 def _package_problems(j, fb, migrate=True):
-    waiting = customization_problem(j, fb)
-    if waiting:
-        return [waiting]
     d = folder(j['id'], name=card.name(j), migrate=migrate)
     if not d:
         return ['可投遞夾還沒建']
@@ -509,6 +567,10 @@ def _package_problems(j, fb, migrate=True):
 
 def check(j, fb, migrate=True):
     """投遞前把關;必須有本模組最近一次成功建置的紀錄。"""
+    # 客製檔還在等你看/重寫/客製中:這張刻意在等,原因就寫這個(建置那邊不動它,見 reconcile_packages)
+    waiting = customization_problem(j, fb)
+    if waiting:
+        return [waiting]
     state = _build_states().get(j['id'])
     if state is None:
         return ['可投遞夾尚未由本模組建置驗收']
@@ -565,10 +627,16 @@ def reconcile_packages(man, force, check_only, board, timings=False):
         parsed = bd.parse(f.read())
     fb = json.loads(parsed['fb'])
     jobs = [j for j in parsed['data']['jobs'] if (fb.get(j['id']) or {}).get('app') in STAGES
-            and not j.get('dead') and not (fb.get(j['id']) or {}).get('rm')]
+            # dead 是程式判的「頁面打不開」;他在「出錯了」按了放回原處(live_ok)就是說沒壞,照常建(頁面真的活著時 board_status 會清 dead)
+            and not (j.get('dead') and not (fb.get(j['id']) or {}).get('live_ok'))
+            and not (fb.get(j['id']) or {}).get('rm')]
     did, failed = False, []
     elapsed = {'比對': 0.0, '建置': 0.0, '檢查': 0.0, '預覽': 0.0, '回報': 0.0}
     for j in jobs:
+        if customization_problem(j, fb):
+            # 客製檔在等你看/重寫/客製中是刻意的等待,不是建置壞了:夾子保持原樣、不報失敗,
+            # 投遞前把關(check)照樣擋這張。以前算進 failed,整輪結束碼 1,所有卡的自動推進都停住。
+            continue
         started = time.perf_counter()
         variant, lang = resolve(j, fb)
         src, attachments, _own = sources(j, fb)
@@ -646,8 +714,19 @@ def clean_orphans(check_only, board):
             continue
         if not os.path.realpath(full).startswith(root_real + os.sep):
             continue
+        # 代投留下的 .apply(填表截圖、交件紀錄)不是這裡建的、也重生不了,跟 build_default 一樣留著:
+        # 卡退出流程後按復原,填表時的截圖還在。只剩它的夾子不算過期套件,不再每輪報「已清」
+        apply_dir = os.path.join(full, '.apply')
+        rest = [n for n in os.listdir(full) if n != '.apply']
+        if os.path.isdir(apply_dir) and not rest:
+            continue
         if not check_only:
-            shutil.rmtree(full)
+            if os.path.isdir(apply_dir):
+                for n in rest:
+                    p = os.path.join(full, n)
+                    shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
+            else:
+                shutil.rmtree(full)
         cleaned.append(entry)
     return cleaned, unknown
 

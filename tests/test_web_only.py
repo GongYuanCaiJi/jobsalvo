@@ -75,6 +75,19 @@ class WebOnly(tb.HttpBase):
         self.assertEqual(code, 400)
         self.assertIn('副本', json.loads(raw)['msg'])
 
+    def test_turning_on_autostart_hands_the_background_board_over(self):
+        """安裝指令在背景起的看板沒有終端機:打開開機自動啟動後,不叫他按 Ctrl-C,看板回完話自己關、交給 launchd。
+        install_service 換成假的,不真的裝;看板自己關的那一步也換成假的,不把測試用的伺服器關掉。"""
+        ok = Mock(returncode=0, stdout='已裝好:x.plist', stderr='')
+        with patch.object(bs, 'is_real', return_value=True), patch.object(bs.subprocess, 'run', return_value=ok), \
+                patch.dict(os.environ, {'JOBSALVO_LAUNCHD': ''}), \
+                patch.object(bs, 'hand_over_to_launchd', create=True) as hand_over:
+            code, raw, _ = self.req('/api/settings/service', {'act': 'install'})
+        msg = json.loads(raw)['msg']
+        self.assertEqual(code, 200)
+        self.assertNotIn('Ctrl-C', msg)
+        hand_over.assert_called_once_with()
+
     def test_settings_round_trip(self):
         legacy_resume = cf.path('resume.md')
         with open(legacy_resume, 'w', encoding='utf-8') as f:
@@ -121,6 +134,10 @@ class WebOnly(tb.HttpBase):
         if any(x.get('browser') is True and x.get('runtime') in ('codex', 'claude-code') and dr.agent_state(x['runtime'])[0]
                for x in self.settings()['effective']['agent']['agents']):
             expected.add('agent_chrome')
+        # 用 Codex 操作 Chrome 時,另外看它允許了哪些網站上傳、下載
+        if any(x.get('browser') is True and x.get('runtime') == 'codex' and dr.agent_state('codex')[0]
+               for x in self.settings()['effective']['agent']['agents']):
+            expected.add('codex_sites')
         self.assertEqual({x['key'] for x in doctor['checks']}, expected)
         self.assertNotIn('codex_login', {x['key'] for x in doctor['checks']})
         self.assertEqual(doctor['ok'], all(x['ok'] for x in doctor['checks'] if x.get('required', True)))
@@ -164,7 +181,8 @@ class WebOnly(tb.HttpBase):
                 checks = {item['key']: item for item in result['checks']}
                 results[name] = (result, checks)
                 self.assertEqual(set(checks), {'python', 'chrome', 'git', 'agent', 'packages', 'browser_agent'} | expected_runtimes
-                                 | ({'agent_chrome'} if browser_ok else set()))
+                                 | ({'agent_chrome'} if browser_ok else set())
+                                 | ({'codex_sites'} if any(a['runtime'] == 'codex' and a['browser'] for a in agents) else set()))
                 self.assertTrue(checks['python']['ok'])
                 self.assertTrue(checks['chrome']['ok'])
                 self.assertTrue(all(checks[key]['ok'] for key in expected_runtimes))
@@ -177,7 +195,7 @@ class WebOnly(tb.HttpBase):
             chrome_row = results['only_codex'][1]['agent_chrome']
             self.assertFalse(chrome_row['ok'])
             self.assertFalse(chrome_row['required'])
-            for step in ('打開 agent 的 Chrome', 'Codex 的 Chrome 外掛', '連接'):
+            for step in ('打開 agent 的 Chrome', 'Codex 的擴充功能', '連接'):
                 self.assertIn(step, chrome_row['fix'])
             # Claude Code 勾了可使用 Chrome 也算有瀏覽器 agent;還沒配對時教學連結要看得到
             self.assertIn('docs/agent-chrome.md', results['claude_code_with_chrome'][1]['agent_chrome']['fix'])
@@ -284,10 +302,45 @@ class WebOnly(tb.HttpBase):
 
     def test_apply_or_replies_prompt_for_a_live_browser_only_when_needed(self):
         with patch.object(bs, 'is_real', return_value=True), \
-             patch('agent_chrome.connected', return_value=False):
+             patch('agent_chrome.configured', return_value=False):
             code, raw, _ = self.req('/api/run/replies', {})
         self.assertEqual(code, 409, raw)
         self.assertTrue(json.loads(raw)['needs_browser'])
+
+    def test_eye_on_a_page_lost_to_a_chrome_restart_marks_the_card_for_refill(self):
+        # 👀 截不到、而且 agent 的 Chrome 是在這張填好之後才開的:那一頁一定不在了,卡上改成要重填(不再寫「填好了」)
+        import agent_chrome, datetime
+        u = 'https://jobs.example/1'
+        fb = {u: {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': '2026-09-29T14:00:00', 'tab_id': '7'}}}
+        wrote = []
+        filled = datetime.datetime.fromisoformat('2026-09-29T14:00:00').timestamp()
+        with patch.object(bs, 'read_doc', return_value='x'), \
+             patch.object(bs, 'is_real', return_value=True), \
+             patch.object(bs.bd, 'parse', return_value={'fb': json.dumps(fb)}), \
+             patch.object(bs.bd, 'set_fb', side_effect=lambda mut, **k: (mut(fb), wrote.append(fb))), \
+             patch.object(agent_chrome, 'pid', return_value=5):
+            with patch.object(agent_chrome, 'started_at', return_value=filled - 60):
+                self.assertFalse(bs.page_gone(u))                 # Chrome 從填好前就開著:可能只是一時沒連上,不動
+            with patch.object(agent_chrome, 'started_at', return_value=filled + 60):
+                self.assertTrue(bs.page_gone(u))
+        a = wrote[-1][u]['apply']
+        self.assertFalse(a['ok'])
+        self.assertIn('要重填', a['issues'][0])
+        self.assertEqual(a['tab_id'], '')
+
+    def test_closed_agent_chrome_does_not_block_a_new_run(self):
+        # 每批做完都會把 agent 的 Chrome 關掉:開跑前只看連接設定過了沒,Chrome 沒在跑由流程自己開(以前一關就再也開不了跑)
+        import agent_chrome
+        with patch.object(agent_chrome, 'pid', return_value=None), \
+             patch.object(agent_chrome, '_mine', return_value=True), \
+             patch.object(agent_chrome, '_codex_ready', return_value=True), \
+             patch('agent_run.browser_runtime', return_value='codex'):
+            self.assertTrue(agent_chrome.configured())
+            self.assertFalse(agent_chrome.connected())
+        with patch.object(agent_chrome, 'conf', return_value={'claude_device': 'dev-1'}):
+            self.assertTrue(agent_chrome.configured('claude-code'))    # 只裝 Claude:不要求 Codex
+        with patch.object(agent_chrome, 'conf', return_value={}):
+            self.assertFalse(agent_chrome.configured('claude-code'))
 
     def test_preference_note_migrates_rules_and_keeps_assumptions_distinct(self):
         from unittest.mock import patch
@@ -354,7 +407,7 @@ class WebOnly(tb.HttpBase):
         settings['research']['skills']['deep'] = 'custom/skills/missing.md'
         code, raw, _ = self.req('/api/settings', {'settings': settings})
         self.assertEqual(code, 400)
-        self.assertIn('skill', json.loads(raw)['msg'].lower())
+        self.assertIn('選的做法找不到', json.loads(raw)['msg'])        # 不講 skill(GLOSSARY)
 
         settings['research']['skills'] = {task: '' for task in tasks}
         code, raw, _ = self.req('/api/settings', {'settings': settings})
@@ -401,11 +454,12 @@ class WebOnly(tb.HttpBase):
         self.assertEqual(cfg['resumes'], [{
             'id': 'general', 'name': '通用版', 'when': '',
             'file_langs': ['zh', 'en'], 'preview_langs': ['zh', 'en'],
+            'sigs': {'zh': '', 'en': ''},                  # 原始檔還沒上傳:沒有簽章,已收下的客製版一律不用
         }])
         self.assertEqual(cfg['attachments'], [{
             'id': 'portfolio', 'name': '作品集', 'short': '',
             'resume_ids': ['general'], 'file_langs': ['zh', 'en'],
-            'preview_langs': ['zh', 'en'],
+            'preview_langs': ['zh', 'en'], 'sigs': {'zh': '', 'en': ''},
         }])
 
     def test_ordered_agent_settings_round_trip_and_browser_validation(self):
@@ -517,12 +571,12 @@ class WebOnly(tb.HttpBase):
             code, raw, _ = self.req('/api/customize/files?u=' + urllib.parse.quote(u))
             self.assertEqual(code, 200, raw)
             files = json.loads(raw)['files']
-            self.assertEqual([x['id'] for x in files], ['resume:general'])
+            self.assertEqual([x['id'] for x in files], ['resume:general:zh'])
             self.assertTrue(files[0]['default_checked'])
             self.assertEqual(files[0]['skill_name'], 'Route test skill')
             self.assertEqual(self.req('/api/run/customize', {'url': u, 'items': []})[0], 400)
 
-            code, raw, _ = self.req('/api/run/customize', {'url': u, 'items': ['resume:general']})
+            code, raw, _ = self.req('/api/run/customize', {'url': u, 'items': ['resume:general:zh']})
             self.assertEqual(code, 200, raw)
             status = self.wait('customize', lambda s: s.get('phase') == 'done')
             self.assertEqual(status['url'], u)
@@ -602,6 +656,23 @@ class AddJobReal(unittest.TestCase):
             research.DIR = old_dir
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_a_url_already_on_the_board_but_removed_says_where_it_is(self):
+        """貼的網址板上已經有、但在「🗑 已移除」:要講它在已移除、怎麼放回來,不是只說「都已經有了」。"""
+        import tempfile, add_job
+        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
+        old_sp = add_job.SP
+        add_job.SP = d
+        try:
+            make_board(p, {JOBS[0]['id']: {'rm': 1}})
+            self.assertEqual(add_job.run([JOBS[0]['id']], p), 0)
+            with open(os.path.join(d, add_job.STATUS), encoding='utf-8') as f:
+                msg = json.load(f)['msg']
+            self.assertIn('已移除', msg)
+            self.assertIn('放回看板', msg)
+        finally:
+            add_job.SP = old_sp
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_pasted_jobs_always_get_a_card_summary(self):
         # 使用者自己貼的網址:判成先不送(keep=false)也要寫摘要,不然卡上一整排「無」
         import research
@@ -660,6 +731,24 @@ class Sync104(unittest.TestCase):
             self.assertIn('1 張', msg)
             fb = read_fb(p)
             self.assertEqual((fb[a]['app'], fb[b]['app']), ('sent', 'ready'))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_marking_names_the_cards_says_which_were_removed_and_locks_the_form(self):
+        """對帳把卡標成已投出:講是哪幾張、哪張原本在「🗑 已移除」;表單跟手動「📮 我已在外部送出」一樣鎖住。"""
+        import tempfile, sync_sent as ss
+        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
+        try:
+            a, b = 'https://www.104.com.tw/job/aaaa1', 'https://www.104.com.tw/job/bbbb2'
+            make_board(p, {a: {'app': 'ship', 'rm': 1, 'form': {'f': []}}, b: {'app': 'ship', 'form': {'f': []}}},
+                       jobs=[{'id': a, 'target': '工程師 · 甲公司'}, {'id': b, 'target': '設計師 · 乙公司'}])
+            today = time.strftime('%Y-%m-%d')
+            msg = ss.sync(p, [{'id': 'aaaa1', 'applied_at': today}, {'id': 'bbbb2', 'applied_at': today}])
+            self.assertIn('甲公司', msg)
+            self.assertIn('乙公司', msg)
+            self.assertIn('已移除', msg)
+            fb = read_fb(p)
+            self.assertEqual((fb[a]['form'].get('lock'), fb[b]['form'].get('lock')), (1, 1))
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

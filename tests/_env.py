@@ -22,6 +22,9 @@ _cf.DEFAULTS['browser']['state'] = os.path.join(os.environ['JOBSALVO_TEST_HOME']
 # agent 的 Chrome 資料夾也一樣:預設在 ~/Library/Application Support 底下,測試不准碰真的那一份。
 _cf.DEFAULTS['browser']['data_dir'] = os.path.join(os.environ['JOBSALVO_TEST_HOME'], 'agent-chrome')
 _cf.reload(os.environ['JOBSALVO_HOME'])
+# Codex 自己的瀏覽器設定(允許哪些網站上傳、下載)在 ~/.codex 底下:環境檢查會讀它,測試不讀真的那一份
+import agent_chrome as _ac  # noqa: E402
+_ac.CODEX_BROWSER_CONFIG = os.path.join(os.environ['JOBSALVO_TEST_HOME'], 'codex-browser-config.toml')
 
 
 def read_board(path):

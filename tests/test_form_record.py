@@ -152,17 +152,45 @@ class Validate(unittest.TestCase):
         self.assertEqual([e['k'] for e, _ in fr.find_pending(fb)], ['a'])
 
 
+class OneBrokenFormDoesNotBlockTheOthers(unittest.TestCase):
+    """一張表單壞掉(他在外部送出時還標著 refill、存檔衝突後指到答案庫沒有的那條),
+    以前之後每一張「記表單」「翻譯」都失敗:記的時候檢查的是整個看板。只檢查這一張跟答案庫本身。"""
+
+    def board(self):
+        return {'__ans__': [{'k': 'n', 'q': '國籍', 'v': 'Taiwan', 'zh': '台灣', 'at': T}],
+                U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n', 'refill': 1}]}},
+                U3: {'form': {'plat': 'x', 'f': [{'q': 'Why?', 'src': 'bank', 'k': 'lost'}]}}}
+
+    def test_another_card_still_records(self):
+        fb = self.board()
+        fr.apply_record(fb, U1, 'x', [dict(NAT, k='n', v='Taiwan')])
+        self.assertEqual(fields(fb, U1)[0]['k'], 'n')
+
+    def test_translation_still_works(self):
+        fb = self.board()
+        fr.apply_translate(fb, 'n', en='Taiwan (R.O.C.)')
+        self.assertEqual(fb['__ans__'][0]['v'], 'Taiwan (R.O.C.)')
+
+    def test_this_card_is_still_checked(self):
+        fb = self.board()
+        with self.assertRaises(ValueError):
+            fr.apply_record(fb, U1, 'x', [{'q': 'S', 'src': 'new', 'v': 'y', 'k': 'n'}])   # 給了 k 卻是別的值
+        self.assertTrue(fr.validate(fb))                         # --check 照樣看全部
+
 class Translate(unittest.TestCase):
     def test_he_edits_chinese_i_retranslate_and_unsent_forms_get_retyped(self):
         fb = {'__ans__': [{'k': 'n', 'q': '國籍', 'v': 'Taiwan', 'zh': '中華民國', 'tr': 1, 'at': T}],
-              U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}},
-              U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}}}
+              U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]},
+                   'apply': {'stage': 'fill', 'ok': True, 'tab_id': '5'}},
+              U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}},
+              U3: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}}}
         self.assertEqual([e['k'] for e in fr.find_translate(fb)], ['n'])
         fr.apply_translate(fb, 'n', en='Republic of China (Taiwan)')
         e = fb['__ans__'][0]
         self.assertEqual((e['v'], 'tr' in e), ('Republic of China (Taiwan)', False))
         self.assertEqual(fb[U1]['form']['f'][0].get('refill'), 1)
         self.assertNotIn('refill', fb[U2]['form']['f'][0])          # 已投遞的不動
+        self.assertNotIn('refill', fb[U3]['form']['f'][0])          # agent 還沒填過:雇主網頁上沒有舊字,填的時候照新的填
         self.assertEqual(fr.find_translate(fb), [])
 
     def test_missing_chinese_is_listed_and_can_be_filled(self):
@@ -299,7 +327,8 @@ class FromFill(unittest.TestCase):
             r, fb = self._run(board, fill2, d)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertNotIn('approve', fb[U1])
-            self.assertEqual(fr.approval_problem(fb, U1), '還沒確認送出')
+            passed = {'schema_version': 2, 'checked_links': True, 'issues': []}      # 投遞前驗收過了
+            self.assertEqual(fr.approval_problem(fb, U1, passed), '還沒確認送出')
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

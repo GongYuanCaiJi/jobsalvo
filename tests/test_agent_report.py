@@ -62,6 +62,28 @@ class Resolve(unittest.TestCase):
         self.assertEqual((j1['done'], j1['res']), ('2026-09-22', '送出成功'))
         self.assertNotIn('done', j2)
 
+    def test_success_of_one_kind_does_not_close_other_kinds(self):
+        # 可投遞夾重建成功、重填成功,不能把「送出沒確認成功」一起收掉(他還沒確認到底送出沒有)
+        fb = {}
+        ar.apply_report(fb, '代投', '送出沒確認成功:沒看到成功頁面', job='J1', now='t1')
+        ar.apply_report(fb, '可投遞夾建置', '可投遞夾本輪建置失敗', job='J1', now='t1')
+        self.assertEqual(ar.apply_resolve(fb, 'J1', '建好了', 'd', only=lambda it: it.get('from') == '可投遞夾建置'), 1)
+        sent, built = fb['__inbox__']
+        self.assertNotIn('done', sent)
+        self.assertEqual(built['done'], 'd')
+
+    def test_handled_reports_do_not_pile_up_forever(self):
+        # 處理好的只留最近幾百則:看板每次都整份讀寫這一格,以前永遠不清
+        keep = getattr(ar, 'KEEP_DONE', 200)
+        fb = {'__inbox__': [{'id': 'd%03d' % i, 'from': '代投', 'msg': str(i), 'at': 't', 'done': '2026-01-%02d' % (i % 28 + 1)}
+                            for i in range(keep + 50)]}
+        fb['__inbox__'].append({'id': 'open', 'from': '代投', 'msg': '還開著', 'at': 't'})
+        ar.apply_report(fb, '代投', '新的一則', job='J1', now='t2')
+        box = fb['__inbox__']
+        self.assertEqual(sum(1 for it in box if it.get('done')), keep)
+        self.assertEqual({it['msg'] for it in box if not it.get('done')}, {'還開著', '新的一則'})
+        self.assertIn('2026-01-28', {it['done'] for it in box if it.get('done')})     # 留的是最近處理的
+
 if __name__ == '__main__':
     unittest.main()
 

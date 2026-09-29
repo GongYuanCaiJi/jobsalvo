@@ -9,6 +9,7 @@ import sys, os, re, json, argparse, datetime
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd
+import card
 
 RETAIN_DAYS = 60
 
@@ -114,6 +115,9 @@ def mark(board, to_mark, today):
             entry.pop('rm', None)
             entry['app'] = 'sent'
             entry['sent_at'] = applied_date(record.get('applied_at'), today)
+            # 跟手動「📮 我已在外部送出」、代投送出成功一樣:投出去的表單鎖住,不再被當成還沒送出、等他重寫的表單
+            if isinstance(entry.get('form'), dict):
+                entry['form']['lock'] = 1
     bd.set_fb(mut, live=board, by='平台應徵紀錄對帳')
 
 
@@ -125,11 +129,16 @@ def sync(board, records):
         return ''
     with open(board, encoding='utf-8') as f:
         p = bd.parse(f.read())
-    to_mark, _, _ = plan(records, json.loads(p['fb']), p['data']['jobs'], today)
-    if to_mark:
-        mark(board, to_mark, today)
-    return (f'平台應徵紀錄裡有 {len(to_mark)} 張看板還沒標,已標成已投遞'
-            if to_mark else '')
+    fb = json.loads(p['fb'])
+    to_mark, _, _ = plan(records, fb, p['data']['jobs'], today)
+    if not to_mark:
+        return ''
+    mark(board, to_mark, today)
+    # 點名是哪幾張;原本在「🗑 已移除」的特別講:平台上真的投過了所以放回已投出,他才不會以為移除沒生效
+    names = [card.name(job)[:24] for job, _ in to_mark]
+    back = [card.name(job)[:24] for job, _ in to_mark if (fb.get(job['id']) or {}).get('rm')]
+    return (f'平台應徵紀錄裡有 {len(to_mark)} 張看板還沒標,已標成已投遞:' + '、'.join(names)
+            + (f'(其中 {"、".join(back)} 原本在「🗑 已移除」,平台上真的投過了,放回「已投出」)' if back else ''))
 
 
 def main(argv=None):

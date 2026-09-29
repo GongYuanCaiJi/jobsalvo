@@ -990,6 +990,8 @@ body.scrolled .tab-arr{font-size:12px}
 .cfg-in.ico{flex:0 0 48px;text-align:center}
 .cfg-in.nm{flex:1 1 120px}
 .cfg-in.mt{flex:3 1 220px}
+/* iOS Safari 點到字級小於 16px 的輸入框會整頁放大:手機上一律 16px(.runn 同一個理由) */
+@media(max-width:720px){ .cfg-in{font-size:16px} }
 .cfg-li{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:5px 0}
 .cfg-file{font-size:13px;color:var(--ink-dim);overflow-wrap:anywhere}
 .cust-pick{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
@@ -1169,5 +1171,5 @@ body:has(.cfg-save.dirty) #totop{bottom:84px}
 .fl-row:first-child{border-top:0}
 .fl-name{background:none;border:0;padding:0;font:inherit;font-weight:650;color:var(--ink);text-decoration:underline;cursor:pointer;text-align:left}
 .fl-st{color:var(--ink-dim);flex:1;min-width:8em}
-.fl-bad .fl-st{color:var(--warn)}
+.fl-bad .fl-st,.fl-wait .fl-st,.fl-gone .fl-st{color:var(--warn)}
 .fl-sum{margin-left:8px;font-size:12px;font-weight:600;color:var(--ink-dim)}

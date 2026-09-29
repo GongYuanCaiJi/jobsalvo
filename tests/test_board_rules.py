@@ -17,6 +17,8 @@ import settings_api
 
 with open(os.path.join(HERE, 'fixtures', 'board-rule-cases.json'), encoding='utf-8') as f:
     CASES = json.load(f)
+# 案例沒寫 status 的:投遞前驗收跑過、沒有問題(看板那邊沿用副本的驗收結果,也是這樣)
+PASSED = {'schema_version': 2, 'checked_links': True, 'issues': []}
 
 
 class SharedBoardRules(unittest.TestCase):
@@ -29,7 +31,7 @@ class SharedBoardRules(unittest.TestCase):
     def test_approval_cases(self):
         for case in CASES['approvals']:
             with self.subTest(case=case['name']):
-                problem = form_record.approval_problem(case['state'], case['url'])
+                problem = form_record.approval_problem(case['state'], case['url'], case.get('status', PASSED))
                 self.assertEqual(problem, case['problem'])
                 self.assertEqual(problem is not None, case['blocked'])
 
@@ -45,7 +47,21 @@ class SharedBoardRules(unittest.TestCase):
                 state = copy.deepcopy(case['state'])
                 if (state.get(case['url']) or {}).get('form'):
                     state[case['url']]['approve'] = {'snap': form_record.snapshot(state, case['url'])}
-                self.assertEqual(form_record.approval_problem(state, case['url']), case['problem'])
+                self.assertEqual(form_record.approval_problem(state, case['url'], case.get('status', PASSED)), case['problem'])
+
+    def test_custom_pending_cases(self):
+        """客製還沒處理完擋不擋這張:只看這張現在會寄的那幾份(ship.documents)。
+        看板那份(custPending,shipBlocked 和核准前預覽都用它)由 board_check 跑同一張案例表。"""
+        from unittest import mock
+        import ship
+        table = CASES['custom_pending']
+        cfg, job = table['cfg'], table['job']
+        with mock.patch.object(cf, 'LANGS', cfg['langs']), \
+                mock.patch.object(cf, 'RESUMES', {r['id']: r for r in cfg['resumes']}), \
+                mock.patch.object(cf, 'ATTACHMENTS', cfg['attachments']):
+            for case in table['cases']:
+                with self.subTest(case=case['name']):
+                    self.assertEqual(ship.customization_problem(job, {job['id']: case['mark']}), case['problem'])
 
     @staticmethod
     def _settings_for(case):

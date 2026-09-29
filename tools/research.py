@@ -99,6 +99,7 @@ def search_files(rd, cs, listing, ledger_txt):
 
 def search_prompt(mode, direction, cs, cats, ledger_txt, out_json, out_md, listing=(), seeds=(),
                   model='', files=None, note_out=None, minutes=0):
+    import agent_run as ar
     files = files or {}
     parts = []
     if minutes:
@@ -128,8 +129,8 @@ def search_prompt(mode, direction, cs, cats, ledger_txt, out_json, out_md, listi
     # 以前要它每張都用瀏覽器打開確認:一頁倒回來三到二十幾萬字,十分鐘裡一半的步數花在這,只交得出幾張。
     # 交件後 clean() 本來就會同時讀每一頁、丟掉下架的,判的 agent 拿到的是整頁原文;這一步不用它再做一次。
     parts += ['不用逐張打開職缺頁確認:交件後程式會同時去讀每一頁,下架的直接丟掉,判的人拿到的是整頁原文。'
-              '搜尋結果看得出是單一職缺頁、可能對味就交。瀏覽器留給搜尋結果不夠用的時候'
-              '(例如公司的職缺列表要打開才看得到有哪些缺)。\n\n',
+              '搜尋結果看得出是單一職缺頁、可能對味就交。搜尋結果不夠用的時候(例如公司的職缺列表要打開才看得到有哪些缺)'
+              f'才抓那一頁:`{ar.page_fetch_cmd()} <網址>`。\n\n',
               # 以前找缺一輪 72 步,有好幾步在翻工具清單找別的搜尋工具、讀其他 skill 的說明;每一步都要花時間
               '網路搜尋用你手上現成的搜尋工具就好,不用去翻工具清單找別的、也不用讀其他 skill 的說明。'
               '一次送好幾個關鍵字、一次打開好幾頁:每一次呼叫都要花時間,呼叫次數就是這一輪要多久。\n\n',
@@ -862,6 +863,14 @@ def cat_counts(jobs):
     return sorted(c.items(), key=lambda kv: -kv[1])
 
 
+def web_agent(board):
+    """找缺、加職缺派 agent 的方法:run_agent(prompt, outfile, required),required 是「這一步要上網」。
+    不給操作 Chrome 的能力(#287,Codex、Claude 都一樣):上網搜尋、叫程式 page_fetch 抓頁;要登入的就回報。
+    以前能開瀏覽器的 agent 排前面、開著 Chrome 找,卻不在代投那把鎖裡,也沒限制只准用 agent 專用的 Chrome。"""
+    import agent_run as ar
+    return lambda p, of, required: ar.run(p, of, cf.HOME, web=required, board=board)
+
+
 def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent=None,
         ledger=LEDGER, sums=SUMS, seeds=None, turned=TURNED, limit=0, finishing=None, pending=PENDING,
         minutes=0, time_up=None, tally=None):
@@ -879,10 +888,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
     import feedback_dump
     note_pids = set()        # 整理偏好筆記那隻:時間限制只管「找」,不停它
     if run_agent is None:
-        # required 是「這一步要上網」:能開瀏覽器的 agent 先用;只會上網搜尋的也可以,不用非瀏覽器不可
-        run_agent = lambda p, of, required: ar.run(
-            p, of, cf.HOME, prefer_browser=required, web=required, board=live,
-        )
+        run_agent = web_agent(live)
         note_agent = lambda p, of, required: ar.run(
             p, of, cf.HOME, web=False, board=live, on_start=lambda proc: note_pids.add(proc.pid),
         )
@@ -928,10 +934,17 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
     # 整理偏好筆記跟找缺同時跑(沒有新表態就不用整理);判之前等它交件,判的時候用新筆記
     note_box = {}
     note_thread = None
+    note_base = None
     if delta.strip():
+        # 交給整理筆記的 agent 的是開跑這一刻的筆記副本:它跑的期間他在看板上改的,交件時才分得出是誰改的
+        with open(prefs.PREF, encoding='utf-8') as f:
+            note_base = f.read()
+        base_path = os.path.join(rd, '偏好筆記.md')
+        with open(base_path, 'w', encoding='utf-8') as f:
+            f.write(note_base)
+        note_files = {'偏好筆記.md': base_path, '新表態.md': delta_path}
         note_thread = threading.Thread(
-            target=lambda: note_box.__setitem__('error', run_note(
-                {k: extra_files[k] for k in ('偏好筆記.md', '新表態.md')}, rd, note_out, note_agent)),
+            target=lambda: note_box.__setitem__('error', run_note(note_files, rd, note_out, note_agent)),
             daemon=True)
         note_thread.start()
 
@@ -948,7 +961,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
                 missing_feedback = missing_feedback_coverage(delta, candidate_note)
                 if missing_feedback:
                     raise ValueError(f'新版偏好筆記有 {len(missing_feedback)} 張新表態未交代')
-                changed = prefs.apply_agent_note(candidate_note, prefs.PREF)
+                changed = prefs.apply_agent_note(candidate_note, prefs.PREF, base=note_base)
             except (OSError, ValueError) as e:
                 _report(f'這一輪偏好筆記沒更新:{str(e)[:160]}', '下一輪會再整理一次;檢查這一輪找缺紀錄', live)
             else:
@@ -1018,7 +1031,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
         unreadable = [c['url'] for c in ok if not res.get(c['url'], {}).get('readable')]
         if unreadable:
             _report(f'有 {len(unreadable)} 個職缺頁沒有可確認的頁面職稱:' + '、'.join(unreadable[:3]),
-                    '確認職缺連結與 agent 瀏覽器登入狀態後再重跑', live)
+                    '確認職缺連結;要登入才看得到的職缺頁程式讀不到,請自己打開看', live)
         bad_evidence = [c['url'] for c in ok if res.get(c['url'], {}).get('bad_evidence')]
         if bad_evidence:
             _report(f'有 {len(bad_evidence)} 個職缺的判斷理由缺少引用或根據類型:'
