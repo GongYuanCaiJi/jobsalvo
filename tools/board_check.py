@@ -2056,6 +2056,22 @@ CHECKS.append((
     'filled_ship_case',
 ))
 
+CHECKS.append((
+    '每一頁最上面「🚀 填表進度」列出填好的卡,不用點進「可以投了」;那一行直接有「👀 看頁面」',
+    r"""
+      var bad=[]; document.querySelector('[data-tab="none"]').click(); T.sync(); await T.sleep(600);
+      var box=document.getElementById('filllistbar');
+      if(!box||!box.querySelector('.fl-d'))return '別的頁最上面沒有「🚀 填表進度」';
+      if(!/填好 \d+/.test(box.textContent))bad.push('標題沒寫填好幾張:'+box.textContent.slice(0,80));
+      var row=box.querySelector('.fl-ok [data-livego="'+CSS.escape(P.id)+'"]');
+      if(!row)bad.push('填好的那張不在清單裡,或那一行沒有「👀 看頁面」');
+      if(!box.querySelector('.fl-ok [data-fillgo="'+CSS.escape(P.id)+'"]'))bad.push('卡名點不到那張卡');
+      return bad.join('；');
+    """,
+    'filled_ship_case',
+))
+
+
 
 def human_check_ship_case(board):
     """一張可投遞卡:agent 去填,那個網站停在真人驗證(Cloudflare),填不了。"""

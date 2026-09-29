@@ -1125,7 +1125,7 @@ def main():
         return
     results = []
     for i, u in enumerate(todo):
-        jobrun.write(st, dict(base, phase='run', done=i, which=card.name(jobs[u])))
+        jobrun.write(st, dict(base, phase='run', done=i, which=card.name(jobs[u]), url=u))
         ok, msg = run_one(a.stage, u, board, a.dry, note=a.note)
         results.append({'url': u, 'ok': ok, 'msg': msg})
         print(('✅ ' if ok else '❌ ') + card.name(jobs[u]) + ' — ' + msg)

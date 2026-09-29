@@ -2385,7 +2385,7 @@
     var n=applyFillN(), r=applyReadyN(), p=APPLY||{}, st='', what=p.stage==='submit'?'送出':'填表';
     if(p.running)st='<span class="prep-st run">⏳ '+AGENT+' 正在'+(p.stage==='submit'?'送出':'填')+(p.which?':'+esc(p.which):'')+
       (p.n>1?'　'+(p.done||0)+'/'+p.n:'')+'　· 已 '+minsOf(p)+' 分鐘</span>';
-    else if(p.phase==='done'){var rs=p.results||[], ok=rs.filter(function(x){return x.ok;}).length;
+    else if(p.phase==='done'||(p.phase==='failed'&&p.results)){var rs=p.results||[], ok=rs.filter(function(x){return x.ok;}).length;
       st='<span class="prep-st '+(ok===rs.length?'ok':'bad')+'">上一輪'+what+'('+hhmm(p.finished_at)+'):'+ok+'/'+rs.length+' 張成功'+
         (ok<rs.length?',沒成功的原因寫在卡上':'')+'</span>';}
     else if(p.phase==='nothing')st='<span class="prep-st">上一輪沒東西可跑:'+esc(p.msg||'')+'</span>';
@@ -2673,6 +2673,7 @@
         if(ready.length)snack(AGENT+' 填好了 '+ready.length+' 張,等你看過再確認送出',null,
           {label:'👀 看頁面',fn:function(){openShot(liveHref(ready[0].id),ready[0].id);}});}
       if(k==='prep'||k==='apply'){ if(was!==!!p.running)renderAll(); else if(k==='prep')refreshPrepUI(); else refreshApplyUI(); }
+      if(k==='apply')renderFillList();
       else refreshFindUI();
     });
     var rp=v.replies;
@@ -3527,7 +3528,32 @@
       '<div class="cuts">'+open.map(inboxRowHTML).join('')+'</div>',
       {cls:'cuts-d inbox-d',hcls:'cuts-sum'});
   }
-  function renderInbox(){var b=$('inboxbar'); if(b)b.innerHTML=inboxPanelHTML();}
+  function renderInbox(){var b=$('inboxbar'); if(b)b.innerHTML=inboxPanelHTML(); renderFillList();}
+  // ---- 🚀 填表進度:「可以投了」的卡哪幾張填好、哪張正在填、哪幾張沒填成,放在每一頁最上面 ----
+  // 以前要點進「可以投了」、一張一張看卡才知道填過沒有;填好的直接在這一行按 👀 看那一頁。
+  // 資料直接看每張卡的填表紀錄(手動按的、自動流程填的都算),正在填的那張看伺服器帶回來的進度。
+  var FL_OPEN=true;
+  function fillListHTML(){
+    var run=APPLY&&APPLY.running&&APPLY.stage!=='submit'?(APPLY.url||''):'', rows={run:[],ok:[],bad:[]}, todo=0;
+    jobs.forEach(function(j){var m=FB[j.id]; if(!m||m.app!=='ship'||removed(j.id)||(m.form||{}).lock)return;
+      var a=m.apply||{};
+      if(run&&j.id===run)rows.run.push(j);
+      else if((a.stage==='fill'||a.stage==='fix')&&a.ok)rows.ok.push(j);
+      else if(a.at&&a.ok===false)rows.bad.push(j);
+      else todo++;});
+    if(!rows.run.length&&!rows.ok.length&&!rows.bad.length)return '';
+    function row(j,kind){var a=(FB[j.id]||{}).apply||{}, id=escA(j.id);
+      var st=kind==='run'?'⏳ 正在填 · 已 '+minsOf(APPLY)+' 分鐘':kind==='ok'?'✅ 填好了,等你送出':'❌ '+esc(String((a.issues||[])[0]||'沒填成').slice(0,60));
+      return '<div class="fl-row fl-'+kind+'"><button class="fl-name" type="button" data-fillgo="'+id+'">'+esc(cardName(j))+'</button>'+
+        '<span class="fl-st">'+st+'</span>'+
+        (a.session&&kind!=='run'?'<button class="ap-undo" type="button" data-livego="'+id+'">👀 看頁面</button>':'')+'</div>';}
+    var n=function(k,t){return rows[k].length?t+' '+rows[k].length:'';};
+    var head='🚀 填表進度<span class="fl-sum">'+[n('ok','填好'),n('run','正在填'),n('bad','沒填成'),todo?'還沒填 '+todo:''].filter(Boolean).join(' · ')+'</span>';
+    return '<details class="fold cuts-d fl-d"'+(FL_OPEN?' open':'')+'><summary class="fold-h cuts-sum">'+head+'</summary><div class="cuts">'+
+      rows.run.map(function(j){return row(j,'run');}).join('')+rows.ok.map(function(j){return row(j,'ok');}).join('')+
+      rows.bad.map(function(j){return row(j,'bad');}).join('')+'</div></details>';
+  }
+  function renderFillList(){var b=$('filllistbar'); if(b)b.innerHTML=fillListHTML();}
   // 每頁才有的幾條(回報、找新職缺、你的履歷)放在分頁籤「下面」:放上面的話,切頁時它們一出一沒,
   // 分頁籤整排跟著上下跳,手指/滑鼠剛好點不到下一顆。
   (function(){var fb=document.createElement('div'); fb.id='findbar';
@@ -3562,6 +3588,11 @@
   })();
   (function(){var cb=document.createElement('div'); cb.id='cutbar';
     var t=$('app'); if(t&&t.parentNode)t.parentNode.insertBefore(cb,t);
+  })();
+  (function(){var fl=document.createElement('div'); fl.id='filllistbar';
+    var t=$('findbar')||$('app'); if(t&&t.parentNode)t.parentNode.insertBefore(fl,t);
+    fl.addEventListener('toggle',function(e){if(e.target.classList&&e.target.classList.contains('fl-d'))FL_OPEN=e.target.open;},true);
+    fl.addEventListener('click',function(e){var g=e.target.closest('[data-fillgo]'); if(g)goToJob(g.getAttribute('data-fillgo'),'ship');});
   })();
   (function(){var ib=document.createElement('div'); ib.id='inboxbar';
     var t=$('findbar')||$('app'); if(t&&t.parentNode)t.parentNode.insertBefore(ib,t);

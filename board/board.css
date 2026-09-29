@@ -1164,3 +1164,10 @@ body:has(.cfg-save.dirty) #totop{bottom:84px}
 .ansq-acts .stage-b.adv{flex:1 1 200px;min-height:46px;font-size:14.5px}
 .stage-note{display:inline-block;margin-left:8px;font-size:12px;color:var(--ink-dim);cursor:help}
 .rv-card .fb-save:has(>.fb-st:empty:only-child){display:none}   /* 沒有未存時是一條空白,底下那段要省高度 */
+
+.fl-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 4px;border-top:1px solid var(--line);font-size:13px}
+.fl-row:first-child{border-top:0}
+.fl-name{background:none;border:0;padding:0;font:inherit;font-weight:650;color:var(--ink);text-decoration:underline;cursor:pointer;text-align:left}
+.fl-st{color:var(--ink-dim);flex:1;min-width:8em}
+.fl-bad .fl-st{color:var(--warn)}
+.fl-sum{margin-left:8px;font-size:12px;font-weight:600;color:var(--ink-dim)}
