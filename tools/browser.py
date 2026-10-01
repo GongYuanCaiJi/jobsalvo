@@ -27,7 +27,7 @@ def _worker():
         from chrome_bin import chrome
         pw_cm = sync_playwright()
         pw = pw_cm.__enter__()
-    except BaseException as error:
+    except BaseException as error:  # noqa: BLE001 — 開不起來的原因原樣交回給每一個排隊的呼叫者丟出去
         _broken.append(error)
         while True:                      # 把排著的、之後才來的工作都退回去
             job = _jobs.get()
@@ -49,7 +49,7 @@ def _worker():
                                                  args=['--headless=new', '--disable-gpu', '--hide-scrollbars'],
                                                  ignore_default_args=['--font-render-hinting=none'])
                 box['value'] = fn(browser)
-            except BaseException as error:   # 交回給排隊的那一方處理
+            except BaseException as error:  # noqa: BLE001 — 原樣交回給排隊的那一方丟出去
                 box['error'] = error
             finally:
                 done.set()
@@ -95,7 +95,7 @@ def only_public(route):
         local_test = os.environ.get('JOBSALVO_TEST_ALLOW_LOOPBACK_FETCH') == '1'
         if not (local_test and host in ('127.0.0.1', '::1')):
             page_fetch._assert_public_url(url)
-    except Exception:
+    except Exception:  # noqa: BLE001 — 安全閘門往擋的那邊錯:判斷不了是不是公開網址就擋下,不讓請求卡住沒人處理
         route.abort('blockedbyclient')
         return
     route.continue_()

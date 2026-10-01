@@ -8,7 +8,6 @@ from unittest.mock import patch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import profile_sync as ps     # noqa: E402
 import apply_run as run       # noqa: E402
 
@@ -52,12 +51,13 @@ class Diff(unittest.TestCase):
 class Step(unittest.TestCase):
     def test_agent_is_told_only_the_sections_that_differ(self):
         w = {'read': 'R', 'edit': 'E'}
-        delivery = {'method': 'platform_profile'}
-        self.assertIn('跳過', run.profile_step('https://www.104.com.tw/job/1', 'zh', 'general', 'M', (w, [], ''), delivery=delivery))
-        s = run.profile_step('https://www.104.com.tw/job/1', 'zh', 'general', 'M', (w, ps.diff({'text': '', 'links': []}, WANT[:1]), ''), delivery=delivery)
+        known = {'platform': '104', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'fixed', 'fixed_url': 'R'}
+        self.assertIn('內容不用動', run.profile_step('https://www.104.com.tw/job/1', known, 'M', (w, [], '')))
+        s = run.profile_step('https://www.104.com.tw/job/1', known, 'M', (w, ps.diff({'text': '', 'links': []}, WANT[:1]), ''))
         self.assertIn('只處理這幾格', s)
         self.assertIn('projects[0]', s)
-        self.assertIn('profile.url', run.profile_step('https://www.cake.me/jobs/1', 'zh', 'general', 'M', (None, [], ''), delivery=delivery))
+        unknown = {'platform': 'cake', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'fixed'}
+        self.assertIn('profile.url', run.profile_step('https://www.cake.me/jobs/1', unknown, 'M', (None, [], '')))
         # 有差異時告訴它:平台只是用自己的說法寫的,回報 equivalents 就好,不用改平台;格式寫明,不用讀原始碼
         self.assertIn('profile.equivalents', s)
         self.assertIn('not_shown', s)
@@ -90,6 +90,18 @@ class Equivalents(unittest.TestCase):
         with patch.object(ps.cf, 'master', return_value=self.master):
             return ps.check('alpha.example', 'zh', 'general', reader=lambda _u: page or self.page,
                             reported=reported, **kw)
+
+    def test_unreadable_master_is_a_problem_not_a_match(self):
+        # 以前母稿讀不出來就當成沒有要比的段落:什麼都沒比,結果卻是「跟母稿對得上」
+        pdf = os.path.join(self.tmp, 'resume.pdf')
+        with open(pdf, 'wb') as f:
+            f.write(b'not a pdf')
+        with patch.object(ps.cf, 'master', return_value=pdf), \
+             patch('settings_api.pdf_text', side_effect=ValueError('PDF 壞掉了')):
+            _w, ds, problem = ps.check('alpha.example', 'zh', 'general', reader=lambda _u: self.page)
+        self.assertEqual(ds, [])
+        self.assertIn('母稿', problem)
+        self.assertIn('PDF 壞掉了', problem)
 
     def test_platform_wording_is_accepted_once_and_reused(self):
         _w, ds, _p = self._check()

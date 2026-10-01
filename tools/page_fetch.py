@@ -326,7 +326,7 @@ def accept_language(langs=None):
         try:
             import config as cf
             langs = cf.LANGS
-        except Exception:
+        except (ImportError, AttributeError):   # 單獨拿這支出去用(沒有 jobsalvo 的設定):照原本的中文、英文
             langs = None
     tags = []
     for code in langs or ['zh', 'en']:
@@ -495,7 +495,7 @@ def fetch_many(urls, fetch_page=None):
     def one(url):
         try:
             return fetch_page(url)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 — 一頁抓不到不擋其他頁;原因照實放進這一頁的結果
             return PageResult(url, 'unknown', errors=(f'{type(error).__name__}: {str(error)[:180]}',))
     if not urls:
         return []
@@ -517,7 +517,7 @@ def fetch(url):
     for attempt in range(RETRIES):
         try:
             pinned_ip = _assert_public_url(parts.geturl())
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 — 查不到位址、不是公開網址:原因照實放進這一頁的結果
             return PageResult(parts.geturl(), 'unknown', errors=(f'target blocked: {str(error)[:180]}',))
         for via, route in (('104', _104), ('lever', _lever),
                            ('ashby', _ashby), ('greenhouse', _greenhouse)):
@@ -527,7 +527,7 @@ def fetch(url):
                     return result
                 if result and result.readable:
                     return result
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 — 換下一條路抓;每一條的原因照實放進結果
                 errors.append(f'{via}: {type(error).__name__}: {str(error)[:180]}')
         routes = (('direct', lambda url: _direct(url, pinned_ip)),
                   ('reader', _reader), ('chrome', lambda url: _chrome(url, pinned_ip)))
@@ -539,7 +539,7 @@ def fetch(url):
                 if result.readable:
                     return result
                 errors.append(f'{via}: no readable text')
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 — 換下一條路抓;每一條的原因照實放進結果
                 errors.append(f'{via}: {type(error).__name__}: {str(error)[:180]}')
         if attempt + 1 < RETRIES:
             time.sleep(RETRY_WAIT)

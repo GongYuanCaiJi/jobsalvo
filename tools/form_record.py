@@ -47,6 +47,7 @@ import os, sys, json, re, datetime, argparse, unicodedata, hashlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd
+import delivery_state as ds
 
 SRCS = ('rz', 'bank', 'skip')
 KINDS = ('txt', 'op', 'pick', 'val', 'ck')
@@ -69,21 +70,32 @@ def _entry(fb, k):
     return None
 
 
-def page_up(m):
-    """agent 填好的那一頁還在它的 Chrome 裡(記到分頁、沒被標成不見)。答案改了要不要標 refill 看這個:
-    還沒填過(或頁面不見了、要整張重填)的卡,雇主網頁上沒有舊答案可以重打,重填時照新的答案填就好。
-    跟看板的 pageUp 同一條。"""
-    a = (m.get('apply') or {}) if isinstance(m, dict) else {}
-    return a.get('stage') in ('fill', 'fix') and bool(a.get('tab_id')) and not a.get('gone') and not a.get('sent')
-
-
 def mark_refill(fb, k):
-    """答案 k 改了值:還沒送出、頁面還在的表單裡用到它的欄位標 refill(雇主網頁上還是舊字,送出前照答案庫重打)。"""
+    """答案 k 改了值:頁面還在(停著的頁)的表單裡用到它的欄位標 refill(雇主網頁上還是舊字,送出前照答案庫重打)。
+    還沒填過(或頁面不見了、要整張重填)的卡,雇主網頁上沒有舊答案可以重打,重填時照新的答案填就好。"""
     for url, f in _forms(fb):
-        if not f.get('lock') and page_up(fb[url]):
+        if ds.page_up(fb[url]):
             for x in f.get('f', []):
                 if x.get('k') == k:
                     x['refill'] = 1
+
+
+def redo(fb, k, today=None):
+    """這一條答案作廢、改由 agent 重新代填(他在看板上清掉,或它過時了,見 stale.py)。
+    還沒送出的表單在用的:題目留著、答案和依據清掉,標 redo(等 agent,不在要他處理的清單);
+    頁面還在的表單標 refill,agent 在那一頁上照規矩代填(apply_run 的指示寫明哪幾題)。
+    只剩已送出的表單在用、或沒人用:整條拿掉(送出時的原字在流水帳)。看板的「清掉答案」同一條(board.js ansRedo)。"""
+    e = _entry(fb, k)
+    if e is None:
+        return
+    if all(users(fb, k).values()):
+        _bank(fb).remove(e)
+        return
+    for kk in ('zh', 'why', 'inf', 'at', 'tr', 'pjw'):
+        e.pop(kk, None)
+    e['v'] = ''
+    e['redo'] = today or _today()
+    mark_refill(fb, k)
 
 
 def _forms(fb):
@@ -107,7 +119,7 @@ def read_lang():
     try:
         import config as cf
         return str((cf.C.get('resume') or {}).get('read_lang') or 'zh')
-    except Exception:
+    except AttributeError:   # 設定裡 resume 不是一組設定(寫壞了):用預設語言
         return 'zh'
 
 
@@ -144,7 +156,8 @@ def _same_question(fb, *phrasings):
 
 
 def _mark(e, x, today):
-    """這條的值是我這次給的:他親口講過的算確認,其餘標「我推論的」。"""
+    """這條的值是我這次給的:他親口講過的算確認,其餘標「我推論的」。等 agent 重新代填的(redo)這樣就填好了。"""
+    e.pop('redo', None)
     if x.get('his'):
         e.pop('inf', None); e['at'] = today
     else:
@@ -240,18 +253,23 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         out.append(y)
     # 記到秒:代投核對「這一輪有沒有記表單」要跟這一輪開始的時間比,只有日期的話同一天第二輪沒記也會過
     cur['form'] = {'plat': plat, 'f': out, 'at': at or datetime.datetime.now().isoformat(timespec='seconds')}
-    cur.pop('approve', None)          # 表單重記過,他核准的就不是這一份了,要重新核准
+    ds.try_fire(fb, url, 'answers_changed')   # 表單重記過,他確認的就不是這一份了,要重新確認
     bad = validate(fb, [url])
     if bad:
         raise ValueError('記完不對:' + ';'.join(bad))
     return [e['k'] for e in _bank(fb) if e.get('k') not in before]
 
 
-def record(url, plat, fields, at=None, live=None):
-    """寫進看板(走 set_fb:在鎖裡讀現行看板、改、寫回,不蓋掉他手機上的標記)。"""
+def record(url, plat, fields, at=None, live=None, event=None):
+    """寫進看板(走 set_fb:在鎖裡讀現行看板、改、寫回,不蓋掉他手機上的標記)。
+    event:agent 呼叫時先送這個事件給狀態表;這張現在不准就丟 delivery_state.Forbidden(講原因),卡片不動。"""
     made = []
-    kw = {'live': live} if live else {}
-    bd.set_fb(lambda fb: made.extend(apply_record(fb, url, plat, fields, at)), **kw)
+
+    def mut(fb):
+        if event:
+            ds.fire(fb, url, event)
+        made.extend(apply_record(fb, url, plat, fields, at))
+    bd.set_fb(mut, live=live)
     return made
 
 
@@ -272,9 +290,14 @@ def fields_from_fill(fill):
 
 
 def record_fill(path, url, live=None):
-    with open(path, encoding='utf-8') as f:
-        fill = json.load(f)
-    return record(url, fill.get('platform') or '', fields_from_fill(fill), live=live)
+    """agent 這一輪的交件單(fill.json)裡的表單每一欄記進看板。交件單照樣經安檢門讀(gate.read);
+    記下來的每一欄,驗收時程式自己讀那一頁核對(gate「表單每一欄」)。"""
+    import gate
+    fill, missing = gate.read(os.path.dirname(os.path.abspath(path)), 'fill', where=path)
+    if fill is None:
+        raise ValueError(missing)
+    # agent 呼叫的入口:只在這張正在填或改時收(狀態表的 form_recorded),其他時候擋下、講原因(#307)
+    return record(url, fill.get('platform') or '', fields_from_fill(fill), live=live, event='form_recorded')
 
 
 def validate(fb, urls=None):
@@ -335,8 +358,7 @@ def apply_translate(fb, k, en=None, zh=None):
 
 
 def translate(k, en=None, zh=None, live=None):
-    kw = {'live': live} if live else {}
-    bd.set_fb(lambda fb: apply_translate(fb, k, en, zh), **kw)
+    bd.set_fb(lambda fb: apply_translate(fb, k, en, zh), live=live)
 
 
 def find_translate(fb):
@@ -349,18 +371,6 @@ def find_refills(fb):
     """答案改了、雇主網頁還沒跟著改的欄位:[(職缺網址, 問題)]。"""
     return [(url, x.get('q')) for url, f in _forms(fb) if not f.get('lock')
             for x in f.get('f', []) if x.get('refill')]
-
-
-def mark_stale(fb, url, why):
-    """agent 填好之後,要上傳的檔換了(收下客製版、改回原始檔、換履歷或語言):網頁上傳的還是舊的那份。
-    標在 apply 上,核准擋下(approval_problem),自動流程會替他重填一次;重填寫新的 apply 就清掉。"""
-    m = fb.get(url) if isinstance(fb.get(url), dict) else None
-    a = (m or {}).get('apply') or {}
-    if a.get('stage') in ('fill', 'fix') and not ((m or {}).get('form') or {}).get('lock'):
-        a['stale'] = why
-        m.pop('approve', None)  # 換過上傳檔後，舊核准不再適用；重填後須重新核准
-        return True
-    return False
 
 
 def apply_clear_refill(fb, url, q=None):
@@ -377,25 +387,39 @@ def _blank(s):
     return not str(s or '').replace('\ufeff', '').strip()
 
 
-def _empty(e):
+def empty_answer(e):
+    """常用答案的中英文都空著。"""
     return _blank(e.get('v')) and _blank(e.get('zh'))
 
 
+NO_EVIDENCE = '有題目缺證據(沒有程式自己截的那一頁),先讓 agent 重填'
+
+
 def answers_pending(fb, url):
-    """這張表單用到的答案還有沒有在等他(推論的、空的、或答案庫裡沒有那一條;看板的 fmTodo)。"""
+    """這張表單用到的答案還有沒有在等他(推論的、空的、或答案庫裡沒有那一條;看板 approvalProblem 的 ansNeed)。
+    缺證據的那幾條(noev)不叫他確認,可是也還沒人確認過:照樣算沒好,這張不能確認送出。"""
     ks = {x.get('k') for x in ((fb.get(url) or {}).get('form') or {}).get('f', []) if x.get('src') == 'bank'}
-    return any(e['k'] in ks for e, _ in find_pending(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
+    return any(e['k'] in ks for e, _ in _waiting(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
+
+
+def _waiting(fb):
+    """答案庫裡還沒好的:我推論的(inf),或答案還空著、而且有還沒送出的表單在用(或沒有表單在用)。
+    等 agent 重新代填的(redo)不算。"""
+    out = []
+    for e in _bank(fb):
+        if e.get('redo'):
+            continue                  # 等 agent 重新代填,不是他的事
+        us = users(fb, e['k'])
+        if e.get('inf') or (empty_answer(e) and (not us or not all(us.values()))):
+            out.append((e, sorted(us)))
+    return out
 
 
 def find_pending(fb):
     """答案庫裡等他的(跟看板的 ⚠ 同一個算法):我推論的(inf),或答案還空著、而且有還沒送出的表單
-    在用(或沒有表單在用)。[(那一條, 在用它的職缺網址)]。"""
-    out = []
-    for e in _bank(fb):
-        us = users(fb, e['k'])
-        if e.get('inf') or (_empty(e) and (not us or not all(us.values()))):
-            out.append((e, sorted(us)))
-    return out
+    在用(或沒有表單在用)。等 agent 重新代填的(redo)不算。[(那一條, 在用它的職缺網址)]。
+    缺證據的(noev:沒有程式自己截的那一頁、或那一頁上沒有這一題)不列:沒有截圖就不叫他確認(#315),改回報缺證據。"""
+    return [(e, us) for e, us in _waiting(fb) if not e.get('noev')]
 
 
 def snapshot(fb, url):
@@ -419,22 +443,18 @@ def board_status(board):
 
 
 def approval_problem(fb, url, status=None):
-    """這張的核准還能不能拿去送出。None = 可以;不行就回原因(看板顯示同一句)。
+    """這張的確認還能不能拿去送出。None = 可以;不行就回原因(看板顯示同一句,board.js 的 approvalProblem)。
+    先看投遞狀態:只有「你已確認」能送;再看檢查清單(投遞前驗收、這次上傳方式、常用答案、重翻、重打、確認時的答案)。
     status:看板資料的 status(投遞前驗收的結果,board_status 讀);沒給就當成還沒驗收過,擋。"""
     m = fb.get(url) or {}
     f = m.get('form')
     if not f:
         return '這張還沒有表單紀錄'
-    if f.get('lock'):
+    s = ds.state(m)
+    if s == 'sent':
         return '已經送出了'
-    if m.get('rm'):
-        return '這張已經移除了'
-    sf = (m.get('apply') or {}).get('submit_fail')
-    if sf and not sf.get('cleared'):
+    if s == 'unsure':
         return '上次送出沒確認成功,先確認到底送出沒有'     # 不確定就重送,可能變成投兩次
-    if (m.get('apply') or {}).get('sent'):
-        # agent 在這一頁按過送出(已投出又退回來的卡):那一頁現在是「已收到申請」,不是表單;重填會換新的紀錄
-        return '這張 agent 已經送出過了;要再投一次,先讓 agent 重填'
     # 投遞前驗收(職缺下架、要寄的檔案有問題、客製檔還沒處理完):確認之後才驗收失敗也要擋送出。
     # 跟看板 shipBlocked 同一支規則(autopilot.ship_blocked)
     import autopilot
@@ -442,46 +462,89 @@ def approval_problem(fb, url, status=None):
     if gate:
         return gate
     apply = m.get('apply') or {}
-    if apply.get('stage') in ('fill', 'fix'):
-        if not apply.get('ok'):
-            return (apply.get('issues') or [''])[0] or '填表檢查還有問題,先讓 agent 改好'     # 空字串也用預設句(跟看板一樣)
-        delivery = apply.get('delivery') or {}
-        if delivery.get('method') not in ('direct_upload', 'no_profile', 'platform_profile'):
-            return '填表檢查沒有回報這次直接上傳或使用哪一份平台履歷'
-        if apply.get('stale'):
-            return '履歷換過了,網頁上傳的還是舊的,先讓 agent 重填'
-    if not m.get('approve'):
+    if s in ('running', 'nopage', 'stuck', 'gone'):
+        return (apply.get('issues') or [''])[0] or '填表檢查還有問題,先讓 agent 改好'     # 空字串也用預設句(跟看板一樣)
+    if s == 'stale':
+        return '履歷換過了,網頁上傳的還是舊的,先讓 agent 重填'
+    if s != 'todo' and (apply.get('delivery') or {}).get('method') not in ('direct_upload', 'no_profile', 'platform_profile'):
+        return '填表檢查沒有回報這次直接上傳或使用哪一份平台履歷'
+    if s == 'sending':
+        return '正在送出'
+    if s != 'confirmed':
         return '還沒確認送出'
+    rnd = (m.get('approve') or {}).get('round')
+    if rnd is not None and rnd != apply.get('at'):
+        return '確認的是上一輪填的頁,要重新確認送出'        # 確認綁在「哪一輪填表」:重填、重打過就作廢
+    tab = (m.get('approve') or {}).get('tab')
+    if tab is not None and tab != apply.get('tab_id'):
+        return '確認的不是現在這一頁,要重新確認送出'        # 也綁在「哪一頁」:換過一頁就作廢(以前的確認沒記頁,不看)
     ks = {x.get('k') for x in f.get('f', []) if x.get('src') == 'bank'}
     if answers_pending(fb, url):
-        return '還有答案等你確認或填寫'
+        # 等他的全是缺證據的(不叫他確認):照實講缺證據,不然他看到「等你確認」卻找不到要確認的那一條(#315)
+        asked = any(e['k'] in ks for e, _ in find_pending(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
+        return '還有答案等你確認或填寫' if asked else NO_EVIDENCE
     if any(e.get('tr') for e in _bank(fb) if e.get('k') in ks):
         return '有答案你改了{},{}還沒照著重翻'.format(*lang_words())
     if any(x.get('refill') for x in f.get('f', [])):
-        return '有答案改過,網頁上還是舊的,先讓 agent 改'       # 他核准的要是網頁上真的那一頁
-    if (m['approve'].get('snap') or {}) != snapshot(fb, url):
+        return '有答案改過,網頁上還是舊的,先讓 agent 改'       # 他確認的要是網頁上真的那一頁
+    if ((m.get('approve') or {}).get('snap') or {}) != snapshot(fb, url):
         return '確認之後答案改過,要重新確認送出'
     return None
 
 
-def apply_mark_sent(fb, url, evidence, today=None, sent_v=None):
-    """送出成功(有確認頁證據)才走這裡:搬到已投遞、鎖表單、清掉待重打。核准紀錄留著當證據。"""
-    today = today or _today()
-    m = fb[url]
-    m['app'] = 'sent'
-    m.setdefault('sent_at', today)
-    if sent_v:
-        m.setdefault('sent_v', sent_v)
-    m['form']['lock'] = 1
-    for x in m['form'].get('f', []):
-        x.pop('refill', None)
-    m.setdefault('apply', {})['sent'] = evidence
-    return m
+def start_submit(fb, url, status=None):
+    """你已確認 → 正在送出:那一刻再跑一次檢查清單(從按確認到這裡,答案、驗收都可能變了;狀態表修正 5)。
+    過了就送「開始送出」事件、回 None;不過就不動、回原因(卡留在你已確認)。apply_run 派 agent 送出前走這一支。"""
+    problem = approval_problem(fb, url, status)
+    if problem:
+        return problem
+    try:
+        ds.fire(fb, url, 'submit_start')
+    except ds.Forbidden as e:
+        return str(e)
+    return None
+
+
+def approval(fb, url, at=None):
+    """按確認送出存下的:當下每一題會送出去的值(快照),和確認的是哪一輪填表(那一輪的時間)、哪一頁(分頁)。
+    看板 dsApproval 同一個。"""
+    apply = (fb.get(url) or {}).get('apply') or {}
+    out = {'snap': snapshot(fb, url), 'round': apply.get('at'), 'tab': apply.get('tab_id')}
+    if at:
+        out['at'] = at
+    return out
+
+
+def confirm_problem(fb, url, status=None):
+    """按「✅ 確認送出」之前:狀態要是停著等你,再拿現在的答案當確認快照跑一次檢查清單。None = 可以確認。
+    看板的 approveBlocker 同一條(按鈕灰掉、卡上寫的原因就是這一句)。"""
+    import autopilot
+    import copy
+    m = fb.get(url) or {}
+    if not m.get('form'):
+        return '這張還沒有表單紀錄'
+    gate = autopilot.ship_blocked(fb, {'id': url}, status)
+    if gate:
+        return gate
+    s = ds.state(m)
+    if s == 'todo':
+        return 'agent 還沒填這張,先讓它填好、你看過頁面再確認送出'
+    if s != 'parked':
+        return approval_problem(fb, url, status) or f'「{ds.label(s)}」時不能確認送出'
+    trial = copy.deepcopy(fb)
+    ds.fire(trial, url, 'confirm', approve=approval(trial, url))
+    return approval_problem(trial, url, status)
 
 
 def find_shared(fb):
     """填新表單之前先讀這份:他確認過、共用、有答案的。這缺專用的不在裡面(不能接到別的職缺)。"""
-    return [e for e in _bank(fb) if not e.get('pj') and not e.get('inf') and not _empty(e)]
+    return [e for e in _bank(fb) if not e.get('pj') and not e.get('inf') and not empty_answer(e)]
+
+
+def shared_text(fb):
+    """find_shared 排成給人(和 agent)讀的字:填新表單前先讀的那一份。"""
+    return '\n'.join(f"{e['k']}: {e.get('q')}\n   中文 {e.get('zh') or e.get('v')!r}\n   送出 {e.get('v')!r}"
+                     for e in find_shared(fb))
 
 
 def main():
@@ -494,21 +557,21 @@ def main():
     ap.add_argument('--shared', action='store_true', help='填新表單前先讀:他確認過的共用答案')
     ap.add_argument('--from-fill', metavar='FILL_JSON', help='代投:把 fill.json 的 fields 記成 --url 那張的表單')
     ap.add_argument('--url', help='--from-fill 記到哪一張')
-    ap.add_argument('--board', default=os.environ.get('AGENT_BOARD') or bd.LIVE,
-                    help='哪一份看板(預設 AGENT_BOARD 或現行看板;測試給副本)')
+    ap.add_argument('--board', help='哪一份看板(預設:派 agent 的程式指定的那一份,沒有就是現行看板;測試給副本)')
     a = ap.parse_args()
-    bd_live = a.board
+    bd_live = bd.target(a.board)
     if a.from_fill:
         if not a.url:
             sys.exit('--from-fill 要給 --url')
         try:
             made = record_fill(a.from_fill, a.url, live=bd_live)
+        except ds.Forbidden as e:
+            sys.exit(f'沒記進去:{e}。這張現在不是交給你填或改的,不要再跑、也不要改看板檔;照實寫進 problems 停下。')
         except (ValueError, OSError) as e:
             sys.exit(f'沒記進去:{e}\n照訊息改 fill.json 的 fields,再跑一次同一個指令。')
         print('記好了' + (f',新開的答案:{", ".join(made)}' if made else ''))
         return
-    with open(bd_live, encoding='utf-8') as f:
-        fb = json.loads(bd.parse(f.read())['fb'])
+    fb = json.loads(bd.load(bd_live)['fb'])
     if a.clear_refill:
         n = []
         bd.set_fb(lambda d: n.append(apply_clear_refill(d, a.clear_refill, a.q)), live=bd_live)
@@ -524,8 +587,7 @@ def main():
         print('\n'.join(bad) if bad else '沒問題:表單只有指標,答案都在答案庫')
         sys.exit(1 if bad else 0)
     elif a.shared:
-        print('\n'.join(f"{e['k']}: {e.get('q')}\n   中文 {e.get('zh') or e.get('v')!r}\n   送出 {e.get('v')!r}"
-                        for e in find_shared(fb)))
+        print(shared_text(fb))
     else:
         ps = find_pending(fb)
         print('\n'.join(f"{e['k']}: {e.get('q')} = {e.get('zh') or e.get('v')!r}"

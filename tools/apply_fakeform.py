@@ -170,9 +170,6 @@ class FakeForm:
             return [e for e in self.log if e.get('srv_t', 0) >= since]
 
     # ---- 驗收要問的事 ----
-    def gets(self, since=0.0):
-        return [e for e in self.events(since) if e.get('ev') == 'GET']
-
     def submits(self, since=0.0):
         return [e for e in self.events(since) if e.get('ev') == 'SUBMIT']
 

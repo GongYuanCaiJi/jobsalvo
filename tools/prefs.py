@@ -212,12 +212,9 @@ def resume_selection_signature(resumes=None):
             ref = files.get(lang)
             digest = None
             if ref:
-                h = hashlib.sha256()
                 try:
                     with open(cf.path(ref), 'rb') as f:
-                        for chunk in iter(lambda: f.read(1024 * 1024), b''):
-                            h.update(chunk)
-                    digest = h.hexdigest()
+                        digest = hashlib.file_digest(f, 'sha256').hexdigest()
                 except OSError:
                     pass
             hashes[lang] = {'configured': bool(ref), 'sha256': digest}

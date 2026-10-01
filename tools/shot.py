@@ -21,7 +21,7 @@ shot —— 自己把看板截圖出來看,不依賴任何人幫忙開視窗。
   uv run python tools/shot.py --tab ready --full                 # 整頁
   uv run python tools/shot.py --js "…"                           # 截圖前先跑一段自己的 JS
 """
-import sys, os, json, argparse, subprocess, tempfile, shutil, time, urllib.parse, urllib.request, socket
+import sys, os, json, argparse, subprocess, tempfile, shutil, time, urllib.parse, urllib.request, socket, contextlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
@@ -47,11 +47,17 @@ def sandbox_api(base, path, body=None, method=None, headers=None, timeout=10, ra
     return out if raw else json.loads(out)
 
 
-def sandbox_flow(base, **flow):
-    """透過副本伺服器的設定 API 改自動流程(跟他在設定頁按儲存同一條路)。"""
-    settings = sandbox_api(base, '/api/settings').get('settings') or {}
-    settings['flow'] = flow
-    return sandbox_api(base, '/api/settings', {'settings': settings})
+# 這一輪開的副本看板網址:board_check 開好副本後填進來。放這裡(不放 board_check):board_check 是 __main__,
+# board_check_apply 另外 import 它會拿到沒填網址的第二份
+SB_URL = ['']
+FLOW_OFF = {'like_to_prep': False, 'auto_prep': False, 'auto_advance': False, 'auto_fill': False, 'replies_at': ''}
+
+
+def flow(**on):
+    """副本的自動流程:全部關著,只開 on 給的那幾樣。透過副本伺服器的設定 API 改(跟他在設定頁按儲存同一條路)。"""
+    settings = sandbox_api(SB_URL[0], '/api/settings').get('settings') or {}
+    settings['flow'] = dict(FLOW_OFF, **on)
+    return sandbox_api(SB_URL[0], '/api/settings', {'settings': settings})
 
 
 def free_port():
@@ -75,15 +81,15 @@ class Sandbox:
         for _ in range(80):
             try:
                 urllib.request.urlopen(self.url, timeout=1); return
-            except Exception:
+            except OSError:   # 還沒起來(連不上、逾時都是 OSError)
                 time.sleep(0.1)
         self.close(); sys.exit('副本 server 起不來')
 
     def close(self):
         try: self.proc.terminate(); self.proc.wait(timeout=5)
-        except Exception:
-            try: self.proc.kill()
-            except Exception: pass  # noqa: S110
+        except (OSError, subprocess.TimeoutExpired):   # 叫不停:直接收掉
+            with contextlib.suppress(OSError):   # 已經結束了
+                self.proc.kill()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 

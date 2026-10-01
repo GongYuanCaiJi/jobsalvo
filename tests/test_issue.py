@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """對 GitHub issue 寫東西前的私人字串把關:有就不送、清單不在也不送、gh 參數原樣交出去。"""
-import os, sys, re, unittest
+import contextlib, os, sys, re, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
@@ -63,15 +63,8 @@ class WordListInWorktree(unittest.TestCase):
         with open(os.path.join(m, '.git', 'info', 'private-words'), 'w') as f:
             f.write('Alice\n')
         run('git', 'worktree', 'add', '-q', os.path.join(d, 'wt'), cwd=m)
-        old = os.getcwd()
-        os.chdir(os.path.join(d, 'wt'))
-        saved = dict(os.environ)
-        os.environ.clear(); os.environ.update(env)
-        try:
+        with contextlib.chdir(os.path.join(d, 'wt')), mock.patch.dict(os.environ, env, clear=True):
             pats, where = ps.words()
-        finally:
-            os.chdir(old)
-            os.environ.clear(); os.environ.update(saved)
         self.assertEqual([w for w, _ in pats], ['Alice'])
 
 

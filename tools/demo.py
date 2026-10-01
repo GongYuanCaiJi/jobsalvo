@@ -83,8 +83,9 @@ def marks(js, resumes):
                      'at': '2026-01-01'}],
     }
     if resume_id:
-        fb[ids[9]]['sent_v'] = f'zh-{resume_id}'
-        fb[ids[10]]['sent_v'] = f'en-{resume_id}'
+        import ship   # 寄出的是哪一份只由 ship.record_sent 寫
+        ship.record_sent(fb, ids[9], version=f'zh-{resume_id}')
+        ship.record_sent(fb, ids[10], version=f'en-{resume_id}')
     return fb
 
 
@@ -129,8 +130,7 @@ def build(path, extra=0):
     data = {'jobs': js, 'status': status, 'research': [], 'bank': bank()}
     doc = bd.assemble(read('board.css'), bd.stat_first(read('header.html'), data), '', data,
                       json.dumps(marked, ensure_ascii=False), read('board.js'))
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(doc)
+    bd.write_doc(path, doc)
     return path
 
 

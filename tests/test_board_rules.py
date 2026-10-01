@@ -10,8 +10,8 @@ TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, TOOLS)
 
 import board_server as bs
+import delivery_state
 import config as cf
-import form_record
 import settings_api
 
 
@@ -25,33 +25,12 @@ class SharedBoardRules(unittest.TestCase):
     def test_mark_empty_and_conflict_equivalence_cases(self):
         for case in CASES['mark_values']:
             with self.subTest(case=case['name']):
-                self.assertEqual(bs._lean(case['value']), case['normalized'])
+                self.assertEqual(delivery_state.lean(case['value']), case['normalized'])   # 伺服器比對標記用的那一份
                 self.assertEqual(bs._same(case['value'], case['base']), case['same'])
-
-    def test_approval_cases(self):
-        for case in CASES['approvals']:
-            with self.subTest(case=case['name']):
-                problem = form_record.approval_problem(case['state'], case['url'], case.get('status', PASSED))
-                self.assertEqual(problem, case['problem'])
-                self.assertEqual(problem is not None, case['blocked'])
-
-    def test_approve_preview_cases_agree_with_approval_problem(self):
-        """看板的核准前預覽(approveBlocker)= 拿現在的答案當核准快照,跑同一套核准規則。
-        Python 這邊用 form_record 照做一次,結果要跟案例表(看板那份由 board_check 跑)一樣。
-        「agent 還沒填過」那條是看板多擋的一關(真的送出要叫回填表那段對話),Python 沒有,跳過。"""
-        import copy
-        for case in CASES['approve_blockers']:
-            if case.get('problem_contains'):
-                continue
-            with self.subTest(case=case['name']):
-                state = copy.deepcopy(case['state'])
-                if (state.get(case['url']) or {}).get('form'):
-                    state[case['url']]['approve'] = {'snap': form_record.snapshot(state, case['url'])}
-                self.assertEqual(form_record.approval_problem(state, case['url'], case.get('status', PASSED)), case['problem'])
 
     def test_custom_pending_cases(self):
         """客製還沒處理完擋不擋這張:只看這張現在會寄的那幾份(ship.documents)。
-        看板那份(custPending,shipBlocked 和核准前預覽都用它)由 board_check 跑同一張案例表。"""
+        看板不自己算:卡上顯示的是後台 ship.card_files 帶回去的這一句(pending)。"""
         from unittest import mock
         import ship
         table = CASES['custom_pending']

@@ -7,10 +7,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401
-sys.path.insert(0, TOOLS)
 import board_check  # noqa: E402
 
 

@@ -347,7 +347,7 @@ def _redirect_absolute_inputs(copy, settings):
 
 
 def _check_copy(src, copy, quick):
-    shutil.copytree(src, copy, symlinks=True, ignore=shutil.ignore_patterns('.git', '.reconcile.lock'))
+    shutil.copytree(src, copy, symlinks=True, ignore=shutil.ignore_patterns('.git', '.reconcile.lock', '*.html.sha256'))   # 看板指紋不帶:副本是剛拍的,照常信任(#307)
     config_path = os.path.join(copy, 'jobsalvo.json')
     if os.path.islink(config_path):
         with open(config_path, 'rb') as source:
@@ -412,7 +412,7 @@ def status_summary(board_path):
     try:
         with open(board_path, encoding='utf-8') as source:
             status = bd.parse(source.read())['data'].get('status')
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — 原因(只給例外類別)照實印進檢查結果
         return f'⚠ 看板驗收:讀不到副本結果({type(error).__name__})'
     if not isinstance(status, dict) or 'issues' not in status:
         return '⚠ 看板驗收:沒有驗收結果'

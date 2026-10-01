@@ -14,12 +14,11 @@ agent_run —— 派 agent + 等它完成的唯一入口。找職缺、判斷、
   - 不用 os.kill(pid,0):PID 會被回收再利用,假成功卡死。
   - 不用「.out 檔大小停止增長」:command-code -p 只在結束時才一次吐文字,跑的過程檔案一直是 0,會被誤判已停。
 """
-import subprocess,time,os,re,sys,signal,json
+import subprocess,time,os,re,sys,signal,json,contextlib,contextvars,shlex
 from dataclasses import dataclass
 sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
 import config as cf
-MODELS=['main','alt']
-END_MARK="@@ROUND_DONE@@"
+from agent_report import REPORT_FROM_ENV   # 回報來源的環境變數:名字由收回報的那一支定
 
 class AgentStartError(RuntimeError):
     def __init__(self, error):
@@ -127,7 +126,7 @@ APPLY_RULE_CLAUDE=('【瀏覽器鐵律(代投)】只准用 Claude in Chrome 的�
  '- 填欄位、點按鈕(setValue、click、fill)→ form_input、computer(左鍵點 ref);同一頁好幾欄用 browser_batch 一次做完\n'
  '- 選檔上傳(playwright filechooser + setFiles)→ file_upload,給上傳欄的 ref 和檔案的絕對路徑\n'
  '- 交接分頁(markHandoff())→ 那個分頁不要關,把它的 tabId 寫進 fill.json 的 tab_id\n'
- '- 取平台上的檔(downloadMedia)→ 你沒有做法,照【取檔方式(用 Claude 時)】寫進 problems\n\n')
+ '- 取平台上的檔(downloadMedia)→ 你沒有做法,不要取,照【取檔方式(用 Claude 時)】做\n\n')
 
 
 def claude_paired_device():
@@ -136,25 +135,27 @@ def claude_paired_device():
     return agent_chrome.conf().get('claude_device') or None
 
 
-def apply_rule(runtime='codex'):
-    import json
-    if runtime == 'claude-code':
-        import apply_tab
-        return APPLY_RULE_CLAUDE.format(agent=cf.AGENT, device=claude_paired_device()
-                                        or '(還沒連接 agent 專用的 Chrome,先停下回報)') + apply_tab.CLAUDE_SELF_READ + apply_tab.CLAUDE_PROFILE_READ
-    try:
-        with open(cf.BROWSER_STATE,encoding='utf-8') as f: inst=json.load(f).get('instance')
-    except (OSError,ValueError):
-        inst=None
-    return APPLY_RULE.format(agent=cf.AGENT,instance=inst or '(還沒設定,先停下回報)')
+def apply_rule(runtime):
+    """代投的瀏覽器鐵律:照那一家的門路給(chrome_door);不能開 Chrome 的回空字串。"""
+    import chrome_door
+    door = chrome_door.of(runtime)
+    return door.apply_rule() if door else ''
+
+# 回報的來源由程式給(#316):派 agent 的那一段說這一輪是哪一個流程,agent 的回報照這個記,不讓它自己取名字。
+# 它自己取的(例如「(職缺名)核准送出」)程式認不得,重填成功時收不掉那一則。環境變數給 agent_report,指示裡也照抄同一個。
+_REPORT_FROM = contextvars.ContextVar('report_from', default=None)
+
 
 # 每個 agent 都要能回報給使用者:它做不到、需要本人處理的事,不能只寫在自己的紀錄檔裡。
 # 回報寫進看板最上面的「📣 回報」(agent_report.py)。
 def report_rule():
+    src = _REPORT_FROM.get()
+    source = shlex.quote(src) if src else '<這一輪在做什麼>'
     return ('【回報】只回報非使用者本人不可的事:要他登入、要他給權限、要他本人點的驗證碼,而且你找不到別的路。'
      '抓不到就換別的方法抓;判斷得出來就自己判斷,照這一輪的規矩寫進產出;'
      '已經繞過去的不用報。要回報時:'
-     f'`python3 {cf.tool("agent_report.py")} --from <這一輪在做什麼> --job <職缺網址,沒有就不給> --need "<他要做什麼>" "<發生了什麼>"`。'
+     f'`python3 {cf.tool("agent_report.py")} --from {source} --job <職缺網址,沒有就不給> --need "<他要做什麼>" "<發生了什麼>"`'
+     + ('(--from 照抄,是程式給的)' if src else '') + '。'
      '用繁體中文、白話、一句講清楚。回報完照原本的規矩繼續做能做的部分。\n\n')
 
 # 使用者在看板上撥的開關(__agentfree__):要不要放手讓 agent 自己決定派幾隻。
@@ -166,13 +167,13 @@ FREE_CODEX=('(這個環境有 multi_agent_v1__spawn_agent / wait_agent / send_in
  '要並行就在同一個 exec 裡 Promise.all 同時 spawn。)')
 
 def agent_free(board=None):
-    """開關有沒有撥開。讀正在處理的那份看板(派 agent 的程式會設 AGENT_BOARD)。"""
+    """開關有沒有撥開。讀正在處理的那份看板(board_doc.target)。"""
     try:
         import json as _j, board_doc as _bd
-        live=board or os.environ.get('AGENT_BOARD') or _bd.LIVE
+        live=board or _bd.target()
         with open(live,encoding='utf-8') as f:
             return bool(_j.loads(_bd.parse(f.read())['fb']).get('__agentfree__'))
-    except Exception:
+    except Exception:  # noqa: BLE001 — 讀不到看板就當開關沒撥開(預設值);只影響要不要叫 agent 自己決定拆幾隻
         return False
 
 CODEX_CONFIG='~/.codex/config.toml'
@@ -379,6 +380,24 @@ def codex_bin(which=None, app_bins=CODEX_APP_BINS):
     return next((p for p in app_bins if os.path.isfile(p) and os.access(p, os.X_OK)), None)
 
 
+def agent_env(board, argv=(), *said):
+    """派出去的 agent 的環境:不含看板檔的位置,只有代號(board_doc.BOARD_ID);它呼叫的小工具照代號找回這一份(#307)。
+    指示或環境裡帶著看板檔的位置就不派:那等於讓 agent 能繞過狀態表直接改檔。"""
+    import board_doc as bd
+    live = os.fspath(board) if board else bd.target()
+    env = os.environ.copy()
+    env.pop('AGENT_BOARD', None)
+    env[bd.BOARD_ID] = bd.board_id(live)
+    env.pop(REPORT_FROM_ENV, None)
+    if _REPORT_FROM.get():
+        env[REPORT_FROM_ENV] = _REPORT_FROM.get()   # 它回報時的來源由程式給(agent_report 照這個記)
+    marks = {os.path.abspath(live), os.path.realpath(live)}
+    said = [str(x) for x in argv] + [x or '' for x in said] + list(env.values())
+    if any(m in s for m in marks for s in said):
+        raise ValueError('派 agent 的指示或環境裡有看板檔的位置;agent 只能透過小工具改卡片')
+    return env
+
+
 def launch(prompt, outfile, repo, model='main', effort=None, browser=None, resume=None, board=None,
            web=True, chrome=False, append=False):
     agent = _agent_entry(model)
@@ -395,9 +414,7 @@ def launch(prompt, outfile, repo, model='main', effort=None, browser=None, resum
         try:
             _attempt_line(log, agent)
             log.flush()
-            env = os.environ.copy()
-            if board:
-                env['AGENT_BOARD'] = os.fspath(board)
+            env = agent_env(board, argv, prompt, fed)
             return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True, env=env)
         except OSError as e:
@@ -418,14 +435,9 @@ def _agent_entry(agent):
 
 
 def _runtime_supports_browser(runtime):
-    return runtime in ('codex', 'claude-code')
-
-
-def browser_runtime(agent_id=None):
-    """要開瀏覽器的工作會派給哪一種執行者(第一個合格的);沒有回 None。
-    代投的指示和前置(程式先開好分頁)依執行者不同:Codex 接得了程式開的分頁,Claude 只看得到自己分頁群組裡的。"""
-    agents, _err = _eligible_agents(True, agent_id)
-    return agents[0].get('runtime') if agents else None
+    """這一家有沒有 agent 的 Chrome 的門路(chrome_door)。"""
+    import chrome_door
+    return runtime in chrome_door.DOORS
 
 
 def _eligible_agents(browser_required, agent_id=None):
@@ -550,7 +562,7 @@ def _report_authentication(agent, index, board, outfile):
             need='請在這台電腦重新登入這個 agent；只有你能完成登入。',
             live=board,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — 回報寫不進看板:改寫進這隻 agent 的紀錄(看板「看紀錄」看得到)
         try:
             with open(outfile, 'a', encoding='utf-8') as f:
                 f.write(f'\n登入失效回報未能寫進看板:{str(error)[:120]}\n')
@@ -603,11 +615,35 @@ def _record(outfile, agent, index, started, result, prompt):
 
 def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
         browser_required=False, browser=None, resume=None, board=None, web=True,
-        agent_id=None, on_start=None, launcher=None, waiter=None, prepare=None):
+        agent_id=None, on_start=None, launcher=None, waiter=None, prepare=None, report_from=None):
     """依序試用符合瀏覽器需求的 agent;只在 runtime 明確不可用時換手。
+    report_from:這一輪 agent 回報時的來源(程式給的,例如「代投」);agent 自己寫別的也照這個記(#316)。
     prepare(agent):輪到這個 agent 時回給它的 prompt(代投換手到另一家時照那一家重組、重做 Chrome 檢查,#288);
-    那一家的 Chrome 沒準備好就丟 AgentStartError,照啟動失敗換下一個。"""
-    browser_required = bool(browser_required or chrome)
+    那一家的 Chrome 沒準備好就丟 AgentStartError,照啟動失敗換下一個。
+    證據(#315):每一次派出去的指示、跑完的動作紀錄都記進現在開著的那一輪(evidence.opened);
+    流程沒開輪就記進那個流程自己的夾,沒有一次派 agent 是沒留證據的。"""
+    import evidence
+    rnd = evidence.active() or evidence.Round(os.path.splitext(os.path.basename(sys.argv[0] or ''))[0] or 'agent',
+                                              os.path.splitext(os.path.basename(outfile or ''))[0] or 'run', (), board)
+
+    def noted(agent):
+        task = prepare(agent) if prepare else prompt
+        rnd.instruction(task, agent=agent.get('id'))
+        return task
+    token = _REPORT_FROM.set(report_from) if report_from else None
+    try:
+        return _run(prompt, outfile, repo, timeout, browser_required=browser_required or chrome, browser=browser,
+                    resume=resume, board=board, web=web, agent_id=agent_id, on_start=on_start,
+                    launcher=launcher, waiter=waiter, prepare=noted)
+    finally:
+        if token is not None:
+            _REPORT_FROM.reset(token)
+        rnd.agent_log(outfile)
+
+
+def _run(prompt, outfile, repo, timeout, *, browser_required, browser, resume, board, web,
+         agent_id, on_start, launcher, waiter, prepare):
+    browser_required = bool(browser_required)
     launch_agent = launcher or launch
     wait_for_agent = waiter or wait_done
     agents, selection_error = _eligible_agents(browser_required, agent_id)
@@ -695,10 +731,8 @@ def _signal_tree(proc, sig):
             return
         except OSError:
             pass
-    try:
+    with contextlib.suppress(OSError):   # 已經結束了
         proc.terminate() if sig == signal.SIGTERM else proc.kill()
-    except OSError:
-        pass
 
 
 def _stop_tree(proc, grace=2):
@@ -715,12 +749,14 @@ def _stop_tree(proc, grace=2):
         _signal_tree(proc, signal.SIGKILL)
 
 
-def wait_done(procs, timeout=3600):
-    """等全部 agent 結束;逐一回報成功、非零結束或超時。"""
+def wait_done(procs, timeout=3600, paused=None):
+    """等全部 agent 結束;逐一回報成功、非零結束或超時。
+    paused():這一輪到現在一共暫停了幾秒(jobrun.paused_seconds);給了的話,等的這段期間暫停的時間不算進時限(#308)。"""
     procs = list(procs)
     pending = list(procs)
     results = {}
     deadline = time.monotonic() + max(0, timeout)
+    paused0 = paused() if paused else 0.0
     while pending:
         for proc in pending[:]:
             code = proc.poll()
@@ -730,7 +766,7 @@ def wait_done(procs, timeout=3600):
             pending.remove(proc)
         if not pending:
             break
-        remaining = deadline - time.monotonic()
+        remaining = deadline + ((paused() - paused0) if paused else 0.0) - time.monotonic()
         if remaining <= 0:
             for proc in pending:
                 _stop_tree(proc)

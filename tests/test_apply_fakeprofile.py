@@ -5,28 +5,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'tools'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _env  # noqa: E402  測試跑在暫存資料夾
 
 from apply_fakeprofile import FakePlatformProfile, acceptance_scenarios, sha256
 import profile_sync
-
-
-def _multipart(fields, filename=None, content=b''):
-    boundary = 'jobsalvo-fake-profile-test'
-    parts = []
-    for name, value in fields.items():
-        parts.append(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
-            f'{value}\r\n'.encode()
-        )
-    if filename is not None:
-        parts.append(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="attachment"; '
-            f'filename="{filename}"\r\nContent-Type: application/pdf\r\n\r\n'.encode()
-            + content + b'\r\n'
-        )
-    parts.append(f'--{boundary}--\r\n'.encode())
-    return b''.join(parts), f'multipart/form-data; boundary={boundary}'
 
 
 def _post(url, fields=None, filename=None, content=b''):
@@ -35,7 +18,7 @@ def _post(url, fields=None, filename=None, content=b''):
         body = urllib.parse.urlencode(fields).encode()
         content_type = 'application/x-www-form-urlencoded'
     else:
-        body, content_type = _multipart(fields, filename, content)
+        body, content_type = _env.multipart(fields, [('attachment', filename, content)])
     request = urllib.request.Request(
         url, data=body, headers={'Content-Type': content_type}, method='POST',
     )

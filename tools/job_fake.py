@@ -68,6 +68,13 @@ def research(board, sp, step, mode, direction, minutes=0):
 
 # 假的 agent 回報(fill.json 的形狀):真的填表檢查一定回報這次怎麼交履歷(delivery),
 # 少了這欄副本上核准鈕永遠按不下去。紀錄本身用 apply_run.fill_record 組,跟真的同一支。
+def _fake_runtime():
+    """假的「開這一頁的那一家」:副本設定裡用 Chrome 的那一家(副本的卡也跟真的一樣記著,沒記到的卡算接不回來)。"""
+    import chrome_door
+    door = chrome_door.current()
+    return door.runtime if door else None
+
+
 FAKE_FILL = {'delivery': {'method': 'direct_upload'}, 'tab_id': '1', 'tab_url': '', 'blank_for_him': [],
              'uploaded': [], 'notes': [], 'fixed': []}
 
@@ -83,28 +90,36 @@ def apply(board, sp, step, stage, url, limit=0):
     done = []
     status = fr.board_status(board)          # 核准規則也看投遞前驗收,跟真的一樣
 
+    import delivery_state as ds
+
     def mut(fb):
-        for u, m in fb.items():
-            if not isinstance(m, dict) or m.get('app') != 'ship' or (url and u != url) or (m.get('form') or {}).get('lock'):
+        # 跟真的 apply_run 一樣只送狀態表的事件:開始 → 填好 / 看到已收到申請頁
+        for u, m in list(fb.items()):
+            if not isinstance(m, dict) or m.get('app') != 'ship' or m.get('rm') or (url and u != url):
                 continue
             if stage == 'fill':
-                if limit and len(done) >= limit:     # 「跑幾張」:填滿就停
+                if (limit and len(done) >= limit) or not ds.allowed(m, 'fill_start'):     # 「跑幾張」:填滿就停
                     continue
-                m['apply'] = ar.fill_record('fill', m.get('apply'), FAKE_FILL, [], 'sandbox-' + str(me), '', 'sandbox')
-                # 真的填表一定由 agent 用 form_record 重記這張表單(記的當天日期,並作廢舊的核准);
-                # 沒有表單紀錄的話副本上新進可投遞的卡永遠走不到核准。
+                ds.fire(fb, u, 'fill_start', apply={'stage': 'fill', 'at': today, 'issues': []})
+                # 真的填表一定由 agent 用 form_record 重記這張表單(記的當天日期);
+                # 沒有表單紀錄的話副本上新進可投遞的卡永遠走不到確認。
                 old = m.get('form') or {}
                 m['form'] = {'plat': old.get('plat') or '沙箱', 'f': old.get('f') or [], 'at': today}
-                m.pop('approve', None)
+                ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fill', m.get('apply'), FAKE_FILL, [], 'sandbox-' + str(me), '', 'sandbox',
+                                                               runtime=_fake_runtime()))
                 done.append(u)
             elif stage == 'fix':
-                if (m.get('apply') or {}).get('session'):
-                    m['apply'] = ar.fill_record('fix', m['apply'], FAKE_FILL, [], m['apply']['session'], '', 'sandbox')
+                if (m.get('apply') or {}).get('session') and ds.allowed(m, 'fix_start'):
+                    ds.fire(fb, u, 'fix_start', apply={'stage': 'fix', 'at': today, 'issues': []})
+                    ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fix', m['apply'], FAKE_FILL, [], m['apply']['session'], '', 'sandbox'))
                     fr.apply_clear_refill(fb, u)
                     done.append(u)
             elif fr.approval_problem(fb, u, status) is None:
                 ev = ar.submit_evidence({'confirm_text': '(沙箱假確認頁)', 'confirm_url': ''}, '')
-                fr.apply_mark_sent(fb, u, ev, today)
+                ds.fire(fb, u, 'submit_start')
+                ds.fire(fb, u, 'submit_ok', by='agent', sent_at=today, evidence=ev)
+                import ship
+                ship.record_sent(fb, u)
                 done.append(u)
     bd.set_fb(mut, live=board, by='job_fake')
     jobrun.write(path, dict(base, phase='done', n=len(done), done=len(done), finished_at=time.time(),
@@ -133,10 +148,11 @@ def suggest(board, sp, step):
     path = os.path.join(sp, 'suggest_status.json')
     t0 = time.time()
     jobrun.write(path, {'phase': 'agent', 'pid': os.getpid(), 't0': t0}); time.sleep(step)
-    with open(os.path.join(sp, 'suggest.json'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(sp, 'suggestion.json'), 'w', encoding='utf-8') as f:    # 安檢門核對過的樣子
         json.dump({'categories': [{'name': '工程', 'icon': '⚙', 'match': 'engineer|工程師'},
                                   {'name': '其他', 'icon': '•', 'match': ''}],
-                   'tags': [{'name': '遠端', 'match': 'remote|遠端'}], 'why': '沙箱假建議'}, f, ensure_ascii=False)
+                   'tags': [{'name': '遠端', 'match': 'remote|遠端'}], 'why': '沙箱假建議', 'problems': [],
+                   'by': 'agent 判斷'}, f, ensure_ascii=False)
     jobrun.write(path, {'phase': 'done', 't0': t0, 'finished_at': time.time(), 'msg': '建議好了'})
 
 

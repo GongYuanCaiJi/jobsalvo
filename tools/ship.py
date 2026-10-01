@@ -16,7 +16,7 @@ jobsalvo 不管履歷怎麼寫、怎麼排版。它只認三件事:
 
 用法:python3 tools/ship.py            # 對「待你決定」「可投遞」的卡建好可投遞夾(跟 reconcile 做的一樣)
 """
-import os, sys, re, json, glob, shutil, hashlib, argparse, time
+import os, sys, re, json, glob, shutil, hashlib, argparse, time, tempfile, contextlib, functools
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -35,34 +35,81 @@ def _safe(name):
     return re.sub(r'[\\/:*?"<>|\s]+', '_', name).strip('_')[:60] or 'job'
 
 
-def resolve(j, fb):
-    """回 (resume_id, lang)。卡片選擇優先,其次 agent 判斷;只接受已勾選的履歷。"""
+PINNED_UNCHECKED = '你指定的履歷已經取消勾選,請重新選一份'
+NOT_PICKED = '還沒挑履歷'
+
+
+def _active_resumes():
+    return [rid for rid, item in cf.RESUMES.items() if item.get('enabled', True)]
+
+
+def _sent_version(f):
+    """已投出的卡記下的「實際寄出的那一份」(<語言>-<履歷 ID>);沒記或不是已投出回 None。"""
+    if f.get('app') != 'sent' or not f.get('sent_v'):
+        return None
+    lang, _, resume_id = str(f['sent_v']).partition('-')
+    return (resume_id, lang) if resume_id and lang else None
+
+
+def pick(j, fb):
+    """這張卡用哪份履歷、哪個語言。挑履歷的規則只有這一份(看板照這裡的結果畫)。
+    回 {resume_id, lang, problem, lang_from, pinned, sent}:
+    - 已投出、記了實際寄出的那一份:照記的,之後改設定或按鈕都不改寫已經寄出去的事實
+    - 你指定的(卡上的 resume_id / 舊的 variant)優先;被取消勾選就停下來(problem),不偷換
+    - 沒指定用 agent 挑的(resume.recommend);挑的被取消勾選一樣停下來;兩個都沒有是「還沒挑履歷」
+    - 語言不在清單上改用預設語言(第一個),lang_from 記原本要的那個,看板標出來"""
     f = fb.get(j['id']) or {}
-    rz = j.get('resume') or {}
-    active = {rid for rid, item in cf.RESUMES.items() if item.get('enabled', True)}
-    picked = f.get('resume_id') or f.get('variant')
-    recommended = rz.get('recommend')
-    # An explicit card choice is authoritative. If it was unchecked, fail instead of
-    # silently substituting the agent's recommendation.
-    resume_id = (picked if picked in active else '') if picked else (recommended if recommended in active else '')
-    lang = f.get('lang') or rz.get('lang') or (cf.LANGS[0] if cf.LANGS else '')
-    if lang not in cf.LANGS:
-        lang = cf.LANGS[0] if cf.LANGS else ''
-    return resume_id, lang
+    rz = j.get('resume') if isinstance(j.get('resume'), dict) else {}
+    default_lang = cf.LANGS[0] if cf.LANGS else ''
+    sent = _sent_version(f)
+    if sent:
+        return {'resume_id': sent[0], 'lang': sent[1], 'problem': '', 'lang_from': '', 'pinned': True, 'sent': True}
+    active = _active_resumes()
+    pinned = f.get('resume_id') or f.get('variant') or ''
+    recommended = rz.get('recommend') or ''
+    if pinned:
+        resume_id, problem = (pinned, '') if pinned in active else ('', PINNED_UNCHECKED)
+    elif recommended:
+        resume_id, problem = (recommended, '') if recommended in active else ('', f'{cf.AGENT} 挑的履歷已經取消勾選,請選一份')
+    else:
+        resume_id, problem = '', NOT_PICKED
+    wanted = f.get('lang') or rz.get('lang') or default_lang
+    lang, lang_from = (wanted, '') if wanted in cf.LANGS else (default_lang, wanted)
+    return {'resume_id': resume_id, 'lang': lang, 'problem': problem, 'lang_from': lang_from,
+            'pinned': bool(pinned), 'sent': False}
+
+
+def record_sent(fb, url, j=None, version=None):
+    """標成已投出時記下實際寄出的是哪一份(sent_v = <語言>-<履歷 ID>)。只有這裡寫 sent_v;記過就不改。
+    version:幫你填表送出前就記下的那一份(送出那幾分鐘他可能換了履歷);沒給就看這張的要寄的檔案(ship.json),
+    都沒有才照現在挑的。挑不出來就不記(統計表算「不明」)。"""
+    m = fb.get(url)
+    if not isinstance(m, dict) or m.get('sent_v'):
+        return None
+    if not version:
+        info = read_info(folder(url, name=card.name(j) if j else None, migrate=False))
+        if info.get('lang') and info.get('variant'):
+            version = f"{info['lang']}-{info['variant']}"
+    if not version and j:
+        resume_id, lang = resolve(j, fb)
+        version = f'{lang}-{resume_id}' if resume_id and lang else None
+    if version:
+        m['sent_v'] = version
+    return version
+
+
+def resolve(j, fb):
+    """回 (resume_id, lang);選不出履歷時 resume_id 是空的(原因看 pick)。"""
+    p = pick(j, fb)
+    return p['resume_id'], p['lang']
 
 
 def _digest(path):
-    h = hashlib.sha256()
     try:
         with open(path, 'rb') as f:
-            for block in iter(lambda: f.read(1024 * 1024), b''):
-                h.update(block)
+            return hashlib.file_digest(f, 'sha256').hexdigest()
     except OSError:
         return ''
-    return h.hexdigest()
-
-
-_SIG_CACHE = {}
 
 
 def source_sig(path):
@@ -71,12 +118,12 @@ def source_sig(path):
         st = os.stat(path)
     except (OSError, TypeError):
         return ''
-    key = (path, st.st_mtime_ns, st.st_size)
-    if key not in _SIG_CACHE:
-        if len(_SIG_CACHE) > 256:
-            _SIG_CACHE.clear()
-        _SIG_CACHE[key] = _digest(path)
-    return _SIG_CACHE[key]
+    return _sig_at(path, st.st_mtime_ns, st.st_size)
+
+
+@functools.lru_cache(maxsize=256)
+def _sig_at(path, _mtime_ns, _size):
+    return _digest(path)
 
 
 def item_key(kind, item_id, lang):
@@ -84,16 +131,18 @@ def item_key(kind, item_id, lang):
     return f'{kind}:{item_id}:{lang}'
 
 
+def _files_of(kind, item_id):
+    """設定裡那一份履歷(kind='resume')或附件的 {語言: 檔}。"""
+    if kind == 'resume':
+        return (cf.RESUMES.get(item_id) or {}).get('files') or {}
+    item = next((a for a in cf.ATTACHMENTS if str(a.get('id') or '') == item_id), None)
+    return (item or {}).get('files') or {}
+
+
 def migrate_custom_keys(fb):
     """舊的客製紀錄 key 沒有語言(resume:<id>、attachment:<id>)。照紀錄裡原始檔的簽章認出是哪個語言的檔,
     改成 <kind>:<id>:<語言>;認不出來的(原始檔後來換過)留著不動,看板上列成「這張現在不寄這份」,可以清掉。
     resume:legacy(更早的 custom_file)不分語言,不動。回改了幾筆。"""
-    def files_of(kind, item_id):
-        if kind == 'resume':
-            return (cf.RESUMES.get(item_id) or {}).get('files') or {}
-        item = next((a for a in cf.ATTACHMENTS if str(a.get('id') or '') == item_id), None)
-        return (item or {}).get('files') or {}
-
     moved = 0
     for state in fb.values():
         docs = state.get('custom_docs') if isinstance(state, dict) else None
@@ -106,7 +155,7 @@ def migrate_custom_keys(fb):
                     or not isinstance(entry, dict):
                 continue
             want = {entry.get('source_sig'), entry.get('candidate_source_sig')} - {None, ''}
-            langs = [lang for lang, rel in files_of(kind, item_id).items()
+            langs = [lang for lang, rel in _files_of(kind, item_id).items()
                      if rel and source_sig(cf.path(rel)) in want]
             new = item_key(kind, item_id, langs[0]) if len(langs) == 1 else ''
             if not new or new in docs:
@@ -116,18 +165,20 @@ def migrate_custom_keys(fb):
     return moved
 
 
-def _custom_entry(fb, url, item_id, kind):
-    f = fb.get(url) or {}
-    docs = f.get('custom_docs') if isinstance(f.get('custom_docs'), dict) else {}
-    entry = docs.get(item_id)
-    if isinstance(entry, dict):
-        return entry
-    # Older cards used one custom_file for the selected resume. Keep reading it
-    # as an already accepted resume override until the user replaces it.
-    if kind == 'resume' and f.get('custom_file'):
-        rel = str(f['custom_file'])
-        return {'status': 'accepted', 'path': rel, 'name': os.path.basename(rel), 'legacy': True}
-    return {}
+def _custom_entry(fb, url, item_id):
+    """這份檔這張卡的客製紀錄(沒有回 {})。擋不擋送出看它的狀態。"""
+    docs = (fb.get(url) or {}).get('custom_docs')
+    entry = docs.get(item_id) if isinstance(docs, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def _legacy_entry(fb, url):
+    """更早的卡用一個 custom_file 代替挑中的履歷,當成已收下的客製版讀。"""
+    rel = (fb.get(url) or {}).get('custom_file')
+    if not rel:
+        return {}
+    rel = str(rel)
+    return {'status': 'accepted', 'path': rel, 'name': os.path.basename(rel), 'legacy': True}
 
 
 def _safe_custom_path(rel):
@@ -141,49 +192,66 @@ def _safe_custom_path(rel):
     return full if full.startswith(home + os.sep) else None
 
 
+def _stale(entry, source):
+    """已收下的客製版是從哪一份原始檔做的(source_sig);原始檔後來換過(或沒了)就對不上,不寄它。"""
+    expected = entry.get('source_sig')
+    return bool(entry.get('status') == 'accepted' and expected and (not source or source_sig(source) != expected))
+
+
 def _custom_path(entry, source):
-    if entry.get('status') != 'accepted' or not entry.get('path'):
+    if entry.get('status') != 'accepted' or not entry.get('path') or _stale(entry, source):
         return None
     path = _safe_custom_path(entry['path'])
-    if not path or not os.path.isfile(path):
-        return None
-    expected = entry.get('source_sig')
-    if expected and (not source or _digest(source) != expected):
-        return None
-    return path
+    return path if path and os.path.isfile(path) else None
 
 
-def _effective_path(entry, source):
-    path = _custom_path(entry, source) or source
+def _chosen(fb, url, item_id, kind, source):
+    """這份檔寄哪一個:收下的客製紀錄 > 舊的「這張用自己的檔」(只有履歷) > 原始檔。回 (路徑, 用的那筆客製紀錄或 None)。"""
+    candidates = [_custom_entry(fb, url, item_id)]
+    if kind == 'resume':
+        candidates.append(_legacy_entry(fb, url))
+    for entry in candidates:
+        path = _custom_path(entry, source)
+        if path:
+            return path, entry
+    return source, None
+
+
+def _effective(path):
     if path and path.lower().endswith(('.md', '.markdown')):
         return markdown_pdf.output_path(path)
     return path
 
 
+def _document(fb, url, item_id, kind, name, source, source_rel, skill, style):
+    entry = _custom_entry(fb, url, item_id) or (_legacy_entry(fb, url) if kind == 'resume' else {})
+    path, used = _chosen(fb, url, item_id, kind, source)
+    return {
+        'id': item_id, 'kind': kind, 'name': name, 'source': source, 'source_rel': source_rel, 'skill': skill,
+        'entry': entry,
+        'custom_path': _safe_custom_path(entry.get('candidate_path') or entry.get('path')),
+        'effective_path': _effective(path),
+        'custom': used is not None, 'custom_rel': str(used['path']) if used else '',
+        'style_path': style,
+        'stale': _stale(entry, source),
+    }
+
+
 def documents(j, fb):
-    """列出這張卡會附上的履歷與附件，以及它們的客製狀態。"""
+    """列出這張卡會附上的履歷與附件，以及它們的客製狀態。選不出履歷就是空的(不猜)。"""
     resume_id, lang = resolve(j, fb)
     url = j['id']
+    if not resume_id:
+        return []
     out = []
     resume = cf.RESUMES.get(resume_id) or {}
-    src = cf.master(resume_id, lang) if resume_id else None
+    src = cf.master(resume_id, lang)
     if src or (fb.get(url) or {}).get('custom_file'):
-        item_id = item_key('resume', resume_id, lang) if resume_id else 'resume:legacy'
-        entry = _custom_entry(fb, url, item_id, 'resume')
-        rel = (resume.get('files') or {}).get(lang, '')
-        if not resume_id:
-            rel = (fb.get(url) or {}).get('custom_file', '')
-            src = cf.path(rel) if rel else None
-        skill = str(resume.get('skill') or '')
-        out.append({
-            'id': item_id, 'kind': 'resume', 'name': str(resume.get('name') or cf.resume_name(resume_id) or '履歷'),
-            'source': src, 'source_rel': rel, 'skill': skill, 'entry': entry,
-            'custom_path': _safe_custom_path(entry.get('candidate_path') or entry.get('path')),
-            'effective_path': _effective_path(entry, src),
-            'style_path': cf.path((resume.get('styles') or {}).get(lang) or '') if resume_id else None,
-            'stale': bool(entry.get('status') == 'accepted' and entry.get('source_sig') and src
-                          and _digest(src) != entry.get('source_sig')),
-        })
+        out.append(_document(fb, url, item_key('resume', resume_id, lang), 'resume',
+                             str(resume.get('name') or cf.resume_name(resume_id) or '履歷'), src,
+                             (resume.get('files') or {}).get(lang, ''), str(resume.get('skill') or ''),
+                             cf.path((resume.get('styles') or {}).get(lang) or '')))
+        out[-1]['item'] = resume_id
     for attachment in cf.ATTACHMENTS:
         if not attachment.get('enabled', True):
             continue
@@ -193,19 +261,51 @@ def documents(j, fb):
         rel = (attachment.get('files') or {}).get(lang)
         if not rel:
             continue
-        source = cf.path(rel)
-        item_id = item_key('attachment', str(attachment.get('id') or ''), lang)
-        entry = _custom_entry(fb, url, item_id, 'attachment')
-        out.append({
-            'id': item_id, 'kind': 'attachment', 'name': str(attachment.get('name') or os.path.basename(rel)),
-            'source': source, 'source_rel': rel, 'skill': str(attachment.get('skill') or ''), 'entry': entry,
-            'custom_path': _safe_custom_path(entry.get('candidate_path') or entry.get('path')),
-            'effective_path': _effective_path(entry, source),
-            'style_path': cf.path((attachment.get('styles') or {}).get(lang) or ''),
-            'stale': bool(entry.get('status') == 'accepted' and entry.get('source_sig')
-                          and _digest(source) != entry.get('source_sig')),
-        })
+        out.append(_document(fb, url, item_key('attachment', str(attachment.get('id') or ''), lang), 'attachment',
+                             str(attachment.get('name') or os.path.basename(rel)), cf.path(rel), rel,
+                             str(attachment.get('skill') or ''), cf.path((attachment.get('styles') or {}).get(lang) or '')))
+        out[-1].update(item=str(attachment.get('id') or ''), short=str(attachment.get('short') or ''))
     return out
+
+
+def card_files(j, fb):
+    """一張卡的要寄的檔案(給看板):用哪份履歷、哪個語言、附哪幾份、每份寄客製版還是原始檔、
+    還沒辦法決定時的原因。每次都用現在的設定算。"""
+    p = pick(j, fb)
+    docs = documents(j, fb) if p['resume_id'] else []
+    return {
+        'resume_id': p['resume_id'], 'resume_name': cf.resume_name(p['resume_id']) if p['resume_id'] else '',
+        'lang': p['lang'], 'lang_from': p['lang_from'], 'problem': p['problem'], 'sent': p['sent'],
+        'choices': [{'id': rid, 'name': cf.resume_name(rid)} for rid in _active_resumes()],
+        'langs': list(cf.LANGS),
+        'files': [{'id': d['id'], 'kind': d['kind'], 'item': d.get('item', ''), 'name': d['name'],
+                   'short': d.get('short', ''), 'custom': d['custom'], 'path': d['custom_rel'], 'stale': d['stale'],
+                   # 原始檔有沒有 PDF 預覽(PDF 或 markdown 才有;看板照這個接 /api/source-preview)
+                   'preview': bool(d['custom'] or str(d.get('source_rel') or '').lower().endswith(('.pdf', '.md', '.markdown')))}
+                  for d in docs],
+        'pending': customization_problem(j, fb),
+        'stale_ids': stale_records(j, fb),
+    }
+
+
+def stale_records(j, fb):
+    """這張卡所有已收下、但原始檔後來換過的客製紀錄(不只現在要寄的那幾份):看板照實講「不寄它」。"""
+    docs = (fb.get(j['id']) or {}).get('custom_docs')
+    out = []
+    for key, entry in (docs.items() if isinstance(docs, dict) else []):
+        kind, _, rest = str(key).partition(':')
+        item_id, _, lang = rest.partition(':')
+        if kind not in ('resume', 'attachment') or not lang or not isinstance(entry, dict):
+            continue
+        rel = _files_of(kind, item_id).get(lang)
+        if rel and _stale(entry, cf.path(rel)):
+            out.append(key)
+    return out
+
+
+WAITING = {'review': ' 的客製版等你看，收下或退回後才能送出',
+           'rework': ' 的客製版退回重寫中，完成後才能送出',
+           'working': ' 正在客製，完成後才能送出'}
 
 
 def customization_problem(j, fb):
@@ -215,13 +315,9 @@ def customization_problem(j, fb):
         items = [{'name': (e or {}).get('name') or '有一份檔案', 'entry': e}
                  for e in (((fb.get(j['id']) or {}).get('custom_docs')) or {}).values() if isinstance(e, dict)]
     for item in items:
-        status = (item.get('entry') or {}).get('status')
-        if status == 'review':
-            return f'{item["name"]} 的客製版等你看，收下或退回後才能送出'
-        if status == 'rework':
-            return f'{item["name"]} 的客製版退回重寫中，完成後才能送出'
-        if status == 'working':
-            return f'{item["name"]} 正在客製，完成後才能送出'
+        why = WAITING.get((item.get('entry') or {}).get('status'))
+        if why:
+            return f'{item["name"]}{why}'
     return ''
 
 
@@ -290,13 +386,12 @@ def rename(url, new_title):
 
 def sources(j, fb):
     """這張卡的可投遞夾要放哪些檔:(履歷檔, [附件…], 是不是這張自己上傳的)。"""
-    f = fb.get(j['id']) or {}
     docs = documents(j, fb)
     resume = next((item for item in docs if item['kind'] == 'resume'), None)
     src = resume.get('effective_path') if resume else None
     atts = [item['effective_path'] for item in docs if item['kind'] == 'attachment' and item.get('effective_path')]
-    own = bool(f.get('custom_file')) or bool(resume and resume.get('entry', {}).get('status') == 'accepted'
-                                              and resume.get('entry', {}).get('path'))
+    # 「這張用自己的檔」= 真的寄客製版;收下的客製版原始檔換過了(改寄原始檔)就不算
+    own = bool(resume and resume['custom'])
     return src, atts, own
 
 
@@ -319,6 +414,16 @@ def source_items(j, fb):
     return items
 
 
+def _unique_name(name, taken):
+    """name 撞到 taken 裡的就加 -2、-3…"""
+    stem, ext = os.path.splitext(name)
+    number = 2
+    while name in taken:
+        name = f'{stem}-{number}{ext}'
+        number += 1
+    return name
+
+
 def _write_merged(directory, info):
     """Add the ordered resume-and-attachments PDF beside the individual package files."""
     files = [n for n in info.get('files', []) if isinstance(n, str) and n]
@@ -326,12 +431,7 @@ def _write_merged(directory, info):
     if old_merged and old_merged not in files:
         name = old_merged
     else:
-        name = MERGED_FILE
-        stem, ext = os.path.splitext(name)
-        number = 2
-        while name in files:
-            name = f'{stem}-{number}{ext}'
-            number += 1
+        name = _unique_name(MERGED_FILE, files)
     paths = [os.path.join(directory, n) for n in files]
     missing = [n for n, p in zip(files, paths) if not os.path.isfile(p)]
     if missing:
@@ -347,14 +447,11 @@ def _write_merged(directory, info):
             info['files'] = files
             info['merged'] = name
             problems = []
-        except Exception as e:
-            try:
+        except Exception as e:  # noqa: BLE001 — 合併失敗的原因照實寫進這張卡的問題清單(卡被擋、看板顯示)
+            with contextlib.suppress(OSError):   # 暫存檔本來就可能還沒生出來
                 os.remove(temporary)
-            except OSError:
-                pass
             problems = [f'可投遞夾合併 PDF 失敗:{e}']
-    with open(os.path.join(directory, 'ship.json'), 'w', encoding='utf-8') as f:
-        json.dump(info, f, ensure_ascii=False, indent=1)
+    _write_package_info(directory, info)
     return problems
 def build_default(j, fb):
     """把所選履歷和相容附件原樣複製進可投遞夾。回 (夾, 問題清單)。"""
@@ -363,7 +460,6 @@ def build_default(j, fb):
     if waiting:
         return folder(j['id'], name=card.name(j)), [waiting]
     src, atts, own = sources(j, fb)
-    bad = []
     d = folder(j['id'], name=card.name(j))
     if not resume_id:
         return d, ['沒有已勾選的履歷可供這張卡使用']
@@ -372,12 +468,48 @@ def build_default(j, fb):
     if not src or not os.path.isfile(src):
         return d, ['這張自己上傳的檔不見了' if own else f'履歷「{cf.resume_name(resume_id)}」沒有 {lang} 的檔']
     d = d or path_for(j)
-    os.makedirs(d, exist_ok=True)
+    # 另外建好整份再換上(#308):以前先把資料夾刪空、再一份份複製,這之間去拿檔的(agent 上傳、看板預覽)拿到缺檔的一份。
+    # 暫存的資料夾名稱以 . 開頭,找投遞夾(folder 的 *-卡號)看不到它
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    stage = tempfile.mkdtemp(prefix='.building-', dir=os.path.dirname(d))
+    try:
+        return _fill_package(j, fb, resume_id, lang, own, stage, d)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _swap_dirs(a, b):
+    """兩個資料夾一次對調(macOS renamex_np 的 RENAME_SWAP):換的那一刻沒有「不在」的空檔。做不到回 False。"""
+    if sys.platform != 'darwin':
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.renamex_np(os.fsencode(a), os.fsencode(b), 0x2) == 0
+    except (AttributeError, OSError):
+        return False
+
+
+def _put_in_place(stage, d):
+    """建好的 stage 換成投遞夾 d;d 裡不是這裡建的(代投的截圖與輸出 .apply)搬過去留著。換完 stage 是舊的那一份。"""
     keep = {'.apply'}                        # 代投的截圖與輸出,不是這裡建的
+    if not os.path.isdir(d):
+        os.rename(stage, d)
+        return
     for n in os.listdir(d):
-        if n not in keep:
-            p = os.path.join(d, n)
-            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        if n in keep:
+            os.rename(os.path.join(d, n), os.path.join(stage, n))
+    if _swap_dirs(stage, d):
+        return
+    old = stage + '.old'
+    os.rename(d, old)
+    os.rename(stage, d)
+    os.rename(old, stage)                    # 舊的那一份放回 stage,由呼叫的一起清掉
+
+
+def _fill_package(j, fb, resume_id, lang, own, stage, d):
+    """把要寄的檔複製進 stage、寫 ship.json、合併 PDF,再整份換上成投遞夾 d。回 (d, 問題清單)。"""
+    bad = []
     files = []
     source_map = {}
     items = source_items(j, fb)
@@ -386,21 +518,16 @@ def build_default(j, fb):
         if not os.path.isfile(p):
             bad.append(f'附件不見了:{p}')
             continue
-        name = os.path.basename(p)
-        stem, ext = os.path.splitext(name)
-        number = 2
-        while name == MERGED_FILE or name in files:
-            name = f'{stem}-{number}{ext}'
-            number += 1
-        destination = os.path.join(d, name)
+        name = _unique_name(os.path.basename(p), files + [MERGED_FILE])
+        destination = os.path.join(stage, name)
         shutil.copy2(p, destination)
         files.append(name)
         source_map[item['id']] = name
     info = {'variant': resume_id, 'lang': lang, 'files': files, 'custom': own, 'sources': source_map}
-    with open(os.path.join(d, 'ship.json'), 'w', encoding='utf-8') as f:
-        json.dump(info, f, ensure_ascii=False, indent=1)
+    _write_package_info(stage, info)
     if not bad:
-        bad.extend(_write_merged(d, info))
+        bad.extend(_write_merged(stage, info))
+    _put_in_place(stage, d)
     return d, bad
 
 
@@ -454,24 +581,18 @@ def _apply_previews_to_board(board, job_url, variant_key, selected, previews):
         variant = variants.setdefault(variant_key, {})
         resume_source = next((item for item in selected if item['kind'] == 'resume'), None)
         resume_preview = previews.get(resume_source['id']) if resume_source else None
+        variant.pop('html', None)
         if resume_preview:
             variant['pages'] = [pdf_preview.url(resume_preview)]
-            variant.pop('html', None)
         else:
             variant.pop('pages', None)
-            variant.pop('html', None)
 
         old_attachments = variant.get('attachments')
         old_attachments = old_attachments if isinstance(old_attachments, list) else []
         attachments = []
         for index, item in enumerate(x for x in selected if x['kind'] == 'attachment'):
             old = old_attachments[index] if index < len(old_attachments) else None
-            if isinstance(old, dict):
-                display = dict(old)
-            elif isinstance(old, str):
-                display = {'name': old}
-            else:
-                display = {}
+            display = dict(old) if isinstance(old, dict) else {'name': old} if isinstance(old, str) else {}
             display.setdefault('name', item.get('name') or os.path.basename(item['path']))
             preview = previews.get(item['id'])
             if preview:
@@ -579,24 +700,6 @@ def check(j, fb, migrate=True):
     return _package_problems(j, fb, migrate=migrate)
 
 
-def _snapshot(url, name=None):
-    d = folder(url, name=name)
-    if not d:
-        return None
-    entries = []
-    for root, dirs, files in os.walk(d):
-        dirs.sort()
-        for name in sorted(files):
-            path = os.path.join(root, name)
-            stat = os.stat(path)
-            digest = hashlib.sha256()
-            with open(path, 'rb') as f:
-                for chunk in iter(lambda: f.read(65536), b''):
-                    digest.update(chunk)
-            entries.append((os.path.relpath(path, d), stat.st_size, stat.st_mtime_ns, digest.hexdigest()))
-    return tuple(entries)
-
-
 def _inputs_hash(paths, extra=''):
     h = hashlib.sha256(extra.encode())
     for path in sorted(paths):
@@ -613,7 +716,7 @@ def _inputs_hash(paths, extra=''):
 def _finish_build(j, message, board):
     try:
         _sync_report(j['id'], message, board)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 回報更新失敗照實併進建置狀態訊息(看板顯示)
         message = f'{message + "; " if message else ""}📣 回報更新失敗:{e}'
         _set_build_state(j['id'], False, message)
         return message
@@ -621,10 +724,20 @@ def _finish_build(j, message, board):
     return message
 
 
+def _busy(fb):
+    """agent 正在用可投遞夾的卡:正在填或改、正在送出,和幫你填表那一輪正在跑的那一張(送出前的附件核對時還是你已確認)。"""
+    import delivery_state as ds
+    import jobrun
+    out = {u for u, m in fb.items() if isinstance(m, dict) and ds.state(m) in ('running', 'sending')}
+    st = jobrun.read(os.path.join(os.environ.get('APPLY_TMP') or cf.TMP, 'apply_status.json'), ('apply_run.py', 'job_fake.py'))
+    if st.get('running') and st.get('url'):
+        out.add(st['url'])
+    return out
+
+
 def reconcile_packages(man, force, check_only, board, timings=False):
     """建置、驗收與記錄可投遞夾；呼叫端只負責重建其他衍生物。"""
-    with open(board, encoding='utf-8') as f:
-        parsed = bd.parse(f.read())
+    parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     jobs = [j for j in parsed['data']['jobs'] if (fb.get(j['id']) or {}).get('app') in STAGES
             # dead 是程式判的「頁面打不開」;他在「出錯了」按了放回原處(live_ok)就是說沒壞,照常建(頁面真的活著時 board_status 會清 dead)
@@ -632,7 +745,11 @@ def reconcile_packages(man, force, check_only, board, timings=False):
             and not (fb.get(j['id']) or {}).get('rm')]
     did, failed = False, []
     elapsed = {'比對': 0.0, '建置': 0.0, '檢查': 0.0, '預覽': 0.0, '回報': 0.0}
+    busy = _busy(fb)
     for j in jobs:
+        if j['id'] in busy:
+            # agent 正拿著這張的可投遞夾填表或送出(#308):這一輪不換,記號不前進,它做完下一輪再建
+            continue
         if customization_problem(j, fb):
             # 客製檔在等你看/重寫/客製中是刻意的等待,不是建置壞了:夾子保持原樣、不報失敗,
             # 投遞前把關(check)照樣擋這張。以前算進 failed,整輪結束碼 1,所有卡的自動推進都停住。
@@ -654,7 +771,7 @@ def reconcile_packages(man, force, check_only, board, timings=False):
         started = time.perf_counter()
         try:
             directory, problems = build_default(j, fb)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 一張卡建不成照實寫進它的問題清單,不擋其他卡
             directory, problems = None, [f'可投遞夾建置失敗:{e}']
         elapsed['建置'] += time.perf_counter() - started
         started = time.perf_counter()
@@ -665,7 +782,7 @@ def reconcile_packages(man, force, check_only, board, timings=False):
         if not problems and directory:
             try:
                 _record_package_previews(directory, j, fb, board)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — 預覽建不成照實寫進這張卡的問題清單
                 problems = [f'PDF 預覽建置失敗:{e}']
         elapsed['預覽'] += time.perf_counter() - started
         started = time.perf_counter()
@@ -687,8 +804,7 @@ def clean_orphans(check_only, board):
     root = cf.SHIP_DIR
     if not os.path.isdir(root):
         return [], []
-    with open(board, encoding='utf-8') as f:
-        parsed = bd.parse(f.read())
+    parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     by_id, by_legacy = {}, {}
     for job in parsed['data']['jobs']:
@@ -703,6 +819,11 @@ def clean_orphans(check_only, board):
     for entry in sorted(os.listdir(root)):
         full = os.path.join(root, entry)
         if not os.path.isdir(full):
+            continue
+        if entry.startswith('.building-'):
+            # 重建到一半當掉留下的暫存夾(build_default 另外建好再換上用的),是這裡建的:清掉,不報來歷不明
+            if not check_only:
+                shutil.rmtree(full, ignore_errors=True)
             continue
         suffix = entry.rsplit('-', 1)[-1]
         jobs = by_id.get(suffix) or by_legacy.get(suffix) or []

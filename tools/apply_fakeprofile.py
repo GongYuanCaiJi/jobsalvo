@@ -369,17 +369,21 @@ class FakePlatformProfile:
         )
         return sha256((str(profile.get('kind')) + '\n' + content).encode())
 
+    def _files_html(self, case, profile):
+        pid = profile['id']
+        return ''.join(
+            f'<li>{html.escape(item["name"])} '
+            f'<a href="{self.download_url(case, pid, item["id"])}">下載</a> '
+            f'<form method="post" action="/delete-attachment/{quote(case)}/{quote(pid)}/{quote(str(item["id"]))}">'
+            '<button type="submit">刪除附件</button></form></li>'
+            for item in profile['attachments']
+        ) or '<li>沒有附件</li>'
+
     def _manager_html(self, case, state):
         profiles = []
         for profile in state['profiles'].values():
             pid = profile['id']
-            files = ''.join(
-                f'<li>{html.escape(item["name"])} '
-                f'<a href="{self.download_url(case, pid, item["id"])}">下載</a> '
-                f'<form method="post" action="/delete-attachment/{quote(case)}/{quote(pid)}/{quote(str(item["id"]))}">'
-                '<button type="submit">刪除附件</button></form></li>'
-                for item in profile['attachments']
-            ) or '<li>沒有附件</li>'
+            files = self._files_html(case, profile)
             profiles.append(
                 f'<section><h2>{html.escape(profile["name"])}</h2>'
                 f'<p>類型:{html.escape(profile["kind"])}</p><ul>{files}</ul>'
@@ -405,13 +409,7 @@ class FakePlatformProfile:
             f'<pre class="profile-text">{html.escape(profile_text)}</pre>'
             if isinstance(profile_text, str) and profile_text else ''
         )
-        files = ''.join(
-            f'<li>{html.escape(item["name"])} '
-            f'<a href="{self.download_url(case, pid, item["id"])}">下載</a> '
-            f'<form method="post" action="/delete-attachment/{quote(case)}/{quote(pid)}/{quote(str(item["id"]))}">'
-            '<button type="submit">刪除附件</button></form></li>'
-            for item in profile['attachments']
-        ) or '<li>沒有附件</li>'
+        files = self._files_html(case, profile)
         return (
             f'<html><meta charset="utf-8"><title>{html.escape(profile["name"])}</title>'
             + LOCAL_ACCEPTANCE_BANNER
@@ -464,5 +462,3 @@ class FakePlatformProfile:
     def fixed_snapshot(self, case):
         return self._scenario_hash(case, kind='fixed')
 
-    def scenario_snapshot(self, case):
-        return self._scenario_hash(case)

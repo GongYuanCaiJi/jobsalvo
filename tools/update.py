@@ -13,7 +13,7 @@ update —— 設定頁的「更新」:跟 main 最新的那一版。
 檢查每小時最多問一次遠端(結果存在設定的 tmp,不寫進看板檔;以前記一整天,當天合進 main 的修正整天看不到)。git 一律不准跳出帳密提示、60 秒逾時:
 伺服器裡的網頁請求卡在帳密提示上就永遠不回了。
 """
-import os, json, time, shutil, subprocess, argparse
+import os, json, time, shutil, subprocess, argparse, contextlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.dirname(HERE)
 BRANCH = 'main'
@@ -79,7 +79,7 @@ def _cache_path():
     try:
         import config as cf
         return os.path.join(cf.TMP, 'update-check.json')
-    except Exception:
+    except (ImportError, AttributeError):   # 還沒裝好(第一次安裝):沒有快取可用
         return ''
 
 
@@ -138,10 +138,8 @@ def apply(cwd=APP):
         shutil.rmtree(os.path.expanduser(f'~/.cache/jobsalvo/{old}'), ignore_errors=True)
     path = _cache_path()
     if path and os.path.isfile(path):
-        try:
+        with contextlib.suppress(OSError):   # 刪不掉的舊快取一天內會過期,更新本身已經成功
             os.remove(path)
-        except OSError:   # 刪不掉的舊快取一天內會過期,更新本身已經成功
-            pass
     version = current(cwd)
     restart = os.environ.get('JOBSALVO_LAUNCHD') != '1'
     msg = f'更新到 {version or "最新版"} 了' + (',重新啟動看板才會生效(怎麼重新啟動看 README「停止、重新啟動」;打開開機自動啟動之後,更新完會自己重新啟動)' if restart else ',看板會自己重新啟動')

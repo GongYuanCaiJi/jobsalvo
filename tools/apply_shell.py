@@ -19,7 +19,7 @@ apply_shell —— 把版控裡的看板外殼(CSS/JS/頁首)灌回板子 HTML�
 用法:python3 tools/apply_shell.py            # 灌現行看板
      uv run python tools/apply_shell.py <html>…   # 指定檔案
 """
-import sys, os, json
+import sys, os
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd
@@ -47,12 +47,6 @@ def problem(css, js, hdr):
     return ''
 
 
-def check(css, js, hdr):
-    bad = problem(css, js, hdr)
-    if bad:
-        sys.exit(bad)
-
-
 def current():
     """程式碼裡現在的外殼 (css, js, hdr);讀不到或不像看板外殼回 None。看板伺服器送頁面用。"""
     try:
@@ -63,20 +57,20 @@ def current():
 
 
 def apply_to(path, css, js, hdr):
-    p = bd.parse(read(path))
-    doc = bd.assemble(css, bd.stat_first(hdr, p['data']), p['tail'], p['data'], p['fb'], js)
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(doc)
-    os.replace(tmp, path)
-    marks = sum(1 for k, v in json.loads(p['fb']).items() if isinstance(v, dict) and v.get('s'))
+    """外殼灌進 path 那一份看板:走看板檔唯一的寫入(同一把鎖),重灌途中他存的標記不會被讀舊的那份蓋掉。"""
+    def put(p):
+        p['sty'], p['thdr'], p['app'] = css, hdr, js
+        return p
+    p = bd.rewrite(put, path, by='apply_shell')
+    marks = sum(1 for k, v in p['fb'].items() if isinstance(v, dict) and v.get('s'))
     print(f'  {os.path.basename(path)}: 職缺 {len(p["data"]["jobs"])} · '
           f'標記(保) {marks} · {os.path.getsize(path)//1024} KB')
 
 
 def main():
     css, js, hdr = read(CSS), read(JS), read(HDR)
-    check(css, js, hdr)
+    if bad := problem(css, js, hdr):
+        sys.exit(bad)
     targets = sys.argv[1:] or [cf.LIVE]
     todo = [t for t in targets if os.path.isfile(t)]
     if not todo:

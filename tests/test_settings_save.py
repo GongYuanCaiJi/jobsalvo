@@ -3,7 +3,6 @@
 import copy
 import json
 import os
-import shutil
 import sys
 import tempfile
 import unittest
@@ -12,15 +11,13 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import config as cf  # noqa: E402
 import settings_api as sa  # noqa: E402
 
 
 class SettingsSave(unittest.TestCase):
     def setUp(self):
-        self.home = tempfile.mkdtemp(prefix='settings-save-')
-        self.addCleanup(shutil.rmtree, self.home, True)
+        self.home = self.enterContext(tempfile.TemporaryDirectory(prefix='settings-save-'))
         old = cf.HOME
         self.addCleanup(lambda: cf.reload(old))
         with open(os.path.join(self.home, cf.NAME), 'w', encoding='utf-8') as f:
@@ -145,6 +142,71 @@ class SettingsSave(unittest.TestCase):
         s = cf.user_settings()
         s['search']['flag_words'] = ['x']
         self.assertEqual(sa.save({'settings': s}), [])
+
+
+
+class LegacySettingsConversion(unittest.TestCase):
+    """讀設定時把舊格式寫回成新格式回不了頭:跟看板的轉換走同一個入口(folder_history.convert),
+    先留退回點;沒有就不寫回(這一次照樣用記憶體裡轉好的跑)。平常讀設定不碰 git。"""
+    LEGACY = {'agent': {'runtime': 'codex', 'alt_runtime': 'command-code'}}
+
+    def setUp(self):
+        import folder_history
+        self.fh = folder_history
+        self.home = self.enterContext(tempfile.TemporaryDirectory(prefix='legacy-settings-'))
+        self.path = os.path.join(self.home, cf.NAME)
+        self.write(self.LEGACY)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, settings):
+        with open(self.path, 'w', encoding='utf-8') as f:
+            json.dump(settings, f)
+
+    def on_disk(self, path=None):
+        with open(path or self.path, encoding='utf-8') as f:
+            return json.load(f)
+
+    def test_the_version_before_rewriting_is_the_old_format(self):
+        import subprocess
+        loaded = cf.user_settings(self.home)
+
+        git = self.fh._git()
+        before = subprocess.run([git, 'log', '-1', '--format=%H', '--grep=轉換前'], cwd=self.home, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
+        self.assertTrue(before)
+        old = json.loads(subprocess.run([git, 'show', before + ':' + cf.NAME], cwd=self.home, text=True,
+                                        stdout=subprocess.PIPE, check=True).stdout)
+        self.assertEqual(old, self.LEGACY)
+        self.assertEqual(self.on_disk(), loaded)
+        self.assertIn('agents', loaded['agent'])
+
+    def test_without_version_history_the_old_settings_are_backed_up_first(self):
+        with mock.patch.object(self.fh, '_git', return_value=None):
+            loaded = cf.user_settings(self.home)
+
+        folder = os.path.join(self.home, self.fh.BACKUP_DIR)
+        [backup] = os.listdir(folder)
+        self.assertEqual(self.on_disk(os.path.join(folder, backup)), self.LEGACY)
+        self.assertEqual(self.on_disk(), loaded)
+
+    def test_without_a_restore_point_the_file_is_left_alone(self):
+        with open(os.path.join(self.home, self.fh.BACKUP_DIR), 'w', encoding='utf-8') as f:
+            f.write('a file where the backup folder should go')
+        with mock.patch.object(self.fh, '_git', return_value=None):
+            loaded = cf.user_settings(self.home)
+            self.assertIn('沒有退回點', self.fh.status(self.home)['conversion'])
+
+        self.assertEqual(self.on_disk(), self.LEGACY)
+        self.assertIn('agents', loaded['agent'])   # 這一次照樣用轉好的跑
+
+    def test_reading_settings_that_need_no_conversion_never_runs_git(self):
+        self.write({'agent': {'agents': [{'id': 'a', 'runtime': 'codex'}]}})
+        with mock.patch('subprocess.run', side_effect=AssertionError('讀設定跑了外部指令')):
+            cf.user_settings(self.home)
+        self.assertFalse(os.path.exists(os.path.join(self.home, '.git')))
 
 
 if __name__ == '__main__':

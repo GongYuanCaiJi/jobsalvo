@@ -21,6 +21,15 @@ SP = os.environ.get('ADD_TMP') or cf.TMP
 STATUS = 'add_status.json'
 
 
+
+def _report(msg, need, board, job=''):
+    """要他知道的事寫進看板最上面的「📣 回報」;寫不進看板至少印進這一輪的紀錄(「看紀錄」看得到)。"""
+    try:
+        import agent_report
+        agent_report.report('貼網址加入', msg, need=need, job=job, live=board)
+    except Exception as e:  # noqa: BLE001 — 回報寫不進看板:印進這一輪的紀錄
+        print(f'⚠ 這則回報寫不進看板({str(e)[:120]}):{msg} → {need}')
+
 def run(urls, board, browser_required=True, run_agent=None):
     import research as rs, prefs, page_fetch
     st = lambda d: jobrun.write(os.path.join(SP, STATUS), d)
@@ -68,15 +77,10 @@ def run(urls, board, browser_required=True, run_agent=None):
         rd = os.path.join(rs.DIR, 'rounds', time.strftime('%Y%m%d-%H%M%S') + '-add')
         os.makedirs(rd, exist_ok=True)
         try:
-            res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add')
+            res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add', board=board)
         except ar.AgentRunError as e:
             agent_error = f'判斷沒有完成:{e}'
-            try:
-                import agent_report
-                agent_report.report('貼網址加入', agent_error,
-                                    need='在「貼網址加入」按「看紀錄」確認後再重試', live=board)
-            except Exception:  # noqa: S110
-                pass
+            _report(agent_error, '在「貼網址加入」按「看紀錄」確認後再重試', board)
 
     src = {'round': time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), 'mode': 'add', 'via': 'manual'}
     empty = {'keep': False, 'fit': 0, 'why': 'agent 無法讀取職缺頁,請確認網址與登入狀態',
@@ -84,25 +88,19 @@ def run(urls, board, browser_required=True, run_agent=None):
     entries = []
     for candidate in cands:
         result = res.get(candidate['url']) or empty
-        if not agent_error and not result.get('readable'):
-            try:
-                import agent_report
-                agent_report.report('貼網址加入', f'agent 無法確認職缺頁內容:{candidate["url"]}',
-                                    need='確認職缺網址;要登入才看得到的職缺頁程式讀不到,請自己打開看',
-                                    job=candidate['url'], live=board)
-            except Exception:  # noqa: S110
-                pass
+        if not agent_error and result.get('wrong'):     # 安檢門擋下:卡照樣加(他自己貼的),摘要不用、原因照實講
+            _report('agent 交的判斷跟職缺頁對不上,卡片摘要沒寫:' + '；'.join(result['wrong'][:2])[:300],
+                    '不用你處理:卡已經加了;要查原因先打開那張卡的證據', board, job=candidate['url'])
+        elif not agent_error and not result.get('readable'):
+            _report(f'agent 無法確認職缺頁內容:{candidate["url"]}',
+                    '確認職缺網址;要登入才看得到的職缺頁程式讀不到,請自己打開看', board, job=candidate['url'])
         entry = rs.job_entry(candidate, result, src)
         entry['chan'] = '直投'
         entries.append(entry)
     added = rs.add_entries(entries, board) if entries else 0
     if gone:
-        try:
-            import agent_report
-            agent_report.report('貼網址加入', f'{len(gone)} 個網址確定已下架(HTTP 404/410 或官方資料端點),沒有加:' + '、'.join(gone[:3]),
-                                need='確認網址對不對', live=board)
-        except Exception:  # noqa: S110
-            pass
+        _report(f'{len(gone)} 個網址確定已下架(HTTP 404/410 或官方資料端點),沒有加:' + '、'.join(gone[:3]),
+                '確認網址對不對', board)
     msg = f'加進待評估 {added} 張' + (f',{len(gone)} 張已下架沒加' if gone else '')
     if agent_error:
         msg += f';{agent_error}'

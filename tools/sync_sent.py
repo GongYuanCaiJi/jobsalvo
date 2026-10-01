@@ -72,6 +72,11 @@ def _records(records):
     return out
 
 
+def record_key(record, today):
+    """一筆平台應徵紀錄是哪一筆:平台、職缺代號、應徵日。他退回過的那一筆記在卡上(sync_no),之後不再拉回。"""
+    return f"{record['platform']}:{record['id']}:{applied_date(record.get('applied_at'), today)}"
+
+
 def plan(records, fb, jobs, today):
     """只用職缺代號配卡;日期僅用來避免把舊一輪的記錄誤當成再次投遞。"""
     records = _records(records)
@@ -85,7 +90,12 @@ def plan(records, fb, jobs, today):
             unknown.append(record)
             continue
         current = fb.get(job['id']) or {}
+        if record_key(record, today) in (current.get('sync_no') or []):
+            continue                     # 他退回過這一筆對帳紀錄:說不算,就不再拉回
         if current.get('app') == 'sent':
+            # 已經記成送出了:投遞日以平台紀錄優先(最準),平台寫了日期而且跟卡上不一樣才改
+            if record['applied_at'] and applied_date(record['applied_at'], today) != current.get('sent_at'):
+                to_mark.append((job, record))
             continue
         tries = current.get('tries') or []
         last = max((str(t.get('sent_at') or '') for t in tries), default='')
@@ -109,15 +119,15 @@ def plan(records, fb, jobs, today):
 
 def mark(board, to_mark, today):
     """把 agent 報告的職缺代號配到的卡標成已投遞。"""
+    import delivery_state as ds
+
     def mut(fb):
         for job, record in to_mark:
-            entry = fb.setdefault(job['id'], {})
-            entry.pop('rm', None)
-            entry['app'] = 'sent'
-            entry['sent_at'] = applied_date(record.get('applied_at'), today)
-            # 跟手動「📮 我已在外部送出」、代投送出成功一樣:投出去的表單鎖住,不再被當成還沒送出、等他重寫的表單
-            if isinstance(entry.get('form'), dict):
-                entry['form']['lock'] = 1
+            # 跟手動「📮 我已在外部送出」、代投送出成功走同一個「已送出」移動,只差證據來源;投遞日照平台紀錄
+            ds.fire(fb, job['id'], 'platform_found', by='platform', at=datetime.datetime.now().isoformat(timespec='seconds'),
+                    sent_at=applied_date(record.get('applied_at'), today), rec=record_key(record, today))
+            import ship
+            ship.record_sent(fb, job['id'], job)          # 寄出的是哪一份:只有 ship.record_sent 寫(記過的不改)
     bd.set_fb(mut, live=board, by='平台應徵紀錄對帳')
 
 
@@ -135,10 +145,14 @@ def sync(board, records):
         return ''
     mark(board, to_mark, today)
     # 點名是哪幾張;原本在「🗑 已移除」的特別講:平台上真的投過了所以放回已投出,他才不會以為移除沒生效
-    names = [card.name(job)[:24] for job, _ in to_mark]
-    back = [card.name(job)[:24] for job, _ in to_mark if (fb.get(job['id']) or {}).get('rm')]
-    return (f'平台應徵紀錄裡有 {len(to_mark)} 張看板還沒標,已標成已投遞:' + '、'.join(names)
-            + (f'(其中 {"、".join(back)} 原本在「🗑 已移除」,平台上真的投過了,放回「已投出」)' if back else ''))
+    new = [(job, r) for job, r in to_mark if (fb.get(job['id']) or {}).get('app') != 'sent']
+    dated = [card.name(job)[:24] for job, r in to_mark if (fb.get(job['id']) or {}).get('app') == 'sent']
+    names = [card.name(job)[:24] for job, _ in new]
+    back = [card.name(job)[:24] for job, _ in new if (fb.get(job['id']) or {}).get('rm')]
+    return '；'.join(x for x in (
+        (f'平台應徵紀錄裡有 {len(new)} 張看板還沒標,已標成已投遞:' + '、'.join(names)
+         + (f'(其中 {"、".join(back)} 原本在「🗑 已移除」,平台上真的投過了,放回「已投出」)' if back else '')) if new else '',
+        ('投遞日照平台紀錄改了:' + '、'.join(dated)) if dated else '') if x)
 
 
 def main(argv=None):

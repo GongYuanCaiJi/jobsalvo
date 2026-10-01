@@ -18,5 +18,30 @@ exclude-newer = "7 days"   # 新版先等 7 天再用(https://docs.astral.sh/uv/
 target-version = "py311"
 
 [tool.ruff.lint]
-# 只開這幾條:吞錯(S110)、光禿禿的 except(E722)、沒用到的 import / 變數(F401、F841)、用到沒定義的名字(F821)
-select = ["S110", "E722", "F401", "F821", "F841"]
+# 不准默默失敗(#301):抓所有例外(BLE001)、吞錯(S110、S112、SIM105)、光禿禿的 except(E722)。
+# 每一處三選一:只抓預期的那種;影響他資料或結果的讓他看得到(看板回報、狀態訊息);真的無害的在同一行
+# `# noqa: <規則> — <理由>`(tests/test_no_silent_failures.py 檢查理由有寫)。
+# 另外:沒用到的 import / 變數(F401、F841)、用到沒定義的名字(F821)
+select = ["BLE001", "S110", "S112", "SIM105", "E722", "F401", "F821", "F841"]
+
+[dependency-groups]
+dev = [
+    "coverage==7.16.1",          # 測試的分岔覆蓋率:哪些 if/except 的路從來沒被測到(CI 單元測試那一步)
+]
+
+# 本機跟 CI 同一組指令:
+#   uv run coverage run -m unittest discover -s tests && uv run coverage combine && uv run coverage report
+# 只算 tools/(測試本身不算);branch:每個 if / except 兩條路各自算有沒有走到,沒走到的列成「行->行」。
+# 測試常用子程序跑 tools/ 的指令(例如 board_doc.py --trust):patch = subprocess 讓那些也算進來,
+# 不然明明測過的路會被列成沒測到。每個程序各寫一份,要 combine 併起來才出報告
+[tool.coverage.run]
+branch = true
+source = ["tools"]
+patch = ["subprocess"]
+disable_warnings = ["no-data-collected"]   # 測試也會起不是 tools/ 的子程序(python -c …):那些本來就不算,別在 stderr 喊
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# 直接執行指令才會走的那一行(if __name__ == '__main__':)不算:入口本身在 main() 裡,有測就是測 main()
+exclude_also = ["if __name__ == .__main__.:"]

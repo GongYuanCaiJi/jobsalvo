@@ -7,7 +7,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
 TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
-sys.path.insert(0, TOOLS)
 import chrome_bin  # noqa: E402
 
 

@@ -10,14 +10,13 @@
 起在隨機埠,背景建包與跑準備區都換成假的,不會真的去跑 reconcile 或 agent。
 頁面那一半(自動存、送出途中又打字、衝突處理)要真的瀏覽器,在 board_check.py。
 """
-import io, os, re, sys, json, gzip, time, shutil, tempfile, threading, unittest, urllib.request, urllib.error, urllib.parse
+import io, os, re, sys, json, gzip, functools, time, shutil, tempfile, threading, unittest, urllib.request, urllib.error, urllib.parse, contextlib
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
-sys.path.insert(0, TOOLS)
 import board_doc as bd          # noqa: E402
 import board_server as bs       # noqa: E402
 from http.server import ThreadingHTTPServer  # noqa: E402
@@ -25,11 +24,7 @@ from http.server import ThreadingHTTPServer  # noqa: E402
 JOBS = [{'id': 'https://ex.test/job/%d' % i, 'target': 'Job %d' % i} for i in range(1, 4)]
 
 
-def make_board(path, fb=None, jobs=None, app='/*app v1*/', sty=':root{--a:1}'):
-    doc = bd.assemble(sty, '<b id="stat-first">0</b>', '', {'jobs': jobs or JOBS},
-                      json.dumps(fb or {}, ensure_ascii=False), app)
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(doc)
+make_board = functools.partial(_env.make_board, jobs=JOBS)
 
 
 def read(path):
@@ -69,13 +64,17 @@ class Tmp(unittest.TestCase):
         self._tb = bs.trigger_build
         bs.trigger_build = lambda: self.builds.append(1)   # 不要真的跑 reconcile
         import board_status   # 職缺頁判斷的快取:每個測試從空的開始,別的測試記的判斷不能帶進來
-        try:
+        with contextlib.suppress(OSError):   # 還沒有快取檔:本來就是空的
             os.remove(board_status._verdict_cache_path())
-        except OSError:   # 還沒有快取檔:本來就是空的
-            pass
 
     def tearDown(self):
         bs.trigger_build = self._tb
+        # 存檔排的資料夾版本計時器(folder_history.note_saved)在這條測試裡收掉:還沒響的取消,正在存的等它存完。
+        # 以前留著,1 秒後在下一條測試裡跑 git,被那條換掉的 subprocess.run 抓到(#335)
+        for t in threading.enumerate():
+            if isinstance(t, threading.Timer):
+                t.cancel()
+                t.join()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -212,18 +211,15 @@ class BuildCompletion(Tmp):
         # 不該回「來源檔更新失敗」擋下這一輪(那時也沒有「整理要寄的檔案」回報可看)
         import reconcile
         import source_sync
-        old_live, old_state = bd.LIVE, bs.STATE
-        bd.LIVE = bs.STATE = self.path
+        self.enterContext(mock.patch.object(bd, 'LIVE', self.path))
+        self.enterContext(mock.patch.object(bs, 'STATE', self.path))
         getattr(bs, '_source_fail', {}).clear()
-        try:
-            with mock.patch.object(source_sync, 'stale', return_value=True):
-                for code, want in ((reconcile.PACKAGE_PROBLEMS, ''), (1, '來源檔更新失敗')):
-                    with self.subTest(code=code), \
-                            mock.patch.object(bs.subprocess, 'run', return_value=mock.Mock(returncode=code)):
-                        got = bs._source_preflight()
-                        self.assertTrue(got.startswith(want) if want else got == '', got)
-        finally:
-            bd.LIVE, bs.STATE = old_live, old_state
+        with mock.patch.object(source_sync, 'stale', return_value=True):
+            for code, want in ((reconcile.PACKAGE_PROBLEMS, ''), (1, '來源檔更新失敗')):
+                with self.subTest(code=code), \
+                        mock.patch.object(bs.subprocess, 'run', return_value=mock.Mock(returncode=code)):
+                    got = bs._source_preflight()
+                    self.assertTrue(got.startswith(want) if want else got == '', got)
 
     def test_source_failure_is_not_retried_every_minute(self):
         # 來源檔一直同步失敗(排版要的 Chrome 不見了、原稿壞了):自動流程每分鐘都會走到來源檢查。
@@ -307,13 +303,13 @@ class HttpBase(Tmp):
                 f.write(self.resume_paste_before)
         super().tearDown()
 
-    def req(self, path, body=None, ua='Mozilla/5.0 (iPhone)', headers=None):
+    def req(self, path, body=None, ua='Mozilla/5.0 (iPhone)', headers=None, method=None, data=None):
+        """body 給 dict 就送 JSON;data 是原樣送的位元組。回 (狀態碼, 內容, 標頭)。"""
         h = {'User-Agent': ua}
         h.update(headers or {})
-        data = None
         if body is not None:
             data = json.dumps(body).encode('utf-8'); h['Content-Type'] = 'application/json'
-        r = urllib.request.Request(self.base + path, data=data, headers=h)
+        r = urllib.request.Request(self.base + path, data=data, headers=h, method=method)
         try:
             with urllib.request.urlopen(r, timeout=10) as resp:
                 return resp.status, resp.read(), dict(resp.headers)
@@ -387,30 +383,21 @@ class Http(HttpBase):
             sync.assert_called_once_with()
 
     def test_missing_live_board_paths_skip_source_sync(self):
-        old_state, old_live = bs.STATE, bd.LIVE
-        bs.STATE = bd.LIVE = None
-        try:
-            with mock.patch('source_sync.stale', return_value=True), \
-                    mock.patch.object(bs, 'trigger_build') as build:
-                bs.trigger_source_sync()
-            build.assert_not_called()
-        finally:
-            bs.STATE, bd.LIVE = old_state, old_live
+        with mock.patch.object(bs, 'STATE', None), mock.patch.object(bd, 'LIVE', None), \
+                mock.patch('source_sync.stale', return_value=True), mock.patch.object(bs, 'trigger_build') as build:
+            bs.trigger_source_sync()
+        build.assert_not_called()
 
     def test_live_board_open_rebuilds_only_when_source_inputs_are_stale(self):
-        old_live = bd.LIVE
-        bd.LIVE = self.path
-        try:
-            with mock.patch('source_sync.stale', return_value=False), \
-                    mock.patch.object(bs, 'trigger_build') as build:
-                bs.trigger_source_sync()
-                build.assert_not_called()
-            with mock.patch('source_sync.stale', return_value=True), \
-                    mock.patch.object(bs, 'trigger_build') as build:
-                bs.trigger_source_sync()
-                build.assert_called_once_with()
-        finally:
-            bd.LIVE = old_live
+        self.enterContext(mock.patch.object(bd, 'LIVE', self.path))
+        with mock.patch('source_sync.stale', return_value=False), \
+                mock.patch.object(bs, 'trigger_build') as build:
+            bs.trigger_source_sync()
+            build.assert_not_called()
+        with mock.patch('source_sync.stale', return_value=True), \
+                mock.patch.object(bs, 'trigger_build') as build:
+            bs.trigger_source_sync()
+            build.assert_called_once_with()
 
     def test_preflight_waits_for_the_background_build_instead_of_running_a_second_one(self):
         old_live, old_state = bd.LIVE, bs.STATE
@@ -437,14 +424,10 @@ class Http(HttpBase):
             bd.LIVE, bs.STATE = old_live, old_state
 
     def test_prep_refuses_to_start_when_source_preflight_fails(self):
-        old_live = bd.LIVE
-        bd.LIVE = self.path
         message = '來源檔更新失敗'
-        try:
-            with mock.patch.object(bs, '_source_preflight', return_value=message) as preflight:
-                code, result = bs.start_run('prep', {'mode': 'deep'})
-        finally:
-            bd.LIVE = old_live
+        with mock.patch.object(bd, 'LIVE', self.path), \
+                mock.patch.object(bs, '_source_preflight', return_value=message) as preflight:
+            code, result = bs.start_run('prep', {'mode': 'deep'})
         self.assertEqual(code, 409)
         self.assertEqual(result, {'msg': message})
         preflight.assert_called_once_with()
@@ -472,6 +455,86 @@ class Http(HttpBase):
         self.assertEqual(code, 409)
         self.assertEqual(json.loads(raw)['keys'], [a])
 
+    def test_the_board_sends_events_not_the_delivery_state(self):
+        """同時存檔(狀態表修正 9):看板送來的卡上投遞狀態那幾欄不算數,只看它送的事件,照磁碟上現在的狀態套表;
+        那一格不准的不做事、回原因。以前看板整張卡寫回,自動流程剛寫的「正在送出」被舊分頁蓋回「你已確認」。"""
+        import delivery_state as ds
+        a, b = JOBS[0]['id'], JOBS[1]['id']
+        filled = {'app': 'ship', 'form': {'plat': 'x', 'f': []}, 'apply': {'stage': 'fill', 'tab_id': '7'}}
+        make_board(self.path, {a: dict(filled, ds='sending', approve={'snap': {}}), b: dict(filled, ds='parked')})
+        stale_tab = dict(filled, ds='confirmed', approve={'snap': {}}, n='我的筆記')
+        code, raw, _ = self.req('/api/save', {'__rev__': 1, a: stale_tab, '__events__': [
+            {'u': a, 'ev': 'unconfirm'},                                    # 8 秒計時器已經開始送:取消確認撞上
+            {'u': b, 'ev': 'confirm', 'data': {'approve': {'snap': {}, 'round': None}}}]})
+        self.assertEqual(code, 200, raw)
+        fb = read_fb(self.path)
+        self.assertEqual((ds.state(fb[a]), fb[a]['n']), ('sending', '我的筆記'))   # 狀態照磁碟上的,筆記照收
+        self.assertEqual(ds.state(fb[b]), 'confirmed')
+        self.assertEqual([r['u'] for r in json.loads(raw)['rejected']], [a])
+        self.assertIn('正在送出', json.loads(raw)['rejected'][0]['msg'])
+
+    def test_undo_only_when_nothing_else_moved_the_card(self):
+        import delivery_state as ds
+        a = JOBS[0]['id']
+        make_board(self.path, {a: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '7'}}})
+        before = ds.part(read_fb(self.path)[a])
+        self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'confirm', 'data': {'approve': {'snap': {}}}}]})
+        after = ds.part(read_fb(self.path)[a])
+        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'undo': {'prev': before, 'after': after}}]})
+        self.assertEqual(ds.state(read_fb(self.path)[a]), 'parked')
+        self.assertEqual(json.loads(raw)['rejected'], [])
+        # 復原之前自動流程已經把它改了(這裡換成換了檔):不准整份放回;換檔的復原就是又換了一次檔
+        bs.bd.set_fb(lambda f: ds.fire(f, a, 'files_changed', why='x'), live=self.path)
+        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'undo': {'prev': before, 'after': after}}]})
+        self.assertEqual(json.loads(raw)['rejected'][0]['u'], a)
+        self.assertEqual(ds.state(read_fb(self.path)[a]), 'stale')
+        # 正在填的時候按「復原」換回履歷:也算換檔,填完到「上傳的是舊檔」(修正 12)
+        bs.bd.set_fb(lambda f: ds.fire(f, a, 'fill_start', apply={'stage': 'fill', 'at': 'x', 'issues': []}), live=self.path)
+        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [
+            {'u': a, 'undo': {'prev': before, 'after': after}, 'else': {'ev': 'files_changed', 'data': {'why': '履歷換回來了'}}}]})
+        m = read_fb(self.path)[a]
+        self.assertEqual((ds.state(m), m['apply']['stale']), ('running', '履歷換回來了'))
+
+    def test_undo_actually_sent_although_the_server_noted_the_sent_version(self):
+        """送出結果不明 → 其實送出了 → 復原:後台套完事件會補記寄出的是哪一份(sent_v),看板照狀態表算的 after 沒有它。
+        以前復原拿 after 跟後台那張整份比,差這一欄就當成「被別處改過了」不准復原,卡停在已投出
+        (CI 的看板檢查抓到:那張卡挑得出履歷才會記 sent_v;單跑那一條挑不出,CI 分組第 1 組前面的檢查讓它挑得出)。"""
+        import copy
+        import config as cf
+        import delivery_state as ds
+        a = JOBS[0]['id']
+        make_board(self.path, {a: {
+            'app': 'ship', 'ds': 'unsure', 'resume_id': next(iter(cf.RESUMES)), 'form': {'plat': 'x', 'f': []},
+            'apply': {'stage': 'fill', 'tab_id': '', 'submit_fail': {'problems': ['沒看到成功頁面'], 'clicked': True}},
+            'approve': {'snap': {}}}})
+        before = read_fb(self.path)[a]
+        data = {'by': 'agent', 'at': '2026-10-01T00:00:00Z', 'sent_at': '2026-10-01', 'evidence': {'you_sent': 'x'}}
+        board = copy.deepcopy(before)               # 看板手上那一份照同一張表走一步(board.js evFire → dsPart)
+        ds.fire({a: board}, a, 'actually_sent', **data)
+        self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'actually_sent', 'data': data}]})
+        self.assertTrue(read_fb(self.path)[a].get('sent_v'))   # 後台真的補記了,看板的 after 沒有
+        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [
+            {'u': a, 'undo': {'prev': ds.part(before), 'after': ds.part(board)}}]})
+        self.assertEqual((code, json.loads(raw)['rejected']), (200, []))
+        self.assertEqual(read_fb(self.path)[a], before)
+
+    def test_undo_of_retry_gives_back_the_locked_form(self):
+        """再投一次把整份表單(鎖著的)收進 tries;看板按復原時送復原事件和按之前那張卡,伺服器要把表單連鎖一起放回
+        (#303 每顆按鈕按一遍抓到:以前表單回來了、鎖沒回來,已投出的表單變成可以改)。"""
+        import delivery_state as ds
+        a = JOBS[0]['id']
+        card = {'app': 'sent', 'ds': 'sent', 'sent_by': 'manual', 'sent_at': '2026-01-02', 'oc': 'rej',
+                'oc_at': {'rej': '2026-01-05'}, 'form': {'plat': 'x', 'f': [{'q': 'Q', 'src': 'bank', 'k': 'k1'}], 'lock': 1}}
+        make_board(self.path, {a: card})
+        before = read_fb(self.path)[a]
+        self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'retry'}]})
+        after = read_fb(self.path)[a]
+        self.assertNotIn('form', after)
+        code, raw, _ = self.req('/api/save', {'__rev__': 1, a: before, '__base__': {a: after},
+                                              '__events__': [{'u': a, 'undo': {'prev': ds.part(before), 'after': ds.part(after)}}]})
+        self.assertEqual((code, json.loads(raw)['rejected']), (200, []))
+        self.assertEqual(read_fb(self.path)[a], before)
+
     def test_moving_to_ready_builds_the_pack(self):
         self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'app': 'ready'}})
         self.assertEqual(self.builds, [1])
@@ -480,14 +543,10 @@ class Http(HttpBase):
         """副本(路徑不是他真正的 board-live.html)上存「可投遞」相關的改動,背景不准真的跑 reconcile:
         它動的是他的看板和可投遞包,不是那份副本,而且會把 CPU 吃滿、頁面一直輪詢等一個不相干的建置。"""
         ran = []
-        real_run = bs.subprocess.run
-        bs.subprocess.run = lambda *a, **k: ran.append(a)
-        try:
+        with mock.patch.object(bs.subprocess, 'run', side_effect=lambda *a, **k: ran.append(a)):
             self._tb()                      # setUp 換掉之前、原本的 trigger_build
             time.sleep(0.2)
-        finally:
-            bs.subprocess.run = real_run
-        self.assertEqual(ran, [])
+        self.assertEqual([a for a in ran if 'reconcile.py' in str(a)], [])   # 只看自己會起的那一支
         self.assertFalse(bs._build_state['running'])
 
     def test_gzip(self):
@@ -584,6 +643,69 @@ class Http(HttpBase):
         self.assertEqual(r1['rev'], r2['rev'])
 
 
+class ShipFilesApi(HttpBase):
+    """看板不自己挑履歷:載入時拿到每張卡的要寄的檔案(後台 ship.card_files 算的),
+    按了版本/語言就當下問後台這一張(不經存檔、不整個重建)。"""
+
+    def setUp(self):
+        super().setUp()
+        import config as cf
+        self.cf = cf
+        src = os.path.join(self.dir, 'general-zh.pdf')
+        with open(src, 'wb') as f:
+            f.write(b'%PDF resume')
+        resumes = {'general': {'id': 'general', 'name': '通用版', 'files': {'zh': src, 'en': src}, 'enabled': True},
+                   'tech': {'id': 'tech', 'name': '技術版', 'files': {'zh': src}, 'enabled': True}}
+        attachments = [{'id': 'letter', 'name': '求職信', 'files': {'en': src}, 'enabled': True}]
+        for name, value in (('RESUMES', resumes), ('ATTACHMENTS', attachments), ('LANGS', ['zh', 'en'])):
+            patcher = mock.patch.object(cf, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.jobs = [dict(JOBS[0], resume={'recommend': 'general', 'lang': 'zh'}), JOBS[1],
+                     dict(JOBS[2], resume='malformed old value')]
+        make_board(self.path, {JOBS[0]['id']: {'app': 'ship'}, JOBS[1]['id']: {'app': 'ready'},
+                               JOBS[2]['id']: {'app': 'ready', 'custom_docs': 'broken'}}, jobs=self.jobs)
+
+    def test_page_and_polling_carry_each_cards_files_from_the_backend(self):
+        page = bd.parse(self.req('/')[1].decode('utf-8'))['data']
+        files = page['ship_files']
+        self.assertEqual((files[JOBS[0]['id']]['resume_id'], files[JOBS[0]['id']]['lang']), ('general', 'zh'))
+        self.assertEqual(files[JOBS[1]['id']]['problem'], '還沒挑履歷')
+        self.assertIn(JOBS[2]['id'], files)                      # 壞掉的卡不拖垮整頁
+        self.assertIn('cfg', page)
+        polled = json.loads(self.req('/api/jobs')[1])
+        self.assertEqual(polled['ship_files'][JOBS[0]['id']], files[JOBS[0]['id']])
+
+    def test_asking_for_one_card_with_the_buttons_just_pressed_does_not_save(self):
+        before = read(self.path)
+        u = urllib.parse.quote(JOBS[0]['id'], safe='')
+        code, raw, _ = self.req(f'/api/ship-files?u={u}&resume_id=general&lang=en')
+        self.assertEqual(code, 200)
+        got = json.loads(raw)
+        self.assertEqual((got['resume_id'], got['lang']), ('general', 'en'))
+        self.assertEqual([f['name'] for f in got['files']], ['通用版', '求職信'])
+        got = json.loads(self.req(f'/api/ship-files?u={u}&resume_id=tech')[1])
+        self.assertEqual((got['resume_id'], got['lang']), ('tech', 'zh'))
+        got = json.loads(self.req(f'/api/ship-files?u={u}&resume_id=&lang=')[1])     # 清掉 = 回到 agent 挑的
+        self.assertEqual((got['resume_id'], got['lang']), ('general', 'zh'))
+        self.assertEqual(read(self.path), before)
+        self.assertEqual(self.req('/api/ship-files?u=https%3A%2F%2Fex.test%2Fnope')[0], 404)
+        every = json.loads(self.req('/api/ship-files')[1])
+        self.assertEqual(sorted(every), sorted(j['id'] for j in JOBS))
+
+    def test_marking_sent_on_the_board_records_what_is_sent(self):
+        # 看板不再自己寫 sent_v:存檔時伺服器照要寄的檔案(沒建過就照現在挑的)記一次
+        # 標已投出是「我已在外部送出」事件(投遞狀態只靠事件改,#302)
+        a = JOBS[0]['id']
+        sent = [{'u': a, 'ev': 'sent_manual', 'data': {'by': 'manual', 'sent_at': '2026-01-01'}}]
+        self.assertEqual(self.req('/api/save', {'__rev__': 1, a: {'app': 'ship', 'lang': 'en'}})[0], 200)
+        self.assertEqual(self.req('/api/save', {'__rev__': 1, '__events__': sent})[0], 200)
+        self.assertEqual(read_fb(self.path)[a]['sent_v'], 'en-general')
+        # 頁面手上那份還沒拿到伺服器記的(沒帶 sent_v)、又改了語言:記過的那份留著
+        self.req('/api/save', {'__rev__': 1, a: {'app': 'sent', 'lang': 'zh'}})
+        self.assertEqual(read_fb(self.path)[a]['sent_v'], 'en-general')
+
+
 class Prep(Http):
     """看板上的「跑準備區」。這裡的看板是臨時副本,伺服器一律跑 job_fake(不會派 agent)。"""
 
@@ -651,19 +773,16 @@ class CutTailorEarlyExit(unittest.TestCase):
 
     def run_ct(self, fb, home=None):
         import subprocess
-        d = tempfile.mkdtemp(prefix='ct-')
-        try:
-            path = os.path.join(d, 'board.html')
-            make_board(path, fb)
-            env = dict(os.environ, CUT_TAILOR_TMP=d)
-            if home:
-                env['JOBSALVO_HOME'] = home
-            r = subprocess.run([sys.executable, os.path.join(TOOLS, 'cut_tailor.py'), '--board', path],
-                               env=env, capture_output=True, text=True, timeout=60)
-            with open(os.path.join(d, 'cut_tailor_status.json'), encoding='utf-8') as f:
-                return r.returncode, json.load(f)
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='ct-'))
+        path = os.path.join(d, 'board.html')
+        make_board(path, fb)
+        env = dict(os.environ, CUT_TAILOR_TMP=d)
+        if home:
+            env['JOBSALVO_HOME'] = home
+        r = subprocess.run([sys.executable, os.path.join(TOOLS, 'cut_tailor.py'), '--board', path],
+                           env=env, capture_output=True, text=True, timeout=60)
+        with open(os.path.join(d, 'cut_tailor_status.json'), encoding='utf-8') as f:
+            return r.returncode, json.load(f)
 
     def test_empty_resumes_still_prompt_without_a_choice(self):
         import cut_tailor
@@ -677,8 +796,7 @@ class CutTailorEarlyExit(unittest.TestCase):
         """準備區裡按了 🗑 移除的卡(app 還是 prep、多一個 rm)不交給 agent 判、不推進待你決定、不佔「跑幾張」的名額。
         以前照樣派 agent,直連 404 還被標成出錯了;看板按鈕上的張數本來就不算它。"""
         import cut_tailor as ct
-        d = tempfile.mkdtemp(prefix='ct-')
-        self.addCleanup(shutil.rmtree, d, True)
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='ct-'))
         path = os.path.join(d, 'board.html')
         cases = [({JOBS[0]['id']: {'app': 'prep', 'rm': 1}, JOBS[1]['id']: {'app': 'prep'}}, [JOBS[1]['id']]),
                  ({JOBS[0]['id']: {'app': 'prep', 'rm': 1}}, [])]
@@ -736,11 +854,8 @@ class StalePid(unittest.TestCase):
         pidf = os.path.join(self.dir, 'cut_tailor.pid')
         with open(pidf, 'w') as f:
             f.write(str(self.other.pid))
-        old, self.ct.PIDF = self.ct.PIDF, pidf
-        try:
+        with mock.patch.object(self.ct, 'PIDF', pidf):
             self.ct.stop_previous()
-        finally:
-            self.ct.PIDF = old
         time.sleep(0.3)
         self.assertIsNone(self.other.poll(), '把不相干的行程殺掉了')
 
@@ -793,10 +908,7 @@ class AddJobs(Tmp):
         live = self.path
         cur = [dict(JOBS[0], resume={'html': '<p>新產的履歷</p>'}, sum={'fit': '舊', 'cuts': {'c1': {'ok': 'yes'}}}),
                JOBS[1], JOBS[2]]
-        doc = bd.assemble(':root{--a:1}', '<b id="stat-first">0</b>', '', {'jobs': cur, 'status': {'at': '新'}},
-                          json.dumps({JOBS[0]['id']: {'s': 'like'}}), '/*app*/')
-        with open(live, 'w', encoding='utf-8') as f:
-            f.write(doc)
+        make_board(live, {JOBS[0]['id']: {'s': 'like'}}, data={'jobs': cur, 'status': {'at': '新'}})
         src = os.path.join(self.dir, 'merged.html')   # 開跑時的快照 + 這輪的新缺
         make_board(src, {}, jobs=[dict(JOBS[0], sum={'fit': '新摘要'}), JOBS[1], JOBS[2],
                                   {'id': 'https://ex.test/job/9', 'target': 'Job 9'}])
@@ -815,6 +927,8 @@ class ResearchPipeline(unittest.TestCase):
     """找缺一輪:找 → 程式清洗 → 判 → 進板。agent 跟網路都換成假的。"""
 
     LIKED = 'https://jobs.lever.co/acme/1111'
+    # 假的職缺頁:假的判斷寫的職稱、公司、引用都要在頁面原文裡(安檢門拿原文比,#317)
+    PAGE = ' '.join(f'Engineer {i}' for i in range(1, 30)) + ' ACME 工作內容包含資安工程'
 
     def setUp(self):
         import research as rs, converge as cv
@@ -909,7 +1023,7 @@ class ResearchPipeline(unittest.TestCase):
              patch.object(self.rs, 'search_files', return_value={}), \
              patch('feedback_dump.feedback_delta', return_value=('', 0)), \
              patch.object(self.rs.prefs, 'refresh_like'), \
-             patch('page_fetch.fetch', side_effect=lambda url: page_result(url, '工作內容包含資安工程')):
+             patch('page_fetch.fetch', side_effect=lambda url: page_result(url, self.PAGE)):
             return self.rs.run('deep', '', live=self.path, run_agent=fake_agent, ledger=self.ledger,
                                sums=self.sums, turned=os.path.join(self.dir, 'turned.jsonl'),
                                finishing=finishing, pending=pending, **kw)
@@ -1043,7 +1157,8 @@ class ResearchPipeline(unittest.TestCase):
              patch('feedback_dump.feedback_delta', return_value=('', 0)), \
              patch.object(self.rs.prefs, 'refresh_like'), \
              patch('page_fetch.fetch', side_effect=lambda url: page_result(
-                 url, '工作內容包含資安工程', posted_at='2026-09-01', posted_source='test date')):
+                 url, 'Security Engineer · ACME · 工作內容包含資安工程', posted_at='2026-09-01',
+                 posted_source='test date')):
             added = self.rs.run('deep', '', live=self.path, run_agent=fake_agent,
                                 ledger=self.ledger, sums=self.sums, turned=turned, limit=1)
 
@@ -1091,7 +1206,7 @@ class ResearchPipeline(unittest.TestCase):
             f.write('# 使用者逐張表態\n')
 
         def fake_search(*_args, **kwargs):
-            return [candidate], '- 安全職務：符合指定方向。'
+            return [candidate], '- 安全職務：符合指定方向。', []
 
         def fake_note(_files, _rd, note_out, _run_agent):
             with open(note_out, 'w', encoding='utf-8') as f:
@@ -1443,7 +1558,8 @@ class ResearchPipeline(unittest.TestCase):
                 patch.object(self.rs.prefs, 'PREF', preference_file), \
                 patch.object(self.rs.prefs, 'refresh_like'), \
                 patch.object(self.rs, '_report', side_effect=lambda msg, *_: reports.append(msg)), \
-                patch('page_fetch.fetch', side_effect=lambda url: page_result(url)), \
+                patch('page_fetch.fetch', side_effect=lambda url: page_result(
+                    url, 'Candidate deep ' + url.rsplit('-', 1)[-1] + ' · CloudCo · 平台維運 實際 JD 片段')), \
                 patch.dict(os.environ, {'AGENT_BOARD': self.path}):
             summary_dump = feedback_dump.build(self.path, only_ids=[cloud_one])
             self.rs.run('deep', '', live=self.path, st=lambda *a, **k: None,
@@ -1595,7 +1711,8 @@ class ResumeSelection(Tmp):
         import agent_run as ar
 
         url = 'https://ex.test/job/no-resume'
-        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example'}
+        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example', 'jd': 'Engineer at Example',
+                     'page_status': 'ok'}
         prompts = []
 
         def run_agent(prompt, outfile, _model):
@@ -1665,6 +1782,28 @@ class ReapplySync(Tmp):
         self.assertEqual(fb[b]['app'], 'sent')          # 沒有歷史的照舊補標
         self.assertEqual(fb[b]['n'], '他寫的')           # 原因欄是他的字,不寫程式訊息
 
+    def test_a_record_he_backed_out_is_not_pulled_back_and_platform_date_wins(self):
+        """平台對帳:移除的卡照樣記成已送出;他退回那一筆之後同一筆不再拉回(修正 22)。
+        agent 送出的卡,投遞日以平台紀錄優先(額外抓到 3)。"""
+        import sync_sent as ss, datetime
+        import delivery_state as ds
+        a = 'https://www.104.com.tw/job/abc12'
+        b = 'https://www.104.com.tw/job/def34'
+        today = datetime.date.today()
+        d3 = today - datetime.timedelta(days=3)
+        make_board(self.path, {a: {'app': 'ship', 'rm': 1},
+                               b: {'app': 'sent', 'ds': 'sent', 'sent_by': 'agent', 'sent_at': today.isoformat()}},
+                   jobs=[{'id': a, 'target': 'A'}, {'id': b, 'target': 'B'}])
+        recs = [{'id': 'abc12', 'title': 'A', 'applied_at': d3.isoformat()},
+                {'id': 'def34', 'title': 'B', 'applied_at': d3.isoformat()}]
+        ss.sync(self.path, recs)
+        fb = read_fb(self.path)
+        self.assertEqual((fb[a]['app'], fb[a].get('rm'), fb[a]['sent_by']), ('sent', None, 'platform'))
+        self.assertEqual(fb[b]['sent_at'], d3.isoformat())          # 平台上的日期
+        bd.set_fb(lambda f: ds.fire(f, a, 'back', to='ship'), live=self.path)
+        self.assertEqual(ss.sync(self.path, recs), '')              # 同一筆不再拉回
+        self.assertEqual(ds.state(read_fb(self.path)[a]), 'todo')
+
 
 class PrepSkips(Tmp):
     """跑準備區沒產出的卡。網站擋程式時,活的職缺只是抓不到 JD,
@@ -1692,11 +1831,33 @@ class PrepSkips(Tmp):
         make_board(self.path, {a: {'s': 'meh', 'app': 'prep'}})
         out = os.path.join(self.dir, 'trial'); os.makedirs(os.path.join(out, ct.jid(a)))
         with open(os.path.join(out, ct.jid(a), 'fill.json'), 'w', encoding='utf-8') as fh:
-            json.dump({'skip': True, 'reason': '職缺已關:網址導回職缺列表'}, fh, ensure_ascii=False)
-        moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
+            json.dump({'skip': True, 'reason': '職缺已關:網址導回職缺列表', 'quote': 'This job is no longer available'},
+                      fh, ensure_ascii=False)
+        given = {a: {'text': 'Risk Analyst. This job is no longer available.', 'lang': ''}}
+        moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out, given=given)
         self.assertEqual(read_fb(self.path)[a], {'s': 'techerr', 's0': 'meh', 'app0': 'prep'})   # 原本的心情、階段都留著,可以放回原處
-        self.assertTrue(bd.parse(read(self.path))['data']['jobs'][0]['dead'])
+        job = bd.parse(read(self.path))['data']['jobs'][0]
+        self.assertTrue(job['dead'])
+        self.assertIn('agent 判斷', job['prep_note'])                         # 標明是 agent 判斷、附它抄的原文
+        self.assertIn('This job is no longer available', job['prep_note'])
         self.assertEqual(moved['closed'], 1)
+
+    def test_a_closure_whose_quote_is_not_in_the_jd_leaves_the_card_where_it_was(self):
+        """安檢門(#317):agent 說職缺已關,抄的那一句 JD 原文裡沒有:不標出錯、不推進,卡上寫出 agent 說什麼、實際是什麼。"""
+        import cut_tailor as ct
+        a = JOBS[0]['id']
+        make_board(self.path, {a: {'s': 'meh', 'app': 'prep'}})
+        out = os.path.join(self.dir, 'trial'); os.makedirs(os.path.join(out, ct.jid(a)))
+        with open(os.path.join(out, ct.jid(a), 'fill.json'), 'w', encoding='utf-8') as fh:
+            json.dump({'skip': True, 'reason': '職缺已關:已額滿', 'quote': '本職缺已額滿'}, fh, ensure_ascii=False)
+        given = {a: {'text': 'Risk Analyst. Apply now.', 'lang': ''}}
+        moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out, given=given)
+        self.assertEqual(read_fb(self.path)[a], {'s': 'meh', 'app': 'prep'})
+        job = bd.parse(read(self.path))['data']['jobs'][0]
+        self.assertFalse(job.get('dead'))
+        self.assertIn('本職缺已額滿', job['prep_note'])
+        self.assertIn('JD 原文裡沒有', job['prep_note'])
+        self.assertEqual(moved['closed'], 0)
 
     def test_agent_fixes_a_drifted_card_name_and_keeps_the_link(self):
         """agent 判斷「同一個缺、看板上的名字過時」時寫 real_title,程式照改卡片名字,後面的連結留著。"""
@@ -1706,7 +1867,8 @@ class PrepSkips(Tmp):
         out = os.path.join(self.dir, 'trial'); os.makedirs(os.path.join(out, ct.jid(u)))
         with open(os.path.join(out, ct.jid(u), 'fill.json'), 'w', encoding='utf-8') as fh:
             json.dump({'variant': 'general', 'lang': 'en', 'real_title': 'Northwind Graduate · Risk Analyst'}, fh)
-        self.assertEqual(ct.apply_real_titles([(u, 'x')], self.path, out_dir=out), 1)
+        given = {u: {'text': 'Northwind Graduate · Risk Analyst. SQL, Python.', 'lang': ''}}
+        self.assertEqual(ct.apply_real_titles([(u, 'x')], self.path, out_dir=out, given=given), 1)
         t = [j for j in bd.parse(read(self.path))['data']['jobs'] if j['id'] == u][0]['target']
         self.assertEqual(t, f'Northwind Graduate · Risk Analyst（[Lever]({u})）')
 
@@ -1721,6 +1883,46 @@ class PrepRunFinish(Tmp):
             json.dump({'approved': True, 'variant': 'general'}, f)
         with patch.object(ct, 'OUT', out):
             self.assertEqual(ct.skip_approved([(a, 'Approved'), (b, 'Pending')]), [(b, 'Pending')])
+
+    def test_the_saved_fill_keeps_only_what_the_gate_accepted_and_never_an_approval_the_agent_wrote(self):
+        """#313 審查:這一輪的交件單經安檢門,存回正式位置的只有收下的格子加上跑之前別人寫的欄位;
+        agent 自己寫 approved(或沒登記的格子)不會存下來,下一輪也不會因此被跳過。"""
+        import cut_tailor as ct
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        a = JOBS[0]['id']
+        make_board(self.path, {a: {'s': 'like', 'app': 'prep'}})
+        sp = os.path.join(self.dir, 'state')
+        run_out, canonical = os.path.join(sp, 'runs', 'fresh'), os.path.join(sp, 'fills')
+        os.makedirs(os.path.join(run_out, ct.jid(a)), exist_ok=True)
+        os.makedirs(canonical, exist_ok=True)
+        with open(os.path.join(sp, 'cut_tailor_t0'), 'w') as f:
+            f.write(str(time.time() - 10))
+        with open(os.path.join(sp, 'cut_tailor_prompt.txt'), 'w') as f:
+            f.write('prompt')
+        with open(os.path.join(sp, 'rows.json'), 'w', encoding='utf-8') as f:
+            json.dump([[a, 'Fresh']], f)
+        with open(os.path.join(sp, 'keep.json'), 'w', encoding='utf-8') as f:
+            json.dump({ct.jid(a): {'tailored': '他的產線寫的客製內容'}}, f, ensure_ascii=False)
+        with open(os.path.join(run_out, ct.jid(a), 'fill.json'), 'w', encoding='utf-8') as f:
+            json.dump({'resume': 'general', 'lang': 'klingon', 'why': 'fresh', 'approved': True, 'secret': 'x'}, f)
+        with patch.multiple(ct, SP=sp, ROWSF=os.path.join(sp, 'rows.json'), KEEPF=os.path.join(sp, 'keep.json'),
+                            OUT=canonical, PIDF=os.path.join(sp, 'pid'), WORKER_PIDF=os.path.join(sp, 'worker.pid')):
+            with patch.object(ct, '_status'), patch.object(ct, '_report'), \
+                 patch.object(ct.ar, 'argv_for', return_value=(['codex'], '/repo')), \
+                 patch.object(ct.ar, 'launch', return_value=SimpleNamespace(pid=123)), \
+                 patch.object(ct.ar, 'wait_done', return_value=[ct.ar.AgentResult('completed', 0, 123)]), \
+                 patch.object(ct.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
+                ct.run_finish(self.path, out_dir=run_out)
+            with open(os.path.join(canonical, ct.jid(a), 'fill.json'), encoding='utf-8') as f:
+                saved = json.load(f)
+            self.assertEqual(saved.get('tailored'), '他的產線寫的客製內容')      # 別人寫的欄位原樣放回
+            self.assertEqual(saved.get('why'), 'fresh')                        # 收下的格子
+            self.assertNotIn('approved', saved)                                # agent 寫的認可不算他的決定
+            self.assertNotIn('secret', saved)                                  # 沒登記的格子
+            self.assertNotIn('lang', saved)                                    # 安檢門沒收下的格子
+            self.assertEqual(ct.skip_approved([(a, 'Fresh')]), [(a, 'Fresh')])
 
     def test_finish_uses_only_this_runs_outputs_and_reports_missing_rows(self):
         import cut_tailor as ct
@@ -1884,7 +2086,7 @@ class PrepReselection(Tmp):
         paths = self._state_paths()
         with patch.object(cf, 'LANGS', languages), patch.object(cf, 'RESUMES', {'general': resume}), \
              patch.multiple(ct, **paths), patch.object(ct, 'stop_previous'), \
-             patch.object(ct, 'jd_verdict', return_value=('ok', '')), \
+             patch('page_fetch.fetch_many', return_value=[SimpleNamespace(status='ok')]), \
              patch.object(ct.subprocess, 'Popen') as launch, \
              patch.object(ct.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as reconcile, \
              patch.object(sys, 'argv', ['cut_tailor.py', '--board', self.path]):
@@ -1988,12 +2190,20 @@ class SandboxHome(unittest.TestCase):
             finally:
                 if proc.poll() is None:
                     proc.terminate()
+                # 伺服器關之前會等自動流程正在跑的那一輪做完才刪副本(autopilot.Pilot.stop);CI 比本機慢好幾倍,
+                # 以前只等 5 秒就強制關掉,刪資料夾那一步根本沒跑到
+                killed = False
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=60)
                 except subprocess.TimeoutExpired:
+                    killed = True
                     proc.kill(); proc.wait()
+                err = ('(60 秒沒關掉,強制結束)' if killed else '') + proc.stderr.read().decode(errors='replace')[-2000:]
                 proc.stderr.close()
-            self.assertEqual(glob.glob(os.path.join(scratch, 'jobsalvo-sandbox-home-*')), [])
+            left = glob.glob(os.path.join(scratch, 'jobsalvo-sandbox-home-*'))
+            # 失敗時講清楚剩下哪些檔、伺服器最後說了什麼(只在 CI 的 Linux 上紅過,本機重現不出來)
+            files = [os.path.relpath(os.path.join(d, f), scratch) for top in left for d, _, fs in os.walk(top) for f in fs]
+            self.assertEqual(left, [], f'剩下的檔:{files[:40]}\n伺服器 stderr:{err}')
 
     def test_configured_nested_skill_is_available_in_sandbox(self):
         import config as cf
@@ -2139,10 +2349,100 @@ class ScriptWritesAreJournaled(Tmp):
         self.assertFalse(os.path.exists(bd.journal_path(self.path)))
 
 
-class OldShipFlagIsMigratedOnDisk(Tmp):
+class OwnHome(Tmp):
+    """資料夾(cf.HOME)也用這個測試自己的暫存資料夾:伺服器起來時的轉換會在資料夾裡留退回點(版本、備份),
+    不准落在大家共用的測試資料夾;跑完跟著 Tmp 一起清掉。"""
+
+    def setUp(self):
+        super().setUp()
+        import config as cf
+        with open(os.path.join(self.dir, 'jobsalvo.json'), 'w', encoding='utf-8') as f:
+            f.write('{}')
+        home = mock.patch.object(cf, 'HOME', self.dir)
+        home.start()
+        self.addCleanup(home.stop)
+
+
+class ConversionKeepsARestorePoint(OwnHome):
+    """伺服器起來時的資料轉換回不了頭:轉之前一定要有退回點(存一版;存不了版就備份看板檔),沒有就不轉、照實回報。"""
+
+    def setUp(self):
+        super().setUp()
+        import folder_history
+        self.fh = folder_history
+        make_board(self.path, {JOBS[0]['id']: {'s': 'like', 'ship': True}})
+
+    def _git(self, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        return subprocess_run([self.fh._git(), *args], cwd=self.dir, env=env)
+
+    def test_the_version_before_the_conversion_is_the_old_format(self):
+        bs.migrate_marks(self.path)
+
+        before = self._git('log', '-1', '--format=%H', '--grep=轉換前').strip()
+        self.assertTrue(before)
+        old = json.loads(bd.parse(self._git('show', before + ':board.html'))['fb'])
+        self.assertNotIn('__ds__', old)
+        self.assertEqual(read_fb(self.path)['__ds__'], 1)
+
+    def test_without_version_history_the_old_board_is_backed_up_first(self):
+        with mock.patch.object(self.fh, '_git', return_value=None):
+            bs.migrate_marks(self.path)
+
+        folder = os.path.join(self.dir, self.fh.BACKUP_DIR)
+        [backup] = os.listdir(folder)
+        self.assertNotIn('__ds__', json.loads(bd.parse(read(os.path.join(folder, backup)))['fb']))
+        self.assertEqual(read_fb(self.path)['__ds__'], 1)
+
+    def test_without_a_restore_point_nothing_is_converted(self):
+        with open(os.path.join(self.dir, self.fh.BACKUP_DIR), 'w', encoding='utf-8') as f:
+            f.write('a file where the backup folder should go')
+        before = read(self.path)
+        with mock.patch.object(self.fh, '_git', return_value=None):
+            bs.migrate_marks(self.path)
+            self.assertIn('沒有退回點', self.fh.status(self.dir)['conversion'])
+        self.assertEqual(read(self.path), before)
+
+    def test_skipped_conversion_shows_up_in_the_environment_check(self):
+        """伺服器起來時沒有退回點、跳過轉換:不能只印在伺服器的 log(使用者看不到),
+        設定頁的環境檢查要有一列 ⚠️ 攤開,寫哪一種轉換沒做、為什麼、怎麼處理。"""
+        import doctor
+        with open(os.path.join(self.dir, self.fh.BACKUP_DIR), 'w', encoding='utf-8') as f:
+            f.write('a file where the backup folder should go')
+        with mock.patch.object(self.fh, '_git', return_value=None), \
+                mock.patch('sys.stdout', new_callable=io.StringIO):
+            bs.migrate_marks(self.path)
+            checks = {c['key']: c for c in doctor.check_environment([])['checks']}
+        row = checks['folder_history']
+        self.assertFalse(row['ok'])
+        self.assertTrue(row['warn'])
+        self.assertIn('沒有退回點', row['detail'])
+        self.assertIn('投遞狀態轉換還沒轉換', row['detail'])
+        self.assertTrue(row['fix'])
+
+
+def subprocess_run(args, cwd, env):
+    import subprocess
+    return subprocess.run(args, cwd=cwd, env=env, text=True, check=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+
+
+class OldShipFlagIsMigratedOnDisk(OwnHome):
     """舊資料的可投遞是 ship 布林(沒有 app)。以前只有看板頁面載入時在記憶體裡改成 app='ship'、從沒存回去:
     卡停在「可以投了」,伺服器那邊的填表、送出、自動流程(都讀檔)卻看不到它;第一次改它還撞 409、卡跳回心情分頁。
     伺服器起來時把它寫回檔案(記進流水帳)。"""
+
+    def test_leaves_nothing_in_the_shared_test_folder(self):
+        """轉換前的退回點(版本、備份)落在這個測試自己的暫存資料夾,跑完跟著清掉;不准留在大家共用的測試資料夾。"""
+        shared = os.environ['JOBSALVO_TEST_HOME']
+
+        def everything():
+            return {os.path.join(root, n) for root, dirs, files in os.walk(shared) for n in files + dirs}
+        before = everything()
+        make_board(self.path, {JOBS[0]['id']: {'s': 'like', 'ship': True}})
+        bs.migrate_marks(self.path)
+        self.assertEqual(read_fb(self.path)['__ds__'], 1)
+        self.assertEqual(sorted(everything() - before), [])
 
     def test_server_start_writes_the_migration_back(self):
         import apply_run
@@ -2151,12 +2451,27 @@ class OldShipFlagIsMigratedOnDisk(Tmp):
         getattr(bs, 'migrate_marks', lambda _p: None)(self.path)
         fb = read_fb(self.path)
         self.assertEqual(fb[a], {'s': 'like', 'app': 'ship'})
-        self.assertEqual(fb[b], {'s': 'like', 'app': 'sent'})          # 已經往後走的不拉回可投遞
+        self.assertEqual(fb[b], {'s': 'like', 'app': 'sent', 'ds': 'sent', 'sent_by': 'legacy'})   # 已經往後走的不拉回可投遞
+        self.assertEqual(fb['__ds__'], 1)                                 # 投遞狀態也一起轉好了,只轉一次
         jobs = {j['id']: j for j in JOBS}
         self.assertEqual(apply_run.eligible(jobs, fb, 'fill'), [a])     # 讀檔的程式看得到它
         before = read(bd.journal_path(self.path))
         bs.migrate_marks(self.path)                                     # 已經改過:不再動、不再記
         self.assertEqual(read(bd.journal_path(self.path)), before)
+
+    def test_server_start_settles_rounds_that_are_no_longer_running(self):
+        """伺服器起來時,卡停在正在填、正在送出,那一輪卻已經不在跑(Mac 重開、當掉):照狀態表收尾(修正 4、13)。"""
+        import delivery_state as ds
+        a, b, c = JOBS[0]['id'], JOBS[1]['id'], JOBS[2]['id']
+        make_board(self.path, {'__ds__': 1,
+                               a: {'app': 'ship', 'ds': 'running', 'apply': {'stage': 'fill', 'tab_id': '7'}},
+                               b: {'app': 'ship', 'ds': 'running', 'apply': {'stage': 'fill'}},
+                               c: {'app': 'ship', 'ds': 'sending', 'approve': {'snap': {}}, 'apply': {'stage': 'fill', 'tab_id': '9'}}})
+        with mock.patch.object(bs, 'run_status', return_value={'running': False}):
+            bs.migrate_marks(self.path)
+        fb = read_fb(self.path)
+        self.assertEqual([ds.state(fb[u]) for u in (a, b, c)], ['stuck', 'nopage', 'unsure'])
+        self.assertIn('沒跑完', fb[a]['apply']['issues'][0])
 
     def test_custom_records_get_their_language(self):
         # 客製紀錄以前不分語言(resume:<id>):照紀錄裡原始檔的簽章認出是哪個語言的檔,改成 resume:<id>:<語言>。
@@ -2188,25 +2503,6 @@ class OldShipFlagIsMigratedOnDisk(Tmp):
             before = read(bd.journal_path(self.path))
             bs.migrate_marks(self.path)                                 # 已經改過:不再動、不再記
             self.assertEqual(read(bd.journal_path(self.path)), before)
-
-    def test_page_gets_each_source_file_signature(self):
-        # 看板要自己判斷「已收下的客製版還能不能用」(原始檔換過就不能):頁面拿到每份原始檔、每個語言的簽章,
-        # 跟客製紀錄裡的 source_sig 同一種算法
-        import hashlib
-        import config as cf
-        src = os.path.join(self.dir, 'base.pdf')
-        with open(src, 'wb') as f:
-            f.write(b'%PDF one')
-        resume = dict(cf.C['resume'], resumes=[{'id': 'general', 'files': {'zh': src}}],
-                      attachments=[{'id': 'letter', 'files': {'zh': src, 'en': ''}}])
-        with mock.patch.object(cf, 'C', dict(cf.C, resume=resume)):
-            page = bs.page_cfg()
-            want = {'zh': hashlib.sha256(b'%PDF one').hexdigest()}
-            self.assertEqual(page['resumes'][0].get('sigs'), want)
-            self.assertEqual(page['attachments'][0].get('sigs'), want)
-            with open(src, 'wb') as f:
-                f.write(b'%PDF two, longer')
-            self.assertEqual(bs.page_cfg()['resumes'][0]['sigs'], {'zh': hashlib.sha256(b'%PDF two, longer').hexdigest()})
 
 
 class AgentSandbox(unittest.TestCase):
@@ -2303,7 +2599,8 @@ class PreApplyPageReading(Tmp):
             for block in prompt.split('=== ')[1:]:
                 jid = block.split(' ===', 1)[0]
                 url = block.split('URL: ', 1)[1].split('\n', 1)[0]
-                rows.append({'id': jid, 'status': answer[url]})
+                rows.append(dict({'id': jid, 'status': answer[url]},
+                                 **({'quote': 'closed role'} if answer[url] == 'closed' else {})))
             with open(output, 'w', encoding='utf-8') as f:
                 json.dump({'jobs': rows}, f)
             return SimpleNamespace(ok=True, message=lambda: 'completed')
@@ -2313,6 +2610,37 @@ class PreApplyPageReading(Tmp):
         soft = {x['jid']: bool(x.get('soft')) for x in issues}
         self.assertEqual(soft, {urls['gone']: False, urls['closed']: False,
                                 urls['unsure']: True, urls['unread']: True})
+        closed = next(x for x in issues if x['jid'] == urls['closed'])
+        self.assertIn('agent 判斷', closed['msg'])            # 標明是 agent 判斷、附它抄的原文
+        self.assertEqual(closed['judged'], 'closed role')
+        # 他在卡上按「不對,職缺還在」:同一個判斷不再擋,只留一行提示
+        issues, _r, _i = board_status._link_issues(
+            {'ready': jobs, 'ship': []}, self.path, fetch_page=pages.get, run_agent=run_agent,
+            fb={urls['closed']: {'judged_no': {'closed': '2026-09-30'}}})
+        self.assertTrue(next(x for x in issues if x['jid'] == urls['closed']).get('soft'))
+
+    def test_a_closure_whose_quote_is_not_on_the_page_does_not_block(self):
+        """安檢門(#317):agent 說關了,抄的那一句頁面上沒有:不擋,卡上寫出 agent 說什麼、實際是什麼。"""
+        from types import SimpleNamespace
+        import board_status, page_fetch
+        url = 'https://example.invalid/jobs/lie'
+        jobs = [{'id': url, 'target': 'lie'}]
+        make_board(self.path, {url: {'app': 'ready'}}, jobs=jobs)
+
+        def run_agent(prompt, _log, _browser_required):
+            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
+            with open(output, 'w', encoding='utf-8') as f:
+                json.dump({'jobs': [{'id': 'J1', 'status': 'closed', 'quote': 'Position closed'}]}, f)
+            return SimpleNamespace(ok=True, message=lambda: 'completed')
+
+        issues, _r, _i = board_status._link_issues(
+            {'ready': jobs, 'ship': []}, self.path,
+            fetch_page=lambda u: page_fetch.PageResult(u, 'ok', text='Open role, apply now', via='fake'),
+            run_agent=run_agent)
+        self.assertEqual(len(issues), 1)
+        self.assertTrue(issues[0].get('soft'))
+        self.assertIn('Position closed', issues[0]['msg'])
+        self.assertIn('原文裡沒有', issues[0]['msg'])
 
     def test_link_gate_asks_the_agent_in_small_batches(self):
         """一次把幾十頁全文塞給同一隻 agent,容易整批判不出來;分小批問。"""
@@ -2365,7 +2693,7 @@ class PreApplyPageReading(Tmp):
         with patch.object(sys, 'argv', ['board_status.py', '--links', '--board', self.path]), \
              patch('page_fetch.fetch', return_value=page), \
              patch('agent_run.run', side_effect=fake_agent), \
-             patch.object(board_status, 'check_shipping', return_value=[]), \
+             patch.object(board_status.ship, 'check', return_value=[]), \
              redirect_stdout(io.StringIO()) as output:
             result = board_status.main()
 
@@ -2450,10 +2778,6 @@ def prefs_load(path):
     return prefs.load(path)
 
 
-def prefs_pref():
-    import prefs
-    return prefs.PREF
-
 class NoRejudging(unittest.TestCase):
     """判過、判定不送的那些,下一輪不要再抓一次 JD、再花一批判斷。結論一定一樣,純浪費。"""
     def setUp(self):
@@ -2489,14 +2813,10 @@ class SeedRuns(Http):
     """他在卡片/公司列上指名「找類似的」「找這家更多」:走的是既有的更深,範圍由他指定,
     不是第四種找法(以前 --seed-url 會把整輪轉成「指定方向」,同一件事兩套邏輯)。"""
     def test_seeds_run_as_deep_with_scope(self):
-        real = bs.is_real
-        bs.is_real = lambda: True          # 副本跑的是 job_fake,要看的是真的那條指令
-        try:
+        with mock.patch.object(bs, 'is_real', return_value=True):          # 副本跑的是 job_fake,要看的是真的那條指令
             argv = bs.run_argv('research', {'mode': 'deep', 'text': '',
                                             'seeds': [{'k': 'co', 'v': 'Northwind'},
                                                       {'k': 'job', 'v': 'https://ex.test/job/1'}]})
-        finally:
-            bs.is_real = real
         self.assertIn('--mode', argv)
         self.assertEqual(argv[argv.index('--mode') + 1], 'deep')
         self.assertEqual(argv[argv.index('--seed-co') + 1], 'Northwind')
@@ -2516,6 +2836,16 @@ class SeedRuns(Http):
         l = research.liked_company_list(cs)
         self.assertEqual(sorted(r['company'] for r in l), ['AAA', 'BBB'])
         self.assertEqual([r['company'] for r in l if r['company'] in {'AAA'}], ['AAA'])
+
+
+class TestsLeaveNothingRunning(unittest.TestCase):
+    def test_a_saving_test_leaves_no_folder_history_timer(self):
+        """#335:存檔會排一個 1 秒後存資料夾版本的計時器;測試結束時沒收掉,它在下一條測試裡跑 git,
+        被那條換掉的 subprocess.run 抓到。存過檔的測試一結束,背景不能還有計時器。"""
+        result = unittest.TestResult()
+        Http('test_undo_only_when_nothing_else_moved_the_card').run(result)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual([t for t in threading.enumerate() if isinstance(t, threading.Timer)], [])
 
 
 class PromptPreview(Http):
@@ -2594,13 +2924,9 @@ class PromptPreview(Http):
         """看 prompt 不准真的派 agent 出去。"""
         import agent_run as ar
         launched = []
-        real = ar.run
-        ar.run = lambda *a, **k: launched.append(a)
-        try:
+        with mock.patch.object(ar, 'run', side_effect=lambda *a, **k: launched.append(a)):
             self.req('/api/prompt?kind=find&mode=deep')
             self.req('/api/prompt?kind=prep')
-        finally:
-            ar.run = real
         self.assertEqual(launched, [])
 
 
@@ -2646,7 +2972,10 @@ class GhostAndScam(Tmp):
         import research as rs
         import agent_run as ar
         url = 'https://ex.test/job/risk'
-        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example'}
+        # 判斷拿程式抓回的 JD 原文和程式提醒核對(#317):它引的那句要在裡面
+        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example',
+                     'jd': 'Engineer at Example. 錄取前需繳交保證金。', 'page_status': 'ok',
+                     'flag': ['刊登已經 120 天(超過 90 天):可能是長期掛著、沒在真的招人的幽靈職缺,判斷時一起看']}
 
         def run_agent(prompt, outfile, _model):
             payload = [{'id': 'J1', 'title': 'Engineer', 'company': 'Example', 'keep': True, 'fit': 4,
@@ -2657,6 +2986,25 @@ class GhostAndScam(Tmp):
             return ar.AgentResult('completed', 0, 1)
         res = rs.judge([dict(candidate)], [], self.dir, 'main', run_agent, resumes=[])
         return rs, candidate, res[url]
+
+    def test_a_title_that_is_not_on_the_page_keeps_the_card_off_the_board(self):
+        """安檢門(#317):判斷寫的職稱在程式抓回的 JD 原文裡沒有:這一張不進板、不算判過,原因寫出 agent 說什麼。"""
+        import json
+        import research as rs
+        import agent_run as ar
+        url = 'https://ex.test/job/lie'
+        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example', 'jd': 'Engineer at Example.',
+                     'page_status': 'ok'}
+
+        def run_agent(prompt, outfile, _model):
+            with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
+                json.dump([{'id': 'J1', 'title': 'Chief Chef', 'company': 'Example', 'keep': True, 'fit': 5,
+                            'cite': [], 'why': '很合', 'cat': rs.CATS[0]}], f, ensure_ascii=False)
+            return ar.AgentResult('completed', 0, 1)
+        r = rs.judge([dict(candidate)], [], self.dir, 'main', run_agent, resumes=[])[url]
+        self.assertFalse(r['keep'])
+        self.assertFalse(r['readable'])                   # 不記成「判過不送」,下一輪找到會再判
+        self.assertTrue(any('頁面上的職稱' in p and 'Chief Chef' in p for p in r['wrong']), r['wrong'])
 
     def test_scam_is_never_kept(self):
         _rs, _c, r = self._judge({'kind': 'scam', 'why': 'JD 寫「錄取前需繳交保證金」'})
@@ -2700,7 +3048,7 @@ class StatusSkipsRemoved(Tmp):
         urls = ['https://example.invalid/jobs/keep', 'https://example.invalid/jobs/removed']
         make_board(self.path, {urls[0]: {'app': 'ready'}, urls[1]: {'app': 'ready', 'rm': 1}},
                    jobs=[{'id': u, 'target': u} for u in urls])
-        with mock.patch.object(board_status, "check_shipping", return_value=["缺履歷"]), \
+        with mock.patch.object(board_status.ship, "check", return_value=["缺履歷"]), \
              mock.patch.object(sys, "argv", ["board_status", "--board", self.path, "--write"]):
             board_status.main()
         status = bd.parse(read(self.path))['data']['status']

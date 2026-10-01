@@ -84,7 +84,7 @@ def _source_report(errors, live):
         with open(live, encoding='utf-8') as f:
             if any(gone(it) for it in agent_report.open_items(json.loads(bd.parse(f.read())['fb']))):
                 agent_report.resolve(None, '這份檔整理好了', live=live, only=gone)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 回報管道本身寫不進看板:至少印出來(從按鈕跑時進這一輪的紀錄),不擋建置
         print(f'  ⚠ 來源檔的問題沒寫進回報:{e}')
 
 
@@ -117,7 +117,7 @@ def run(a):
     try:
         with open(MANIFEST, encoding='utf-8') as f:
             man = json.load(f)
-    except Exception:
+    except (OSError, ValueError):   # 第一次跑(或寫壞了):全部當成變了重建
         man = {}
     print('reconcile:比對來源,只重建變了的' + ('(--check:只報不動手)' if a.check else ''))
     if not os.path.isfile(live):
@@ -163,7 +163,7 @@ def run(a):
         try:
             import prefs
             prefs.refresh_like(live)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 只影響「最可能喜歡」的排序,不動他的資料;原因印出來,不擋建置
             print(f'  ⚠ 排序分數沒算成:{e}')
         with open(MANIFEST, 'w', encoding='utf-8') as f:
             json.dump(man, f, ensure_ascii=False, indent=2)

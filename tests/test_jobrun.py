@@ -5,7 +5,6 @@ import os, sys, subprocess, tempfile, time, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import jobrun  # noqa: E402
 
 MARK = 'jobrun_stop_test_parent'

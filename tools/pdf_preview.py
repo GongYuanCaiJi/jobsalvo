@@ -23,11 +23,8 @@ def _home(home=None):
 
 
 def _content_hash(path):
-    digest = hashlib.sha256()
     with open(path, 'rb') as source:
-        for chunk in iter(lambda: source.read(65536), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
 def _is_pdf(path):
@@ -83,9 +80,7 @@ def generate(path, home=None):
             detail = (result.stderr or result.stdout or '').strip()[-240:]
             raise PreviewError('PDF 預覽產生失敗' + (f':{detail}' if detail else ''))
         source = max(candidates, key=os.path.getsize)
-        temporary = destination + '.tmp'
-        shutil.copyfile(source, temporary)
-        os.replace(temporary, destination)
+        os.replace(source, destination)   # 暫存資料夾跟目的地在同一個預覽資料夾:直接換名
     return key
 
 

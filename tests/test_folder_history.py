@@ -105,29 +105,149 @@ class FolderHistory(unittest.TestCase):
                 marker = os.path.join(home, '.git', 'jobsalvo-data-repository')
                 self.assertTrue(os.path.isfile(marker))
 
-    def test_existing_repository_at_the_data_folder_is_never_committed(self):
-        with _without_git_environment():
-            git = folder_history._git()
-            for has_remote in (False, True):
-                with self.subTest(has_remote=has_remote), tempfile.TemporaryDirectory(
-                        prefix='foreign-history-') as home:
-                    subprocess.run([git, 'init', '--initial-branch=main'], cwd=home,
-                                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    if has_remote:
-                        subprocess.run([git, 'remote', 'add', 'origin',
-                                        'https://example.invalid/project.git'], cwd=home, check=True)
-                    with open(os.path.join(home, 'jobsalvo.json'), 'w', encoding='utf-8') as f:
-                        f.write('{"resume":{}}')
+    def _git_in(self, cwd, *args):
+        return subprocess.run([folder_history._git(), *args], cwd=cwd, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-                    self.assertFalse(folder_history.flush_now(home))
-                    status = folder_history.status(home)
+    def _old_system_repository(self, home, remote=False):
+        """從舊系統搬來的資料夾:本來就是 git repo、有 jobsalvo.json、有舊的 commit,沒有 jobsalvo 標記。"""
+        env = {'GIT_AUTHOR_NAME': 'Old', 'GIT_AUTHOR_EMAIL': 'old@example.invalid',
+               'GIT_COMMITTER_NAME': 'Old', 'GIT_COMMITTER_EMAIL': 'old@example.invalid'}
+        self._git_in(home, 'init', '--initial-branch=main')
+        with open(os.path.join(home, 'jobsalvo.json'), 'w', encoding='utf-8') as f:
+            f.write('{"resume":{}}')
+        self._git_in(home, 'add', '-A')
+        subprocess.run([folder_history._git(), 'commit', '-m', 'old system'], cwd=home, check=True,
+                       env={**os.environ, **env}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if remote:
+            self._git_in(home, 'remote', 'add', 'origin', 'https://example.invalid/project.git')
+        with open(os.path.join(home, 'board.html'), 'w', encoding='utf-8') as f:
+            f.write('changed after the move')
 
-                    self.assertIn('不是 jobsalvo 建立', status['message'])
-                    self.assertNotEqual(subprocess.run(
-                        [git, 'rev-parse', '--verify', 'HEAD'], cwd=home,
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode, 0)
-                    self.assertFalse(os.path.exists(os.path.join(home, '.git',
-                                                                   'jobsalvo-data-repository')))
+    def _commits(self, home):
+        return int(self._git_in(home, 'rev-list', '--count', 'HEAD').stdout.strip() or 0)
+
+    def test_moved_folder_repository_is_adopted_and_keeps_saving(self):
+        with _without_git_environment(), tempfile.TemporaryDirectory(prefix='moved-history-') as home:
+            self._old_system_repository(home)
+
+            self.assertTrue(folder_history.flush_now(home))
+
+            self.assertEqual(self._commits(home), 2)
+            self.assertTrue(os.path.isfile(os.path.join(home, '.git', 'jobsalvo-data-repository')))
+            status = folder_history.status(home)
+            self.assertRegex(status['message'], r'最近一次 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$')
+            self.assertFalse(status.get('fix'))
+
+    def test_repository_with_a_remote_is_never_committed(self):
+        with _without_git_environment(), tempfile.TemporaryDirectory(prefix='remote-history-') as home:
+            self._old_system_repository(home, remote=True)
+
+            self.assertFalse(folder_history.flush_now(home))
+
+            self.assertEqual(self._commits(home), 1)
+            self.assertFalse(os.path.exists(os.path.join(home, '.git', 'jobsalvo-data-repository')))
+            status = folder_history.status(home)
+            self.assertIn('remote', status['message'])
+            self.assertTrue(status['fix'])
+
+    def test_folder_inside_another_repository_is_never_committed(self):
+        with _without_git_environment(), tempfile.TemporaryDirectory(prefix='outer-repo-') as outer:
+            self._git_in(outer, 'init', '--initial-branch=main')
+            home = os.path.join(outer, 'jobsearch')
+            os.makedirs(home)
+            with open(os.path.join(home, 'jobsalvo.json'), 'w', encoding='utf-8') as f:
+                f.write('{"resume":{}}')
+
+            self.assertFalse(folder_history.flush_now(home))
+
+            self.assertFalse(os.path.exists(os.path.join(home, '.git')))
+            self.assertNotEqual(self._git_in(outer, 'rev-parse', '--verify', 'HEAD').returncode, 0)
+            status = folder_history.status(home)
+            self.assertIn('子資料夾', status['message'])
+            self.assertTrue(status['fix'])
+
+    def _board(self, home, text='old format'):
+        path = os.path.join(home, 'board.html')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        with open(os.path.join(home, 'jobsalvo.json'), 'w', encoding='utf-8') as f:
+            f.write('{"resume":{}}')
+        return path
+
+    @staticmethod
+    def _rewrite(path):
+        def do():
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('new format')
+        return do
+
+    def test_conversion_saves_a_version_of_the_old_format_first(self):
+        with _without_git_environment(), tempfile.TemporaryDirectory(prefix='convert-') as home:
+            board = self._board(home)
+
+            result = folder_history.convert(home, [board], '投遞狀態', self._rewrite(board))
+
+            self.assertTrue(result['done'])
+            self.assertEqual(self._git_in(home, 'show', 'HEAD:board.html').stdout, 'old format')
+            self.assertIn('版本', result['restore'])
+            with open(board, encoding='utf-8') as f:
+                self.assertEqual(f.read(), 'new format')
+
+    def test_conversion_without_version_history_backs_the_board_up_inside_the_folder(self):
+        for name in ('沒有 git', '看板檔不在資料夾裡(版本紀錄收不到它)'):
+            with self.subTest(name), _without_git_environment(), \
+                    tempfile.TemporaryDirectory(prefix='convert-') as home, \
+                    tempfile.TemporaryDirectory(prefix='elsewhere-') as elsewhere:
+                board = self._board(home if name == '沒有 git' else elsewhere)
+                self._board(home)
+                no_git = mock.patch.object(folder_history, '_git', return_value=None)
+                with no_git if name == '沒有 git' else mock.patch.dict(os.environ):
+                    result = folder_history.convert(home, [board], '投遞狀態', self._rewrite(board))
+
+                self.assertTrue(result['done'])
+                folder = os.path.join(home, folder_history.BACKUP_DIR)
+                backups = [os.path.join(folder, n) for n in os.listdir(folder)]
+                self.assertEqual(len(backups), 1)
+                with open(backups[0], encoding='utf-8') as f:
+                    self.assertEqual(f.read(), 'old format')
+                self.assertIn(backups[0], result['restore'])
+
+    def test_conversion_without_any_restore_point_does_not_convert(self):
+        with tempfile.TemporaryDirectory(prefix='convert-') as home:
+            board = self._board(home)
+            with open(os.path.join(home, folder_history.BACKUP_DIR), 'w', encoding='utf-8') as f:
+                f.write('a file where the backup folder should go')
+            with mock.patch.object(folder_history, '_git', return_value=None):
+                result = folder_history.convert(home, [board], '投遞狀態', self._rewrite(board))
+
+                self.assertFalse(result['done'])
+                self.assertTrue(result['reason'])
+                with open(board, encoding='utf-8') as f:
+                    self.assertEqual(f.read(), 'old format')
+                status = folder_history.status(home)
+                self.assertIn('投遞狀態', status['conversion'])
+
+    def test_one_conversion_succeeding_does_not_hide_another_that_was_skipped(self):
+        with tempfile.TemporaryDirectory(prefix='convert-') as home:
+            board = self._board(home)
+            settings = os.path.join(home, 'jobsalvo.json')
+            with mock.patch.object(folder_history, '_git', return_value=None):
+                with mock.patch.object(folder_history, '_back_up', side_effect=OSError('disk full')):
+                    folder_history.convert(home, [settings], '舊設定格式轉換', lambda: None)
+                folder_history.convert(home, [board], '投遞狀態轉換', self._rewrite(board))
+                conversion = folder_history.status(home)['conversion']
+            self.assertIn('舊設定格式轉換', conversion)
+            self.assertNotIn('投遞狀態轉換', conversion)
+
+    def test_conversion_with_nothing_to_keep_is_not_a_restore_point(self):
+        with tempfile.TemporaryDirectory(prefix='convert-') as home:
+            called = []
+            with mock.patch.object(folder_history, '_git', return_value=None):
+                result = folder_history.convert(home, [os.path.join(home, 'missing.html')], '投遞狀態',
+                                                lambda: called.append(1))
+            self.assertFalse(result['done'])
+            self.assertEqual(called, [])
 
     def test_configured_generated_paths_are_ignored_when_they_stay_inside_home(self):
         with tempfile.TemporaryDirectory(prefix='folder-history-') as home:

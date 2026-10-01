@@ -5,13 +5,13 @@ form_record 的回歸測試:「答案只有一個真相,就是表單答案庫;�
 
 跑法(repo 根目錄):python3 -m unittest discover -s tests
 """
-import os, sys, json, tempfile, shutil, unittest
+import os, sys, json, tempfile, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
 from _env import read_board, read_fb  # noqa: E402
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import board_doc as bd          # noqa: E402
 import form_record as fr        # noqa: E402
 
@@ -181,7 +181,7 @@ class Translate(unittest.TestCase):
     def test_he_edits_chinese_i_retranslate_and_unsent_forms_get_retyped(self):
         fb = {'__ans__': [{'k': 'n', 'q': '國籍', 'v': 'Taiwan', 'zh': '中華民國', 'tr': 1, 'at': T}],
               U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]},
-                   'apply': {'stage': 'fill', 'ok': True, 'tab_id': '5'}},
+                   'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '5'}},
               U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}},
               U3: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}}}
         self.assertEqual([e['k'] for e in fr.find_translate(fb)], ['n'])
@@ -220,59 +220,34 @@ class ThroughTheBoardFile(unittest.TestCase):
     """真的走 set_fb 寫檔:他手機上已經有的標記不能被蓋掉。"""
 
     def test_record_keeps_his_marks(self):
-        d = tempfile.mkdtemp(prefix='formrec-')
-        try:
-            p = os.path.join(d, 'board.html')
-            doc = bd.assemble(':root{--a:1}', '<b id="stat-first">0</b>', '', {'jobs': [{'id': U1}]},
-                              json.dumps({U1: {'s': 'like', 'app': 'ship'}}, ensure_ascii=False), '/*app*/')
-            with open(p, 'w', encoding='utf-8') as f:
-                f.write(doc)
-            made = fr.record(U1, 'Lever', [NAT], live=p)
-            self.assertEqual(made, ['nationality'])
-            fb = read_fb(p)
-            self.assertEqual(fb[U1]['s'], 'like')
-            self.assertEqual(fb[U1]['form']['f'][0], {'q': NAT['q'], 'src': 'bank', 'k': 'nationality'})
-            self.assertTrue(fb['__ans__'][0]['inf'])
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-'))
+        p = _env.make_board(os.path.join(d, 'board.html'), {U1: {'s': 'like', 'app': 'ship'}}, jobs=[{'id': U1}])
+        made = fr.record(U1, 'Lever', [NAT], live=p)
+        self.assertEqual(made, ['nationality'])
+        fb = read_fb(p)
+        self.assertEqual(fb[U1]['s'], 'like')
+        self.assertEqual(fb[U1]['form']['f'][0], {'q': NAT['q'], 'src': 'bank', 'k': 'nationality'})
+        self.assertTrue(fb['__ans__'][0]['inf'])
 
     def test_agent_board_is_the_default_write_target(self):
-        d = tempfile.mkdtemp(prefix='formrec-agent-board-')
-        try:
-            target = os.path.join(d, 'agent-board.html')
-            live = os.path.join(d, 'live-board.html')
-            initial = bd.assemble(':root{--a:1}', '<b id="stat-first">0</b>', '',
-                                 {'jobs': [{'id': U1}]}, '{}', '/*app*/')
-            for path in (target, live):
-                with open(path, 'w', encoding='utf-8') as f:
-                    f.write(initial)
-            old_live = bd.LIVE
-            bd.LIVE = live
-            try:
-                previous = os.environ.get('AGENT_BOARD')
-                os.environ['AGENT_BOARD'] = target
-                try:
-                    self.assertEqual(fr.record(U1, 'Lever', [NAT]), ['nationality'])
-                    bd.set_fb(lambda fb: fb.setdefault(U1, {}).__setitem__('s', 'like'), live=live)
-                    bd.set_data(lambda data, _fb: data['jobs'].append({'id': U2}), live=live)
-                finally:
-                    if previous is None:
-                        os.environ.pop('AGENT_BOARD', None)
-                    else:
-                        os.environ['AGENT_BOARD'] = previous
-            finally:
-                bd.LIVE = old_live
-            target_data = read_board(target)
-            target_fb = json.loads(target_data['fb'])
-            live_data = read_board(live)
-            live_fb = json.loads(live_data['fb'])
-            self.assertIn('form', target_fb[U1])
-            self.assertEqual(target_fb[U1]['s'], 'like')
-            self.assertEqual([job['id'] for job in target_data['data']['jobs']], [U1, U2])
-            self.assertEqual(live_fb, {})
-            self.assertEqual([job['id'] for job in live_data['data']['jobs']], [U1])
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-agent-board-'))
+        target = os.path.join(d, 'agent-board.html')
+        live = os.path.join(d, 'live-board.html')
+        for path in (target, live):
+            _env.make_board(path, jobs=[{'id': U1}])
+        with mock.patch.object(bd, 'LIVE', live), mock.patch.dict(os.environ, AGENT_BOARD=target):
+            self.assertEqual(fr.record(U1, 'Lever', [NAT]), ['nationality'])
+            bd.set_fb(lambda fb: fb.setdefault(U1, {}).__setitem__('s', 'like'), live=live)
+            bd.set_data(lambda data, _fb: data['jobs'].append({'id': U2}), live=live)
+        target_data = read_board(target)
+        target_fb = json.loads(target_data['fb'])
+        live_data = read_board(live)
+        live_fb = json.loads(live_data['fb'])
+        self.assertIn('form', target_fb[U1])
+        self.assertEqual(target_fb[U1]['s'], 'like')
+        self.assertEqual([job['id'] for job in target_data['data']['jobs']], [U1, U2])
+        self.assertEqual(live_fb, {})
+        self.assertEqual([job['id'] for job in live_data['data']['jobs']], [U1])
 
 
 class FromFill(unittest.TestCase):
@@ -295,11 +270,9 @@ class FromFill(unittest.TestCase):
 
     def _board(self, d):
         p = os.path.join(d, 'board.html')
-        fb = {U1: {'app': 'ship'}, '__ans__': [dict(NAT, at=T)]}
-        with open(p, 'w', encoding='utf-8') as f:
-            f.write(bd.assemble(':root{--a:1}', '<b id="stat-first">0</b>', '', {'jobs': [{'id': U1}]},
-                                json.dumps(fb, ensure_ascii=False), '/*app*/'))
-        return p
+        # agent 記表單只在它正在填或改這張時收(狀態表的 form_recorded,#307)
+        fb = {U1: {'app': 'ship', 'ds': 'running', 'apply': {'stage': 'fill'}}, '__ans__': [dict(NAT, at=T)]}
+        return _env.make_board(p, fb, jobs=[{'id': U1}])
 
     def _run(self, board, fill, d):
         import subprocess
@@ -310,40 +283,37 @@ class FromFill(unittest.TestCase):
                             '--from-fill', fp, '--url', U1, '--board', board], capture_output=True, text=True)
         return r, read_fb(board)
 
-    def test_cli_records_once_and_a_changed_answer_needs_a_new_approval(self):
-        d = tempfile.mkdtemp(prefix='formrec-fill-')
-        try:
-            board = self._board(d)
-            r, fb = self._run(board, self.FILL, d)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual([x['src'] for x in fb[U1]['form']['f']], ['rz', 'bank', 'bank', 'skip'])
-            self.assertEqual(fb[U1]['form']['plat'], 'Lever')
-            self.assertEqual(fr.validate(fb), [])
-            # 他核准了這一版;agent 修改那一輪重寫 fill.json、答案不一樣了 → 核准作廢,送不出去
-            bd.set_fb(lambda x: x[U1].__setitem__('approve', {'at': T, 'snap': fr.snapshot(x, U1)}), live=board)
-            fill2 = json.loads(json.dumps(self.FILL))
-            fill2['fields'][2]['value'] = 'Because B.'
-            fill2['fields'][2]['zh'] = '因為 B。'
-            r, fb = self._run(board, fill2, d)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertNotIn('approve', fb[U1])
-            passed = {'schema_version': 2, 'checked_links': True, 'issues': []}      # 投遞前驗收過了
-            self.assertEqual(fr.approval_problem(fb, U1, passed), '還沒確認送出')
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+    def test_cli_records_once_and_cannot_rewrite_the_form_he_confirmed(self):
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-fill-'))
+        board = self._board(d)
+        r, fb = self._run(board, self.FILL, d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([x['src'] for x in fb[U1]['form']['f']], ['rz', 'bank', 'bank', 'skip'])
+        self.assertEqual(fb[U1]['form']['plat'], 'Lever')
+        self.assertEqual(fr.validate(fb), [])
+        # 他核准了這一版;agent 之後再拿不一樣的答案記一次 → 擋下、講原因,他核准的那一份不變
+        def confirmed(x):
+            x[U1].update(ds='confirmed', apply={'stage': 'fill', 'tab_id': '1', 'delivery': {'method': 'direct_upload'}},
+                         approve={'at': T, 'snap': fr.snapshot(x, U1)})
+        bd.set_fb(confirmed, live=board)
+        fill2 = json.loads(json.dumps(self.FILL))
+        fill2['fields'][2]['value'] = 'Because B.'
+        fill2['fields'][2]['zh'] = '因為 B。'
+        before = read_fb(board)
+        r, fb = self._run(board, fill2, d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('你已確認', r.stderr)
+        self.assertEqual(fb, before)
 
     def test_cli_says_which_field_is_wrong(self):
-        d = tempfile.mkdtemp(prefix='formrec-fill-bad-')
-        try:
-            board = self._board(d)
-            bad = {'platform': 'Lever', 'fields': [
-                {'q': 'What is your nationality?', 'value': 'Japan', 'v': 'Japan', 'src': 'bank', 'k': 'nationality'}]}
-            r, fb = self._run(board, bad, d)
-            self.assertNotEqual(r.returncode, 0)
-            self.assertIn('nationality', r.stderr)
-            self.assertNotIn('form', fb[U1])
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-fill-bad-'))
+        board = self._board(d)
+        bad = {'platform': 'Lever', 'fields': [
+            {'q': 'What is your nationality?', 'value': 'Japan', 'v': 'Japan', 'src': 'bank', 'k': 'nationality'}]}
+        r, fb = self._run(board, bad, d)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('nationality', r.stderr)
+        self.assertNotIn('form', fb[U1])
 
 
 class ReadLang(unittest.TestCase):
@@ -372,3 +342,123 @@ class ReadLang(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RefusedInput(unittest.TestCase):
+    """agent 交來的表單欄位哪裡不對,就擋在哪裡、講是哪一欄;以前這幾條擋的路一次都沒走過。"""
+
+    def test_unknown_kind_or_src_is_refused(self):
+        for bad, want in (({'q': 'Q', 'v': 'x', 'kind': 'poem'}, 'kind 要是'),
+                          ({'q': 'Q', 'v': 'x', 'src': 'guess'}, 'src 要是')):
+            with self.subTest(want):
+                fb = {}
+                with self.assertRaises(ValueError) as e:
+                    fr.apply_record(fb, U1, 'x', [bad], today=T)
+                self.assertIn(want, str(e.exception))
+                self.assertNotIn('form', fb.get(U1, {}))
+
+    def test_given_k_with_the_same_value_reuses_the_entry(self):
+        fb = {}
+        fr.apply_record(fb, U1, 'x', [NAT], today=T)
+        fr.apply_record(fb, U2, 'x', [dict(NAT, q='Nationality')], today=T)
+        self.assertEqual([e['k'] for e in fb['__ans__']], ['nationality'])
+        self.assertEqual(fields(fb, U2)[0]['k'], 'nationality')
+
+    def test_validate_names_the_other_broken_shapes(self):
+        fb = {'__ans__': [{'k': 'a', 'q': 'Q', 'v': '台灣'}, {'k': 'a', 'q': 'Q2', 'v': '台灣'},
+                          {'k': 'b', 'q': 'R', 'v': '是', 'inf': T, 'at': T}],
+              U1: {'form': {'plat': 'x', 'f': [{'q': 'Name', 'src': 'rz', 'k': 'a'}]}}}
+        bad = ' '.join(fr.validate(fb))
+        for want in ('重複的 k', '是 rz 卻有 k', '同時標了'):
+            self.assertIn(want, bad)
+
+    def test_recording_the_same_answer_again_changes_nothing(self):
+        fb = {}
+        fr.apply_record(fb, U1, 'x', [WHY], today=T)
+        bank = json.loads(json.dumps(fb['__ans__']))
+        fr.apply_record(fb, U1, 'x', [WHY], today='2026-12-31')
+        self.assertEqual(fb['__ans__'], bank)
+
+    def test_retranslating_to_the_same_english_does_not_ask_for_retyping(self):
+        fb = {'__ans__': [{'k': 'a', 'q': 'Q', 'v': 'Taiwan', 'zh': '台灣', 'tr': 1}],
+              U1: {'form': {'plat': 'x', 'f': [{'q': 'Q', 'src': 'bank', 'k': 'a'}]}}}
+        fr.apply_translate(fb, 'a', en='Taiwan')
+        self.assertNotIn('refill', fb[U1]['form']['f'][0])
+        self.assertNotIn('tr', fb['__ans__'][0])
+
+    def test_fill_rows_without_a_question_are_skipped(self):
+        got = fr.fields_from_fill({'fields': ['亂寫的', {'value': 'x'}, {'q': 'Name', 'value': 'Alex', 'src': 'rz'}]})
+        self.assertEqual(got, [{'q': 'Name', 'src': 'rz', 'v': 'Alex'}])
+
+    def test_translating_an_answer_that_is_not_there_is_refused(self):
+        with self.assertRaises(ValueError):
+            fr.apply_translate({'__ans__': []}, 'nope', zh='中文')
+
+    def test_new_english_without_chinese_is_refused(self):
+        fb = {'__ans__': [{'k': 'a', 'q': 'Q', 'v': '台灣'}]}
+        with self.assertRaises(ValueError) as e:
+            fr.apply_translate(fb, 'a', en='Taiwan')
+        self.assertIn('翻完不對', str(e.exception))
+
+
+class Commands(unittest.TestCase):
+    """form_record.py 給 agent 和我跑的指令:每一種都照看板上現在的樣子回答。"""
+
+    def setUp(self):
+        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-cli-'))
+        self.board = os.path.join(self.dir, 'board.html')
+        fb = {'__ans__': [{'k': 'nat', 'q': '國籍', 'v': 'Taiwan', 'zh': '台灣', 'at': T},
+                          {'k': 'eng', 'q': '英文自介', 'v': 'I build things.', 'inf': T}],
+              U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'nat', 'refill': 1},
+                                               {'q': 'About', 'src': 'bank', 'k': 'eng', 'refill': 1}]}}}
+        _env.make_board(self.board, fb, jobs=[{'id': U1}])
+
+    def run_cli(self, *args):
+        import contextlib, io
+        from unittest import mock
+        out = io.StringIO()
+        code = 0
+        with mock.patch.object(sys, 'argv', ['form_record.py', '--board', self.board, *args]), \
+             contextlib.redirect_stdout(out):
+            try:
+                fr.main()
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def test_from_fill_needs_a_card(self):
+        code, _ = self.run_cli('--from-fill', os.path.join(self.dir, 'fill.json'))
+        self.assertIn('--url', str(code))
+
+    def test_refills_lists_what_to_translate_first(self):
+        _code, out = self.run_cli('--refills')
+        self.assertIn('先翻', out)
+        self.assertIn('eng', out)
+        self.assertIn('Nationality', out)
+
+    def test_check_fails_when_something_is_wrong(self):
+        code, out = self.run_cli('--check')
+        self.assertEqual(code, 1)
+        self.assertIn('eng', out)
+
+    def test_shared_lists_his_confirmed_answers(self):
+        _code, out = self.run_cli('--shared')
+        self.assertIn('nat', out)
+        self.assertNotIn('eng', out)
+
+    def test_refills_without_anything_to_translate(self):
+        bd.set_fb(lambda fb: fb['__ans__'][1].__setitem__('zh', '我做東西。'), live=self.board)
+        _code, out = self.run_cli('--refills')
+        self.assertNotIn('先翻', out)
+        self.assertIn('Nationality', out)
+
+    def test_default_lists_answers_waiting_for_him(self):
+        _code, out = self.run_cli()
+        self.assertIn('eng', out)
+        self.assertIn('推論於', out)
+
+    def test_clear_refill_only_the_matching_question(self):
+        _code, out = self.run_cli('--clear-refill', U1, '--q', 'Nation')
+        self.assertIn('清掉 1 欄', out)
+        f = read_fb(self.board)[U1]['form']['f']
+        self.assertEqual([bool(x.get('refill')) for x in f], [False, True])

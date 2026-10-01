@@ -6,7 +6,6 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import update  # noqa: E402
 
 # 全域 git hook 每次 clone/checkout 都會跑,測試裡的假 repo 不需要

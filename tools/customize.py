@@ -1,17 +1,20 @@
 """Per-card resume and attachment customization workflow."""
 import argparse
+import contextlib
 import copy
 import difflib
 import hashlib
 import json
 import os
 import re
+import subprocess
 import time
 import uuid
 
 import agent_report
 import agent_run
 import board_doc as bd
+import evidence
 import card
 import config as cf
 import jobrun
@@ -26,8 +29,7 @@ MAX_FEEDBACK = 2000
 
 
 def _read_board(path):
-    with open(path, encoding='utf-8') as f:
-        parsed = bd.parse(f.read())
+    parsed = bd.load(path)
     return parsed['data'], json.loads(parsed['fb'])
 
 
@@ -121,9 +123,10 @@ def build_prompt(url, title, items, feedback, report_path, jd=''):
         + '\n\n其他卡片尚未處理的內容回饋(JSON):\n'
         + json.dumps(feedback, ensure_ascii=False, indent=2)
         + '\n\n請把跨卡回饋中「至少兩張卡都提到的同一個問題」整理到 '
-        + report_path + '，格式為 {"reports":[{"issue":"問題","recommendation":"建議調整哪份履歷或哪個 skill","occurrences":2,'
+        + report_path + '，格式為 {"reports":[{"issue":"問題","recommendation":"建議調整哪份履歷或哪個 skill",'
         + '"feedback_ids":["提到這個問題的那幾則回饋的 id"]}]}。'
-        + '每個問題只列一次，occurrences 填實際提到的次數，feedback_ids 列出歸進這個問題的回饋 id；只有一次的問題不要列。'
+        + '每個問題只列一次，feedback_ids 列出歸進這個問題的回饋 id(提到幾次程式照這個數);只有一張卡提過的問題不要列。'
+        + '程式會核對每個 id 都是上面給你的、而且至少兩張卡提到，對不上的那一則不收。'
         + '沒有重複問題也要寫 {"reports":[]}。'
         + '只回報建議，不要修改任何設定或 skill。全部完成後 stdout 只印 @@CUSTOMIZE_DONE@@。\n'
     )
@@ -156,20 +159,64 @@ def list_files(url, board=None):
     } for item in items]
 
 
-def _set_entries(board, url, updates):
-    import form_record as fr
+def swap_files(fb, url, why):
+    """這張要寄的檔換了:照狀態表送「換檔」(填好的頁上傳的是舊檔,要重填)。表上不准(正在送出)回原因,
+    呼叫的在看板鎖內就不寫(#338:以前換了檔卻默默擋掉事件,送出去的是頁上的舊檔)。"""
+    import delivery_state as ds
+    try:
+        ds.fire(fb, url, 'files_changed', why=why)
+    except ds.Forbidden as e:
+        return str(e)
 
-    def mutate(fb):
-        state = fb.setdefault(url, {})
-        docs = state.setdefault('custom_docs', {})
-        for item_id, entry in updates.items():
-            prev = docs.get(item_id) or {}
-            docs[item_id] = copy.deepcopy(entry)
-            # 換成另一份檔(新收下、換了檔):agent 已經填好的那一頁上傳的是舊檔,要重填。
-            # 只看檔有沒有真的換:已收下的再客製一次沒成功,會退回原本收下的那一份(path 沒變),頁上的就是它
-            if entry.get('status') == 'accepted' and prev.get('path') != entry.get('path'):
-                fr.mark_stale(fb, url, f'「{entry.get("name") or item_id}」換成客製版了')
-    return bd.set_fb(mutate, live=board, by='customize')
+
+def _put_entries(fb, url, updates):
+    """客製紀錄寫進這張卡(呼叫的已經在看板鎖內)。換了檔而狀態表不准就回原因(呼叫的就不寫)。"""
+    state = fb.setdefault(url, {})
+    docs = state.setdefault('custom_docs', {})
+    for item_id, entry in updates.items():
+        prev = docs.get(item_id) or {}
+        docs[item_id] = copy.deepcopy(entry)
+        # 換成另一份檔(新收下、換了檔):agent 已經填好的那一頁上傳的是舊檔,要重填。
+        # 只看檔有沒有真的換:已收下的再客製一次沒成功,會退回原本收下的那一份(path 沒變),頁上的就是它
+        if entry.get('status') == 'accepted' and prev.get('path') != entry.get('path'):
+            why = swap_files(fb, url, f'「{entry.get("name") or item_id}」換成客製版了')
+            if why:
+                return why
+
+
+def _set_entries(board, url, updates):
+    return bd.set_fb(lambda fb: _put_entries(fb, url, updates), live=board, by='customize')
+
+
+def _in_lock(board, decide):
+    """讀這張卡現在的樣子、判斷、寫回,整段在看板鎖內(#308):以前鎖外讀、鎖內整份寫回,
+    兩台裝置同時按收下和退回,後寫的蓋掉先寫的、兩邊都說成功。
+    decide(data, fb) 就地改 fb;不能做就回原因(那就不寫)。回 (做了沒, 原因)。"""
+    why = []
+
+    def put(d):
+        problem = decide(d['data'], d['fb'])
+        if problem:
+            why.append(problem)
+            return bd.SKIP
+    bd.rewrite(put, bd.target(board), 'customize')
+    return (False, why[0]) if why else (True, '')
+
+
+def _review(url, item_id, board, change):
+    """收下或退回一份在等你看的客製版:在看板鎖內確認它還在等你看,change(entry) 改好(回原因就不做),寫回。"""
+    def decide(data, fb):
+        _job_data, state, items = _card_items(data, fb, url)
+        if not any(item['id'] == item_id for item in items):
+            return '這張卡沒有這份檔案'
+        entry = copy.deepcopy((state.get('custom_docs') or {}).get(item_id) or {})
+        if entry.get('status') != 'review':
+            return '這份客製版目前不在等你看'
+        problem = change(entry)
+        if problem:
+            return problem
+        return _put_entries(fb, url, {item_id: entry})
+    return _in_lock(board, decide)
 
 
 def _report_invalid(board, url, title, item, reason, reporter=None):
@@ -180,7 +227,7 @@ def _report_invalid(board, url, title, item, reason, reporter=None):
             '查看卡片上的原因，修正原檔或客製 skill 後再重跑。', job=url, live=board,
         )
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 — 原因已經寫在卡上(這則回報只是再提醒一次),回報寫不進去不擋收尾
         return False
 
 
@@ -232,7 +279,7 @@ def validate_output(source, output, page_counter=None, *, page_source=None, sour
         if source_pages is None:
             source_pages = page_counter(page_source)
         output_pages = page_counter(output)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 讀不了的原因照實回給呼叫的地方,寫在卡上
         return f'PDF 讀取失敗:{str(e)[:120]}', None, None
     if not output_pages:
         return '客製版 PDF 沒有可讀取的頁面', source_pages, output_pages
@@ -278,11 +325,7 @@ def finish_outputs(board, url, items, run_id, feedback_ids=(), report_path=None,
                 source_pages=original['page_limit_pages'],
             )
         if reason:
-            previous = old.pop('previous_status', '')
-            old['status'] = 'accepted' if old.get('path') else ('rework' if previous == 'rework' else 'failed')
-            old['error'] = reason
-            old.pop('candidate_path', None)
-            old.pop('candidate_source_sig', None)
+            _revert(old, reason)
             failures.append((item, reason))
         else:
             old.update({
@@ -304,33 +347,37 @@ def finish_outputs(board, url, items, run_id, feedback_ids=(), report_path=None,
 
 
 def process_feedback_reports(board, path, feedback_ids=(), report_writer=None):
+    """跨卡回饋的整理(交件單)經安檢門:歸進來的回饋都要是這一輪給它的、至少兩張卡提到;對不上的那一則不收、照實回報。
+    哪幾則算同一個問題是 agent 判斷:回報裡標明、附那幾則回饋的原文;提到幾次程式照它列的回饋數。"""
     if not feedback_ids or not path or not os.path.isfile(path):
         return False
+    import gate
+    writer = report_writer or agent_report.report
     try:
-        with open(path, encoding='utf-8') as f:
-            payload = json.load(f)
-        reports = payload.get('reports') if isinstance(payload, dict) else None
-        if not isinstance(reports, list):
+        payload, _missing = gate.read(os.path.dirname(path), 'customize', where=path)
+        if payload is None or not isinstance(payload.get('reports'), list):
             return False
+        data, fb = _read_board(board)
+        wanted_ids = set(feedback_ids)
+        given = {r['id']: r for r in feedback_records(fb, data.get('jobs') or []) if r['id'] in wanted_ids}
+        verdict = gate.inspect('customize', payload, gate.Truth(feedback=given))
         covered = set()
-        for report in reports:
-            if not isinstance(report, dict):
+        for row in verdict.rows.get('reports', []):
+            if not row.ok:            # 安檢門擋下:這一則不收,講清楚哪一格、agent 說什麼、實際是什麼
+                writer('客製回饋', 'agent 交的跨卡回饋整理對不上,這一則不收:' + '；'.join(row.problems)[:300],
+                       '不用你處理:那幾則回饋留著,下一輪再整理', live=board)
                 continue
-            issue = str(report.get('issue') or '').strip()
-            recommendation = str(report.get('recommendation') or '').strip()
-            try:
-                occurrences = int(report.get('occurrences') or 0)
-            except (TypeError, ValueError):
-                occurrences = 0
-            if not issue or not recommendation or occurrences < 2:
+            issue = str(row.judged.get('issue') or '').strip()
+            recommendation = str(row.facts.get('recommendation') or '').strip()
+            ids = list(dict.fromkeys(row.facts.get('feedback_ids') or []))
+            if not issue or not recommendation:
                 continue
-            writer = report_writer or agent_report.report
-            for _ in range(min(occurrences, 100)):
-                writer('客製回饋', issue, recommendation, live=board)
-            ids = report.get('feedback_ids')
-            if isinstance(ids, list):
-                covered.update(x for x in ids if isinstance(x, str))
-    except Exception:
+            quotes = '、'.join(f'「{given[i]["text"][:60]}」({given[i]["card"][:20]})' for i in ids[:6])
+            msg = f'{gate.JUDGED}這幾則回饋是同一個問題:{issue}(回饋原文:{quotes})'
+            for _ in range(min(len(ids), 100)):
+                writer('客製回饋', msg, recommendation, live=board)
+            covered.update(ids)
+    except Exception:  # noqa: BLE001 — agent 交的整理檔什麼樣子都有可能;處理不了就不標成處理過,下一輪照樣交給 agent
         return False
     # 只標歸進回報的那幾則:只提過一次的留著,之後別張卡也提到才湊得到兩次。
     # 以前這一輪交給 agent 的全部標成處理過,同一個問題幾乎永遠湊不到兩次
@@ -358,8 +405,9 @@ def _text(path):
     if path.lower().endswith('.pdf'):
         try:
             return sa.pdf_text(path)
-        except Exception:
-            return ''
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            # 讀不出來照實說是哪一份:當成空的,差異會變成「整份都刪掉了」
+            raise ValueError(f'{os.path.basename(path)} 抽不出文字:{str(e)[:120]}') from e
     if path.lower().endswith(('.md', '.txt')):
         try:
             with open(path, encoding='utf-8') as f:
@@ -388,64 +436,43 @@ def diff_for(url, item_id, board=None):
     return {'name': item['name'], 'diff': diff[:200000] or '兩份檔案的文字相同。'}
 
 
-def _review_entry(url, item_id, board):
-    data, fb = _read_board(board)
-    _job_data, state, items = _card_items(data, fb, url)
-    if not any(item['id'] == item_id for item in items):
-        return None, '這張卡沒有這份檔案'
-    entry = copy.deepcopy((state.get('custom_docs') or {}).get(item_id) or {})
-    if entry.get('status') != 'review':
-        return None, '這份客製版目前不在等你看'
-    return entry, ''
-
-
 def accept(url, item_id, board=None):
-    board = board or bd.LIVE
-    entry, error = _review_entry(url, item_id, board)
-    if error:
-        return False, error
-    path = ship._safe_custom_path(entry.get('candidate_path'))
-    if not path or not os.path.isfile(path):
-        return False, '客製版檔案不見了，不能收下'
-    entry['path'] = entry.pop('candidate_path')
-    entry['source_sig'] = entry.pop('candidate_source_sig', '')
-    entry['status'] = 'accepted'
-    entry['accepted_at'] = _now()
-    entry.pop('error', None)
-    _set_entries(board, url, {item_id: entry})
-    return True, ''
+    def change(entry):
+        path = ship._safe_custom_path(entry.get('candidate_path'))
+        if not path or not os.path.isfile(path):
+            return '客製版檔案不見了，不能收下'
+        entry['path'] = entry.pop('candidate_path')
+        entry['source_sig'] = entry.pop('candidate_source_sig', '')
+        entry['status'] = 'accepted'
+        entry['accepted_at'] = _now()
+        entry.pop('error', None)
+    return _review(url, item_id, board or bd.LIVE, change)
 
 
 def reject(url, item_id, note, board=None):
-    board = board or bd.LIVE
     note = re.sub(r'\s+', ' ', str(note or '')).strip()[:MAX_FEEDBACK]
     if not note:
         return False, '寫一下哪裡不對，agent 才知道要改什麼'
-    entry, error = _review_entry(url, item_id, board)
-    if error:
-        return False, error
-    entry['status'] = 'rework'
-    entry['error'] = ''
-    feedbacks = entry.setdefault('feedbacks', [])
-    feedbacks.append({
-        'id': uuid.uuid4().hex[:12],
-        'at': _now(), 'text': note,
-    })
-    _set_entries(board, url, {item_id: entry})
-    return True, ''
+
+    def change(entry):
+        entry['status'] = 'rework'
+        entry['error'] = ''
+        entry.setdefault('feedbacks', []).append({
+            'id': uuid.uuid4().hex[:12],
+            'at': _now(), 'text': note,
+        })
+    return _review(url, item_id, board or bd.LIVE, change)
 
 
 def clear(url, item_id, board=None):
-    """移除一份已收下版本的引用,不刪使用者資料夾裡的原檔。"""
-    board = board or bd.LIVE
-    data, fb = _read_board(board)
-    _job_data, state, items = _card_items(data, fb, url)
-    legacy_resume = item_id == 'resume:legacy' and bool(state.get('custom_file'))
-    current = legacy_resume or any(x['id'] == item_id for x in items)
-    # 換了履歷、語言或附件之後留下的舊紀錄(不在這張現在要寄的檔裡)也能清掉:卡上只給這一顆
-    if not current and item_id not in (state.get('custom_docs') or {}):
-        return False, '這張卡沒有這份檔案'
-    def mutate(all_fb):
+    """移除一份已收下版本的引用,不刪使用者資料夾裡的原檔。整段在看板鎖內判斷、寫(#308)。"""
+    def decide(data, all_fb):
+        _job_data, state, items = _card_items(data, all_fb, url)
+        legacy_resume = item_id == 'resume:legacy' and bool(state.get('custom_file'))
+        current = legacy_resume or any(x['id'] == item_id for x in items)
+        # 換了履歷、語言或附件之後留下的舊紀錄(不在這張現在要寄的檔裡)也能清掉:卡上只給這一顆
+        if not current and item_id not in (state.get('custom_docs') or {}):
+            return '這張卡沒有這份檔案'
         card_state = all_fb.setdefault(url, {})
         docs = card_state.get('custom_docs')
         if isinstance(docs, dict):
@@ -453,42 +480,46 @@ def clear(url, item_id, board=None):
             if not docs:
                 card_state.pop('custom_docs', None)
         if not current:
-            return                       # 舊紀錄本來就沒寄出去:要寄的檔沒變,已填好的頁和核准都不用動
+            return None                  # 舊紀錄本來就沒寄出去:要寄的檔沒變,已填好的頁和核准都不用動
         if item_id.startswith('resume:'):
             card_state.pop('custom_file', None)
-        import form_record as fr
-        fr.mark_stale(all_fb, url, '客製版改回原始檔了')
-    bd.set_fb(mutate, live=board, by='customize')
-    return True, ''
+        return swap_files(all_fb, url, '客製版改回原始檔了')
+    return _in_lock(board or bd.LIVE, decide)
 
 
 def upload_custom(url, item_id, name, data, board=None):
-    """使用者直接上傳一份客製 PDF;這是已收下狀態。"""
+    """使用者直接上傳一份客製 PDF;這是已收下狀態。檔先存好,卡上的紀錄在看板鎖內照現在的樣子寫(#308)。"""
     board = board or bd.LIVE
     filename = os.path.basename(str(name or 'custom.pdf')).replace('\\', '_')
     if not filename.lower().endswith('.pdf') or not data.startswith(b'%PDF-'):
         return None, '客製版要是 PDF'
     live_data, fb = _read_board(board)
-    _job_data, state, items = _card_items(live_data, fb, url)
-    item = next((x for x in items if x['id'] == item_id), None)
-    if not item:
+    _job_data, _state, items = _card_items(live_data, fb, url)
+    if not any(x['id'] == item_id for x in items):
         return None, '這張卡沒有這份檔案'
     digest = hashlib.sha256(item_id.encode('utf-8')).hexdigest()[:12]
     rel = f'custom/{card.card_id_from_url(url)}/uploaded/{digest}-{uuid.uuid4().hex[:8]}-{filename}'
     saved, error = sa.put_file(rel, data)
     if not saved:
         return None, error
-    old = copy.deepcopy((state.get('custom_docs') or {}).get(item_id) or {})
-    old.update({
-        'id': item_id, 'kind': item['kind'], 'name': item['name'], 'status': 'accepted',
-        'path': saved, 'source_sig': ship._digest(item.get('source')),
-        'uploaded_at': _now(),
-    })
-    old.pop('candidate_path', None)
-    old.pop('candidate_source_sig', None)
-    old.pop('error', None)
-    _set_entries(board, url, {item_id: old})
-    return saved, ''
+
+    def decide(board_data, all_fb):
+        _job_data, state, items = _card_items(board_data, all_fb, url)
+        item = next((x for x in items if x['id'] == item_id), None)
+        if not item:
+            return '這張卡沒有這份檔案'
+        entry = copy.deepcopy((state.get('custom_docs') or {}).get(item_id) or {})
+        entry.update({
+            'id': item_id, 'kind': item['kind'], 'name': item['name'], 'status': 'accepted',
+            'path': saved, 'source_sig': ship._digest(item.get('source')),
+            'uploaded_at': _now(),
+        })
+        entry.pop('candidate_path', None)
+        entry.pop('candidate_source_sig', None)
+        entry.pop('error', None)
+        return _put_entries(all_fb, url, {item_id: entry})
+    ok, why = _in_lock(board, decide)
+    return (saved, '') if ok else (None, why)
 
 
 class JobPageUnreadable(RuntimeError):
@@ -561,6 +592,7 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
     _status = lambda value: jobrun.write(status_path, value)
     feedback = feedback_records(fb, data.get('jobs') or [])
     report_path = os.path.join(run_dir, 'feedback_reports.json')
+    rnd = None
     prompt_path = os.path.join(run_dir, 'customize_prompt.txt')
     output_log = os.path.join(run_dir, 'customize.out')
     try:
@@ -577,17 +609,19 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
             def launch_override(prompt_text, outfile, repo, _agent, **options):
                 return launcher(prompt_text, outfile, repo, model='main', board=board,
                                 chrome=options.get('chrome', False))
-        result = agent_run.run(
-            prompt, output_log, cf.HOME, model='main', board=board, web=False,
-            launcher=launch_override, waiter=waiter,
-        )
+        with evidence.opened('customize', 'tailor', [url], board) as rnd:   # 證據記進這張卡(#315)
+            result = agent_run.run(
+                prompt, output_log, cf.HOME, model='main', board=board, web=False,
+                launcher=launch_override, waiter=waiter,
+            )
+            rnd.handoff(report_path)
     except JobPageUnreadable as e:
         result = None
         worker_error = str(e)
     except FileNotFoundError as e:
         result = None
         worker_error = f'找不到 agent 執行程式:{str(e)[:120]}'
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 這一輪最外層:原因照實寫進卡上與看板的回報
         result = None
         worker_error = f'客製工作失敗:{str(e)[:120]}'
     else:
@@ -598,17 +632,22 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
             output = sa.safe_rel(item['output_rel'])
             if output and os.path.isfile(output):
                 os.remove(output)
-        failed = {item['id']: _failed_entry(item, worker_error, board, url, card.name(job), run_id)
-                  for item in selected}
-        failed = {item_id: entry for item_id, entry in failed.items() if entry is not None}
+        _data, fb = _read_board(board)
+        docs = (fb.get(url) or {}).get('custom_docs') or {}
+        olds = {item['id']: copy.deepcopy(docs.get(item['id']) or {}) for item in selected}
+        failed = {i: _revert(old, worker_error) for i, old in olds.items() if _still_running(old, run_id)}
+        for item in selected:
+            if item['id'] in failed:
+                _report_invalid(board, url, card.name(job), item, worker_error)
         if failed:
             _set_entries(board, url, failed)
         _status({'phase': 'failed', 'n': len(selected), 'done': 0, 'msg': worker_error,
                  't0': t0, 'finished_at': time.time(), 'url': url})
         return {'ok': False, 'msg': worker_error}
-    result_data = finish_outputs(
-        board, url, selected, run_id, [row['id'] for row in feedback], report_path,
-    )
+    with (evidence.activated(rnd) if rnd is not None else contextlib.nullcontext()):   # 安檢門的比對結果記進同一輪
+        result_data = finish_outputs(
+            board, url, selected, run_id, [row['id'] for row in feedback], report_path,
+        )
     if stopping:
         jobrun.clear_finish(status_path)
     _status({'phase': 'stopped' if stopping else 'done', 'n': len(selected),
@@ -619,18 +658,13 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
     return result_data
 
 
-def _failed_entry(item, reason, board, url, title, run_id):
-    data, fb = _read_board(board)
-    state = fb.get(url) or {}
-    old = copy.deepcopy((state.get('custom_docs') or {}).get(item['id']) or {})
-    if not _still_running(old, run_id):
-        return None
+def _revert(old, reason):
+    """這一輪的客製版不收:有收下過的版本就留著,退回重寫中的照舊,其他標失敗;原因記上。"""
     previous = old.pop('previous_status', '')
     old['status'] = 'accepted' if old.get('path') else ('rework' if previous == 'rework' else 'failed')
     old['error'] = reason
     old.pop('candidate_path', None)
     old.pop('candidate_source_sig', None)
-    _report_invalid(board, url, title, item, reason)
     return old
 
 

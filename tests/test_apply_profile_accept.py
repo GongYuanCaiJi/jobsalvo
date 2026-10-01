@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import sys
 import tempfile
 import unittest
@@ -12,7 +11,7 @@ import apply_profile_accept as acceptance
 
 class AcceptanceIsolation(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.mkdtemp(prefix='profile-accept-test-')
+        self.temporary = self.enterContext(tempfile.TemporaryDirectory(prefix='profile-accept-test-'))
         self.source = os.path.join(self.temporary, 'source')
         os.makedirs(self.source)
         self.settings = {
@@ -42,9 +41,6 @@ class AcceptanceIsolation(unittest.TestCase):
             target.write('private rules')
         with open(os.path.join(self.temporary, 'agent.json'), 'w', encoding='utf-8') as target:
             target.write('{"instance":"test"}')
-
-    def tearDown(self):
-        shutil.rmtree(self.temporary, ignore_errors=True)
 
     def test_clone_redirects_runtime_paths_and_browser_state(self):
         runtime = os.path.join(self.temporary, 'runtime')
@@ -118,7 +114,7 @@ class AcceptanceIsolation(unittest.TestCase):
         evidence = {
             'run_ok': False,
             'apply': {'issues': [
-                '「private-question」頁面上是 \'private-answer\',答案庫是 \'private-bank-value\'',
+                '「private-question」頁面上是 \'private-answer\',常用答案是 \'private-bank-value\'',
             ]},
         }
 
@@ -162,7 +158,7 @@ class AcceptanceIsolation(unittest.TestCase):
         self.assertEqual(shell['data'], {'jobs': []})
         self.assertEqual(json.loads(shell['fb']), {})
         self.assertIn('.ap-approve:disabled', shell['sty'])
-        self.assertIn("m.apply.stage==='fill'||m.apply.stage==='fix'", shell['app'])
+        self.assertIn('function dsFire(', shell['app'])       # 現在的外殼照投遞狀態表判斷能不能確認送出
 
 
 if __name__ == '__main__':

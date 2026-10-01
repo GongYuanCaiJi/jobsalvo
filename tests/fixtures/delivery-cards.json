@@ -1,0 +1,1747 @@
+{
+ "_": "投遞狀態表測試用的標準卡:每個狀態一張、每個事件一份事件資料。後台測試(tests/test_delivery_state.py)和看板檢查(tools/board_check.py 的投遞狀態表那一條)用同一份。",
+ "url": "https://cells.example/job/1",
+ "ans": [
+  {
+   "k": "k1",
+   "q": "Why?",
+   "v": "Because.",
+   "zh": "因為。",
+   "at": "2026-01-01"
+  }
+ ],
+ "cards": {
+  "todo": {
+   "app": "ship",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   }
+  },
+  "running": {
+   "app": "ship",
+   "ds": "running",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [
+     "這一輪還沒跑完"
+    ],
+    "tab_id": "7",
+    "session": "s1"
+   }
+  },
+  "nopage": {
+   "app": "ship",
+   "ds": "nopage",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [
+     "連不上 agent 的 Chrome"
+    ],
+    "tab_id": ""
+   }
+  },
+  "parked": {
+   "app": "ship",
+   "ds": "parked",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1",
+      "refill": 1
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   }
+  },
+  "stuck": {
+   "app": "ship",
+   "ds": "stuck",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fix",
+    "at": "2026-01-01T00:00:00",
+    "issues": [
+     "必填欄位沒填"
+    ],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   }
+  },
+  "stale": {
+   "app": "ship",
+   "ds": "stale",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    },
+    "stale": "履歷換成「B」"
+   }
+  },
+  "gone": {
+   "app": "ship",
+   "ds": "gone",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [
+     "填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填"
+    ],
+    "tab_id": "",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   }
+  },
+  "confirmed": {
+   "app": "ship",
+   "ds": "confirmed",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   },
+   "approve": {
+    "at": "2026-01-01T00:07:00",
+    "snap": {
+     "Why?": "Because."
+    }
+   }
+  },
+  "sending": {
+   "app": "ship",
+   "ds": "sending",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   },
+   "approve": {
+    "at": "2026-01-01T00:07:00",
+    "snap": {
+     "Why?": "Because."
+    }
+   }
+  },
+  "unsure": {
+   "app": "ship",
+   "ds": "unsure",
+   "form": {
+    "plat": "x",
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    },
+    "submit_fail": {
+     "at": "2026-01-01T00:08:00",
+     "problems": [
+      "沒看到成功頁面"
+     ],
+     "clicked": true
+    }
+   },
+   "approve": {
+    "at": "2026-01-01T00:07:00",
+    "snap": {
+     "Why?": "Because."
+    }
+   }
+  },
+  "sent": {
+   "app": "sent",
+   "ds": "sent",
+   "sent_by": "agent",
+   "sent_at": "2026-01-02",
+   "sent_v": "zh-A",
+   "ev": "送出頁是目前唯一證據",
+   "oc": "rej",
+   "oc_at": {
+    "rej": "2026-01-20"
+   },
+   "form": {
+    "plat": "x",
+    "lock": 1,
+    "f": [
+     {
+      "q": "Why?",
+      "src": "bank",
+      "k": "k1"
+     }
+    ]
+   },
+   "apply": {
+    "stage": "fill",
+    "at": "2026-01-01T00:00:00",
+    "issues": [],
+    "tab_id": "7",
+    "session": "s1",
+    "delivery": {
+     "method": "direct_upload"
+    },
+    "sent": {
+     "at": "2026-01-02T00:09:00",
+     "text": "已收到申請"
+    }
+   },
+   "approve": {
+    "at": "2026-01-01T00:07:00",
+    "snap": {
+     "Why?": "Because."
+    }
+   }
+  }
+ },
+ "data": {
+  "fill_start": {
+   "apply": {
+    "stage": "fill",
+    "at": "2026-02-01T00:00:00",
+    "issues": [
+     "這一輪還沒跑完"
+    ]
+   }
+  },
+  "fix_start": {
+   "apply": {
+    "stage": "fix",
+    "at": "2026-02-01T00:00:00",
+    "issues": [
+     "這一輪還沒跑完"
+    ]
+   }
+  },
+  "fill_ok": {
+   "apply": {
+    "stage": "fill",
+    "at": "2026-02-01T00:10:00",
+    "issues": [],
+    "tab_id": "9",
+    "session": "s2",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   }
+  },
+  "fill_bad": {
+   "apply": {
+    "stage": "fill",
+    "at": "2026-02-01T00:10:00",
+    "issues": [
+     "必填欄位沒填"
+    ],
+    "tab_id": "9",
+    "session": "s2",
+    "delivery": {
+     "method": "direct_upload"
+    }
+   }
+  },
+  "fill_nopage": {
+   "apply": {
+    "stage": "fill",
+    "at": "2026-02-01T00:10:00",
+    "issues": [
+     "連不上 agent 的 Chrome"
+    ],
+    "tab_id": ""
+   }
+  },
+  "check_failed": {
+   "apply": {
+    "issues": [
+     "平台上的附件跟這次要寄的不一樣"
+    ]
+   }
+  },
+  "confirm": {
+   "approve": {
+    "at": "2026-02-01T00:20:00",
+    "snap": {
+     "Why?": "Because."
+    }
+   }
+  },
+  "unconfirm": {},
+  "answers_changed": {},
+  "files_changed": {
+   "why": "語言換成「English」"
+  },
+  "page_lost": {
+   "issues": [
+    "填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填"
+   ]
+  },
+  "submit_start": {},
+  "submit_ok": {
+   "by": "agent",
+   "sent_at": "2026-02-02",
+   "sent_v": "en-B",
+   "ev": "送出頁是目前唯一證據",
+   "evidence": {
+    "at": "2026-02-02T00:09:00",
+    "text": "Application received"
+   }
+  },
+  "submit_unsure": {
+   "evidence": {
+    "at": "2026-02-02T00:09:00",
+    "problems": [
+     "沒看到成功頁面"
+    ],
+    "clicked": true
+   }
+  },
+  "submit_not_started": {},
+  "not_sent": {
+   "at": "2026-02-03T00:00:00",
+   "issues": [
+    "填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填"
+   ]
+  },
+  "actually_sent": {
+   "by": "agent",
+   "sent_at": "2026-02-03",
+   "sent_v": "en-B",
+   "evidence": {
+    "at": "2026-02-02T00:09:00",
+    "problems": [
+     "沒看到成功頁面"
+    ],
+    "clicked": true
+   }
+  },
+  "sent_manual": {
+   "by": "manual",
+   "at": "2026-02-03T00:00:00",
+   "sent_at": "2026-02-03",
+   "sent_v": "en-B"
+  },
+  "platform_found": {
+   "by": "platform",
+   "at": "2026-02-03T00:00:00",
+   "sent_at": "2026-01-30",
+   "rec": "104:abc:2026-01-30"
+  },
+  "undo_sent": {
+   "at": "2026-02-04T00:00:00"
+  },
+  "back": {
+   "at": "2026-02-04T00:00:00",
+   "to": "ship"
+  },
+  "retry": {},
+  "leave": {},
+  "fill_submitted": {
+   "by": "agent",
+   "sent_at": "2026-02-01",
+   "evidence": {
+    "at": "2026-02-01T00:10:00",
+    "text": "Application received",
+    "note": "填表時 agent 違規按了送出"
+   },
+   "ev": "填表時 agent 違規按了送出"
+  },
+  "form_recorded": {},
+  "tab_handed": {
+   "apply": {
+    "tab_id": "9",
+    "chrome": {
+     "pid": 1,
+     "start": 1000.0
+    }
+   }
+  }
+ },
+ "checklist_": "能不能確認送出:先看投遞狀態,再看檢查清單(投遞前驗收、這次上傳方式、常用答案、重翻、重打、確認時的答案)。problem 是確認之後能不能送(form_record.approval_problem / 看板 approvalProblem);confirm 是現在按確認送出會被什麼擋(form_record.confirm_problem / 看板 approveBlocker)。原本 board-rule-cases.json 的 approvals、approve_blockers 併進來。",
+ "checklist": [
+  {
+   "name": "missing form",
+   "url": "https://rules.example/missing",
+   "fb": {},
+   "problem": "這張還沒有表單紀錄",
+   "confirm": "這張還沒有表單紀錄"
+  },
+  {
+   "name": "missing approval",
+   "url": "https://rules.example/no-approval",
+   "fb": {
+    "https://rules.example/no-approval": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "app": "ship"
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": "agent 還沒填這張,先讓它填好、你看過頁面再確認送出"
+  },
+  {
+   "name": "pending answer",
+   "url": "https://rules.example/pending",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "Engineer",
+      "zh": "工程師",
+      "inf": "2026-01-01"
+     }
+    ],
+    "https://rules.example/pending": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    }
+   },
+   "problem": "還有答案等你確認或填寫",
+   "confirm": "還有答案等你確認或填寫"
+  },
+  {
+   "name": "empty answer",
+   "url": "https://rules.example/empty",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "",
+      "zh": ""
+     }
+    ],
+    "https://rules.example/empty": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": ""
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    }
+   },
+   "problem": "還有答案等你確認或填寫",
+   "confirm": "還有答案等你確認或填寫"
+  },
+  {
+   "name": "translation needed",
+   "url": "https://rules.example/translation",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "Engineer",
+      "zh": "工程師",
+      "tr": true
+     }
+    ],
+    "https://rules.example/translation": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    }
+   },
+   "problem": "有答案你改了中文,英文還沒照著重翻",
+   "confirm": "有答案你改了中文,英文還沒照著重翻"
+  },
+  {
+   "name": "page refill needed",
+   "url": "https://rules.example/refill",
+   "fb": {
+    "https://rules.example/refill": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer",
+        "refill": true
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": "有答案改過,網頁上還是舊的,先讓 agent 改",
+   "confirm": "有答案改過,網頁上還是舊的,先讓 agent 改"
+  },
+  {
+   "name": "unchanged approved snapshot",
+   "url": "https://rules.example/unchanged",
+   "fb": {
+    "https://rules.example/unchanged": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出"
+  },
+  {
+   "name": "platform attachment mismatch",
+   "url": "https://rules.example/attachment-mismatch",
+   "fb": {
+    "https://rules.example/attachment-mismatch": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [
+       "平台附件「求職信」內容不同"
+      ]
+     },
+     "app": "ship",
+     "ds": "nopage"
+    }
+   },
+   "problem": "平台附件「求職信」內容不同",
+   "confirm": "平台附件「求職信」內容不同"
+  },
+  {
+   "name": "direct upload is approvable",
+   "url": "https://rules.example/direct-upload",
+   "fb": {
+    "https://rules.example/direct-upload": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出"
+  },
+  {
+   "name": "changed after approval",
+   "url": "https://rules.example/changed",
+   "fb": {
+    "https://rules.example/changed": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Developer"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": "確認之後答案改過,要重新確認送出",
+   "confirm": "確認之後答案改過,要重新確認送出"
+  },
+  {
+   "name": "uncertain submit result",
+   "url": "https://rules.example/submit-failed",
+   "fb": {
+    "https://rules.example/submit-failed": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      },
+      "submit_fail": {
+       "cleared": false
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "unsure"
+    }
+   },
+   "problem": "上次送出沒確認成功,先確認到底送出沒有",
+   "confirm": "上次送出沒確認成功,先確認到底送出沒有"
+  },
+  {
+   "name": "resume changed after fill",
+   "url": "https://rules.example/stale",
+   "fb": {
+    "https://rules.example/stale": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      },
+      "stale": "履歷換了"
+     },
+     "app": "ship",
+     "ds": "stale"
+    }
+   },
+   "problem": "履歷換過了,網頁上傳的還是舊的,先讓 agent 重填",
+   "confirm": "履歷換過了,網頁上傳的還是舊的,先讓 agent 重填"
+  },
+  {
+   "name": "already submitted",
+   "url": "https://rules.example/locked",
+   "fb": {
+    "https://rules.example/locked": {
+     "form": {
+      "lock": true,
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "sent",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "sent",
+     "sent_by": "manual"
+    }
+   },
+   "problem": "已經送出了",
+   "confirm": "已經送出了"
+  },
+  {
+   "name": "fill failed without a reason",
+   "url": "https://rules.example/fill-no-reason",
+   "fb": {
+    "https://rules.example/fill-no-reason": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": []
+     },
+     "app": "ship",
+     "ds": "nopage"
+    }
+   },
+   "problem": "填表檢查還有問題,先讓 agent 改好",
+   "confirm": "填表檢查還有問題,先讓 agent 改好"
+  },
+  {
+   "name": "fill did not report delivery",
+   "url": "https://rules.example/no-delivery",
+   "fb": {
+    "https://rules.example/no-delivery": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": []
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    }
+   },
+   "problem": "填表檢查沒有回報這次直接上傳或使用哪一份平台履歷",
+   "confirm": "填表檢查沒有回報這次直接上傳或使用哪一份平台履歷"
+  },
+  {
+   "name": "unknown delivery method",
+   "url": "https://rules.example/odd-delivery",
+   "fb": {
+    "https://rules.example/odd-delivery": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fix",
+      "issues": [],
+      "delivery": {
+       "method": "email"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    }
+   },
+   "problem": "填表檢查沒有回報這次直接上傳或使用哪一份平台履歷",
+   "confirm": "填表檢查沒有回報這次直接上傳或使用哪一份平台履歷"
+  },
+  {
+   "name": "fixed with platform profile is approvable",
+   "url": "https://rules.example/fixed-profile",
+   "fb": {
+    "https://rules.example/fixed-profile": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fix",
+      "issues": [],
+      "delivery": {
+       "method": "platform_profile"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出"
+  },
+  {
+   "name": "cleared submit failure is approvable",
+   "url": "https://rules.example/cleared",
+   "fb": {
+    "https://rules.example/cleared": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "no_profile"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "history": [
+      {
+       "ev": "not_sent",
+       "legacy": 1,
+       "apply.submit_fail": {
+        "cleared": true
+       }
+      }
+     ],
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出"
+  },
+  {
+   "name": "answer missing from the bank",
+   "url": "https://rules.example/missing-answer",
+   "fb": {
+    "__ans__": [],
+    "https://rules.example/missing-answer": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "gone"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": ""
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    }
+   },
+   "problem": "還有答案等你確認或填寫",
+   "confirm": "還有答案等你確認或填寫"
+  },
+  {
+   "name": "confirmed bank answer is approvable",
+   "url": "https://rules.example/confirmed",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "Engineer",
+      "zh": "工程師",
+      "at": "2026-01-01"
+     }
+    ],
+    "https://rules.example/confirmed": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    }
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出"
+  },
+  {
+   "name": "job closed after approval (acceptance failed later)",
+   "url": "https://rules.example/closed-later",
+   "fb": {
+    "https://rules.example/closed-later": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    }
+   },
+   "problem": "驗收未通過：職缺已下架",
+   "confirm": "驗收未通過：職缺已下架",
+   "status": {
+    "schema_version": 2,
+    "checked_links": true,
+    "issues": [
+     {
+      "jid": "https://rules.example/closed-later",
+      "msg": "職缺已下架"
+     }
+    ]
+   }
+  },
+  {
+   "name": "custom file still being reviewed after approval",
+   "url": "https://rules.example/custom-pending",
+   "fb": {
+    "https://rules.example/custom-pending": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "custom_docs": {
+      "cv": {
+       "status": "review",
+       "name": "客製履歷"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    }
+   },
+   "problem": "客製履歷 的客製版等你看，收下或退回後才能送出",
+   "confirm": "客製履歷 的客製版等你看，收下或退回後才能送出",
+   "status": {
+    "schema_version": 2,
+    "checked_links": true,
+    "issues": []
+   }
+  },
+  {
+   "name": "acceptance has not run",
+   "url": "https://rules.example/no-acceptance",
+   "fb": {
+    "https://rules.example/no-acceptance": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    }
+   },
+   "problem": "投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)",
+   "confirm": "投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)",
+   "status": null
+  },
+  {
+   "name": "links not checked yet",
+   "url": "https://rules.example/links-unchecked",
+   "fb": {
+    "https://rules.example/links-unchecked": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    }
+   },
+   "problem": "職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)",
+   "confirm": "職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)",
+   "status": {
+    "schema_version": 2,
+    "checked_links": false,
+    "issues": []
+   }
+  },
+  {
+   "name": "an unconfirmed link does not block",
+   "url": "https://rules.example/soft-link",
+   "fb": {
+    "https://rules.example/soft-link": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      }
+     },
+     "app": "ship",
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出",
+   "status": {
+    "schema_version": 2,
+    "checked_links": true,
+    "issues": [
+     {
+      "jid": "https://rules.example/soft-link",
+      "msg": "無法確認",
+      "soft": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "answer that is only a byte-order mark counts as empty",
+   "url": "https://rules.example/bom",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "﻿",
+      "zh": ""
+     }
+    ],
+    "https://rules.example/bom": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "﻿"
+      }
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    }
+   },
+   "problem": "還有答案等你確認或填寫",
+   "confirm": "還有答案等你確認或填寫"
+  },
+  {
+   "name": "fill failed with an empty reason",
+   "url": "https://rules.example/empty-issue",
+   "fb": {
+    "https://rules.example/empty-issue": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [
+       ""
+      ]
+     },
+     "app": "ship",
+     "ds": "nopage"
+    }
+   },
+   "problem": "填表檢查還有問題,先讓 agent 改好",
+   "confirm": "填表檢查還有問題,先讓 agent 改好"
+  },
+  {
+   "name": "agent 送出過又退回可以投了的舊資料:轉成還沒填(送出證據在投遞歷史),要重填才能確認",
+   "url": "https://rules.example/sent-then-back",
+   "fb": {
+    "https://rules.example/sent-then-back": {
+     "app": "ship",
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "history": [
+      {
+       "ev": "undo_sent",
+       "legacy": 1,
+       "apply": {
+        "stage": "fill",
+        "ok": true,
+        "issues": [],
+        "tab_id": "1",
+        "session": "s1",
+        "delivery": {
+         "method": "direct_upload"
+        },
+        "sent": {
+         "at": "2026-01-01T00:00:00",
+         "text": "Thanks for applying"
+        }
+       },
+       "approve": {
+        "snap": {
+         "Role": "Engineer"
+        }
+       }
+      }
+     ]
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": "agent 還沒填這張,先讓它填好、你看過頁面再確認送出",
+   "status": {
+    "schema_version": 2,
+    "checked_links": true,
+    "issues": []
+   }
+  },
+  {
+   "name": "no form yet",
+   "url": "https://rules.example/b-none",
+   "fb": {},
+   "problem": "這張還沒有表單紀錄",
+   "confirm": "這張還沒有表單紀錄"
+  },
+  {
+   "name": "agent has not filled it",
+   "url": "https://rules.example/b-unfilled",
+   "fb": {
+    "https://rules.example/b-unfilled": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "app": "ship"
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": "agent 還沒填這張,先讓它填好、你看過頁面再確認送出"
+  },
+  {
+   "name": "filled and confirmed can be approved",
+   "url": "https://rules.example/b-ok",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "Engineer",
+      "zh": "工程師",
+      "at": "2026-01-01"
+     }
+    ],
+    "https://rules.example/b-ok": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "app": "ship",
+     "ds": "parked"
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": null
+  },
+  {
+   "name": "filled but an answer is still inferred",
+   "url": "https://rules.example/b-inf",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "Engineer",
+      "zh": "工程師",
+      "inf": "2026-01-01"
+     }
+    ],
+    "https://rules.example/b-inf": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "app": "ship",
+     "ds": "parked"
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": "還有答案等你確認或填寫"
+  },
+  {
+   "name": "filled but English needs re-translation",
+   "url": "https://rules.example/b-tr",
+   "fb": {
+    "__ans__": [
+     {
+      "k": "a1",
+      "q": "Role",
+      "v": "Engineer",
+      "zh": "工程師",
+      "tr": true,
+      "at": "2026-01-01"
+     }
+    ],
+    "https://rules.example/b-tr": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "bank",
+        "k": "a1"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "app": "ship",
+     "ds": "parked"
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": "有答案你改了中文,英文還沒照著重翻"
+  },
+  {
+   "name": "approval preview does not stick",
+   "url": "https://rules.example/b-keep",
+   "fb": {
+    "https://rules.example/b-keep": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "apply": {
+      "stage": "fill",
+      "issues": [],
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "app": "ship",
+     "ds": "parked"
+    }
+   },
+   "problem": "還沒確認送出",
+   "confirm": null
+  },
+  {
+   "name": "確認之後又重填、重打過一輪:確認的是上一輪的頁",
+   "url": "https://rules.example/unchanged",
+   "fb": {
+    "https://rules.example/unchanged": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      },
+      "round": "2026-01-01T00:00:00"
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      },
+      "at": "2026-01-02T00:00:00"
+     },
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": "確認的是上一輪填的頁,要重新確認送出",
+   "confirm": "確認的是上一輪填的頁,要重新確認送出"
+  },
+  {
+   "name": "確認之後換了一頁(同一輪):確認的不是現在這一頁",
+   "url": "https://rules.example/unchanged",
+   "fb": {
+    "https://rules.example/unchanged": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      },
+      "round": null,
+      "tab": "6"
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": "確認的不是現在這一頁,要重新確認送出",
+   "confirm": "確認的不是現在這一頁,要重新確認送出"
+  },
+  {
+   "name": "確認綁著這一輪填的頁",
+   "url": "https://rules.example/unchanged",
+   "fb": {
+    "https://rules.example/unchanged": {
+     "form": {
+      "f": [
+       {
+        "q": "Role",
+        "src": "resume",
+        "v": "Engineer"
+       }
+      ]
+     },
+     "approve": {
+      "snap": {
+       "Role": "Engineer"
+      },
+      "round": null,
+      "tab": "7"
+     },
+     "app": "ship",
+     "apply": {
+      "stage": "fill",
+      "tab_id": "7",
+      "session": "s1",
+      "delivery": {
+       "method": "direct_upload"
+      }
+     },
+     "ds": "confirmed"
+    },
+    "__ans__": []
+   },
+   "problem": null,
+   "confirm": "「你已確認」時不能確認送出"
+  }
+ ]
+}

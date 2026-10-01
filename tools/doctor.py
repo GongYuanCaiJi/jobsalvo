@@ -72,6 +72,30 @@ def agent_state(runtime):
     return True, path + ('' if state else '(登入狀態查不到,先當能用)')
 
 
+def _folder_history_row():
+    """資料夾不自動存版、或舊資料因為沒有退回點沒轉:照實寫原因和怎麼處理。沒事(或資料夾還沒建)不列。
+    不擋安裝(required False),但看板上標 ⚠️ 並攤開(warn)。"""
+    import folder_history
+    if not os.path.isdir(cf.HOME):
+        return None
+    try:
+        status = folder_history.status(cf.HOME)
+    except (OSError, RuntimeError) as exc:
+        status = {'message': '版本紀錄狀態讀不到：' + str(exc)[:120], 'fix': ''}
+    problems, fixes = [], []
+    if status.get('conversion'):
+        problems.append(status['conversion'])
+        fixes.append('先照這一列說的讓版本紀錄能存，或讓資料夾裡能建 ' + folder_history.BACKUP_DIR +
+                     ' 資料夾，再重新啟動看板：會先留退回點再轉。還沒轉之前照舊格式在跑（看板舊卡片的投遞狀態可能不準）。')
+    if status.get('fix') or status['message'].startswith(('版本紀錄未啟用', '版本紀錄失敗', '版本紀錄狀態讀不到')):
+        problems.append(status['message'])
+        fixes.append(status.get('fix') or '')
+    if not problems:
+        return None
+    return {'key': 'folder_history', 'label': '資料夾版本紀錄', 'ok': False, 'required': False, 'warn': True,
+            'detail': '；'.join(problems), 'fix': ' '.join(f for f in fixes if f)}
+
+
 def check_environment(agents=None):
     """Check Python, Chrome, and only the runtimes in the configured agent list.
 
@@ -114,6 +138,10 @@ def check_environment(agents=None):
         'detail': git or '找不到 git 指令(更新、資料夾版本紀錄都靠它)',
         'fix': '' if git else '在終端機跑 xcode-select --install 裝好 Apple 的開發者工具(裡面有 git)。',
     })
+
+    history = _folder_history_row()
+    if history:
+        checks.append(history)
 
     # 要的是「至少有一個能用的 agent」,不是「一定要某一種」:派工時照清單順序,用不了的會換下一個。
     # 每一種各自一列只是講清楚狀態;真正擋人的只有最後那一列。
@@ -165,9 +193,10 @@ def check_environment(agents=None):
     })
 
     # 設定勾了會用 Chrome、而且那一種真的能用才算(以前只看設定:沒裝任何 agent 也寫「已設定」)
+    import chrome_door
     browser_runtimes = {agent.get('runtime') for agent in agents
                         if isinstance(agent, dict) and agent.get('browser') is True
-                        and agent.get('runtime') in ('codex', 'claude-code') and states[agent['runtime']][0]}
+                        and agent.get('runtime') in chrome_door.DOORS and states[agent['runtime']][0]}
     browser_ready = bool(browser_runtimes)
     checks.append({
         'key': 'browser_agent',
@@ -180,11 +209,8 @@ def check_environment(agents=None):
                 '需要幫你填表或查應徵進度時，在設定頁新增或啟用可使用 Chrome 的 Codex 或 Claude Code agent。'),
     })
     if browser_ready:
-        # agent 清單設好了還不夠:agent 自己的 Chrome 要裝 Codex 外掛、連過一次。只讀本機紀錄,不開 Chrome。
-        import agent_chrome
-        import agent_run
-        linked = (('codex' in browser_runtimes and agent_chrome._mine())
-                  or ('claude-code' in browser_runtimes and bool(agent_run.claude_paired_device())))
+        # agent 清單設好了還不夠:agent 自己的 Chrome 要連過一次(那一家用那一家的門路看)。只讀本機紀錄,不開 Chrome。
+        linked = any(door.configured() for door in map(chrome_door.of, browser_runtimes) if door)
         checks.append({
             'key': 'agent_chrome',
             'label': '幫你填表用的 Chrome（選用）',

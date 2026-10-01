@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Render Markdown with headless Chrome, using only an explicitly supplied stylesheet."""
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,11 +22,6 @@ def output_path(source_path):
                         os.path.splitext(os.path.basename(source_path))[0] + '.pdf')
 
 
-def _python_with_markdown():
-    """轉 Markdown 用的 python:就是現在這個(整個程式跑在 uv 建的 .venv 裡,Markdown 套件在)。"""
-    return sys.executable
-
-
 def render(source_path, destination, style_path=None, lang=''):
     """Write a PDF atomically; without style_path, leave browser defaults in charge."""
     source_path = os.path.abspath(os.path.expanduser(source_path))
@@ -45,28 +39,26 @@ def render(source_path, destination, style_path=None, lang=''):
 
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     try:
-        interpreter = _python_with_markdown()
         with tempfile.TemporaryDirectory(prefix='.markdown-pdf-', dir=os.path.dirname(destination)) as work:
             html_path = os.path.join(work, 'resume.html')
             pdf_path = os.path.join(work, 'resume.pdf')
             try:
                 subprocess.run(
-                    [interpreter, os.path.join(HERE, 'markdown_html.py'), source_path,
+                    [sys.executable, os.path.join(HERE, 'markdown_html.py'), source_path,
                      style_path, html_path, str(lang or '')], check=True, capture_output=True, timeout=120)
                 import browser   # 共用瀏覽器(tools/browser.py):不再每份 PDF 開一整個 Chrome
                 browser.print_pdf(html_path, pdf_path)
             except RenderError:
                 raise
             except Exception as exc:
-                raise RenderError('Markdown 原稿無法排成 PDF') from exc
+                why = (getattr(exc, 'stderr', b'') or b'').decode('utf-8', 'replace').strip().splitlines()
+                raise RenderError('Markdown 原稿無法排成 PDF' + (f':{why[-1][:200]}' if why else '')) from exc
             if not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) < 5:
                 raise RenderError('Chrome 沒有產生 PDF')
             with open(pdf_path, 'rb') as output:
                 if output.read(5) != b'%PDF-':
                     raise RenderError('Chrome 產生的檔案不是 PDF')
-            temporary = destination + '.tmp'
-            shutil.copyfile(pdf_path, temporary)
-            os.replace(temporary, destination)
+            os.replace(pdf_path, destination)   # 暫存資料夾就在目的地同層:直接換名
     except RenderError:
         raise
     except Exception as exc:

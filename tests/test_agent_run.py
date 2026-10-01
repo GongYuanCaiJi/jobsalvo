@@ -8,9 +8,9 @@ from unittest.mock import patch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401  測試跑在暫存資料夾(派 agent 的執行紀錄才不會寫進程式資料夾)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'tools'))
 
 import agent_run as ar
+import chrome_door
 import research
 
 
@@ -553,10 +553,10 @@ class ClaudeCodeRuntime(unittest.TestCase):
             patch.object(ar, '_claude_outcome', return_value={'is_error': False, 'subtype': 'success'}),
         ):
             self.assertTrue(ar.run('task', os.path.join(d, 't.log'), d, browser_required=True).ok)
-            self.assertEqual(ar.browser_runtime(), 'claude-code')
+            self.assertEqual(chrome_door.current().runtime, 'claude-code')
         self.assertEqual(seen, [('cc', True)])
         with self.settings([self.entry('cm', 'command-code', browser=True)]):
-            self.assertIsNone(ar.browser_runtime())               # Command Code 還是不能開瀏覽器
+            self.assertIsNone(chrome_door.current())               # Command Code 還是不能開瀏覽器
 
     def test_search_and_add_never_get_chrome_even_when_the_first_agent_can_browse(self):
         # #287:找缺、加職缺不給操作 Chrome 的能力(Codex、Claude 都一樣);網頁由程式的 page_fetch 抓。
@@ -636,6 +636,13 @@ class AgentSettingsMigration(unittest.TestCase):
             {'id': 'secondary', 'runtime': 'command-code', 'model': 'model-b', 'effort': 'high', 'speed': 'standard', 'browser': False},
         ])
         self.assertNotIn('alt_runtime', migrated['agent'])
+
+    def test_a_legacy_claude_primary_keeps_using_chrome(self):
+        # 舊設定只有一個 Claude Code 主 agent:轉過來要照實能用 Chrome(以前只有 Codex 才勾,遷移後填表、查應徵進度都用不了)
+        migrated, _changed = ar.cf._migrate_agents({'agent': {'runtime': 'claude-code', 'model': 'sonnet'}})
+        self.assertTrue(migrated['agent']['agents'][0]['browser'])
+        migrated, _changed = ar.cf._migrate_agents({'agent': {'runtime': 'command-code'}})
+        self.assertFalse(migrated['agent']['agents'][0]['browser'])            # 不能開 Chrome 的照舊不勾
 
     def test_reading_legacy_settings_persists_the_migration(self):
         with tempfile.TemporaryDirectory(prefix='agent-settings-') as d:

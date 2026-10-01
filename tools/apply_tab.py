@@ -13,17 +13,20 @@ agent 用 Codex 的 Chrome 外掛開分頁,那個分頁屬於開它的那一段�
         他要看就看這張,是那一刻真的頁面,手機也看得到。
 Claude 填的分頁在 Claude in Chrome 替那段對話開的分頁群組,程式拿不到:讀,是 Claude 那一輪最後自己跑一次唯讀函式、
 程式從紀錄拿工具的回傳(page_from_log);截,是接回同一段對話叫它截一張(claude_shot)。都不採信模型轉述。
+哪一張卡走哪一條由 chrome_door 挑(卡上記的那一家);這裡是兩條的底層。
 不點、不打字、不關分頁。用完照外掛的規矩收尾(Session.end_turn):那一頁重新標 markHandoff、宣告這一輪結束,
 它才會好好停著,他看得到、agent 下一輪也接得回來。
 
 用法:
-  uv run python tools/apply_tab.py read --url 職缺網址 [--board B]
+  uv run python tools/apply_tab.py read --url 職缺網址 [--board B]      # Codex 填的頁;Claude 填的直接說做不到、改看 👀
   uv run python tools/apply_tab.py shot --url 職缺網址 --out 檔案.png [--board B]
 """
-import os, sys, json, time, uuid, select, argparse, subprocess
+import os, sys, json, time, uuid, select, argparse, subprocess, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+from profile_sync import ID_PARAMS    # 平台履歷的編號放在哪個網址參數(讀頁時留下連到那一份的連結)
+import gate_cells                     # noqa: E402
 PLUGIN = os.path.expanduser('~/.codex/plugins/cache/openai-bundled/unified-computer-use')
 
 
@@ -97,19 +100,17 @@ class Session:
         不宣告就直接結束行程,分頁會卡在「接在一個已經死掉的行程上」,下一個人(包括 agent 自己下一輪)拿它都是
         Debugger unattached。沒重新標的分頁,這一輪結束時外掛會把它收掉。"""
         for var in keep:
-            try:
+            try:  # noqa: SIM105 — 理由同下一行
                 self.js(f'await {var}.markHandoff(); nodeRepl.write("ok")')
-            except Exception:  # noqa: S110
+            except Exception:  # noqa: BLE001, S110 — 標不到的分頁這一輪結束時外掛會收掉;之後要讀那一頁讀不到時,讀的那一方照實回報
                 pass
         m = self.meta['x-codex-turn-metadata']
         self._rpc('tools/call', {'name': 'turn_ended', '_meta': self.meta,
                                  'arguments': {'hook_event_name': 'Stop', 'session_id': m['session_id'], 'turn_id': m['turn_id']}})
 
     def close(self):
-        try:
+        with contextlib.suppress(OSError):   # 已經結束了
             self.p.kill()
-        except Exception:  # noqa: S110
-            pass
 
 
 class Tab(Session):
@@ -124,9 +125,9 @@ class Tab(Session):
             raise LookupError('agent 的 Chrome 沒連上')
         try:
             self.js(f'globalThis.__t = await cua.getTab({json.dumps(str(tab_id))}, {{browser: "{bid}"}}); nodeRepl.write("ok")')
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 外掛丟的什麼都有;收好後換成 LookupError 照實往上丟
             self.close()
-            raise LookupError(str(e)[-300:] or '拿不到那個分頁')
+            raise LookupError(str(e)[-300:] or '拿不到那個分頁') from e
 
 
 # 頁面上每一個欄位:題目(label / aria-label / name)、型別、現在的值;上傳欄給檔名。只讀,不改頁面。
@@ -158,15 +159,19 @@ PAGE_FN = r"""() => {
     .map(s => s.replace(/[\ue000-\uf8ff]/g, '').replace(/[×✕]\s*$/, '').trim())
     .filter(s => s && s.length <= 120).slice(0, 1500);
   const shownFiles = lines.filter(s => /\.(pdf|docx?|rtf|odt|txt)$/i.test(s)).slice(0, 30);
-  return {url: location.href, title: document.title, fields, shownFiles, lines};
-}"""
+  // 連到平台上某一份履歷的連結(104 應徵彈窗的「預覽履歷」帶著那一份的編號):程式照編號核對選的是哪一份
+  const profileLinks = Array.from(new Set(Array.from(document.links).map(a => a.href).filter(h => {
+    try { const q = new URL(h).searchParams; return ID_PARAMS.some(k => q.has(k)); } catch (e) { return false; }
+  }))).slice(0, 20);
+  return {url: location.href, title: document.title, fields, shownFiles, lines, profileLinks};
+}""".replace('ID_PARAMS', json.dumps(sorted(set(ID_PARAMS.values()))))
 READ_JS = 'const r = await __t.playwright.evaluate(' + PAGE_FN + ');\nnodeRepl.write(JSON.stringify(r));'
 
 
 def _lookup(url, board=None):
+    """看板上這張卡記的那段對話、分頁,和開那一頁的那一家的門路(chrome_door.for_card:沒記到、那一家不能用了丟 Unreachable)。"""
     import board_doc as bd
-    with open(board or os.environ.get('AGENT_BOARD') or bd.LIVE, encoding='utf-8') as f:
-        fb = json.loads(bd.parse(f.read())['fb'])
+    fb = json.loads(bd.load(board)['fb'])
     a = (fb.get(url) or {}).get('apply') or {}
     if not a.get('session') or not a.get('tab_id'):
         raise LookupError('看板上沒有記這張是哪一段對話、哪個分頁')
@@ -174,7 +179,8 @@ def _lookup(url, board=None):
     if agent_chrome.gone_pages({url: fb[url]}):
         # 分頁編號每個 Chrome 程序從頭數:Chrome 重開過,記著的編號可能剛好是別張卡的頁,不能拿它去截、去讀
         raise LookupError(agent_chrome.GONE)
-    return a['session'], a['tab_id'], a.get('runtime') or 'codex'
+    import chrome_door
+    return a['session'], a['tab_id'], chrome_door.for_card(a)
 
 
 def _on_tab(session, tab_id, fn, tries=3):
@@ -187,35 +193,26 @@ def _on_tab(session, tab_id, fn, tries=3):
             try:
                 return fn(t)
             finally:
-                t.end_turn(keep=['__t'])          # 那一頁還要留給他看、留給 agent 下一輪
-                t.close()
+                try:
+                    t.end_turn(keep=['__t'])      # 那一頁還要留給他看、留給 agent 下一輪;出錯也要交接,不然外掛會跟 Chrome 斷線
+                finally:
+                    t.close()
         except (RuntimeError, LookupError, TimeoutError) as e:
             if attempt == tries - 1 or not ('retry' in str(e).lower() or isinstance(e, TimeoutError)):
                 raise
             time.sleep(3)
 
 
-def read(session, tab_id, tries=3, runtime='codex', log=None):
-    if runtime == 'claude-code':
-        return page_from_log(log)
+def read(session, tab_id, tries=3):
+    """Codex 開的那一頁現在的網址、每一格的值、上傳欄選了什麼檔。"""
     return _on_tab(session, tab_id, lambda t: json.loads(t.js(READ_JS)), tries)
 
 
-def release(session, tab_id, runtime='codex'):
-    """那一頁不用再留(送成功之後用):換成空白頁、照樣交接留著。
+def release(session, tab_id):
+    """Codex 開的那一頁不用再留(送成功之後用):換成空白頁、照樣交接留著。
     不關、也不讓這一輪結束時被收掉:程式這邊收分頁,Codex 外掛會跟 agent 的 Chrome 斷線、不會自己連回來
     (2026-09-29 實測),一次送好幾張時下一張就連不上。空白頁不是他在等的頁,close_if_idle 會連 Chrome 一起收掉。"""
-    if runtime == 'claude-code':
-        _claude_tools(session, [('tabs_close_mcp', {'tabId': int(tab_id)})], why=CLAUDE_RELEASE)
-        return
-    t = Tab(session, tab_id)
-    try:
-        t.js('await __t.goto("about:blank"); nodeRepl.write("ok")')
-    finally:
-        try:
-            t.end_turn(keep=['__t'])            # 換空白頁失敗也要交接、結束這一輪,不然外掛會跟 Chrome 斷線
-        finally:
-            t.close()
+    _on_tab(session, tab_id, lambda t: t.js('await __t.goto("about:blank"); nodeRepl.write("ok")'), tries=1)
 
 
 # ---- Claude:分頁在 Claude in Chrome 替那段對話開的分頁群組裡,只有同一段對話拿得到(新的對話看不到)。
@@ -249,7 +246,17 @@ def _claude_run(session, steps_text, names, timeout=240, why=CLAUDE_LOOK):
                         *ar.claude_lean(chrome=True)],
                        input=prompt, capture_output=True, text=True, timeout=timeout)
     uses, out = {}, []
-    for line in r.stdout.splitlines():
+    for c in _tool_events(r.stdout.splitlines()):
+        if c['type'] == 'tool_use':
+            uses[c.get('id')] = c.get('name', '').rsplit('__', 1)[-1]
+        else:
+            out.append((uses.get(c.get('tool_use_id')), c['content'], bool(c.get('is_error'))))
+    return out
+
+
+def _tool_events(lines):
+    """stream-json 紀錄裡的每一個 tool_use / tool_result 區塊,照順序;tool_result 的 content 一律整理成清單。"""
+    for line in lines:
         try:
             o = json.loads(line)
         except ValueError:
@@ -259,11 +266,10 @@ def _claude_run(session, steps_text, names, timeout=240, why=CLAUDE_LOOK):
             if not isinstance(c, dict):
                 continue
             if c.get('type') == 'tool_use':
-                uses[c.get('id')] = c.get('name', '').rsplit('__', 1)[-1]
+                yield c
             elif c.get('type') == 'tool_result':
                 content = c.get('content') if isinstance(c.get('content'), list) else [{'type': 'text', 'text': str(c.get('content') or '')}]
-                out.append((uses.get(c.get('tool_use_id')), content, bool(c.get('is_error'))))
-    return out
+                yield dict(c, content=content)
 
 
 def _text(content):
@@ -296,7 +302,6 @@ CHUNK = 900
 _CLAUDE_FN = __import__('re').sub(r'^\s*//.*\n', '', PAGE_FN, flags=__import__('re').M).replace(
     '/[\\ue000-\\uf8ff]/g', 'new RegExp("[" + String.fromCharCode(57344) + "-" + String.fromCharCode(63743) + "]", "g")')
 _WHOLE = 'JSON.stringify((' + _CLAUDE_FN + ')())'
-LEN_JS = 'String(' + _WHOLE + '.length)'
 
 
 def chunk_js(i, whole=_WHOLE):
@@ -322,11 +327,6 @@ CLAUDE_SELF_READ = ('【填完、改完的最後一步】寫 fill.json 之前,�
 PROFILE_FN = ('() => ({url: location.href, title: document.title, text: document.body.innerText, '
               'links: Array.from(document.links).map(a => a.href)})')
 _PROFILE_WHOLE = 'JSON.stringify((' + PROFILE_FN + ')())'
-PROFILE_LEN_JS = 'String(' + _PROFILE_WHOLE + '.length)'
-
-
-def profile_chunk_js(i):
-    return chunk_js(i, _PROFILE_WHOLE)
 
 
 # 平台履歷上的附件(#294):Claude 沒有把檔完整取回來的工具(回傳超過 1000 字截斷、把檔編碼回傳被安全過濾擋),
@@ -401,20 +401,12 @@ def _js_calls(log):
                 lines += f.readlines()
         except OSError:
             continue
-    for line in lines:
-        try:
-            o = json.loads(line)
-        except ValueError:
-            continue
-        msg = o.get('message') if isinstance(o, dict) else None
-        for c in (msg.get('content') or []) if isinstance(msg, dict) and isinstance(msg.get('content'), list) else []:
-            if not isinstance(c, dict):
-                continue
-            if c.get('type') == 'tool_use' and c.get('name', '').endswith('javascript_tool'):
+    for c in _tool_events(lines):
+        if c['type'] == 'tool_use':
+            if c.get('name', '').endswith('javascript_tool'):
                 uses[c.get('id')] = (c.get('input') or {}).get('text') or ''
-            elif c.get('type') == 'tool_result' and c.get('tool_use_id') in uses and not c.get('is_error'):
-                content = c.get('content') if isinstance(c.get('content'), list) else [{'type': 'text', 'text': str(c.get('content') or '')}]
-                calls.append((uses[c['tool_use_id']], _text(content).split('\n\nTab Context:')[0]))
+        elif c.get('tool_use_id') in uses and not c.get('is_error'):
+            calls.append((uses[c['tool_use_id']], _text(c['content']).split('\n\nTab Context:')[0]))
     return calls
 
 
@@ -463,6 +455,11 @@ def self_reads(log, whole=_WHOLE):
     return out
 
 
+def claude_release(session, tab_id):
+    """Claude 開的那一頁不用再留(送成功之後):接回那段對話叫它關掉。"""
+    _claude_tools(session, [('tabs_close_mcp', {'tabId': int(tab_id)})], why=CLAUDE_RELEASE)
+
+
 def claude_shot(session, tab_id, out):
     import base64
     (content,) = _claude_tools(session, [('computer', {'tabId': int(tab_id), 'action': 'screenshot'})])
@@ -501,14 +498,12 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
     先看它還是不是填好的那一頁:網址變了、欄位不見了,就是換頁了或被送出了(Codex 外掛不准在頁面上裝擋送出,只能事後查)。
     答案庫的答案(英文 v 或中文 zh)要出現在頁面某一格;履歷直接對上的(rz)短答案也一樣;上傳的檔要真的選在上傳欄。
     頁面上怎麼對應到題目各平台不一樣,這裡只問「這個值在不在頁面上」,不猜哪一格是哪一題。"""
-    vals, shown, files, flabels, blank = set(), set(), set(), [], []
+    vals, shown, blank = set(), set(), []
     lines = {_norm(x) for x in page.get('lines') or []}   # 頁面上整行的字(104 選單選好的值)
     hidden = [f for f in page.get('fields') or [] if f.get('type') in HIDDEN_TYPES and not f.get('value')]
     for f in page.get('fields') or []:
         v = f.get('value')
         if isinstance(v, list):
-            files.update(_norm(x) for x in v)
-            flabels.append(_norm(f.get('label')))   # Lever 傳完會清空上傳欄,檔名改顯示在旁邊的標籤
             continue
         for x in (v, f.get('shown')):
             if _norm(x):
@@ -517,10 +512,9 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
             shown.add(_norm(f.get('shown')))
         if not _norm(v) or _norm(v) == REDACTED:
             blank.append(_norm(f.get('label')))
-    same = lambda a, b: str(a or '').split('#')[0].rstrip('/') == str(b or '').split('#')[0].rstrip('/')
     if human_check(page):
         return [HUMAN_CHECK]
-    if tab_url and not same(page.get('url'), tab_url):
+    if tab_url and not gate_cells.same_url(page.get('url'), tab_url):
         return [f'那一頁已經不是填好的申請表了(現在是 {str(page.get("url"))[:80]}),可能被送出了,要人看']
     if not page.get('fields'):
         return ['那一頁上沒有任何欄位(可能被送出了、或換頁了),要人看']
@@ -543,7 +537,18 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
             if contact and (hidden or any(q and l and (q in l or l in q) for l in blank)):
                 continue                   # 外掛把 email/電話讀成空的或「<redacted>」(不管欄位型別),讀不到;看截圖
             bad.append(f'頁面上找不到「{str(x.get("q"))[:40]}」的答案 {str(want[0])[:40]!r}')
+    return bad + upload_problems(page, uploaded)
+
+
+def upload_problems(page, uploaded=()):
+    """說上傳了的檔是不是真的選在上傳欄(或上傳完顯示在旁邊的檔名)。回問題清單。"""
+    files, flabels = set(), []
+    for f in page.get('fields') or []:
+        if isinstance(f.get('value'), list):
+            files.update(_norm(x) for x in f['value'])
+            flabels.append(_norm(f.get('label')))   # Lever 傳完會清空上傳欄,檔名改顯示在旁邊的標籤
     shown_files = {_norm(x) for x in page.get('shownFiles') or []}
+    bad = []
     for n in uploaded or ():
         stem = _norm(os.path.splitext(n)[0])[:18]
         if _norm(n) not in files | shown_files and not any(stem and stem in l for l in flabels):
@@ -551,9 +556,8 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
     return bad
 
 
-def shot(session, tab_id, out, tries=3, runtime='codex'):
-    if runtime == 'claude-code':
-        return claude_shot(session, tab_id, out)
+def shot(session, tab_id, out, tries=3):
+    """Codex 開的那一頁當場截整頁圖。"""
     _, imgs = _on_tab(session, tab_id,
                       lambda t: t.call('await nodeRepl.emitImage(await __t.screenshot({fullPage: true}));'), tries)
     if not imgs:
@@ -580,13 +584,13 @@ def main():
     ap.add_argument('--out')
     a = ap.parse_args()
     try:
-        sid, tid, rt = _lookup(a.url, a.board)
+        sid, tid, door = _lookup(a.url, a.board)
         if a.cmd == 'read':
-            print(json.dumps(read(sid, tid, runtime=rt), ensure_ascii=False, indent=1))
+            print(json.dumps(door.read_page(sid, tid), ensure_ascii=False, indent=1))
         else:
-            shot(sid, tid, a.out or 'tab.png', runtime=rt)
+            door.shot(sid, tid, a.out or 'tab.png')
             print(a.out or 'tab.png')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 指令列最外層:原因照實印出、結束碼 2(看板的 👀 照結束碼講)
         print(f'看不到那一頁:{e}', file=sys.stderr)
         sys.exit(2)
 

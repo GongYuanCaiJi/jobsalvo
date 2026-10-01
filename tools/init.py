@@ -21,8 +21,7 @@ def empty_board(path):
     read = lambda n: open(os.path.join(cf.BOARD_SRC, n), encoding='utf-8').read()
     data = {'jobs': [], 'status': {}, 'research': []}
     doc = bd.assemble(read('board.css'), bd.stat_first(read('header.html'), data), '', data, '{}', read('board.js'))
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(doc)
+    bd.write_doc(path, doc)
 
 
 def installed_agents(which=None):

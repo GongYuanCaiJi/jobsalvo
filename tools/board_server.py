@@ -17,7 +17,7 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
 (自己的 tailnet 裝置才連得到,手機走這條)。抓不到 Tailscale IP 就只剩 localhost。
 絕不綁 0.0.0.0:那會連同 Wi-Fi/LAN 的陌生人都能讀到你的履歷和求職資料。
 """
-import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal
+import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal,html,contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _HTTPServer
 import socketserver
 
@@ -67,13 +67,9 @@ def code_version(root=None):
     return digest.hexdigest()[:16]
 
 
-def _watch_code(servers, version, interval=10, stop=None):
+def _watch_code(servers, version, interval=10):
     while True:
-        if stop is not None:
-            if stop.wait(interval):
-                return
-        else:
-            time.sleep(interval)
+        time.sleep(interval)
         if code_version() == version:
             continue
         for server in servers:
@@ -110,49 +106,40 @@ def _gzip(b):
     return z
 
 def read_doc():
-    with open(STATE,encoding='utf-8') as f: return f.read()
+    """讀看板檔(對過指紋:被繞過正常寫入改過就丟 bd.Tampered,請求那一頭回 423 講原因)。"""
+    return bd.read_doc(STATE)
 
 def page_cfg():
     """頁面要知道、但屬於設定不屬於資料的東西。每次送出時從設定現讀,不存進看板檔。"""
-    import ship
     C = cf.C
-    resumes = [item for item in C['resume'].get('resumes', []) if item.get('enabled', True)]
-    attachments = [item for item in C['resume'].get('attachments', []) if item.get('enabled', True)]
-
-    def file_langs(item):
-        files = item.get('files')
-        if not isinstance(files, dict):
-            return [], [], {}
-        present = [lang for lang, path in files.items() if path]
-        previews = [lang for lang, path in files.items()
-                    if path and str(path).lower().endswith(('.pdf', '.md', '.markdown'))]
-        # 每個語言原始檔的簽章:已收下的客製版記著它是從哪一份原始檔做的,對不上(原始檔換過)就不寄,
-        # 看板照這個在卡上講清楚、預覽也換回原始檔(跟 ship.documents 同一條判斷)
-        sigs = {lang: ship.source_sig(cf.path(path)) for lang, path in files.items() if path}
-        return present, previews, sigs
-
-    resume_rows = []
-    for item in resumes:
-        present, previews, sigs = file_langs(item)
-        resume_rows.append({'id': item['id'], 'name': item.get('name') or item['id'],
-                            'when': item.get('when', ''), 'file_langs': present,
-                            'preview_langs': previews, 'sigs': sigs})
-    attachment_rows = []
-    for item in attachments:
-        present, previews, sigs = file_langs(item)
-        resume_ids = item.get('resume_ids')
-        attachment_rows.append({'id': item['id'], 'name': item.get('name') or item['id'],
-                                 'short': item.get('short', ''),
-                                 'resume_ids': resume_ids if isinstance(resume_ids, list) else [],
-                                 'file_langs': present, 'preview_langs': previews, 'sigs': sigs})
+    # 每張卡寄哪幾份、有沒有預覽、客製版還用不用,後台算好放在 ship_files(ship_files_of),頁面不自己判斷;
+    # 這裡只給名字(統計表、設定頁摘要用)
+    resume_rows = [{'id': item['id'], 'name': item.get('name') or item['id'], 'when': item.get('when', '')}
+                   for item in C['resume'].get('resumes', []) if item.get('enabled', True)]
     return {'agent': cf.AGENT, 'langs': cf.LANGS,
-            'resumes': resume_rows, 'attachments': attachment_rows,
+            'resumes': resume_rows,
             'categories': C['board']['categories'], 'tags': C['board']['tags'],
             'company_alias': {str(k).lower(): v for k, v in (C['board'].get('company_alias') or {}).items()},
             'title_words': __import__('card').title_words(C['board'].get('title_words')),
             'read_lang': C['resume'].get('read_lang') or 'zh',
             'flow': __import__('autopilot').flow(),
             'find_minutes': (C.get('search') or {}).get('find_minutes') or 0}
+
+def ship_files_of(jobs, fb, only=None):
+    """每張卡的要寄的檔案(ship.card_files):頁面載入、輪詢、按了按鈕問的都是這一份,看板不自己挑。
+    一張卡算不出來(舊資料格式壞了)只影響那一張,整頁照常。"""
+    import ship
+    out = {}
+    for j in jobs or []:
+        if not isinstance(j, dict) or not j.get('id') or (only is not None and j['id'] != only):
+            continue
+        try:
+            out[j['id']] = ship.card_files(j, fb)
+        except Exception as e:  # noqa: BLE001 — 算不出來的原因照實放進這張卡的 problem,看板卡上顯示
+            out[j['id']] = {'resume_id': '', 'lang': '', 'problem': f'這張卡的要寄的檔案算不出來:{str(e)[:120]}',
+                            'files': [], 'choices': [], 'langs': list(cf.LANGS), 'pending': '', 'stale_ids': []}
+    return out
+
 
 # 履歷預覽(建置步驟寫的 j.resume.variants[<語言>-<履歷>].html / pages)只有點「📄」才看得到,
 # 卻佔了職缺資料的一大半(真實資料 101 張卡、1.6 MB)。送頁面時抽掉,留一個記號,點開才抓 /api/resume。
@@ -194,11 +181,14 @@ def serve_doc(doc):
     try:
         d=bd.parse(doc)
         data=dict(d['data']); data['cfg']=page_cfg()
+        import delivery_state
+        data['delivery']=delivery_state.TABLE   # 投遞狀態 × 事件表:看板按下去當場照同一張表改
         import zhconv
         if zhconv.simplified(data['cfg'].get('read_lang')):
             data['cfg']['zh_tables']=zhconv.page_tables()   # 簡體:字典跟著頁面走,頁面自己把畫面上的字轉掉
         if data.get('masters'):
             data['masters_n']=len(data['masters']); data['masters']=[]
+        data['ship_files']=ship_files_of(data.get('jobs'),json.loads(d['fb'] or '{}'))
         data['jobs']=lean_jobs(data.get('jobs'))
         # 頁面程式用程式碼裡現在的那份。看板檔裡存的外殼要等下一次重建材料才會換新:
         # 以前按「更新」、伺服器也重啟了,畫面卻一直是上次重建時的舊版(連「⬆ 更新」鈕都沒有)。
@@ -207,7 +197,10 @@ def serve_doc(doc):
             css,js,hdr=shell
             return bd.assemble(css,bd.stat_first(hdr,d['data']),d['tail'],data,d['fb'],js)
         return bd.assemble(d['sty'],d['thdr'],d['tail'],data,d['fb'],d['app'])
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — 組不出來照樣送原檔(直接開檔也是這份),並把原因寫進看板的回報
+        import agent_report
+        agent_report.report('看板',f'看板頁面沒辦法照現在的程式組好,先給你存檔裡的那一份(按鈕可能少了或是舊的):'
+                                  f'{type(e).__name__}: {str(e)[:120]}',need='重新整理看板;一直出現就重開看板伺服器',live=STATE)
         return doc
 
 _SHELL={'key':None,'parts':None}
@@ -221,11 +214,6 @@ def current_shell():
     if _SHELL['key']!=key:
         _SHELL.update(key=key,parts=ash.current())
     return _SHELL['parts']
-
-def safe_json(obj):
-    """序列化後跳脫 <,讓內容絕不可能生出字面 </script> 提早關掉 script 區塊(stored XSS 防線)。
-    \\u003c 在 JS 端 JSON.parse 會還原成 <,語意不變,只是 HTML 原始碼裡看不到 < 。"""
-    return json.dumps(obj,ensure_ascii=False).replace('<','\\u003c')
 
 # rev(標記)與 gen(職缺資料)從檔案內容算,不是這支自己數。
 # 會寫這個檔的不只這支:cut_tailor 收尾把卡推到「待你決定」、reconcile 裝新的職缺資料、
@@ -244,65 +232,103 @@ def content_sig():
             _SIG['key']=key
         return _SIG['fb'],_SIG['data']
 
-def cur_rev():
-    return content_sig()[0]
-
 def cur_gen():
     """職缺資料的版本。背景 reconcile 跑完也要換(可投遞包生好了,頁面該重拿),
     就算板子上的資料剛好沒變,所以後面接著建包次數。"""
     with _BUILD_LOCK: n=_build_state['gen']
     return '%s.%d'%(content_sig()[1],n)
 
-def journal(chg):
-    """他在看板上的每一次存檔都記進標記流水帳(格式與位置見 board_doc.journal)。"""
-    bd.journal(STATE, chg, by='看板')
+# 比對標記值:跟頁面上的 lean() 同一套規則(空字串、空陣列、空物件、None 都算「沒有」),收在 delivery_state 一份。
+# 兩邊一定要用同一套:以前頁面把清空的那筆記成 [] 或 {},伺服器這邊是整個 key 拿掉(None),比對起來永遠對不上。
+# 結果「標喜歡 → 取消 → 再標還好」第三下被當成衝突丟掉,還跳一條「有 1 筆在別的裝置改過」騙他。
+from delivery_state import same as _same  # noqa: E402
 
-def _lean(v):
-    """跟頁面上的 lean() 同一套規則:空字串、空陣列、空物件、None 都算「沒有」。
-    兩邊一定要用同一套:以前頁面把清空的那筆記成 [] 或 {},伺服器這邊是整個 key 拿掉
-    (None),比對起來永遠對不上。結果「標喜歡 → 取消 → 再標還好」第三下被當成衝突丟掉,
-    還跳一條「有 1 筆在別的裝置改過」騙他。"""
-    if v is None or v=='': return None
-    if isinstance(v,list): return v if v else None
-    if isinstance(v,dict):
-        o={k:_lean(x) for k,x in v.items()}
-        o={k:x for k,x in o.items() if x is not None}
-        return o or None
-    return v
+def _record_sent_version(fb, url, jobs):
+    """看板送來的事件把卡帶到已送出(我已在外部送出、其實送出了):記下實際寄出的是哪一份
+    (ship.record_sent;看板不自己寫,記過的不改)。"""
+    import ship
+    job=next((j for j in jobs if isinstance(j,dict) and j.get('id')==url),None)
+    try:
+        ship.record_sent(fb,url,job)
+    except Exception as e:  # noqa: BLE001 — 記不下來照實寫進看板的回報(卡照樣算已送出),不擋他按的那一下
+        import agent_report
+        agent_report.apply_report(fb,'看板',f'記不下寄出的是哪一份:{str(e)[:120]}',
+                                  need='這張照樣算已送出;要留紀錄就到可投遞夾看寄出的那一份',job=url)
 
-def _same(a,b):
-    """比對兩個標記值是不是同一件事(欄位順序無關,「空」的各種寫法都算一樣)。"""
-    return (json.dumps(_lean(a),sort_keys=True,ensure_ascii=False)
-            ==json.dumps(_lean(b),sort_keys=True,ensure_ascii=False))
-
-def write_fb(fb_obj, base=None):
+def write_fb(fb_obj, base=None, events=None, rejected=None):
     """把新的 data-fb 併進 STATE 檔,其餘(jobs/sty/app)不動。單寫者鎖。
 
     逐筆合併,不是整包覆蓋。以前是整包蓋:任何一個停在舊狀態的分頁(手機擱著沒關、
     我開著沒重整)一自動存,就把整份標記倒回它載入時的樣子,別處的新改動全沒了。
-    現在只吃這次真的帶了東西的那幾筆,其餘保留磁碟上的版本。清空一筆要送 null。"""
-    with LOCK, bd.live_lock(STATE):
-        d=bd.parse(read_doc())
-        cur=json.loads(d['fb'])
+    現在只吃這次真的帶了東西的那幾筆,其餘保留磁碟上的版本。清空一筆要送 null。
+
+    投遞狀態不跟著卡片存:卡上歸狀態表管的那幾欄(delivery_state.OWNED、表單鎖、進出已送出)看板送來的不算數,
+    看板只送事件(events:[{u, ev, data}] 或復原 [{u, undo:{prev, after}, else?}]),這裡照磁碟上現在的狀態套表;
+    那一格不准的不做事(跟著那一下改的階段、心情也不收),原因放進 rejected 回給看板(狀態表修正 9)。
+    表單只有後台寫:看板改答案要標重打就送 {refill: 答案鍵},在鎖內標在現在那份表單上(#308)。"""
+    import delivery_state
+    bad=[]
+    # 按「✅ 確認送出」之前:程式自己讀那一頁,跟驗收時核對過的樣子比;變了就不讓他確認,卡上寫哪一格從什麼變成什麼和下一步(#316)。
+    # 讀頁很慢(Codex 幾秒),在拿鎖之前做。副本(沙箱、測試、看板檢查)沒有真的 agent 的 Chrome,不讀
+    changed={}
+    if events and is_real():
+        import apply_run
+        for e in events:
+            u=str((e or {}).get('u') or '') if isinstance(e,dict) else ''
+            if u and not u.startswith('__') and e.get('ev')=='confirm':
+                problems=apply_run.confirm_check(u,STATE)
+                if problems: changed[u]=problems
+    def put(d):
+        cur=d['fb']
         # 樂觀鎖:這個分頁是照「它載入時看到的值」在改的。如果磁碟上那一筆已經不是那個值,
         # 代表別的裝置(另一支手機、另一個分頁)先改過了,這次就整批不寫,讓它重新拿再改。
         # 這是把 artifact 那套搬過來:publish 不加 force,底下版本比較新就直接擋下來。
-        # 全有或全無,不做一半——一半寫進去他無從分辨哪幾筆生效了。
+        # 全有或全無,不做一半——一半寫進去他無從分辨哪幾筆生效了。狀態表管的那幾欄不比(那一部分看事件)。
         if base:
-            bad=[k for k,want in base.items() if not _same(cur.get(k), want)]
-            if bad: return bad
-        chg={}
+            bad.extend(k for k,want in base.items() if not (_same(cur.get(k),want) if k.startswith('__') else
+                                                               _same(delivery_state.plain(cur.get(k)),delivery_state.plain(want))))
+            if bad: return bd.SKIP
+        refused=set()
+        for e in events or []:
+            u=str((e or {}).get('u') or '')
+            if isinstance(e,dict) and 'refill' in e and not u:
+                # 答案改了:在現在那份表單上標重打(頁還在的才標;form_record.mark_refill)。看板不送整份表單
+                import form_record
+                form_record.mark_refill(cur,str(e['refill']))
+                continue
+            try:
+                if not u or u.startswith('__'):
+                    raise ValueError('沒有指定是哪一張')
+                if 'undo' in e:
+                    delivery_state.undo(cur,u,(e['undo'] or {}).get('prev'),(e['undo'] or {}).get('after'),e.get('else'))
+                elif e.get('ev')=='confirm' and u in changed:
+                    import apply_run
+                    apply_run.page_changed(cur,u,changed[u],'確認前')     # 停著等你 → 填了卡住,原因和下一步寫在卡上
+                    raise ValueError('確認前'+apply_run.PAGE_CHANGED+changed[u][0])
+                else:
+                    delivery_state.fire(cur,u,str(e.get('ev') or ''),**(e.get('data') if isinstance(e.get('data'),dict) else {}))
+                    if e.get('ev')=='not_sent':
+                        # 他查過了、確認沒送出:這張跟送出有關的回報(送出沒確認成功、去信箱查)一起收掉(#316)
+                        import agent_report, apply_run
+                        agent_report.apply_resolve(cur,u,'你確認沒送出',only=lambda it: it.get('from')==apply_run.REPORT_FROM)
+                if delivery_state.state(cur.get(u))=='sent': _record_sent_version(cur,u,d['data'].get('jobs') or [])
+            except (ValueError,TypeError,KeyError) as x:
+                refused.add(u)
+                if rejected is not None: rejected.append({'u':u,'ev':(e or {}).get('ev') or 'undo','msg':str(x)[:200]})
+        # 事件先套(復原要比的是這一包送來之前的樣子),再收這一包裡卡片的其他欄位。
+        # 那一張的事件被擋下:他按的那一下沒發生,跟著那一下改的欄位(退回、移除、出錯了、👎 改的階段和心情)也不收,
+        # 不然會拼出「正在送出卻在待你決定」這種狀態表不准存在的組合;同一包裡的筆記照收
         for k,v in fb_obj.items():
-            old=cur.get(k)
-            if v is None:
-                if k in cur: chg[k]=[old,None]; cur.pop(k,None)
-            elif old!=v:
-                chg[k]=[old,v]; cur[k]=v
-        journal(chg)
-        doc=bd.assemble(d['sty'],d['thdr'],d['tail'],d['data'],safe_json(cur),d['app'])
-        tmp=STATE+'.tmp'
-        with open(tmp,'w',encoding='utf-8') as f: f.write(doc)
-        os.replace(tmp,STATE)  # 原子替換
+            if not k.startswith('__'):
+                if k in refused:
+                    if v is None: continue          # 整張清掉也是跟著那一下的:不做
+                    v=delivery_state.keep_flow(cur.get(k),v)
+                v=delivery_state.merge_saved(cur.get(k),v)
+            if v is None: cur.pop(k,None)
+            else: cur[k]=v
+    with LOCK:
+        if bd.rewrite(put,STATE,by='看板') is bd.SKIP:
+            return bad
     note_saved()
     return []
 
@@ -315,8 +341,11 @@ def note_saved():
         bank = bd.parse(read_doc())['data'].get('bank') or {}
         ib.export_file(bank, cf.HOME)
         folder_history.note_saved(cf.HOME)
-    except Exception as exc:
-        print(f'⚠ 資料夾版本紀錄排程失敗:{str(exc)[:120]}')
+    except Exception as exc:  # noqa: BLE001 — 存檔已經寫進去了;版本紀錄沒排上照實寫進看板的回報
+        import agent_report
+        msg=f'資料夾版本紀錄沒排上,這次的修改沒有存成一版:{str(exc)[:120]}'
+        print('⚠ '+msg)
+        agent_report.report('看板',msg,need='看板上的資料已經存好,只是沒存成一版;下次存檔會再試',live=STATE)
 
 
 _BUILD_LOCK=threading.Lock()
@@ -353,8 +382,13 @@ def trigger_build():
                         if done and PILOT: PILOT.kick()  # 驗收跑完才可能推進
                         return
                     _build_state['again']=False
-        except Exception:
-            with _BUILD_LOCK: _build_state['running']=False
+        except Exception as e:  # noqa: BLE001 — 背景執行緒最外層:建置沒跑起來照實寫進看板的回報,不然頁面只看到建置停了
+            import agent_report
+            try:
+                agent_report.report('看板',f'可投遞夾背景建置沒跑起來:{type(e).__name__}: {str(e)[:120]}',
+                                    need='標了可投遞的卡這次沒有生出可投遞夾;再存一次或重開看板會再建',live=STATE)
+            finally:
+                with _BUILD_LOCK: _build_state['running']=False
     threading.Thread(target=_run,daemon=True).start()
 
 
@@ -369,8 +403,7 @@ def trigger_source_sync():
         import reconcile, source_sync
         if source_sync.stale(reconcile.MANIFEST, board=STATE):
             trigger_build()
-    except Exception:
-        # The next explicit run still performs its own preflight and reports failures.
+    except Exception:  # noqa: BLE001 — 打開看板順手的預先建置;按下要跑的那一刻會再檢查一次來源,出錯在那裡照實回報
         return
 
 
@@ -464,8 +497,8 @@ def pv_sig():
         except OSError: pass  # 沒有自訂 skill 資料夾時,仍可用產品預設。
     for f in (cf.PREFS, cf.PREFERENCE_NOTE, os.path.join(cf.HOME,'resume.md'),
               cf.APPLY_RULES, os.path.join(cf.HOME,cf.NAME)):
-        try: t=max(t,os.path.getmtime(f))
-        except OSError: pass
+        with contextlib.suppress(OSError):   # 還沒建的檔不算
+            t=max(t,os.path.getmtime(f))
     return round(t,3)
 
 def is_real():
@@ -485,19 +518,71 @@ def migrate_marks(state):
     """舊資料一次改成現在的樣子,寫回檔案(記進流水帳):伺服器的填表、送出、自動流程讀的都是檔案。
     可投遞以前是 ship 布林、沒有 app。以前只有看板頁面在記憶體裡改,從沒存回去:
     卡停在「可以投了」,讀檔的程式都看不到它。已經往後走(有 app)的不拉回可投遞,只拿掉舊欄位。
-    客製紀錄以前不分語言:照原始檔簽章補上語言(ship.migrate_custom_keys)。"""
-    import copy, ship
+    客製紀錄以前不分語言:照原始檔簽章補上語言(ship.migrate_custom_keys)。
+    投遞以前是十幾個記號拼的:轉成一張卡一個投遞狀態,只轉一次(delivery_state.migrate、docs/adr/0004)。
+    卡停在正在填、正在送出,那一輪卻已經不在跑(伺服器重開前被停掉、當掉):照狀態表收尾(apply_run.settle)。
+    產生它的規則改了、造成它的 bug 修掉了的 agent 回報和還沒確認的答案:清掉(stale.sweep,GLOSSARY「過時」)。"""
+    import copy, ship, delivery_state, apply_run, stale
     with open(state,encoding='utf-8') as source: fb0=json.loads(bd.parse(source.read())['fb'])
     old=[k for k,f in fb0.items() if isinstance(f,dict) and 'ship' in f]
     custom=ship.migrate_custom_keys(copy.deepcopy(fb0))
-    if not old and not custom: return
+    probe=copy.deepcopy(fb0)
+    states=delivery_state.migrate(probe)
+    stuck=apply_run.settle(probe,_apply_busy())
+    before=stale.boundaries()
+    outdated=stale.sweep(probe,before)
+    if not old and not custom and not states and not stuck and not outdated: return
     def mut(fb):
         for k in old:
             f=fb.get(k)
             if isinstance(f,dict) and 'ship' in f:
                 if f.pop('ship') and not f.get('app'): f['app']='ship'
         if custom: ship.migrate_custom_keys(fb)
-    bd.set_fb(mut, live=state, by='board_server')
+        delivery_state.migrate(fb)
+        apply_run.settle(fb,_apply_busy())
+        stale.sweep(fb,before)
+    # 回不了頭:一律走 folder_history.convert,先留退回點(存一版或備份看板檔),沒有退回點就不轉
+    import folder_history
+    why='、'.join(w for w,need in (('可投遞舊記號',old),('客製紀錄語言',custom),('投遞狀態',states),
+                                  ('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated)) if need)+'轉換'
+    done=folder_history.convert(cf.HOME,[state],why,lambda: bd.set_fb(mut, live=state, by='board_server'))
+    if not done['done']:
+        print(f'⚠ {why}沒有做:沒有退回點({done["reason"]})')
+
+
+def _apply_busy():
+    """現在幫你填表那一輪在跑哪一張:None 沒在跑,'*' 整批在跑(不知道是哪一張)。"""
+    st=run_status('apply')
+    return (st.get('url') or '*') if st.get('running') else None
+
+# 這幾種狀態換檔才有意義:頁上傳的會變成舊檔(停著等你、填了卡住、你已確認),或先記下來(正在填、送出結果不明)
+_FILE_STATES=('parked','stuck','confirmed','running','unsure')
+
+def sent_files():
+    """已經填過、還在等的卡,現在要寄的檔案(哪一份、檔案內容的指紋):換檔之前先記,換完再比。"""
+    import delivery_state, ship
+    doc=bd.parse(read_doc()); fb=json.loads(doc['fb']); out={}
+    for j in doc['data'].get('jobs') or []:
+        if delivery_state.state(fb.get(j.get('id'))) not in _FILE_STATES: continue
+        try:
+            docs=ship.documents(j,fb)
+        except Exception as e:  # noqa: BLE001 — 算不出來記成錯誤指紋:換檔前後照樣比得出有沒有變,變了卡上會標檔案換了
+            docs=[{'id':'?','effective_path':'err:'+type(e).__name__}]
+        out[j['id']]=[(d.get('id'),d.get('effective_path'),
+                       ship._digest(d['effective_path']) if d.get('effective_path') and os.path.isfile(d['effective_path']) else None)
+                      for d in docs]
+    return out
+
+def files_changed(before,why):
+    """換檔之後(改原始履歷、設定裡刪語言或改附件…):要寄的檔案真的變了的那幾張才送「換檔」事件(狀態表修正 6、16)。"""
+    import delivery_state
+    after=sent_files()
+    changed=[u for u,v in before.items() if u in after and after[u]!=v]
+    if changed:
+        bd.set_fb(lambda fb: [delivery_state.try_fire(fb,u,'files_changed',why=why) for u in changed],
+                  live=STATE, by='board_server')
+    return changed
+
 
 def page_gone(u):
     """👀 截不到那一頁時:agent 的 Chrome 在這張填好之後關掉或重開過,就把它改標成「頁面不見了,要重填」
@@ -507,15 +592,24 @@ def page_gone(u):
     if not is_real():
         return False
     try:
-        gone=[x for x in agent_chrome.gone_pages(json.loads(bd.parse(read_doc())['fb'])) if x==u]
-        if gone: bd.set_fb(lambda d: agent_chrome.mark_gone(d,gone), live=STATE, by='board_server')
-        return bool(gone)
-    except Exception:
+        return bool(agent_chrome.sweep_gone(STATE,only=u,by='board_server'))   # 在看板鎖內照現在的看板算(#308)
+    except Exception:  # noqa: BLE001 — 判斷不了就當頁面還在:👀 回「接不上,等一下再按」,自動流程每分鐘會再掃一次
         return False
 
 
-# 👀 截一張最多等多久:Claude 那邊 apply_tab 自己叫 claude -p 最多 240 秒,外層要比它長,不然先被砍的是外層
-LIVE_TIMEOUT={'codex':60,'claude-code':300}
+def agent_swapped(u, why):
+    """👀 找不到開這一頁的那一家(停用、移除、卡上沒記):送「填這張的 agent 接不回來」事件,卡上改成頁面不見了、寫原因、要重填。
+    副本不動(跟 page_gone 一樣):副本的卡不是真的 agent 填的。
+    卡上記不下來(看板檔寫不進去、被改過)回原因,👀 照實告訴他;記下了回空字串。"""
+    import delivery_state
+    if not is_real():
+        return ''
+    try:
+        bd.set_fb(lambda d: delivery_state.try_fire(d,u,'page_lost',issues=[why]),
+                  live=STATE, by='board_server')
+    except (OSError,ValueError,RuntimeError) as e:   # 寫檔失敗、看板讀不懂、看板被改過(bd.Tampered)
+        return str(e)[:120] or type(e).__name__
+    return ''
 
 
 def _run_then_stop(argv,timeout):
@@ -599,6 +693,9 @@ def control_run(kind,act):
     import jobrun
     if act not in ('pause','resume','stop'): return 400,{'msg':'不知道要暫停、繼續還是停止'}
     with _RUN_LOCK:
+        if act=='pause' and kind=='apply' and run_status(kind).get('stage')=='submit':
+            # 凍在按下送出的半路:他查不到送出去沒有;解凍時早就過了時限(#308)。要停就按 ⏹,卡會變成送出結果不明
+            return 409,dict(run_status(kind),msg='正在送出時不能暫停;要停就按 ⏹ 停止(會記成送出結果不明,要你去查)')
         ok,msg=jobrun.control(os.path.join(run_sp(kind),RUNS[kind]['status']),(RUNS[kind]['script'],'job_fake.py'),act,
                               hold=bd.live_lock(STATE) if STATE else None)
         st=run_status(kind)
@@ -679,7 +776,7 @@ def start_run(kind,args):
                 try:
                     if not cu.sa.pdf_pages(page_source):
                         return 409,{'msg':f'{available[item_id]["name"]} 的頁數基準 PDF 沒有可讀取的頁面'}
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — 讀不了照實回給看板(409 訊息)
                     return 409,{'msg':f'{available[item_id]["name"]} 的頁數基準 PDF 讀取失敗:{str(e)[:120]}'}
         args={'url':url,'items':items}
     if kind=='apply':
@@ -697,8 +794,10 @@ def start_run(kind,args):
         if stage=='fix':
             # 修改是叫回填這張的那一隻 agent 在原本那一頁上改:一次一張,那段對話要在
             m=fb.get(url) or {}
+            import delivery_state
             if not url or not ((m.get('apply') or {}).get('session')): return 400,{'msg':'這張沒有 agent 填過的紀錄,先讓 agent 填表單'}
-            if (m.get('form') or {}).get('lock'): return 400,{'msg':'已經送出了'}
+            if not delivery_state.allowed(m,'fix_start'):
+                return 400,{'msg':'這張「'+delivery_state.label(delivery_state.state(m))+'」,不能叫 agent 在原頁改'}
             import apply_run
             if not note and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
                 return 400,{'msg':'寫一下要 agent 改什麼'}
@@ -773,7 +872,22 @@ class H(BaseHTTPRequestHandler):
             # 伺服器沒有掛(ThreadingHTTPServer 每個請求一條執行緒,只有這條結束),
             # 但預設會把整段 traceback 印進日誌,看起來就像當機,真正的問題反而被埋掉。
             self.close_connection=True
+    def _tampered(self, e):
+        """看板檔被繞過正常寫入改過(bd.Tampered):不照改過的內容送頁面、不存檔,講清楚發生什麼事。"""
+        msg=str(e)
+        if self.command=='GET' and self.path in ('/','/index.html'):
+            page=('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+                  '<title>jobsalvo</title><p style="font:16px/1.6 system-ui;max-width:40em;margin:2em auto;padding:0 16px">'
+                  +html.escape(msg)+'</p>')
+            return self._send(423,page)
+        self._json(423,{'ok':False,'err':'tampered','msg':msg})
     def do_GET(self):
+        try: self._do_GET()
+        except bd.Tampered as e: self._tampered(e)
+    def do_POST(self):
+        try: self._do_POST()
+        except bd.Tampered as e: self._tampered(e)
+    def _do_GET(self):
         if self._foreign(False): return
         if self.path in ('/','/index.html'):
             trigger_source_sync()
@@ -785,11 +899,11 @@ class H(BaseHTTPRequestHandler):
         elif self.path.startswith('/api/customize/files?'):
             import customize as cu
             try:self._json(200,{'ok':True,'files':cu.list_files(self._q('u'),board=STATE)})
-            except Exception as e:self._json(400,{'ok':False,'msg':str(e)[:200]})
+            except Exception as e:self._json(400,{'ok':False,'msg':str(e)[:200]})  # noqa: BLE001 — 原因照實回給看板
         elif self.path.startswith('/api/customize/diff?'):
             import customize as cu
             try:self._json(200,dict({'ok':True},**cu.diff_for(self._q('u'),self._q('item'),board=STATE)))
-            except Exception as e:self._json(400,{'ok':False,'msg':str(e)[:200]})
+            except Exception as e:self._json(400,{'ok':False,'msg':str(e)[:200]})  # noqa: BLE001 — 原因照實回給看板
         elif self.path.startswith('/api/resume?'):
             u=self._q('u'); v=self._q('v'); d=bd.parse(read_doc())
             j=next((x for x in d['data'].get('jobs',[]) if x.get('id')==u),None)
@@ -800,11 +914,12 @@ class H(BaseHTTPRequestHandler):
                 source=rz if v=='__top__' else (variants.get(v) if isinstance(variants,dict) else None)
                 preview={k:source[k] for k in LAZY_VARIANT_KEYS if k in source} if isinstance(source,dict) else {}
                 if not preview: self._json(404,{'ok':False,'msg':'找不到這份履歷預覽:到設定頁「你的履歷」重新上傳這一份'})
-                else: self._send(200,json.dumps(preview,ensure_ascii=False),'application/json; charset=utf-8')
+                else: self._json(200,preview)
+        elif self.path=='/api/ship-files' or self.path.startswith('/api/ship-files?'):
+            self.do_GET_ship_files()
         elif self.path=='/api/masters':
             d=bd.parse(read_doc())
-            self._send(200,json.dumps(d['data'].get('masters') or [],ensure_ascii=False),
-                       'application/json; charset=utf-8')
+            self._json(200,d['data'].get('masters') or [])
         elif self.path=='/api/jobs':
             self.do_GET_jobs()
         elif self.path.startswith('/api/live?'):
@@ -818,13 +933,24 @@ class H(BaseHTTPRequestHandler):
                 # agent 正拿著這一頁在填/改/送:這時用同一段對話去截,會搶它的分頁、甚至把它那一輪收掉
                 return self._send(409,'Agent 正在處理這一張,跑完再看(進度在最上面的「🚀 填表進度」)','text/plain; charset=utf-8')
             out=os.path.join(tempfile.gettempdir(),'apply-live-%d.jpg'%os.getpid())
-            # Claude 填的那一頁要接回那段 Claude 對話才截得到(一次十幾秒、算一次用量):不自動重截,他按一次截一次
-            try: rt=((json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}).get('apply') or {}).get('runtime') or 'codex'
-            except ValueError: rt='codex'
-            if rt=='claude-code' and (ast.get('running') or run_status('replies').get('running')):
-                # Claude 的 👀 是再叫一個 Claude 進 agent 的 Chrome 截圖:同一時間只准一個 agent 在裡面
-                # (另一個 Claude 會把正在跑的那一輪用的瀏覽器選走)。先給那一頁填好時截的圖:填完、交接之後 agent 不再動它,
-                # 畫面就是現在的樣子;標明是幾點截的,跑完再按一次截現在的(Codex 可以同時截,這裡是最接近的做法)
+            # 照這張卡記的那一家的門路截(chrome_door):那一家停用、移除或卡上沒記,那一頁接不回來,跟卡上講的一樣要重填
+            import chrome_door
+            try: door=chrome_door.for_card((json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}).get('apply'))
+            except ValueError: door=None
+            except chrome_door.Unreachable as gone:
+                if not gone.sure:                          # 設定檔讀不懂:判斷不了,卡不動
+                    return self._send(503,str(gone),'text/plain; charset=utf-8')
+                failed=agent_swapped(u,str(gone))
+                if failed:
+                    return self._send(404,str(gone)+f'。卡上沒改成要重填({failed}):重新整理看板,再按一次 👀。',
+                                      'text/plain; charset=utf-8')
+                return self._send(404,str(gone)+':按卡上的「▶ 讓 agent 重填這張」。','text/plain; charset=utf-8')
+            if door is None:
+                return self._send(503,'這次讀不到看板,等一下再按一次 👀。','text/plain; charset=utf-8')
+            if not door.shot_while_busy and (ast.get('running') or run_status('replies').get('running')):
+                # 這一家的 👀 是再叫一個 agent 進 agent 的 Chrome 截圖(Claude):同一時間只准一個 agent 在裡面
+                # (另一個會把正在跑的那一輪用的瀏覽器選走)。先給那一頁填好時截的圖:填完、交接之後 agent 不再動它,
+                # 畫面就是現在的樣子;標明是幾點截的,跑完再按一次截現在的(隨時截得到的那一家不走這裡)
                 import apply_run
                 saved=os.path.join(apply_run.out_dir(u,STATE,run_sp('apply')),'fill.png')
                 if u and os.path.isfile(saved):
@@ -833,18 +959,18 @@ class H(BaseHTTPRequestHandler):
                     self.send_header('X-Refresh','0'); self.send_header('X-Shot-At',str(int(os.path.getmtime(saved))))
                     self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
                     return
-                return self._send(409,'幫你填表或查應徵進度正在用 agent 的 Chrome,Claude 同一時間只能一個在裡面:跑完再按 👀',
+                return self._send(409,'幫你填表或查應徵進度正在用 agent 的 Chrome,這一家同一時間只能一個 agent 在裡面:跑完再按 👀',
                                   'text/plain; charset=utf-8')
             try:
                 code=_run_then_stop([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
-                                    LIVE_TIMEOUT.get(rt,60))
+                                    door.live_timeout)
                 ok=bool(u) and code==0 and os.path.isfile(out)
-            except Exception:
+            except (OSError,subprocess.SubprocessError):   # 截圖程式開不起來:跟截不到同一條,下面照實說頁面不見了或接不上
                 ok=False
             if ok:
                 with open(out,'rb') as fh: body=fh.read()
                 self.send_response(200); self.send_header('Content-Type','image/jpeg')
-                self.send_header('X-Refresh','4' if rt=='codex' else '0')
+                self.send_header('X-Refresh',str(door.live_refresh))
                 self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
             elif page_gone(u):
                 self._send(404,'那一頁已經不在了(agent 的 Chrome 關掉或重開過)。卡上已改成要重填:按卡上的「▶ 讓 agent 重填這張」。',
@@ -862,6 +988,15 @@ class H(BaseHTTPRequestHandler):
             if f and os.path.isfile(f):
                 with open(f,'rb') as fh: self._send(200,fh.read(),'image/png')
             else: self._send(404,'沒有截圖','text/plain; charset=utf-8')
+        elif self.path.startswith('/api/evidence?'):
+            # 要他確認或處理的事附的那張截圖(程式自己截的,在那張卡的證據夾,#315)。只收「<輪>/<檔名>」、只給圖檔
+            from urllib.parse import urlparse, parse_qs
+            import evidence
+            q=parse_qs(urlparse(self.path).query); u=(q.get('u') or [''])[0]; rel=(q.get('f') or [''])[0]
+            f=evidence.path(u,rel,STATE) if u and rel.lower().endswith(('.png','.jpg','.jpeg')) else None
+            if f:
+                with open(f,'rb') as fh: self._send(200,fh.read(),'image/jpeg' if f.lower().endswith(('.jpg','.jpeg')) else 'image/png')
+            else: self._send(404,'沒有截圖','text/plain; charset=utf-8')
         elif self.path in ('/api/rev','/api/rev?sync=1'):
             # 切回看板分頁時頁面帶 sync=1:跟打開看板一樣比對一次原稿,變了就在背景先建
             if self.path.endswith('?sync=1'):
@@ -870,13 +1005,11 @@ class H(BaseHTTPRequestHandler):
             # 以前頁面每 20 秒抓一次 /api/jobs 只為了讀裡面的 gen,那一包 1.26MB,
             # 等於他手機上每分鐘白流 3.8MB、還要解析同樣大小的 JSON。
             with _BUILD_LOCK: building=_build_state['running']
-            self._send(200,json.dumps({'rev':cur_rev(),'gen':cur_gen(),'building':building,
+            self._json(200,{'rev':content_sig()[0],'gen':cur_gen(),'building':building,
                                         'prep':run_status('prep'),'research':run_status('research'),
                                         'customize':run_status('customize'),
                                         'apply':run_status('apply'),'replies':run_status('replies'),
-                                       'add':run_status('add'),'suggest':run_status('suggest')},
-                                      ensure_ascii=False),
-                       'application/json; charset=utf-8')
+                                       'add':run_status('add'),'suggest':run_status('suggest')})
         elif self.path.startswith('/api/prompt'):
             self.do_GET_prompt()
         elif self.path in ('/api/update','/api/update?now=1'):
@@ -893,7 +1026,8 @@ class H(BaseHTTPRequestHandler):
             if d.get('migration_notices') or (not note_existed and os.path.exists(cf.PREFERENCE_NOTE)):
                 note_saved()
             try:
-                with open(os.path.join(run_sp('suggest'),'suggest.json'),encoding='utf-8') as f: d['suggest']=json.load(f)
+                # 安檢門核對過的那一份(suggest_cats.checked);agent 交的 suggest.json 不直接給看
+                with open(os.path.join(run_sp('suggest'),'suggestion.json'),encoding='utf-8') as f: d['suggest']=json.load(f)
             except (OSError,ValueError): d['suggest']=None
             self._json(200,d)
         elif self.path.startswith('/api/bank/form?'):
@@ -943,6 +1077,16 @@ class H(BaseHTTPRequestHandler):
     def _body(self):
         n=int(self.headers.get('Content-Length','0') or 0)
         return self.rfile.read(n) if n else b''
+    def _json_body(self):
+        """看板送來的 JSON 物件。讀不懂(編碼、JSON 壞掉、不是物件)就先回 400,回 None。"""
+        try:
+            body=json.loads(self._body().decode('utf-8') or '{}')
+        except ValueError:   # JSON 或編碼壞掉(UnicodeDecodeError 也是 ValueError)
+            body=None
+        if not isinstance(body,dict):
+            self._json(400,{'ok':False,'msg':'看板送來的資料格式不對,重新整理看板再試一次'})
+            return None
+        return body
     def _host_ok(self, host):
         """這個 Host(或 Origin 的主機)是不是這個伺服器自己:綁的位址、本機名稱,
         綁在 Tailscale 位址時也認 MagicDNS 名稱(*.ts.net)。"""
@@ -988,9 +1132,11 @@ class H(BaseHTTPRequestHandler):
         import settings_api as sa
         data=self._body()
         if self.path.startswith('/api/file?'):
+            before=sent_files()
             rel,err=sa.put_file(self._q('path'),data)
             if not rel: return self._json(400,{'ok':False,'msg':err})
             note_saved()
+            files_changed(before,'「'+os.path.basename(rel)+'」的原始檔換過了')
             trigger_build()
             return self._json(200,{'ok':True,'path':rel})
         if self.path.startswith('/api/card-file?'):
@@ -1006,7 +1152,12 @@ class H(BaseHTTPRequestHandler):
                 return self._json(200,{'ok':True,'path':rel})
             rel,err=sa.put_file(f'custom/{card.card_id_from_url(u)}/{name}',data)
             if not rel: return self._json(400,{'ok':False,'msg':err})
-            write_fb({u:dict((json.loads(bd.parse(read_doc())['fb']).get(u) or {}),custom_file=rel)})
+            import customize as cu
+            def own_file(_data,fb):
+                fb.setdefault(u,{})['custom_file']=rel
+                return cu.swap_files(fb,u,'這張換成你自己的檔了')
+            ok,why=cu._in_lock(STATE,own_file)
+            if not ok: return self._json(409,{'ok':False,'msg':why})
             trigger_build()
             return self._json(200,{'ok':True,'path':rel})
         self._send(404,'not found','text/plain; charset=utf-8')
@@ -1015,25 +1166,19 @@ class H(BaseHTTPRequestHandler):
         if self._agent_blocked(): return
         import settings_api as sa
         if self.path.startswith('/api/file?'):
+            before=sent_files()
             removed=sa.delete_file(self._q('path'))
-            if removed: note_saved()
+            if removed:
+                note_saved()
+                files_changed(before,'要寄的檔案被刪掉了')
             return self._json(200,{'ok':removed})
-        if self.path.startswith('/api/card-file?'):
-            u=self._q('u'); m=dict(json.loads(bd.parse(read_doc())['fb']).get(u) or {})
-            rel=m.pop('custom_file',None)
-            if rel: sa.delete_file(rel)
-            write_fb({u:m or None})
-            trigger_build()
-            return self._json(200,{'ok':True})
         self._send(404,'not found','text/plain; charset=utf-8')
     def do_POST_bank(self):
         """🎤 面試準備:新增/改/刪一題。body = {op:'put', item:{編輯框的欄位}} 或 {op:'del', id}。回整份新的 bank。"""
         if self._agent_blocked(): return
         import interview_bank as ib
-        try:
-            body=json.loads(self._body().decode('utf-8') or '{}'); assert isinstance(body,dict)
-        except Exception:
-            return self._json(400,{'ok':False,'msg':'看板送來的資料格式不對,重新整理看板再試一次'})
+        body=self._json_body()
+        if body is None: return
         op=body.get('op')
         if op not in ('put','del'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
         out={}
@@ -1045,10 +1190,8 @@ class H(BaseHTTPRequestHandler):
     def do_POST_settings(self):
         if self._agent_blocked(): return
         import settings_api as sa
-        try:
-            body=json.loads(self._body().decode('utf-8') or '{}'); assert isinstance(body,dict)
-        except Exception:
-            return self._json(400,{'ok':False,'msg':'看板送來的資料格式不對,重新整理看板再試一次'})
+        body=self._json_body()
+        if body is None: return
         act=self.path[len('/api/settings/'):] if self.path.startswith('/api/settings/') else ''
         if act=='skill':
             skill,msg=sa.create_skill(body.get('name'),body.get('content'),body.get('kind'))
@@ -1069,7 +1212,7 @@ class H(BaseHTTPRequestHandler):
                     ok,msg=agent_chrome.claude_setup(busy=lambda: bool(run_status('apply').get('running') or run_status('replies').get('running')),
                                                      board=STATE)
                 else: ok,msg=agent_chrome.show()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — 原因照實回給看板(沒成功:…)
                 ok,msg=False,f'沒成功:{str(e)[:120]}'
             if ok is None:      # 有填好等他核對的頁,連接會把它們關掉:先問他
                 return self._json(409,{'ok':False,'confirm':True,'msg':msg})
@@ -1083,11 +1226,13 @@ class H(BaseHTTPRequestHandler):
             s=cf.user_settings(); ag=s.setdefault('agent',{})
             old=list(ag.get('agents') or (cf.C.get('agent') or {}).get('agents') or [])
             ids={str(x.get('id')) for x in old if isinstance(x,dict)}
-            if rt in ('codex','claude-code'):   # 只准一個 agent 用 Chrome:換成新的那個
+            import chrome_door
+            chrome=rt in chrome_door.DOORS      # 這一家能用 agent 的 Chrome
+            if chrome:   # 只准一個 agent 用 Chrome:換成新的那個
                 old=[{**x,'browser':False} if isinstance(x,dict) else x for x in old]
             new_id=next(i for i in [rt]+[f'{rt}-{n}' for n in range(2,99)] if i not in ids)
             ag['agents']=[{'id':new_id,'runtime':rt,'model':'','effort':'max','speed':'standard',
-                           'browser':rt in ('codex','claude-code')}]+old
+                           'browser':chrome}]+old
             bad=PILOT.save_settings(lambda: sa.save({'settings':s})) if PILOT else sa.save({'settings':s})
             return self._json(400 if bad else 200,{'ok':not bad,'msg':';'.join(bad) or '改好了,之後會先用它'})
         if act=='find_minutes':
@@ -1110,9 +1255,11 @@ class H(BaseHTTPRequestHandler):
                 hand_over_to_launchd()
                 msg+='\n裝好了。這個看板馬上會自己關掉,交給開機自動啟動接手:大約半分鐘後重整這一頁。'
             return self._json(200 if r.returncode==0 else 400,{'ok':r.returncode==0,'msg':msg})
+        before=sent_files()
         bad=PILOT.save_settings(lambda: sa.save(body)) if PILOT else sa.save(body)
         if bad: return self._json(409 if sa.CONFLICT in bad else 400,{'ok':False,'msg':';'.join(bad)})
         note_saved()
+        files_changed(before,'設定改了,這張要寄的檔案跟著變了')
         with _PV_LOCK: _PV_CACHE.clear()
         trigger_build()
         if PILOT: PILOT.kick()
@@ -1131,7 +1278,7 @@ class H(BaseHTTPRequestHandler):
         with _PV_LOCK:
             hit=_PV_CACHE.get(key)
         if hit is not None:
-            self._send(200,json.dumps(hit,ensure_ascii=False),'application/json; charset=utf-8'); return
+            self._json(200,hit); return
         # note:這一份哪裡不是最終樣子(用哪張卡當例子、哪一段之後才接上去)。
         # 例子公司容易被看成「prompt 被寫死成某一家」,所以這句話要放在最上面。
         # 由伺服器算、看板只負責顯示在最上面:只有這裡知道實際挑到哪張卡。
@@ -1153,8 +1300,7 @@ class H(BaseHTTPRequestHandler):
                 import apply_run; p=apply_run.preview(stage, board=STATE)
                 meta=getattr(apply_run,'preview_meta',None); m=None
                 if meta:
-                    try: m=meta(stage, board=STATE)
-                    except Exception: m=None
+                    m=meta(stage, board=STATE)   # 出錯交給外面那層照實顯示,不當成「沒有符合的卡」
                 t=(m or {}).get('title') or ''
                 if meta and not m:
                     note='現在沒有符合這個階段的卡,組不出例子。下面是程式給的說明,不是會送出去的 prompt。'
@@ -1162,24 +1308,44 @@ class H(BaseHTTPRequestHandler):
                     note=('這是例子:'+('用「%s」這張組的'%t if t else '用現在符合這個階段的其中一張組的')+
                           '。真的派出去時每張各派一隻,職缺、網址、檔案換成那張的;規矩的段落每張都一樣。')
             else:
-                self._send(400,json.dumps({'msg':'不知道要看哪一段的 prompt'}),'application/json; charset=utf-8'); return
-        except Exception as e:
+                self._json(400,{'msg':'不知道要看哪一段的 prompt'}); return
+        except Exception as e:  # noqa: BLE001 — 原因照實顯示在 prompt 預覽裡
             p='組這份 prompt 的時候出錯了:%s\n(這不影響按鈕,只是這裡看不到。)'%e
         out={'prompt':p,'note':note}
         with _PV_LOCK:
             if len(_PV_CACHE)>40: _PV_CACHE.clear()      # 看板一變 gen 就換一批 key,舊的不用留
             _PV_CACHE[key]=out
-        self._send(200,json.dumps(out,ensure_ascii=False),'application/json; charset=utf-8')
+        self._json(200,out)
+    def do_GET_ship_files(self):
+        """要寄的檔案。帶 u:只算那一張;resume_id / lang 帶了就蓋過存檔裡的(他剛按、還沒存的),空的 = 清掉。
+        只讀,不寫檔、不重建。"""
+        from urllib.parse import urlparse, parse_qs
+        q=parse_qs(urlparse(self.path).query,keep_blank_values=True)
+        d=bd.parse(read_doc()); fb=json.loads(d['fb'] or '{}'); jobs=d['data'].get('jobs',[])
+        u=(q.get('u') or [''])[0]
+        if not u:
+            return self._json(200,ship_files_of(jobs,fb))
+        if not any(isinstance(j,dict) and j.get('id')==u for j in jobs):
+            return self._json(404,{'ok':False,'msg':'找不到這張卡(可能剛被移除或重建),重新整理看板再試'})
+        mark=dict(fb.get(u) or {}) if isinstance(fb.get(u),dict) else {}
+        for k in ('resume_id','lang'):
+            if k in q:
+                v=q[k][0]
+                if v: mark[k]=v
+                else: mark.pop(k,None)
+        fb=dict(fb); fb[u]=mark
+        self._json(200,ship_files_of(jobs,fb,only=u)[u])
     def do_GET_jobs(self):
         with _BUILD_LOCK: building=_build_state['running']
         d=bd.parse(read_doc())
         # 驗收結果(status)也在職缺資料裡,要一起給:以前只給 jobs,重驗過之後頁面上的
         # 「⛔ 驗收未通過」還是舊的那一批,要他自己重整。
-        self._send(200,json.dumps({'building':building,'gen':cur_gen(),'jobs':lean_jobs(d['data'].get('jobs',[])),
-                                   'status':d['data'].get('status'),'research':d['data'].get('research')},
-                                  ensure_ascii=False),'application/json; charset=utf-8')
+        jobs=d['data'].get('jobs',[])
+        self._json(200,{'building':building,'gen':cur_gen(),'jobs':lean_jobs(jobs),
+                                   'ship_files':ship_files_of(jobs,json.loads(d['fb'] or '{}')),
+                                   'status':d['data'].get('status'),'research':d['data'].get('research')})
 
-    def do_POST(self):
+    def _do_POST(self):
         if self._foreign(True): return
         if self.path=='/api/settings' or self.path.startswith('/api/settings/'):
             return self.do_POST_settings()
@@ -1193,10 +1359,8 @@ class H(BaseHTTPRequestHandler):
             return self.do_POST_bank()
         if self.path=='/api/customize':
             if self._agent_blocked():return
-            try:
-                body=json.loads(self._body().decode('utf-8') or '{}'); assert isinstance(body,dict)
-            except Exception:
-                return self._json(400,{'ok':False,'msg':'看板送來的資料格式不對,重新整理看板再試一次'})
+            body=self._json_body()
+            if body is None: return
             import customize as cu
             if body.get('op')=='accept':
                 ok,msg=cu.accept(str(body.get('url') or ''),str(body.get('item') or ''),board=STATE)
@@ -1214,9 +1378,9 @@ class H(BaseHTTPRequestHandler):
         if '/' in kind: kind,act=kind.split('/',1)
         if kind in RUNS and act:
             if AGENT_UA in (self.headers.get('User-Agent') or '') and not ALLOW_AGENT[0]:
-                self._send(403,json.dumps({'ok':False,'err':'agent'}),'application/json; charset=utf-8'); return
+                self._json(403,{'ok':False,'err':'agent'}); return
             code,st=control_run(kind,act)
-            self._send(code,json.dumps(dict(st,ok=code==200),ensure_ascii=False),'application/json; charset=utf-8'); return
+            self._json(code,dict(st,ok=code==200)); return
         if self.path!='/api/save' and kind not in RUNS:
             self._send(404,'not found','text/plain; charset=utf-8'); return
         # 這份板子上的標記是他的判斷,只有他能寫;跑準備區、找新職缺也只有他能發動。
@@ -1225,18 +1389,12 @@ class H(BaseHTTPRequestHandler):
         # 而使用者不可能記得自己標過什麼。
         # 我要走介面就開沙箱板(tools/board_sandbox.py,那支會帶 --allow-agent)。
         if AGENT_UA in (self.headers.get('User-Agent') or '') and not ALLOW_AGENT[0]:
-            self._send(403,json.dumps({'ok':False,'err':'agent','msg':'這個看板不收 agent 的寫入。要測介面請開沙箱板(8898)。'}),
-                       'application/json; charset=utf-8'); return
+            self._json(403,{'ok':False,'err':'agent','msg':'這個看板不收 agent 的寫入。要測介面請開沙箱板(8898)。'}); return
         if kind:
-            try:
-                n=int(self.headers.get('Content-Length','0'))
-                args=json.loads(self.rfile.read(n).decode('utf-8') or '{}') if n else {}
-                assert isinstance(args,dict)
-            except Exception:
-                args={}
+            args=self._json_body()   # 讀不懂就回 400:不當成沒帶參數照跑,該只跑一張的會變成全部都跑
+            if args is None: return
             code,st=start_run(kind,args)
-            self._send(code,json.dumps(dict(st,ok=code==200),ensure_ascii=False),
-                       'application/json; charset=utf-8'); return
+            self._json(code,dict(st,ok=code==200)); return
         try:
             n=int(self.headers.get('Content-Length','0'))
             fb=json.loads(self.rfile.read(n).decode('utf-8'))
@@ -1245,24 +1403,27 @@ class H(BaseHTTPRequestHandler):
             # 手機擱著沒關的舊分頁會把整份標記倒回它載入時的樣子,別處的改動就沒了。
             keys=[k for k in fb if not k.startswith('__')]
             if '__rev__' not in fb and len(keys)>40:
-                self._send(409,json.dumps({'ok':False,'err':'stale','msg':'這個分頁的程式是舊版,請重新整理再存'}),
-                           'application/json; charset=utf-8'); return
+                self._json(409,{'ok':False,'err':'stale','msg':'這個分頁的程式是舊版,請重新整理再存'}); return
             fb.pop('__rev__',None)
             base=fb.pop('__base__',None)
-            bad=write_fb(fb, base if isinstance(base,dict) else None)
+            events=fb.pop('__events__',None)
+            rejected=[]
+            bad=write_fb(fb, base if isinstance(base,dict) else None,
+                         events if isinstance(events,list) else None, rejected)
             if bad:
-                self._send(409,json.dumps({'ok':False,'err':'conflict','keys':bad,
-                    'msg':'這幾筆在別的地方改過了,先拿最新的再存'},ensure_ascii=False),
-                    'application/json; charset=utf-8'); return
+                self._json(409,{'ok':False,'err':'conflict','keys':bad,
+                    'msg':'這幾筆在別的地方改過了,先拿最新的再存'}); return
             # 有卡進待你決定/可投遞 → 背景生可投遞包(single-flight),使用者不用再等人建。
             if any(isinstance(v,dict) and v.get('app') in ('ready','ship') for v in fb.values()):
                 trigger_build()
-            if PILOT and ('__auto__' in fb or any(isinstance(v,dict) and v.get('app') in ('prep','ready','ship') for v in fb.values())):
+            if PILOT and (events or '__auto__' in fb or any(isinstance(v,dict) and v.get('app') in ('prep','ready','ship') for v in fb.values())):
                 PILOT.kick()
             with _BUILD_LOCK: building=_build_state['running']
-            self._send(200,json.dumps({'ok':True,'building':building}),'application/json; charset=utf-8')
-        except Exception as e:
-            self._send(400,json.dumps({'ok':False,'err':str(e)}),'application/json; charset=utf-8')
+            self._json(200,{'ok':True,'building':building,'rejected':rejected})
+        except bd.Tampered:
+            raise
+        except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)
+            self._json(400,{'ok':False,'err':str(e)})
     def log_message(self,*a): pass  # 安靜
 
 def tailscale_ip():
@@ -1272,7 +1433,7 @@ def tailscale_ip():
         out=subprocess.run([tsc,'ip','-4'],capture_output=True,text=True,timeout=5).stdout.strip()
         ip=out.splitlines()[0].strip() if out else ''
         return ip if ip.startswith('100.') else None
-    except Exception:
+    except (OSError,subprocess.SubprocessError):   # 沒裝 Tailscale、沒開:只綁本機
         return None
 
 def resolve_hosts(arg):

@@ -80,9 +80,14 @@ class OneClaudeAtATimeInTheAgentChrome(tb.HttpBase):
     def setUp(self):
         super().setUp()
         import board_doc as bd
+        import config as cf
         def mut(fb):
             fb[U] = {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'session': 's', 'tab_id': '5', 'runtime': 'claude-code'}}
         bd.set_fb(mut, live=self.path, by='test')
+        agents = [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]
+        cfg = mock.patch.dict(cf.C, {'agent': {'agents': agents}})
+        cfg.start()
+        self.addCleanup(cfg.stop)
 
     def test_claude_eye_waits_while_another_job_uses_the_chrome(self):
         for kind in ('apply', 'replies'):
@@ -131,6 +136,10 @@ class EyeGivesTheTabBackWhenItTimesOut(tb.HttpBase):
 
     def test_time_limit_asks_apply_tab_to_stop_before_killing_it(self):
         import tempfile, textwrap, time
+        import board_doc as bd
+        import chrome_door
+        bd.set_fb(lambda fb: fb.__setitem__(U, {'app': 'ship', 'ds': 'parked', 'apply': {
+            'stage': 'fill', 'session': 's', 'tab_id': '5', 'runtime': 'codex'}}), live=self.path, by='test')
         d = tempfile.mkdtemp(prefix='fake-tools-')
         mark = os.path.join(d, 'handed-off')
         with open(os.path.join(d, 'apply_tab.py'), 'w', encoding='utf-8') as f:
@@ -142,17 +151,51 @@ class EyeGivesTheTabBackWhenItTimesOut(tb.HttpBase):
                 finally:
                     open({mark!r}, 'w').write('ok')      # 真的 apply_tab 在這裡交接那一頁、結束這一輪
             """))
-        old = bs.HERE
-        bs.HERE = d
-        try:
-            with mock.patch.object(bs, 'LIVE_TIMEOUT', {'codex': 1, 'claude-code': 1}, create=True):
-                t0 = time.time()
-                code, _, _ = self.req('/api/live?u=' + U)
-        finally:
-            bs.HERE = old
+        with mock.patch.object(bs, 'HERE', d), mock.patch.object(chrome_door.CodexDoor, 'live_timeout', 1):
+            t0 = time.time()
+            code, _, _ = self.req('/api/live?u=' + U)
         self.assertEqual(code, 503)
         self.assertTrue(os.path.exists(mark), '時間到直接強制結束,apply_tab 的 finally 沒跑到')
         self.assertLess(time.time() - t0, 30)
+
+    def test_eye_on_a_page_whose_family_is_gone_says_refill_like_the_card(self):
+        # 開這一頁的那一家(Codex)已經不用了:👀 不能拿別家去接,也不能當成 Codex;跟卡上一樣講要重填,卡上記成頁面不見了
+        import board_doc as bd
+        import chrome_door
+        import config as cf
+        import delivery_state as ds
+        bd.set_fb(lambda fb: fb.__setitem__(U, {'app': 'ship', 'ds': 'parked', 'apply': {
+            'stage': 'fill', 'session': 's', 'tab_id': '5', 'runtime': 'codex'}}), live=self.path, by='test')
+        agents = [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]
+        real = bs.is_real
+        bs.is_real = lambda: True
+        self.addCleanup(setattr, bs, 'is_real', real)
+        with mock.patch.dict(cf.C, {'agent': {'agents': agents}}), mock.patch.object(bs, 'run_status', return_value={}), \
+             mock.patch.object(bs, '_run_then_stop', side_effect=AssertionError('接不回來的頁不該叫誰去截')):
+            code, raw, _ = self.req('/api/live?u=' + U)
+        self.assertEqual(code, 404)
+        self.assertIn(chrome_door.AGENT_SWAPPED, raw.decode('utf-8'))
+        m = tb.read_fb(self.path)[U]
+        self.assertEqual((ds.state(m), m['apply']['issues']), ('gone', [chrome_door.AGENT_SWAPPED]))
+
+    def test_eye_says_so_when_the_card_could_not_be_marked_gone(self):
+        # 卡上記不下「頁面不見了」(看板檔寫不進去):👀 不能照樣叫他「按卡上的重填」,卡上根本沒有那顆鈕
+        import board_doc as bd
+        bd.set_fb(lambda fb: fb.__setitem__(U, {'app': 'ship', 'ds': 'parked', 'apply': {
+            'stage': 'fill', 'session': 's', 'tab_id': '5', 'runtime': 'codex'}}), live=self.path, by='test')
+        import config as cf
+        agents = [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]
+        real = bs.is_real
+        bs.is_real = lambda: True
+        self.addCleanup(setattr, bs, 'is_real', real)
+        with mock.patch.dict(cf.C, {'agent': {'agents': agents}}), mock.patch.object(bs, 'run_status', return_value={}), \
+             mock.patch('board_doc.set_fb', side_effect=OSError('磁碟滿了')):
+            code, raw, _ = self.req('/api/live?u=' + U)
+        text = raw.decode('utf-8')
+        self.assertEqual(code, 404)
+        self.assertIn('卡上沒改成要重填', text)
+        self.assertIn('磁碟滿了', text)
+        self.assertNotIn('按卡上的', text)
 
     def test_apply_tab_turns_a_stop_request_into_a_normal_exit(self):
         import subprocess, tempfile

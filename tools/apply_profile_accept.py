@@ -9,13 +9,13 @@ import datetime
 import hashlib
 import json
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
@@ -108,11 +108,8 @@ def _acceptance_board_document():
 
 
 def digest_file(path):
-    value = hashlib.sha256()
     with open(path, 'rb') as source:
-        for block in iter(lambda: source.read(1024 * 1024), b''):
-            value.update(block)
-    return value.hexdigest()
+        return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
 def file_snapshot(root):
@@ -339,15 +336,8 @@ def _clone_home(source_home, runtime_home):
 
 
 def _source_home(value):
-    candidates = [value, os.environ.get('JOBSALVO_HOME')]
-    current = os.getcwd()
-    while True:
-        candidates.append(current)
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    for candidate in candidates:
+    cwd = pathlib.Path.cwd()
+    for candidate in [value, os.environ.get('JOBSALVO_HOME'), str(cwd), *map(str, cwd.parents)]:
         if not candidate:
             continue
         path = os.path.abspath(os.path.expanduser(candidate))
@@ -431,10 +421,8 @@ class ProfileAcceptance:
         self.ship_exists_before = os.path.lexists(self.real_ship)
         document = _acceptance_board_document()
         self.board_seed = 'current repository shell; no source jobs or marks'
-        with open(bd.LIVE, 'w', encoding='utf-8') as target:
-            target.write(document)
-        with open(self.board, 'w', encoding='utf-8') as target:
-            target.write(document)
+        bd.write_doc(bd.LIVE, document)
+        bd.write_doc(self.board, document)
 
         fixtures = os.path.join(self.out, 'fixtures')
         self.support_path = os.path.join(fixtures, 'acceptance-support.pdf')
@@ -522,19 +510,18 @@ class ProfileAcceptance:
 
     def _fill_json(self, url):
         apply_run = self.modules['apply_run']
+        import gate
         folder = apply_run.out_dir(url, self.board, self.apply_tmp)
-        path = os.path.join(folder, 'fill.json')
-        try:
-            with open(path, encoding='utf-8') as source:
-                return json.load(source), path
-        except (OSError, ValueError):
-            return {}, path
+        sheet, _missing = gate.read(folder, 'fill')          # 交件單只經安檢門讀(#316)
+        return sheet or {}, gate.path(folder, 'fill')
 
     def _case_evidence(self, case):
         apply_run = self.modules['apply_run']
         jobs, fb = apply_run.load(self.board)
         url = self.jobs[case]
-        record = (fb.get(url) or {}).get('apply') or {}
+        import delivery_state
+        # 「填好了」看投遞狀態(停著等你),不看填表紀錄上舊的 ok 記號
+        record = dict((fb.get(url) or {}).get('apply') or {}, ok=delivery_state.state(fb.get(url)) == 'parked')
         report_rows = [item for item in fb.get('__inbox__', []) if item.get('job') == url]
         fill, fill_path = self._fill_json(url)
         events = self.server.events(case=case)
@@ -626,7 +613,7 @@ class ProfileAcceptance:
         try:
             result = apply_run.run_one('fill', self.jobs[case], self.board)
             run_ok, message = result
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 — 驗收要記下這個情境為什麼失敗,照實寫進結果
             run_ok, message = False, f'{type(error).__name__}: {error}'
         before = self.fixed_before[case]
         evidence = self._case_evidence(case)
@@ -933,7 +920,7 @@ def main(argv=None):
                 run.setup()
                 run.fixed_before = {case: run.server.fixed_snapshot(case) for case in CASES}
                 run.evaluate(args.case or CASES)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 — 驗收中止照實記成一條沒過的檢查
                 run.say(f'驗收中止:{type(error).__name__}')
                 run.check(
                     '執行', '驗收流程完成', False, f'{type(error).__name__}: {error}',
@@ -942,7 +929,7 @@ def main(argv=None):
             finally:
                 run.finish()
             checks = list(run.checks)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — 指令列最外層:原因照實印出、回 1
         print(f'驗收副本建立失敗:{type(error).__name__}: {error}')
         return 1
     finally:

@@ -6,17 +6,19 @@
 
 跑法(repo 根目錄):python3 -m unittest discover -s tests
 """
-import os, sys, json, time, tempfile, shutil, unittest
+import os, sys, json, time, tempfile, shutil, unittest, contextlib, copy
 from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import form_record as fr      # noqa: E402
 import agent_run as ar        # noqa: E402
 import apply_run as run       # noqa: E402
+import delivery_state as ds   # noqa: E402
+import chrome_door            # noqa: E402
+import fake_chrome as fc      # noqa: E402
 
 U = 'https://jobs.lever.co/x/1'
 T = run.today()
@@ -40,6 +42,27 @@ def board():
                 {'q': 'Nationality', 'src': 'bank', 'k': 'nat'}]}}}
 
 
+# 填好、停著的那一頁(程式確認前、送出前讀它跟確認時的樣子比,#316)
+FORM_PAGE = {'url': U + '/apply', 'fields': [{'label': 'Full name', 'value': 'Alex Chen'},
+                                             {'label': 'Nationality', 'value': 'Taiwan'}], 'lines': []}
+FILLED = {'stage': 'fill', 'issues': [], 'tab_id': '7', 'session': 'S1', 'runtime': 'codex',
+          'delivery': {'method': 'direct_upload'}}
+
+
+def park(fb):
+    """agent 填好了、停著等他(還沒確認)。"""
+    confirm(fb)
+    fb[U].pop('approve')
+    fb[U]['ds'] = 'parked'
+
+
+def confirm(fb):
+    """他看過那一頁、按了確認送出(停著等你 → 你已確認)。卡上已經有的填表紀錄照留。"""
+    m = fb[U]
+    m['apply'] = {**FILLED, 'at': run.now(), **(m.get('apply') or {})}
+    m['ds'] = 'confirmed'
+    m['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+
 
 class Approval(unittest.TestCase):
     def test_not_approved_is_refused(self):
@@ -47,14 +70,14 @@ class Approval(unittest.TestCase):
 
     def test_approved_snapshot_is_valid_until_an_answer_changes(self):
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         self.assertIsNone(fr.approval_problem(fb, U, OKST))
         fb['__ans__'][0]['v'] = 'ROC'                        # 核准之後他(或我)改了答案
         self.assertIn('要重新確認送出', fr.approval_problem(fb, U, OKST))
 
     def test_pending_or_untranslated_answers_block_submission(self):
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         fb['__ans__'][0]['inf'] = T; del fb['__ans__'][0]['at']
         self.assertIn('等你確認', fr.approval_problem(fb, U, OKST))
         fb['__ans__'][0].pop('inf'); fb['__ans__'][0]['at'] = T; fb['__ans__'][0]['tr'] = 1
@@ -62,25 +85,28 @@ class Approval(unittest.TestCase):
 
     def test_rerecording_the_form_drops_the_approval(self):
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         fr.apply_record(fb, U, 'Lever', [{'q': 'Nationality', 'k': 'nat'}], today=T)
         self.assertNotIn('approve', fb[U])
 
     def test_mark_sent_locks_and_keeps_the_approval_as_evidence(self):
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         fb[U]['form']['f'][1]['refill'] = 1
-        fr.apply_mark_sent(fb, U, {'text': 'Application submitted'}, T, 'en-general')
+        ds.fire(fb, U, 'submit_start')
+        ds.fire(fb, U, 'submit_ok', by='agent', sent_at=T, evidence={'text': 'Application submitted'})
+        run.ship.record_sent(fb, U, version='en-general')      # 寄出的是哪一份:只有 ship.record_sent 寫
         m = fb[U]
         self.assertEqual((m['app'], m['form']['lock'], m['sent_v']), ('sent', 1, 'en-general'))
         self.assertNotIn('refill', m['form']['f'][1])
-        self.assertIn('approve', m)
+        self.assertNotIn('approve', m)                       # 送出了,那一頁是已收到申請:確認和分頁編號拿掉
+        self.assertEqual(m['apply']['tab_id'], '')
         self.assertEqual(fr.approval_problem(fb, U, OKST), '已經送出了')
 
 
     def test_an_answer_changed_after_filling_blocks_approval_until_agent_retypes_it(self):
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         fb[U]['form']['f'][1]['refill'] = 1                  # 答案庫改了,網頁上還是舊字
         self.assertIn('先讓 agent 改', fr.approval_problem(fb, U, OKST))
         fr.apply_clear_refill(fb, U)                         # agent 在原本那一頁改好了
@@ -88,10 +114,13 @@ class Approval(unittest.TestCase):
 
     def test_an_unconfirmed_submit_blocks_resending_until_he_clears_it(self):
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
-        fb[U]['apply'] = {'submit_fail': {'clicked': True, 'problems': ['沒看到成功頁面']}}
+        confirm(fb)
+        ds.fire(fb, U, 'submit_start')
+        ds.fire(fb, U, 'submit_unsure', evidence={'clicked': True, 'problems': ['沒看到成功頁面']})
         self.assertIn('先確認到底送出沒有', fr.approval_problem(fb, U, OKST))     # 不然可能投兩次
-        fb[U]['apply']['submit_fail']['cleared'] = True
+        ds.fire(fb, U, 'not_sent', at=T)                                          # 他確認過沒送出:可以重送
+        self.assertEqual(fr.approval_problem(fb, U, OKST), '還沒確認送出')        # 不直接回你已確認:重新看過再確認
+        ds.fire(fb, U, 'confirm', approve=fr.approval(fb, U, T))
         self.assertIsNone(fr.approval_problem(fb, U, OKST))
 
 
@@ -99,21 +128,23 @@ class Eligible(unittest.TestCase):
     def test_fill_takes_unapproved_and_skips_ones_already_filled(self):
         fb = board(); jobs = {U: {'id': U}}
         self.assertEqual(run.eligible(jobs, fb, 'fill', status=OKST), [U])
-        fb[U]['apply'] = {'stage': 'fill', 'ok': True}
-        self.assertEqual(run.eligible(jobs, fb, 'fill', status=OKST), [])            # 填好等他核准的不重填
-        self.assertEqual(run.eligible(jobs, fb, 'fill', U, status=OKST), [U])        # 指定那一張才重填
-        self.assertEqual(run.eligible(jobs, fb, 'submit', status=OKST), [])          # 沒核准不會送
+        fb[U].update(ds='parked', apply=dict(FILLED))
+        self.assertEqual(run.eligible(jobs, fb, 'fill', status=OKST), [])            # 停著等你的不重填
+        self.assertEqual(run.eligible(jobs, fb, 'fill', U, status=OKST), [])         # 指定也一樣(狀態表不准)
+        self.assertEqual(run.eligible(jobs, fb, 'submit', status=OKST), [])          # 沒確認不會送
+        fb[U]['ds'] = 'stuck'
+        self.assertEqual(run.eligible(jobs, fb, 'fill', U, status=OKST), [U])        # 卡住的可以重填
 
     def test_submit_takes_only_valid_approvals(self):
         fb = board(); jobs = {U: {'id': U}}
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         self.assertEqual(run.eligible(jobs, fb, 'submit', status=OKST), [U])
         self.assertEqual(run.eligible(jobs, fb, 'fill', status=OKST), [])
 
     def test_fix_needs_the_same_agent_and_something_to_fix(self):
         fb = board(); jobs = {U: {'id': U}}
         self.assertEqual(run.eligible(jobs, fb, 'fix', U, status=OKST), [])                 # 沒有 agent 填過的對話:叫不回來
-        fb[U]['apply'] = {'stage': 'fill', 'ok': True, 'session': 'S1', 'tab_id': '7'}
+        fb[U].update(ds='parked', apply={'stage': 'fill', 'session': 'S1', 'tab_id': '7'})
         self.assertEqual(run.eligible(jobs, fb, 'fix', status=OKST), [])                    # 批次:沒有待重打的不跑
         self.assertEqual(run.eligible(jobs, fb, 'fix', U, status=OKST), [U])                # 指定那一張(他寫了話)
         fb[U]['form']['f'][1]['refill'] = 1
@@ -135,29 +166,25 @@ class TabRemembersItsChrome(unittest.TestCase):
         fb = board()
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
         now = {'pid': 9, 'start': 1000.0}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: now)
         with tempfile.TemporaryDirectory(prefix='apply-stamp-') as directory, \
+             fc.installed(fc.FakeChrome('claude-code', agent_id='a'), chrome_id=now), \
              patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='a')), \
              patch.object(ar, 'session_id', return_value='S9'), \
-             patch.object(ar, 'browser_runtime', return_value='codex'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
              patch.object(run, '_profile_check_after_fill', return_value=[]), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
-             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
             run.run_one('fill', U, '/tmp/board.html')
         self.assertEqual((fb[U]['apply']['tab_id'], fb[U]['apply'].get('chrome')), ('7', now))
+        self.assertEqual(fb[U]['apply']['runtime'], 'claude-code')     # 也記下是哪一家開的(之後都找它)
 
 
 class Checks(unittest.TestCase):
     def setUp(self):
-        self.d = tempfile.mkdtemp(prefix='applyrun-')
-
-    def tearDown(self):
-        shutil.rmtree(self.d, ignore_errors=True)
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='applyrun-'))
 
     def write(self, name, obj=None):
         p = os.path.join(self.d, name)
@@ -166,15 +193,21 @@ class Checks(unittest.TestCase):
         return p
 
     def test_agent_process_gets_its_selected_board_without_changing_parent(self):
+        # agent 拿到的是代號、不是看板檔的位置(#307);代號對回的是這一輪選的那一份
+        import board_doc as bd
         output = self.write('agent.log', {})
+        copy = os.path.join(self.d, 'copy-board.html')
         with patch.dict(os.environ, {'AGENT_BOARD': 'outer-board'}), \
                 patch.object(ar, 'argv_for', return_value=(['agent'], None)), \
                 patch.object(ar.subprocess, 'Popen', return_value='proc') as popen:
-            result = ar.launch('prompt', output, 'repo', board='copy-board')
+            result = ar.launch('prompt', output, 'repo', board=copy)
             self.assertEqual(os.environ.get('AGENT_BOARD'), 'outer-board')
 
         self.assertEqual(result, 'proc')
-        self.assertEqual(popen.call_args.kwargs['env']['AGENT_BOARD'], 'copy-board')
+        env = popen.call_args.kwargs['env']
+        self.assertNotIn('AGENT_BOARD', env)
+        with patch.dict(os.environ, {bd.BOARD_ID: env[bd.BOARD_ID]}):
+            self.assertEqual(bd.target(), os.path.realpath(copy))
 
     def page(self, **vals):
         return {'url': U + '/apply', 'fields': [{'name': k, 'value': v} for k, v in vals.items()]}
@@ -199,7 +232,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: good)[0], [])
         self.write('fill.json', dict(ok, fields=[{'q': 'Nationality', 'value': 'ROC', 'k': 'nat'}], submitted=True))
         bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: good)[0])
-        self.assertNotIn('答案庫是', bad)          # 頁面上是對的:以頁面為準,agent 回報寫法不同不算錯
+        self.assertNotIn('常用答案是', bad)          # 頁面上是對的:以頁面為準,agent 回報寫法不同不算錯
         self.assertIn('已送出', bad)
         wrong = self.page(name='Alex Chen', nat='ROC', cv=['cv.pdf'])
         self.assertTrue(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: wrong)[0])   # 頁面上真的錯
@@ -207,7 +240,7 @@ class Checks(unittest.TestCase):
         def unreadable(_s, _t):
             raise RuntimeError('tab gone')
         bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=unreadable)[0])
-        self.assertIn('答案庫是', bad)              # 讀不到頁面時才退回比 agent 回報的值
+        self.assertIn('常用答案是', bad)              # 讀不到頁面時才退回比 agent 回報的值
         self.write('fill.json', dict(ok, handoff=False))                                  # 分頁沒留下來
         self.assertIn('沒有留在他的 Chrome', ' '.join(run.check_fill(fb, U, self.d, t0)[0]))
 
@@ -240,10 +273,7 @@ class Checks(unittest.TestCase):
         report = {
             'fields': [{'q': 'Nationality', 'value': 'Taiwan', 'k': 'nat'}],
             'submitted': False, 'tab_id': '7', 'tab_url': U + '/apply', 'handoff': True,
-            'delivery': {
-                'method': 'platform_profile', 'profile_kind': 'custom',
-                'profile_url': 'https://example.invalid/profile/custom',
-            },
+            'delivery': {'method': 'platform_profile'},   # 用哪一份、固定版還是客製版程式決定,agent 不寫(#313)
             'uploaded': ['resume.pdf', 'support.pdf'],
         }
         self.write('fill.png')
@@ -266,10 +296,8 @@ class Checks(unittest.TestCase):
 
     def test_same_job_with_a_stale_card_name_is_renamed_keeping_the_link(self):
         import board_doc as bd
-        path = os.path.join(self.d, 'b.html')
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(bd.assemble(':root{}', '<b id="stat-first">0</b>', '', {'jobs': [
-                {'id': U, 'target': f'Northwind Graduate · Risk Operations Specialist (SQL)（[Lever]({U})）'}]}, '{}', ''))
+        path = _env.make_board(os.path.join(self.d, 'b.html'), jobs=[
+            {'id': U, 'target': f'Northwind Graduate · Risk Operations Specialist (SQL)（[Lever]({U})）'}])
         run.rename(U, 'Northwind Accelarator Program - Risk Analyst', 'Northwind', path)
         t = bd.parse(bd._read(path))['data']['jobs'][0]['target']
         self.assertEqual(t, f'Northwind Accelarator Program - Risk Analyst（[Lever]({U})）')
@@ -344,60 +372,21 @@ class Checks(unittest.TestCase):
         self.assertEqual(apply_tab.page_problems(gh2, fb, U, ['merged.pdf']), [])
         self.assertIn('上傳欄裡沒有 other.pdf', ' '.join(apply_tab.page_problems(gh2, fb, U, ['other.pdf'])))
 
-    def test_claude_fill_is_read_through_claude(self):
-        """Claude 填的分頁一樣由程式自己讀(接回同一段 Claude 對話),驗收標準跟 Codex 一樣:讀不到就不算填好。"""
+    def test_the_page_is_read_through_the_family_that_filled_it(self):
+        """填這張的那一家用它自己的門路讀那一頁(帶這一輪的紀錄),驗收標準每一家一樣:讀不到就不算填好。"""
         t0 = time.time() - 1
         fb = board()
         self.write('fill.json', {'fields': [], 'submitted': False, 'tab_id': '1234', 'tab_url': U + '/apply',
                                  'handoff': True, 'uploaded': []})
         self.write('fill.png')
-        seen = []
-
-        def fake_read(sid, tab, runtime='codex', tries=3, log=None):
-            seen.append((sid, tab, runtime))
-            raise LookupError('那段對話接不回來')
-        with patch('apply_tab.read', fake_read):
-            bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', runtime='claude-code')[0])
-        self.assertEqual(seen, [('S1', '1234', 'claude-code')])
+        door = fc.FakeChrome('claude-code', not_now={'read_page'})
+        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', door=door, log=['fill.log'])[0])
+        self.assertEqual(door.calls, [('read_page', 'S1', '1234', ['fill.log'])])
         self.assertIn('讀不到', bad)
-
-    def test_claude_page_comes_from_its_own_run_log(self):
-        """Claude 那一頁:它那一輪最後自己跑唯讀函式,程式從紀錄拿工具的回傳拼回來;
-        只收程式碼一字不差的那幾次,模型自己說什麼、改過的程式碼都不算;不完整就是讀不到。"""
-        import apply_tab
-        page = {'url': U, 'title': 't', 'fields': [{'label': 'Why', 'value': 'x' * 2500}], 'shownFiles': [], 'lines': []}
-        whole = json.dumps(page)
-        n = -(-len(whole) // apply_tab.CHUNK)
-        rows, k = [], 0
-
-        def call(code, result):
-            nonlocal k
-            k += 1
-            rows.append({'type': 'assistant', 'message': {'content': [
-                {'type': 'tool_use', 'id': f'u{k}', 'name': 'mcp__claude-in-chrome__javascript_tool', 'input': {'text': code}}]}})
-            rows.append({'type': 'user', 'message': {'content': [
-                {'type': 'tool_result', 'tool_use_id': f'u{k}', 'content': [{'type': 'text', 'text': result + '\n\nTab Context:\n- x'}]}]}})
-        call(apply_tab.LEN_JS, str(len(whole)))
-        for i in range(n):
-            call(apply_tab.chunk_js(i), f'{i}:' + whole[i * apply_tab.CHUNK:(i + 1) * apply_tab.CHUNK])
-        call('document.title', '{"fields": ["模型自己寫的"]}')        # 不是那支函式的回傳不收
-        rows.append({'type': 'result', 'result': '{"fields": []}'})
-        log = os.path.join(self.d, 'fill.log')
-        with open(log, 'w') as fh:
-            fh.write('\n'.join(json.dumps(r) for r in rows))
-        self.assertEqual(apply_tab.read('S1', '7', runtime='claude-code', log=log), page)
-        wrap = os.path.join(self.d, 'fill-wrapup.log')                # 逾時收尾那一輪沒再讀:用前一輪的
-        with open(wrap, 'w') as fh:
-            fh.write(json.dumps({'type': 'result', 'result': 'done'}))
-        self.assertEqual(apply_tab.read('S1', '7', runtime='claude-code', log=[log, wrap]), page)
-        self.assertGreater(n, 1)                                      # 真的有分段(每段不超過工具的 1000 字上限)
-        rows[-5]['message']['content'][0]['input']['text'] = apply_tab.chunk_js(n - 1) + '.trim()'   # 最後一段的程式碼被改過(空白不同不算)
-        with open(log, 'w') as fh:
-            fh.write('\n'.join(json.dumps(r) for r in rows))
-        with self.assertRaises(LookupError):
-            apply_tab.read('S1', '7', runtime='claude-code', log=log)
-        self.assertIn(apply_tab.LEN_JS, run.ar.apply_rule('claude-code'))    # 規矩裡叫它最後讀一次
-        self.assertNotIn(apply_tab.LEN_JS, run.ar.apply_rule('codex'))
+        door = fc.FakeChrome('codex', page={'url': U + '/apply', 'fields': [{'name': 'name', 'value': 'Alex Chen'},
+                                                                            {'name': 'nat', 'value': 'Taiwan'}]})
+        self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', door=door)[0], [])
+        self.assertIn('讀不到', ' '.join(run.check_fill(fb, U, self.d, t0, 'S1')[0]))    # 不知道是哪一家開的:讀不到
 
     def test_submit_needs_program_screenshot(self):
         t0 = time.time() - 1
@@ -445,8 +434,8 @@ class Dispatch(unittest.TestCase):
         self.assertIn('mcp_servers.node_repl.enabled=false', ov)       # 它的 Chrome 介面會把分頁群組放進他的視窗
         argv, cwd = ar.argv_for('main', 'P', '/repo', browser=ov, chrome=True)
         self.assertEqual([os.path.basename(argv[0])] + argv[1:2], ['codex', 'exec'])
-        self.assertTrue(ar.prompt_stdin('main', 'P', browser=ov, chrome=True).startswith(ar.apply_rule()))   # 換成代投的鐵律
-        self.assertIn('extensionInstanceId', ar.apply_rule())         # 只准用 agent 專用的那個 Chrome,用固定身分認
+        self.assertTrue(ar.prompt_stdin('main', 'P', browser=ov, chrome=True).startswith(ar.apply_rule('codex')))   # 換成代投的鐵律
+        self.assertIn('extensionInstanceId', ar.apply_rule('codex'))  # 只准用 agent 專用的那個 Chrome,用固定身分認
         self.assertIn('computer use', ar.APPLY_RULE)                  # 點螢幕會搶他的畫面,規矩裡禁止
         with self.assertRaises(ValueError):
             ar.argv_for('alt', 'P', '/repo', browser=ov, chrome=True)
@@ -461,23 +450,24 @@ class Dispatch(unittest.TestCase):
 
     def test_fix_and_submit_dispatch_to_the_filling_agent(self):
         fb = board()
-        fb[U]['apply'] = {'session': 'S1', 'agent_id': 'browser-two'}
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        fb[U]['apply'] = {'session': 'S1', 'agent_id': 'browser-two', 'runtime': 'codex'}
+        park(fb)
         jobs = {U: {'id': U, 'target': 'X'}}
         calls = []
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
-        outcome = ar.AgentResult('unavailable', reason='pinned_agent_missing', agent_id='browser-two')
+        outcome = ar.AgentResult('failed', 1, 42, agent_id='browser-two')
         with tempfile.TemporaryDirectory(prefix='apply-agent-pin-') as d, \
+             fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
              patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', d)), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
-             patch.object(ar, 'browser_runtime', return_value='codex'), \
-             patch.object(ar, 'run', side_effect=lambda *args, **kwargs: calls.append(kwargs) or outcome), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(ar, 'run', side_effect=lambda *args, **kwargs: calls.append(kwargs) or outcome):
             self.assertFalse(run.run_one('fix', U, '/tmp/board.html')[0])
             self.assertEqual(fb[U]['apply']['issues'], [outcome.message()])   # 沒跑成的原因寫在卡上
-            fb[U]['apply'] = {'session': 'S1', 'agent_id': 'browser-two'}      # 修改沒成功時本來就不准送;另起一張看送出
+            self.assertEqual(ds.state(fb[U]), 'stuck')                      # 修改沒成功時本來就不准送;另起一張看送出
+            fb[U] = board()[U]
+            fb[U]['apply'] = {'session': 'S1', 'agent_id': 'browser-two', 'runtime': 'codex'}
+            confirm(fb)
             self.assertFalse(run.run_one('submit', U, '/tmp/board.html')[0])
 
         self.assertEqual([call['agent_id'] for call in calls], ['browser-two', 'browser-two'])
@@ -488,7 +478,6 @@ class Dispatch(unittest.TestCase):
         # 填完、交接了分頁,卻在寫交件檔前被 40 分鐘上限砍掉:不整輪作廢,叫回同一段對話把結果寫下來
         fb = board()
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
         calls = []
 
         def agent(prompt, log, home, board_path, **kw):
@@ -499,6 +488,7 @@ class Dispatch(unittest.TestCase):
             return SimpleNamespace(ok=True, status='completed', agent_id='browser-two')
 
         with tempfile.TemporaryDirectory(prefix='apply-wrapup-') as directory, \
+             fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
              patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
              patch.object(run, '_run_agent', side_effect=agent), \
@@ -507,8 +497,7 @@ class Dispatch(unittest.TestCase):
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
-             patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(run.agent_report, 'resolve'):
             ok, _message = run.run_one('fill', U, '/tmp/board.html')
 
         self.assertTrue(ok)
@@ -520,54 +509,49 @@ class Dispatch(unittest.TestCase):
         self.assertIn('不要送出', wrap['prompt'])
 
     def test_fill_handed_to_the_other_vendor_gets_its_own_prompt_and_chrome_check(self):
-        # #288:填表第一家(Codex)額度用完、換手到 Claude:prompt 照 Claude 重組(不帶程式替 Codex 開好的分頁、
-        # 加上最後自讀那一步),Chrome 檢查改做 Claude 的(wait_claude)。以前照第一家組的,換手後卡上寫填表卡住
+        # #288:填表第一家(Codex)額度用完、換手到 Claude:prompt 照 Claude 的門路重組(不帶程式替 Codex 開好的分頁、
+        # 加上它要多交代的那一段),Chrome 檢查改做 Claude 的。以前照第一家組的,換手後卡上寫填表卡住
         fb = board()
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        events = []
-        up = {'claude': (True, '')}
-        chrome = SimpleNamespace(
-            ensure=lambda *_: events.append('ensure') or (True, ''),
-            wait_claude=lambda *_: events.append('wait_claude') or up['claude'],
-            open_for_agent=lambda *_a, **_k: events.append('open') or {'tab_id': '5', 'page': {}},
-            conf=lambda: {}, chrome_id=lambda: {})
+        codex = fc.FakeChrome('codex', prepared={'tab_id': '5', 'page': {}})
+        claude = fc.FakeChrome('claude-code', agent_id='cc', tail='\n【填完、改完的最後一步】')
         got = []
 
         def prompt_for(stage, url, j, fb_, board_, note='', profile=None, attachment_download_dir=None, prepared=None,
-                       runtime='codex'):
-            return ('FILL prepared=' + ('yes' if prepared else 'no') + ' for ' + runtime, self.d)
+                       *, door):
+            return ('FILL prepared=' + ('yes' if prepared else 'no') + ' for ' + door.runtime, self.d)
 
         def agent(prompt, log, home, board_path, **kw):
             got.append(prompt)
             got.append(kw['prepare']({'id': 'primary', 'runtime': 'codex'}))
             got.append(kw['prepare']({'id': 'cc', 'runtime': 'claude-code'}))
-            up['claude'] = (False, 'Claude 90 秒內看不到 agent 的 Chrome')
+            claude.up = (False, 'Claude 90 秒內看不到 agent 的 Chrome')
             with self.assertRaises(ar.AgentStartError):
                 kw['prepare']({'id': 'cc', 'runtime': 'claude-code'})
             return SimpleNamespace(ok=True, status='completed', agent_id='cc')
 
-        self.d = tempfile.mkdtemp(prefix='apply-handoff-')
-        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
-        with patch.object(run, 'load', return_value=(jobs, fb)), \
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-handoff-'))
+        with fc.installed(codex, claude), \
+             patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', side_effect=prompt_for), \
              patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
-             patch.object(ar, 'browser_runtime', side_effect=lambda agent_id=None: 'claude-code' if agent_id == 'cc' else 'codex'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
              patch.object(run, '_profile_check_after_fill', return_value=[]), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
-             patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(run.agent_report, 'resolve'):
             ok, _message = run.run_one('fill', U, '/tmp/board.html')
         self.assertTrue(ok)
         self.assertEqual(got[0], 'FILL prepared=yes for codex')           # 第一家 Codex:程式先開好申請頁
         self.assertEqual(got[1], got[0])                                  # 同一家不重做
-        self.assertTrue(got[2].startswith('FILL prepared=no for claude-code'))   # Claude 接不了程式開的分頁,自己開;取檔規則照 Claude 給
+        self.assertTrue(got[2].startswith('FILL prepared=no for claude-code'))   # 換手那一家照它自己的門路組
         self.assertIn('【填完、改完的最後一步】', got[2])
-        self.assertEqual(events, ['ensure', 'open', 'wait_claude', 'wait_claude'])
+        self.assertEqual([c[0] for c in codex.calls if c[0] in ('ready', 'open_for_agent')], ['ready', 'open_for_agent'])
+        self.assertEqual([c[0] for c in claude.calls if c[0] in ('ready', 'open_for_agent')],
+                         ['ready', 'open_for_agent', 'ready'])
         self.assertEqual(fb[U]['apply']['runtime'], 'claude-code')         # 卡上記的是真的填的那一家
 
     def test_fix_rechecks_the_platform_profile_and_keeps_it_blocked_on_a_mismatch(self):
@@ -576,16 +560,17 @@ class Dispatch(unittest.TestCase):
             'method': 'platform_profile', 'profile_kind': 'fixed',
             'profile_url': U + '/profile',
         }
+        fb[U]['ds'] = 'stuck'
         fb[U]['apply'] = {
-            'stage': 'fill', 'ok': False, 'session': 'S1', 'agent_id': 'browser-two',
+            'stage': 'fill', 'session': 'S1', 'agent_id': 'browser-two', 'runtime': 'codex',
             'tab_id': '7', 'delivery': delivery,
         }
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
         outcome = SimpleNamespace(ok=True, agent_id='browser-two')
         fix_result = {'delivery': None, 'fixed': ['Summary'], 'tab_id': '7'}
 
         with tempfile.TemporaryDirectory(prefix='apply-profile-fix-') as directory, \
+             fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
              patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
              patch.object(run, '_run_agent', return_value=outcome), \
@@ -593,19 +578,19 @@ class Dispatch(unittest.TestCase):
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], fix_result)), \
              patch.object(run, 'profile_after', return_value=['Summary still differs']) as verify, \
-             patch.object(ar, 'browser_runtime', return_value='codex'), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report') as report, \
-             patch.object(run.agent_report, 'resolve') as resolve, \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(run.agent_report, 'resolve') as resolve:
             ok, message = run.run_one('fix', U, '/tmp/board.html')
 
         self.assertFalse(ok)
         self.assertIn('Summary still differs', message)
         verify.assert_called_once()
-        self.assertEqual(verify.call_args.args[1]['delivery'], delivery)
-        self.assertFalse(fb[U]['apply']['ok'])
-        self.assertEqual(fb[U]['apply']['delivery'], delivery)
+        # 用哪一份、固定版還是客製版照程式決定的(#313):程式沒登記這一份,就沒有網址可以照 agent 的填
+        checked = verify.call_args.args[1]['delivery']
+        self.assertEqual((checked['method'], checked['profile_kind']), ('platform_profile', 'fixed'))
+        self.assertEqual(ds.state(fb[U]), 'stuck')
+        self.assertEqual(fb[U]['apply']['delivery'], checked)
         report.assert_called_once()
         # 開跑時收掉這張的舊回報(作廢)是對的;沒改好就不能用「改好了」把問題收掉
         self.assertFalse([c for c in resolve.call_args_list if '已經解決' in str(c.args[1])])
@@ -625,7 +610,9 @@ class Dispatch(unittest.TestCase):
         run.load = lambda b: (jobs, fb)
         try:
             shown = run.preview('fill', U, '/tmp/board.html')
-            p, _ = run.prompt_for('fill', U, jobs[U], fb, '/tmp/board.html')
+            door = chrome_door.current()
+            p, _ = run.prompt_for('fill', U, jobs[U], fb, '/tmp/board.html', door=door)
+            p += door.task_tail('fill')
         finally:
             run.load = real
         # 同一份看板底下比才有意義:那句「自己決定派幾隻」是看板上的開關決定的
@@ -640,34 +627,32 @@ class Dispatch(unittest.TestCase):
             run.load = real
 
     def test_fill_prompt_distinguishes_single_and_multiple_upload_fields(self):
-        directory = tempfile.mkdtemp(prefix='apply-uploads-')
-        try:
-            merged = os.path.join(directory, 'merged.pdf')
-            resume = os.path.join(directory, 'resume.pdf')
-            attachment = os.path.join(directory, 'letter.pdf')
-            for path in (merged, resume, attachment):
-                with open(path, 'wb') as f:
-                    f.write(b'%PDF test')
-            rule = run._upload_rule(directory, {
-                'files': ['resume.pdf', 'letter.pdf'],
-                'merged': 'merged.pdf',
-            })
-            self.assertIn('只有一個上傳欄:只上傳合併版', rule)
-            self.assertIn('恰好兩個上傳欄、標籤是 Resume 與 Cover Letter', rule)
-            self.assertIn('Cover Letter 留空', rule)
-            self.assertIn('不可把履歷另存或拼成求職信', rule)
-            self.assertIn('除上述兩槽特例外', rule)
-            self.assertIn('有兩個以上上傳欄:不要上傳合併版', rule)
-            self.assertIn(merged, rule)
-            self.assertIn(resume, rule)
-            self.assertIn(attachment, rule)
-        finally:
-            shutil.rmtree(directory, ignore_errors=True)
+        directory = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-uploads-'))
+        merged = os.path.join(directory, 'merged.pdf')
+        resume = os.path.join(directory, 'resume.pdf')
+        attachment = os.path.join(directory, 'letter.pdf')
+        for path in (merged, resume, attachment):
+            with open(path, 'wb') as f:
+                f.write(b'%PDF test')
+        rule = run._upload_rule(directory, {
+            'files': ['resume.pdf', 'letter.pdf'],
+            'merged': 'merged.pdf',
+        })
+        self.assertIn('只有一個上傳欄:只上傳合併版', rule)
+        self.assertIn('恰好兩個上傳欄、標籤是 Resume 與 Cover Letter', rule)
+        self.assertIn('Cover Letter 留空', rule)
+        self.assertIn('不可把履歷另存或拼成求職信', rule)
+        self.assertIn('除上述兩槽特例外', rule)
+        self.assertIn('有兩個以上上傳欄:不要上傳合併版', rule)
+        self.assertIn(merged, rule)
+        self.assertIn(resume, rule)
+        self.assertIn(attachment, rule)
 
     def test_without_the_same_agent_nothing_is_fixed_or_sent(self):
         """那段對話找不回來:不改、不送,核准作廢(他核准的是那一頁,新的 agent 找不回來)。"""
         fb = board()
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
+        fb[U]['apply'].pop('session')
         real = (run.load, run.bd.set_fb, ar.run)
         seen = {}
         run.load = lambda b: ({U: {'id': U, 'target': 'X'}}, fb)
@@ -687,20 +672,30 @@ class SubmitOutcomes(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix='apply-outcome-')
         self.fb = board()
-        self.fb[U]['apply'] = {'session': 'S1', 'tab_id': '7'}
-        self.fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(self.fb, U)}
+        self.fb[U]['apply'] = {'session': 'S1', 'tab_id': '7', 'runtime': 'codex'}
+        confirm(self.fb)
         self.jobs = {U: {'id': U, 'target': 'X'}}
+        self.door = fc.FakeChrome('codex', page=copy.deepcopy(FORM_PAGE))
+        self._chrome = fc.installed(self.door)
+        self._chrome.__enter__()
 
     def tearDown(self):
+        self._chrome.__exit__(None, None, None)
         shutil.rmtree(self.d, ignore_errors=True)
+
+    def released(self):
+        return [c[1:] for c in self.door.calls if c[0] == 'release']
 
     def test_confirmation_evidence_wins_over_answers_edited_during_send(self):
         from types import SimpleNamespace
         from unittest.mock import patch
 
         original = run.bd.set_fb
+        calls = []
         def edit_during_send(mut, live=None, by=''):
-            self.fb['__ans__'][0]['v'] = 'Edited after approval'
+            if calls:                                  # 開始送出之後才改(修正 15:正在送出時改答案)
+                self.fb['__ans__'][0]['v'] = 'Edited after approval'
+            calls.append(1)
             mut(self.fb)
         run.bd.set_fb = edit_during_send
         try:
@@ -715,9 +710,7 @@ class SubmitOutcomes(unittest.TestCase):
                  patch.object(run.agent_report, 'resolve'), \
                  patch.object(run.ship, 'folder', return_value=self.d), \
                  patch.object(run.ship, 'read_info', return_value={}):
-                import apply_tab
-                with patch.object(apply_tab, 'release') as release, patch('agent_chrome.ensure', return_value=(True, '')):
-                    ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
+                ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
             self.assertTrue(ok)
             self.assertEqual(self.fb[U]['app'], 'sent')
             self.assertIn('唯一證據', self.fb[U]['ev'])
@@ -725,7 +718,7 @@ class SubmitOutcomes(unittest.TestCase):
             self.assertIn('Nationality', sent['not_sent_questions'])
             self.assertIn('Nationality', msg)
             self.assertTrue(any('Nationality' in call.args[1] for call in report.call_args_list))
-            release.assert_called_once_with('S1', '7', 'codex')
+            self.assertEqual(self.released(), [('S1', '7')])          # 送出成功:照開那一頁的那一家放掉
         finally:
             run.bd.set_fb = original
 
@@ -749,9 +742,7 @@ class SubmitOutcomes(unittest.TestCase):
              patch.object(run.ship, 'folder', return_value=self.d), \
              patch.object(run.ship, 'read_info', side_effect=read_info), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)):
-            import apply_tab
-            with patch.object(apply_tab, 'release'), patch('agent_chrome.ensure', return_value=(True, '')):
-                ok, _msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
+            ok, _msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
         self.assertTrue(ok)
         self.assertEqual(self.fb[U]['sent_v'], 'en-old')
 
@@ -765,8 +756,7 @@ class SubmitOutcomes(unittest.TestCase):
              patch.object(run.ar, 'session_id', return_value='S-OTHER'), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.agent_report, 'report'), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)), \
-             patch('agent_chrome.ensure', return_value=(True, '')):
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)):
             ok, _msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
         self.assertFalse(ok)
         sf = self.fb[U]['apply']['submit_fail']
@@ -775,10 +765,6 @@ class SubmitOutcomes(unittest.TestCase):
         self.assertIsNotNone(fr.approval_problem(self.fb, U, OKST))
 
     def test_runner_failure_does_not_read_partial_submit_evidence_or_release_tab(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        import apply_tab
-
         os.makedirs(self.d, exist_ok=True)
         with open(os.path.join(self.d, 'submit.json'), 'w', encoding='utf-8') as f:
             json.dump({'submitted': True, 'confirm_text': 'partial'}, f)
@@ -789,23 +775,51 @@ class SubmitOutcomes(unittest.TestCase):
              patch.object(run.ar, 'wait_done', return_value=[ar.AgentResult('failed', 7, 123)]), \
              patch.object(run.agent_report, 'report') as report, \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)), \
-             patch.object(run.ar, 'session_id', return_value='S1'), \
-             patch('agent_chrome.ensure', return_value=(True, '')):
-            with patch.object(apply_tab, 'release') as release:
-                ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
+             patch.object(run.ar, 'session_id', return_value='S1'):
+            ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
         self.assertFalse(ok)
         self.assertIn('結束碼 7', msg)
         self.assertEqual(self.fb[U]['app'], 'ship')
         self.assertEqual(self.fb[U]['apply']['submit_fail']['runner_outcome'], 'failed')
         check.assert_not_called()
-        release.assert_not_called()
+        self.assertEqual(self.released(), [])
         self.assertTrue(report.called)
 
-    def test_missing_confirmation_evidence_keeps_the_tab_and_marks_submit_failed(self):
+    def test_the_checklist_is_run_again_the_moment_sending_starts(self):
+        """你已確認 → 正在送出 那一刻再跑一次檢查清單(修正 5):按確認之後答案又改了,就不送、留在你已確認。"""
         from types import SimpleNamespace
         from unittest.mock import patch
-        import apply_tab
+        launched = []
 
+        def edit_then(mut, live=None, by=''):
+            self.fb['__ans__'][0]['v'] = 'Edited after approval'
+            mut(self.fb)
+        with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run.ar, 'launch', side_effect=lambda *a, **k: launched.append(1) or SimpleNamespace(pid=1)), \
+             patch.object(run.agent_report, 'report'), \
+             patch.object(run.ship, 'folder', return_value=self.d), \
+             patch.object(run.ship, 'read_info', return_value={}), \
+             patch.object(run.bd, 'set_fb', side_effect=edit_then):
+            ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
+        self.assertFalse(ok)
+        self.assertIn('要重新確認送出', msg)
+        self.assertEqual(launched, [])
+        self.assertEqual(ds.state(self.fb[U]), 'confirmed')
+
+    def test_a_confirmation_page_on_another_site_is_not_proof(self):
+        """agent 回報送出成功,確認頁網址卻不是這張卡的網站 → 送出結果不明,不當成已送出(修正 19)。"""
+        with open(os.path.join(self.d, 'submit.json'), 'w', encoding='utf-8') as f:
+            json.dump({'submitted': True, 'confirm_url': 'https://other-company.example/thanks', 'confirm_text': 'Thanks'}, f)
+        with open(os.path.join(self.d, 'submit.png'), 'wb') as f:
+            f.write(b'png')
+        ok, res = run.check_submit(self.d, 0, 'https://jobs.lever.co/x/1')
+        self.assertFalse(ok)
+        self.assertIn('不是這張卡的網站', res['problems'][-1])
+        self.assertTrue(run.check_submit(self.d, 0, 'https://www.other-company.example/job/1')[0])
+        self.assertEqual(run._site('https://www.104.com.tw/job/1'), '104.com.tw')
+
+    def test_missing_confirmation_evidence_keeps_the_tab_and_marks_submit_failed(self):
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
              patch.object(run, 'shoot'), \
@@ -816,82 +830,37 @@ class SubmitOutcomes(unittest.TestCase):
              patch.object(run.agent_report, 'report') as report, \
              patch.object(run.ship, 'folder', return_value=self.d), \
              patch.object(run.ship, 'read_info', return_value={}):
-            with patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)), \
-                 patch.object(apply_tab, 'release') as release, patch('agent_chrome.ensure', return_value=(True, '')):
+            with patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)):
                 ok, _msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
         self.assertFalse(ok)
         self.assertEqual(self.fb[U]['app'], 'ship')
         self.assertTrue(self.fb[U]['apply']['submit_fail']['clicked'])
-        release.assert_not_called()
+        self.assertEqual(self.released(), [])
         self.assertTrue(report.called)
 
 
 
-def claude_self_read_log(path, reads):
-    """假的 Claude stream-json 紀錄:reads 是 [(長度那支, 分段那支, 頁面)],照順序跑過一次完整的自讀。"""
-    import apply_tab
-    rows, k = [], [0]
-
-    def call(code, result):
-        k[0] += 1
-        rows.append({'type': 'assistant', 'message': {'content': [
-            {'type': 'tool_use', 'id': f'u{k[0]}', 'name': 'mcp__claude-in-chrome__javascript_tool', 'input': {'text': code}}]}})
-        rows.append({'type': 'user', 'message': {'content': [
-            {'type': 'tool_result', 'tool_use_id': f'u{k[0]}', 'content': [{'type': 'text', 'text': result + '\n\nTab Context:\n- x'}]}]}})
-    for len_js, chunk, page in reads:
-        whole = json.dumps(page)
-        call(len_js, str(len(whole)))
-        for i in range(-(-len(whole) // apply_tab.CHUNK)):
-            call(chunk(i), f'{i}:' + whole[i * apply_tab.CHUNK:(i + 1) * apply_tab.CHUNK])
-    rows.append({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done', 'session_id': 'S1'})
-    with open(path, 'w') as fh:
-        fh.write('\n'.join(json.dumps(r) for r in rows))
-    return path
-
-
-class ClaudeReadsThePlatformProfile(unittest.TestCase):
-    """#288:只用 Claude 時,平台上存好的履歷也能讀回核對。比照填表的自讀:Claude 在那一輪自己跑唯讀函式讀平台履歷頁,
-    程式從 stream-json 紀錄拿工具的回傳(只收程式碼一字不差的那幾次)再跟母稿比。以前一律寫「用 Claude 時讀不回,改用 Codex」。"""
+class ProfileReadWhenTheProgramCannotOpenIt(unittest.TestCase):
+    """#288:程式自己開不了頁的那一家(Claude),平台上存好的履歷也要讀回核對:填表前照實說現在做不到、這一輪由 agent 讀給程式;
+    填完、送出前的核對從它那一輪的紀錄拿。程式自己讀得到的那一家(Codex)照舊由程式讀。用假的 agent 的 Chrome 走完整個流程。"""
     READ = 'https://pda.104.com.tw/profile/preview?vno=1'
 
     def setUp(self):
-        self.d = tempfile.mkdtemp(prefix='apply-claude-profile-')
-        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-claude-profile-'))
 
     def profile_page(self, url=None):
         return {'url': url or self.READ, 'title': '我的履歷', 'text': '工作經歷 ' + 'x' * 2500, 'links': ['https://ex.test/p']}
 
-    def test_the_profile_page_comes_from_the_claude_run_log(self):
-        import apply_tab
-        fill = {'url': U, 'title': 't', 'fields': [], 'shownFiles': [], 'lines': []}
-        log = claude_self_read_log(os.path.join(self.d, 'fill.log'), [
-            (apply_tab.LEN_JS, apply_tab.chunk_js, fill),
-            (apply_tab.PROFILE_LEN_JS, apply_tab.profile_chunk_js, self.profile_page()),
-        ])
-        self.assertEqual(apply_tab.profile_from_log([log], self.READ), self.profile_page())
-        self.assertEqual(apply_tab.page_from_log(log), fill)              # 兩種自讀混在同一份紀錄裡互不干擾
-        # 讀的不是程式要核對的那一份(例如這張卡另開的客製版):不算,講出兩個網址
-        with self.assertRaises(LookupError) as e:
-            apply_tab.profile_from_log([log], 'https://pda.104.com.tw/profile/preview?vno=2')
-        self.assertIn('vno=1', str(e.exception))
-        rule = run.ar.apply_rule('claude-code')
-        self.assertIn(apply_tab.PROFILE_LEN_JS, rule)                      # 規矩裡教它怎麼讀給程式
-        self.assertNotIn(apply_tab.PROFILE_LEN_JS, run.ar.apply_rule('codex'))
-        self.assertNotIn('\\', apply_tab.PROFILE_LEN_JS)                  # Claude 會改寫跳脫字,程式碼就對不上
-
-    def _fill(self, runtime, agent_log_reads):
-        """跑一次填表(外面全換成假的),回 (profile_check 收到的 reader, profile_after 收到的 reader)。"""
+    def _fill(self, door):
+        """跑一次填表(外面全換成假的),回 profile_check 收到的 reader、profile_after 收到的 reader、派出去的 prompt。"""
         fb = board()
         delivery = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': self.READ}
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), wait_claude=lambda *_: (True, ''),
-                                 open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
         seen = {}
 
         def agent(prompt, log, home, board_path, **kw):
-            seen['prompt'] = prompt
-            claude_self_read_log(log, agent_log_reads)
-            return SimpleNamespace(ok=True, status='completed', agent_id='cc')
+            seen['prompt'], seen['log'] = prompt, log
+            return SimpleNamespace(ok=True, status='completed', agent_id=door.agent_id)
 
         def pre(url, board_path, delivery=None, reported=None, reader=None):
             seen['pre_reader'] = reader
@@ -900,11 +869,11 @@ class ClaudeReadsThePlatformProfile(unittest.TestCase):
         def after(url, res, board_path=None, reader=None):
             seen['after_reader'] = reader
             return []
-        with patch.object(run, 'load', return_value=(jobs, fb)), \
+        with fc.installed(door), \
+             patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
-             patch.object(ar, 'browser_runtime', return_value=runtime), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7', 'delivery': delivery})), \
              patch.object(run, 'profile_check', side_effect=pre), \
@@ -912,68 +881,63 @@ class ClaudeReadsThePlatformProfile(unittest.TestCase):
              patch.object(run, '_profile_check_after_fill', return_value=[]), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
-             patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(run.agent_report, 'resolve'):
             run.run_one('fill', U, '/tmp/board.html')
         return seen
 
-    def test_claude_fill_checks_the_profile_from_its_own_log(self):
-        import apply_tab
-        seen = self._fill('claude-code', [(apply_tab.PROFILE_LEN_JS, apply_tab.profile_chunk_js, self.profile_page())])
-        self.assertIsNotNone(seen['after_reader'])
+    def test_the_fill_checks_the_profile_from_the_run_it_just_did(self):
+        door = fc.FakeChrome('claude-code', pages={self.READ: self.profile_page()}, from_log={'read_profile'},
+                             tail='\n照【讀平台履歷給程式】讀給程式')
+        seen = self._fill(door)
         self.assertEqual(seen['after_reader'](self.READ), self.profile_page())
-        # 填表前程式讀不到(Claude 的分頁只有它那段對話拿得到):照實講由它讀給程式,不叫他改用 Codex
-        with self.assertRaises(Exception) as e:
+        self.assertEqual(door.calls[-1], ('read_profile', self.READ, [seen['log']]))   # 從這一輪的紀錄拿
+        # 填表前程式讀不到:照實講現在做不到(由 agent 在這一輪讀給程式),不叫他改用 Codex
+        with self.assertRaises(chrome_door.NotNow):
             seen['pre_reader'](self.READ)
-        self.assertNotIn('Codex', str(e.exception))
         self.assertIn('讀平台履歷給程式', seen['prompt'])                  # 最後再提醒一次,跟填表頁的自讀一樣
-        codex = self._fill('codex', [])
-        self.assertIsNone(codex['after_reader'])                          # Codex 照舊由程式自己開頁讀
-        self.assertIsNone(codex['pre_reader'])
+        codex = fc.FakeChrome('codex', pages={self.READ: self.profile_page()})
+        seen = self._fill(codex)
+        self.assertEqual(seen['pre_reader'](self.READ), self.profile_page())   # 程式自己開頁讀,填表前就讀得到
+        self.assertNotIn('讀平台履歷給程式', seen['prompt'])
 
-    def test_claude_submit_rereads_the_profile_in_a_check_round_before_sending(self):
-        # 送出前要再核對一次平台履歷。Codex 由程式自己讀;Claude 叫回同一段對話讀一次(送出前的核對那一輪),
+    def test_submit_rereads_the_profile_in_a_check_round_before_sending(self):
+        # 送出前要再核對一次平台履歷。程式讀得到的那一家由程式讀;讀不到的那一家叫回同一段對話讀一次(送出前的核對那一輪),
         # 程式從那一輪的紀錄拿結果比,對不上就不送。附件用現在的檔核對過就不再下載
-        import apply_tab
         fb = board()
         delivery = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': self.READ}
-        fb[U]['apply'] = {'session': 'S1', 'tab_id': '7', 'agent_id': 'cc', 'delivery': delivery}
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        fb[U]['apply'] = {'session': 'S1', 'tab_id': '7', 'agent_id': 'cc', 'runtime': 'claude-code', 'delivery': delivery}
+        confirm(fb)
         jobs = {U: {'id': U, 'target': 'X'}}
+        door = fc.FakeChrome('claude-code', agent_id='cc', pages={self.READ: self.profile_page()}, from_log={'read_profile'})
         calls, checked = [], []
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), wait_claude=lambda *_: (True, ''), chrome_id=lambda: {})
 
         def agent(prompt, log, home, board_path, **kw):
             calls.append((os.path.basename(log), prompt))
-            if log.endswith('submit-check.log'):
-                claude_self_read_log(log, [(apply_tab.PROFILE_LEN_JS, apply_tab.profile_chunk_js, self.profile_page())])
             return SimpleNamespace(ok=True, status='completed', agent_id='cc')
 
         def check(url, board_path, delivery=None, reported=None, reader=None):
-            self.assertIsNotNone(reader, '用 Claude 時送出前不能叫程式自己開頁讀')
             checked.append(reader(self.READ))
             return ({'read': self.READ, 'edit': self.READ}, [{'where': '經歷', 'missing': ['x']}], '')
-        with patch.object(run, 'load', return_value=(jobs, fb)), \
+        with fc.installed(door), \
+             patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
              patch.object(run, 'out_dir', return_value=self.d), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S1'), \
-             patch.object(ar, 'browser_runtime', return_value='claude-code'), \
              patch.object(run, 'profile_check', side_effect=check), \
              patch('profile_sync.profile_attachments_fresh', return_value=True), \
              patch('profile_sync.where', return_value={'read': self.READ, 'edit': self.READ}), \
              patch.object(run, '_pick', return_value=('zh', 'general')), \
              patch('profile_sync.attachment_step', return_value=''), \
-             patch.object(run, '_check_delivery_attachments', side_effect=AssertionError('附件核對過了,不用再下載')), \
+             patch('profile_sync.check_attachments', side_effect=AssertionError('附件核對過了,不用再下載')), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
-             patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             patch.object(run.agent_report, 'resolve'):
             ok, message = run.run_one('submit', U, '/tmp/board.html')
         self.assertEqual(checked, [self.profile_page()])
+        self.assertEqual(door.calls[-1][-1], [os.path.join(self.d, 'submit-check.log')])   # 從核對那一輪的紀錄拿
         self.assertEqual([c[0] for c in calls], ['submit-check.log'])     # 對不上:送出那一輪沒派
-        self.assertIn('讀平台履歷給程式', calls[0][1])
-        self.assertIn(self.READ, calls[0][1])
+        self.assertIn(self.READ, calls[0][1])                              # 叫它讀的是要核對的那一份
         self.assertFalse(ok)
         self.assertIn('經歷', message)
 
@@ -1053,12 +1017,15 @@ class TabRead(unittest.TestCase):
             apply_tab.read('S1', '7')
 
 
-def filled(**apply):
-    """一張 agent 填好、他也確認過的卡(頁面還在)。"""
+def filled(state='confirmed', **apply):
+    """一張 agent 填好的卡(頁面還在);預設他也確認過了。"""
     fb = board()
-    fb[U]['apply'] = dict({'stage': 'fill', 'ok': True, 'issues': [], 'session': 'S1', 'agent_id': 'primary',
+    fb[U]['apply'] = dict({'stage': 'fill', 'issues': [], 'session': 'S1', 'agent_id': 'primary', 'runtime': 'codex',
                            'tab_id': '7', 'at': '2026-01-05T09:00:00', 'delivery': {'method': 'direct_upload'}}, **apply)
-    fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+    confirm(fb)
+    if state != 'confirmed':
+        fb[U].pop('approve')
+        fb[U]['ds'] = state
     return fb
 
 
@@ -1069,11 +1036,12 @@ class RoundInProgress(unittest.TestCase):
     def _stopped(self, stage, fb, chrome=None):
         import copy
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        chrome = chrome or SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
+        chrome = chrome or fc.FakeChrome()
         seen = {}
 
         def agent(*_a, **_k):
             seen['apply'] = copy.deepcopy(fb[U].get('apply'))
+            seen['state'] = ds.state(fb[U])
             seen['problem'] = fr.approval_problem(fb, U, OKST)
             raise KeyboardInterrupt                   # 他按了停止:這之後程式什麼都寫不了
 
@@ -1085,46 +1053,40 @@ class RoundInProgress(unittest.TestCase):
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
-            try:
+             fc.installed(chrome):
+            with contextlib.suppress(KeyboardInterrupt):   # 這個情境就是在半路按停
                 run.run_one(stage, U, '/tmp/board.html')
-            except KeyboardInterrupt:
-                pass
         return seen
 
     def test_a_stopped_refill_does_not_leave_the_old_filled_page_approvable(self):
-        fb = filled(stale='履歷換過了')
+        fb = filled('stale', stale='履歷換過了')
         seen = self._stopped('fill', fb)
-        self.assertFalse(seen['apply']['ok'])                     # agent 一開始跑,卡上就不是「填好了」
+        self.assertEqual(seen['state'], 'running')                # agent 一開始跑,卡上就不是「填好了」
         self.assertIn('沒跑完', seen['apply']['issues'][0])
         self.assertIsNotNone(seen['problem'])
         self.assertNotIn('stale', seen['apply'])                  # 這一輪照現在的履歷填:換履歷的記號由這一輪接手
         self.assertNotIn('session', seen['apply'])                # 舊對話填的那一頁正被重開:下一步是重填,不是叫它改
-        self.assertEqual(seen['apply']['tab_id'], '7')
+        self.assertNotIn('tab_id', seen['apply'])                 # 上一輪的分頁不再算停著的頁
+        run.settle(fb, None)                                      # 伺服器發現那一輪不在跑了
+        self.assertEqual(ds.state(fb[U]), 'nopage')               # 這一輪沒交出分頁:沒填成(修正 13)
+        self.assertIn('沒跑完', fb[U]['apply']['issues'][0])
         self.assertIsNotNone(fr.approval_problem(fb, U, OKST))         # 被停掉之後:要重填,不能確認送出
-
-    def test_a_stopped_fix_keeps_the_resume_mark(self):
-        fb = filled(stale='履歷換過了')
-        seen = self._stopped('fix', fb)
-        self.assertFalse(seen['apply']['ok'])
-        self.assertEqual(seen['apply']['stale'], '履歷換過了')     # 修改不換上傳檔,記號留著
-        self.assertIsNotNone(fr.approval_problem(fb, U, OKST))
 
     def test_a_first_fill_that_is_stopped_is_not_left_queued_forever(self):
         # 第一次填被停掉:以前什麼都沒寫,自動流程的記號 fill:<id>:new 已經用掉,卡上卻一直寫「排隊中」
         fb = board()
         seen = self._stopped('fill', fb)
         self.assertEqual(seen['apply']['stage'], 'fill')
-        self.assertFalse(fb[U]['apply']['ok'])
-        self.assertTrue(fr.mark_stale(fb, U, '履歷換過了'))       # 填到一半換履歷,也標得上
+        ds.fire(fb, U, 'files_changed', why='履歷換過了')          # 填到一半換履歷,也標得上
+        run.settle(fb, None)
+        self.assertEqual(ds.state(fb[U]), 'nopage')               # 還沒開到頁就被停掉:沒填成,不是一直排隊
 
     def test_a_failed_automatic_refill_is_not_dispatched_again(self):
         # 頁面不見了,自動流程重填一次;那一輪 Chrome 沒連上就失敗。以前失敗會把 apply.at 換新,
         # 下一次看又是一把新記號,同一張卡一輪接一輪重派(回報每輪多一筆)
         import autopilot as ap
         import agent_chrome
-        fb = filled(ok=False, gone=True, tab_id='', issues=[agent_chrome.GONE])
-        del fb[U]['approve']
+        fb = filled('gone', tab_id='', issues=[agent_chrome.GONE])
         fb['__auto__'] = {'since': '2026-01-01T00:00:00', 'skip': [], 'tried': [], 'seen': {}}
         data = {'jobs': [{'id': U}], 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}}
         cfg = {'auto_fill': True}
@@ -1134,14 +1096,13 @@ class RoundInProgress(unittest.TestCase):
         first = plan()
         self.assertEqual(first['fill'], U)
         fb['__auto__']['tried'] = first['tried']
-        down = SimpleNamespace(ensure=lambda *_: (False, 'agent 的 Chrome 沒連上'), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
+        down = fc.FakeChrome(up=(False, 'agent 的 Chrome 沒連上'))
         with patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
              patch.object(run, 'profile_check', return_value=None), \
-             patch.object(ar, 'browser_runtime', return_value='codex'), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': down}):
+             fc.installed(down):
             ok, _msg = run.run_one('fill', U, '/tmp/board.html')
         self.assertFalse(ok)
         self.assertIn('沒連上', fb[U]['apply']['issues'][0])       # 原因寫在卡上,等他
@@ -1154,7 +1115,6 @@ class WriteBackKeepsWhatOthersMarked(unittest.TestCase):
 
     def _finish(self, stage, fb, during=None):
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
 
         def agent(*_a, **_k):
             if during:
@@ -1173,39 +1133,27 @@ class WriteBackKeepsWhatOthersMarked(unittest.TestCase):
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             fc.installed(fc.FakeChrome()):
             return run.run_one(stage, U, '/tmp/board.html')
 
     def test_a_resume_change_during_the_refill_is_not_wiped_by_its_result(self):
-        fb = filled()
-        ok, _msg = self._finish('fill', fb, during=lambda d: fr.mark_stale(d, U, '履歷換過了'))
+        fb = filled('stuck')
+        ok, _msg = self._finish('fill', fb, during=lambda d: ds.fire(d, U, 'files_changed', why='履歷換過了'))
         self.assertTrue(ok)
-        self.assertEqual(fb[U]['apply'].get('stale'), '履歷換過了')   # 網頁上傳的可能還是舊的那份
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
-        self.assertIn('履歷換過了', fr.approval_problem(fb, U, OKST))
-
-    def test_a_fix_does_not_clear_the_resume_mark(self):
-        # 修改是在原頁上改,不換上傳檔:換過履歷的記號要等重填才清
-        fb = filled(stale='履歷換過了')
-        fb[U]['form']['f'][1]['refill'] = 1
-        self.assertTrue(self._finish('fix', fb)[0])
+        self.assertEqual(ds.state(fb[U]), 'stale')                 # 網頁上傳的可能還是舊的那份
         self.assertEqual(fb[U]['apply'].get('stale'), '履歷換過了')
+        self.assertIn('履歷換過了', fr.approval_problem(fb, U, OKST))
 
     def test_an_uncertain_submit_survives_a_later_fix(self):
         # 送出沒確認成功(可能其實送出去了),之後自動流程照新答案重打:擋重送的記號不能跟著不見,不然會投兩次
         sf = {'at': T, 'problems': ['沒看到成功頁面'], 'clicked': True}
-        fb = filled(submit_fail=sf)
+        fb = filled('unsure', submit_fail=sf)
         fb[U]['form']['f'][1]['refill'] = 1
-        self.assertTrue(self._finish('fix', fb)[0])
-        self.assertEqual(fb[U]['apply'].get('submit_fail'), sf)
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        ok, msg = self._finish('fix', fb)
+        self.assertFalse(ok)                                        # 送出結果不明時不准叫它改
+        self.assertIn('送出結果不明', msg)
+        self.assertEqual((ds.state(fb[U]), fb[U]['apply'].get('submit_fail')), ('unsure', sf))
         self.assertIn('送出沒確認成功', fr.approval_problem(fb, U, OKST))
-
-    def test_the_fake_flow_record_keeps_an_uncertain_submit_too(self):
-        # 副本的假流程也用 fill_record 組紀錄
-        sf = {'at': T, 'problems': ['x']}
-        rec = run.fill_record('fix', {'submit_fail': sf, 'session': 'S1'}, {}, [], 'S1', '')
-        self.assertEqual(rec.get('submit_fail'), sf)
 
 
 class RefillOnlyClosesItsOwnReports(unittest.TestCase):
@@ -1214,13 +1162,12 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
 
     def test_other_flows_and_uncertain_submits_stay_open(self):
         import agent_report
-        fb = filled()
+        fb = filled('stuck')
         for src, msg in (('客製流程', '沒有可收下的客製版'), ('可投遞夾建置', '可投遞夾本輪建置失敗'),
                          ('代投', '送出前平台履歷或附件比對沒通過:附件不符'), ('代投', '送出沒確認成功:沒看到成功頁面'),
                          ('代投', '填表沒完成:舊的')):
             agent_report.apply_report(fb, src, msg, job=U, now='2026-01-01T00:00:00')
         jobs = {U: {'id': U, 'target': 'X'}}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-reports-') as directory, \
              patch.object(run, 'load', return_value=(jobs, fb)), \
@@ -1231,7 +1178,7 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], res)), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             fc.installed(fc.FakeChrome()):
             self.assertTrue(run.run_one('fill', U, '/tmp/board.html')[0])
         still = sorted(it['msg'] for it in fb['__inbox__'] if not it.get('done'))
         self.assertEqual(still, ['可投遞夾本輪建置失敗', '沒有可收下的客製版', '送出沒確認成功:沒看到成功頁面'])
@@ -1243,10 +1190,9 @@ class RetypedMarksOnly(unittest.TestCase):
 
     def test_an_answer_changed_while_the_page_is_being_checked_stays_marked(self):
         import copy
-        fb = filled()
+        fb = filled('parked')
         fb[U]['form']['f'][1]['refill'] = 1
         jobs = {U: {'id': U, 'target': 'X'}}
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
 
         def checking(*_a, **_k):              # 核對頁面的時候(頁面上是 Taiwan),他在看板又改了一次
@@ -1257,92 +1203,161 @@ class RetypedMarksOnly(unittest.TestCase):
              patch.object(run, 'load', side_effect=lambda _b: (jobs, copy.deepcopy(fb))), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
-             patch.object(ar, 'browser_runtime', return_value='codex'), \
              patch.object(ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', side_effect=checking), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             fc.installed(fc.FakeChrome()):
             self.assertTrue(run.run_one('fix', U, '/tmp/board.html')[0])
         self.assertEqual(fb[U]['form']['f'][1].get('refill'), 1)
-        fb[U]['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+        confirm(fb)
         self.assertIn('網頁上還是舊的', fr.approval_problem(fb, U, OKST))
 
     def test_what_the_page_was_checked_against_is_cleared(self):
         import copy
-        fb = filled()
+        fb = filled('parked')
         fb[U]['form']['f'][1]['refill'] = 1
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-retype-') as directory, \
              patch.object(run, 'load', side_effect=lambda _b: ({U: {'id': U, 'target': 'X'}}, copy.deepcopy(fb))), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
-             patch.object(ar, 'browser_runtime', return_value='codex'), \
              patch.object(ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], res)), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             fc.installed(fc.FakeChrome()):
             self.assertTrue(run.run_one('fix', U, '/tmp/board.html')[0])
         self.assertNotIn('refill', fb[U]['form']['f'][1])
 
 
-class AgentThatNeverStarted(unittest.TestCase):
-    """修改、送出固定叫回填這張的那個 agent。它根本沒啟動(設定裡拿掉了、改成不能開瀏覽器、程式開不起來)
-    就是一步都沒做:不能寫成「送出沒確認成功、去信箱查」,也不能讓他一直按一個永遠派不出去的按鈕。"""
+class EachCardIsCheckedWhenItsTurnComes(unittest.TestCase):
+    """批次跑(修正 18):每一張開始前重新看一次狀態,不在允許的狀態就跳過,不派 agent。"""
 
-    def _run(self, stage, fb, runtime, outcome=None):
-        called = []
+    def test_a_card_that_moved_on_is_skipped(self):
+        fb = filled('parked')                                # 排進這一批之後,他已經看過、停著等確認
+        launched = []
+        with patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
+             patch.object(run, 'profile_check', return_value=None), \
+             patch.object(run, '_run_agent', side_effect=lambda *a, **k: launched.append(1)), \
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+            ok, msg = run.run_one('fill', U, '/tmp/board.html')
+        self.assertFalse(ok)
+        self.assertIn('停著等你', msg)
+        self.assertEqual((launched, ds.state(fb[U])), ([], 'parked'))
 
-        def agent(*_a, **_k):
-            called.append(1)             # 沒有另外給就照 agent_run 真的會回的:指定的那個不在設定裡
-            return outcome or ar.AgentResult('unavailable', reason='pinned_agent_missing')
-        chrome = SimpleNamespace(ensure=lambda *_: (True, ''), open_for_agent=lambda *_a, **_k: None, chrome_id=lambda: {})
-        with tempfile.TemporaryDirectory(prefix='apply-gone-agent-') as directory, \
-             patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
+
+class SubmittedWhileFilling(unittest.TestCase):
+    """填表那一輪 agent 違規按了送出、頁面已經是已收到申請 → 已送出(來源 agent,附註違規),並回報(修正 20)。"""
+
+    def test_it_is_recorded_as_sent_and_reported(self):
+        fb = filled('stuck')
+        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
+        res = {'tab_id': '7', 'handoff': True, 'submitted': True, 'confirm_text': 'Application received'}
+        with tempfile.TemporaryDirectory(prefix='apply-violation-') as directory, \
+             patch.object(run, 'load', return_value=(jobs, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
-             patch.object(ar, 'browser_runtime', return_value=runtime), \
-             patch.object(run, '_run_agent', side_effect=agent), \
+             patch.object(run, 'profile_check', return_value=None), \
+             patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
+             patch.object(ar, 'session_id', return_value='S2'), \
+             patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', return_value=(['⚠ 填表階段回報「已送出」,要人看'], res)), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report') as report, \
              patch.object(run.agent_report, 'resolve'), \
-             patch.dict(sys.modules, {'agent_chrome': chrome}):
+             fc.installed(fc.FakeChrome()):
+            ok, msg = run.run_one('fill', U, '/tmp/board.html')
+        self.assertFalse(ok)
+        m = fb[U]
+        self.assertEqual((ds.state(m), m['app'], m['sent_by']), ('sent', 'sent', 'agent'))
+        self.assertIn('違規', m['apply']['sent']['note'])
+        self.assertTrue(report.called)
+
+
+class AgentThatNeverStarted(unittest.TestCase):
+    """修改、送出固定找開那一頁的那一家(卡上記的)。那一家停用、移除,或卡上沒記是哪一家:一步都沒做,
+    不能寫成「送出沒確認成功、去信箱查」,也不能讓他一直按一個永遠派不出去的按鈕;送「填這張的 agent 接不回來」→ 頁面不見了。
+    那一家還能用(換成同一家的另一個 agent 也算):舊頁由它繼續改、送出。"""
+    CODEX = {'id': 'primary', 'runtime': 'codex', 'model': '', 'effort': 'max', 'browser': True}
+    CLAUDE = {'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}
+
+    def _run(self, stage, fb, agents, outcome=None):
+        called = []
+
+        def agent(*_a, **kw):
+            called.append(kw)
+            return outcome or ar.AgentResult('failed', 1, 42, agent_id=kw.get('agent_id'))
+        with tempfile.TemporaryDirectory(prefix='apply-gone-agent-') as directory, \
+             fc.installed(fc.FakeChrome('codex', page=copy.deepcopy(FORM_PAGE)),
+                          fc.FakeChrome('claude-code', agent_id='cc', page=copy.deepcopy(FORM_PAGE)), agents=agents), \
+             patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             patch.object(run, '_run_agent', side_effect=agent), \
+             patch.object(run.ship, 'read_info', return_value={}), \
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+             patch.object(run.agent_report, 'report') as report, \
+             patch.object(run.agent_report, 'resolve'):
             ok, msg = run.run_one(stage, U, '/tmp/board.html')
         return ok, msg, called, report
 
-    def test_submit_with_the_filling_agent_removed_is_not_an_uncertain_submit(self):
-        fb = filled()
-        ok, msg, called, report = self._run('submit', fb, None)
-        self.assertFalse(ok)
+    def assert_gone(self, fb, called, why=chrome_door.AGENT_SWAPPED):
         self.assertEqual(called, [])                              # 派都沒派
         a = fb[U]['apply']
         self.assertNotIn('submit_fail', a)                       # 不是「送出結果不明」
-        self.assertIn('重新填', a['issues'][0])
-        self.assertNotIn('session', a)                           # 那段對話叫不回來了:下一步是重填,不是再按送出
+        self.assertEqual(a['issues'], [why])
+        self.assertEqual(ds.state(fb[U]), 'gone')                # 接不回來了:下一步是重填,不是再按送出
         self.assertNotIn('approve', fb[U])
+
+    def test_submit_with_the_filling_family_disabled_is_not_an_uncertain_submit(self):
+        fb = filled()
+        ok, _msg, called, report = self._run('submit', fb, [dict(self.CODEX, browser=False), self.CLAUDE])
+        self.assertFalse(ok)
+        self.assert_gone(fb, called)
         self.assertFalse([c for c in report.call_args_list if '送出沒確認成功' in str(c)])
 
-    def test_fix_with_the_filling_agent_removed_says_refill(self):
-        fb = filled()
+    def test_fix_with_the_filling_family_removed_says_refill(self):
+        fb = filled('parked')
         fb[U]['form']['f'][1]['refill'] = 1
-        ok, _msg, called, _report = self._run('fix', fb, None)
+        ok, _msg, called, _report = self._run('fix', fb, [self.CLAUDE])
         self.assertFalse(ok)
-        self.assertEqual(called, [])
-        self.assertIn('重新填', fb[U]['apply']['issues'][0])
-        self.assertNotIn('session', fb[U]['apply'])
+        self.assert_gone(fb, called)
+
+    def test_the_same_family_still_usable_keeps_fixing_and_sending_the_old_page(self):
+        # 原本填這張的 agent 拿掉了,換成同一家(Codex)的另一個:那段對話還是 Codex 的,由新的那個接回去改、送出
+        fb = filled('parked')
+        fb[U]['form']['f'][1]['refill'] = 1
+        other = dict(self.CODEX, id='codex-2')
+        ok, _msg, called, _report = self._run('fix', fb, [dict(self.CLAUDE, browser=False), other])
+        self.assertEqual([(c['agent_id'], c['resume']) for c in called], [('codex-2', 'S1')])
+        fb = filled()
+        self._run('submit', fb, [other])
+        self.assertNotEqual(ds.state(fb[U]), 'gone')
+
+    def test_an_agent_switched_to_another_family_in_settings_does_not_take_the_old_page(self):
+        # 設定頁改了執行環境、代號沒改:卡上是 Codex 開的頁,不能叫 Claude 用同一個代號接回一段 Codex 的對話
+        fb = filled('parked')
+        fb[U]['form']['f'][1]['refill'] = 1
+        _ok, _msg, called, _report = self._run('fix', fb, [dict(self.CLAUDE, id='primary')])
+        self.assert_gone(fb, called)
+
+    def test_a_card_that_never_recorded_its_family_is_not_taken_as_codex(self):
+        fb = filled()
+        fb[U]['apply'].pop('runtime')
+        _ok, _msg, called, _report = self._run('submit', fb, [self.CODEX])
+        self.assert_gone(fb, called, chrome_door.BEFORE_UPDATE)      # 更新前填的:不是換掉了(#311 預設 A)
 
     def test_submit_whose_agent_failed_to_launch_keeps_the_approval_and_no_pending(self):
         fb = filled()
         never = ar.AgentResult('unavailable', reason='all_unavailable', agent_id='primary')   # 行程沒開起來(pid 空)
-        ok, msg, called, report = self._run('submit', fb, 'codex', never)
+        ok, msg, called, report = self._run('submit', fb, [self.CODEX], never)
         self.assertFalse(ok)
-        self.assertEqual(called, [1])
+        self.assertEqual(len(called), 1)
         self.assertNotIn('submit_fail', fb[U]['apply'])          # 一步都沒做:不用他去信箱查
         self.assertIsNone(fr.approval_problem(fb, U, OKST))            # 核准照樣有效,再按一次送出
         self.assertFalse([c for c in report.call_args_list if '送出沒確認成功' in str(c)])
@@ -1375,3 +1390,107 @@ class PreparedPageIsNotReloaded(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PauseDoesNotEatTheTimeLimit(unittest.TestCase):
+    """⏸ 暫停把整串行程凍住;以前填表時限照牆上時鐘算,暫停得比剩下的時間久,按繼續的那一刻整張就算逾時被砍(#308)。"""
+
+    def test_paused_time_is_not_counted(self):
+        sp = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-pause-'))
+        status = os.path.join(sp, run.STATUS)
+        started = time.monotonic()
+
+        class Agent:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                elapsed = time.monotonic() - started
+                if elapsed > 0.15 and not os.path.exists(status + '.pausedsum'):
+                    with open(status + '.pausedsum', 'w') as f:
+                        f.write('0.6')                     # 這之間他暫停了 0.6 秒、按了繼續
+                if elapsed > 0.5:
+                    self.returncode = 0
+                return self.returncode
+
+        with patch.object(run, 'SP', sp), patch.object(ar, '_eligible_agents',
+                                                       return_value=([{'id': 'a', 'runtime': 'codex'}], '')), \
+             patch.object(ar, '_record'), patch.object(ar, '_stop_tree'):
+            out = run._run_agent('p', os.path.join(sp, 'fill.log'), sp, os.path.join(sp, 'b.html'),
+                                 timeout=0.3, launcher=lambda *a, **k: Agent())
+        self.assertEqual(out.status, 'completed', '暫停的時間不算進填表時限')
+
+    def test_still_times_out_without_a_pause(self):
+        sp = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-pause-'))
+
+        class Agent:
+            pid = 4321
+            returncode = None
+
+            def poll(self):
+                return None
+
+        with patch.object(run, 'SP', sp), patch.object(ar, '_eligible_agents',
+                                                       return_value=([{'id': 'a', 'runtime': 'codex'}], '')), \
+             patch.object(ar, '_record'), patch.object(ar, '_stop_tree'):
+            out = run._run_agent('p', os.path.join(sp, 'fill.log'), sp, os.path.join(sp, 'b.html'),
+                                 timeout=0.2, launcher=lambda *a, **k: Agent())
+        self.assertEqual(out.status, 'timeout')
+
+
+class CannotReachThePage(unittest.TestCase):
+    """修改、送出要叫回開那一頁的那一家/那段對話:叫不回來時卡上怎麼記(以前這兩條沒走過)。"""
+
+    def _run(self, stage, fb, **patches):
+        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
+        with patch.object(run, 'load', return_value=(jobs, fb)), \
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+             patch.object(run, '_run_agent', side_effect=AssertionError('叫不回來就不該派 agent')), \
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+            if patches:
+                with patch.object(chrome_door, 'for_card', **patches):
+                    return run.run_one(stage, U, '/tmp/board.html')
+            return run.run_one(stage, U, '/tmp/board.html')
+
+    def test_family_that_cannot_be_judged_leaves_the_card_alone(self):
+        # 設定檔讀不懂:判斷不了那一家還在不在,只講原因,不准因此把卡標成頁面不見了
+        fb = filled('parked')
+        before = json.loads(json.dumps(fb[U]))
+        ok, msg = self._run('fix', fb, side_effect=chrome_door.Unreachable('設定檔讀不懂', sure=False))
+        self.assertFalse(ok)
+        self.assertIn('設定檔讀不懂', msg)
+        self.assertEqual(fb[U], before)
+
+    def test_a_round_still_marked_running_without_its_session_becomes_no_page(self):
+        fb = filled('running', session='')
+        ok, msg = self._run('fix', fb)
+        self.assertFalse(ok)
+        self.assertIn('找不回來', msg)
+        self.assertEqual(ds.state(fb[U]), 'nopage')
+        self.assertIn(run.NO_SESSION, fb[U]['apply']['issues'])
+
+
+class LateResult(unittest.TestCase):
+    """agent 還在填,平台對帳已經找到這張送出了:填表結果晚到,只收進投遞歷史,卡照樣是已送出。"""
+
+    def test_fill_result_after_the_platform_says_it_was_sent(self):
+        fb = board()
+        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
+
+        def agent(*_a, **_k):
+            ds.fire(fb, U, 'platform_found', by='platform', sent_at=T, rec='104:abc:' + T)   # 平台對帳找到了
+            return SimpleNamespace(ok=True, status='completed', agent_id='a')
+        with tempfile.TemporaryDirectory(prefix='apply-late-') as directory, \
+             fc.installed(fc.FakeChrome('claude-code', agent_id='a')), \
+             patch.object(run, 'load', return_value=(jobs, fb)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             patch.object(run, '_run_agent', side_effect=agent), \
+             patch.object(ar, 'session_id', return_value='S9'), \
+             patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
+             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+            run.run_one('fill', U, '/tmp/board.html')
+        self.assertEqual(ds.state(fb[U]), 'sent')
+        self.assertIn('fill_ok', [h.get('event') for h in fb[U].get('history') or [] if h.get('late')])

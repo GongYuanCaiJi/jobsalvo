@@ -11,7 +11,7 @@
 
 還原是照時間倒著把每一筆改回原值,所以同一筆被改過好幾次也會回到最早那個值。
 """
-import os, sys, json, argparse, datetime, re
+import os, sys, json, argparse, datetime, re, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -30,8 +30,8 @@ def load(live):
         for line in f:
             line = line.strip()
             if line:
-                try: out.append(json.loads(line))
-                except Exception: pass  # noqa: S110
+                with contextlib.suppress(ValueError):   # 寫到一半的那一行:跳過
+                    out.append(json.loads(line))
     return out
 
 def titles(live):

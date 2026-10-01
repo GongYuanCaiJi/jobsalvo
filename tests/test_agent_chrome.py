@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import json
 import os
@@ -8,7 +9,6 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import agent_chrome  # noqa: E402
 
 
@@ -18,7 +18,7 @@ class NoVisibilityOption(unittest.TestCase):
 
     def test_program_never_passes_visible_when_opening_tabs(self):
         import agent_run
-        self.assertNotIn('visible:', agent_run.apply_rule())
+        self.assertNotIn('visible:', agent_run.apply_rule('codex'))
 
 
 class ReadPages(unittest.TestCase):
@@ -139,7 +139,7 @@ class ReleaseHandsTheTabBack(unittest.TestCase):
              mock.patch('agent_chrome.conf', return_value={'claude_device': 'dev'}), \
              mock.patch('apply_tab.subprocess.run', side_effect=lambda argv, **k: seen.append(k['input']) or mock.Mock(stdout='')):
             with self.assertRaises(LookupError):
-                apply_tab.release('s', '5', runtime='claude-code')
+                apply_tab.claude_release('s', '5')
             with self.assertRaises(LookupError):
                 apply_tab.claude_shot('s', '5', '/tmp/x.png')
         close, shot = seen
@@ -188,9 +188,9 @@ class ReadsNeverOutliveTheirOwnTimeLimit(unittest.TestCase):
 
         def end_turn(self, keep=()):
             for v in keep:
-                try:
+                try:  # noqa: SIM105 — 照真的 apply_tab.Session.end_turn 寫(理由在那邊)
                     self.js(f'await {v}.markHandoff(); nodeRepl.write("ok")')
-                except Exception:  # noqa: S110
+                except Exception:  # noqa: BLE001, S110 — 照真的 apply_tab.Session.end_turn 寫(理由在那邊)
                     pass
 
         def close(self):
@@ -221,9 +221,8 @@ class OwnChrome(unittest.TestCase):
     只認用 agent 資料夾開的那一個,在背景開、不上螢幕,要看才叫出來,收掉要確認程序真的不在了。"""
 
     def setUp(self):
-        import tempfile, shutil
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        import tempfile
+        self.tmp = self.enterContext(tempfile.TemporaryDirectory())
         self.dir = os.path.join(self.tmp, 'agent-chrome')
         p = mock.patch('agent_chrome.data_dir', return_value=self.dir)
         p.start(); self.addCleanup(p.stop)
@@ -331,22 +330,16 @@ class OwnChrome(unittest.TestCase):
             with mock.patch('subprocess.run', return_value=mock.Mock(stdout=cmd)):
                 self.assertEqual(agent_chrome._not_background(1), old, cmd)
 
-    def test_only_pages_still_waiting_for_him_are_protected(self):
-        # 退回、移除、送出的卡留下的舊 tab_id 不算「在等他」,不然 agent 的 Chrome 永遠關不掉
-        fb = {'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'tab_id': 1}},
-              'b': {'app': 'ship', 'apply': {'stage': 'fix', 'ok': False, 'tab_id': 2}},
-              'c': {'app': 'prep', 'apply': {'stage': 'fill', 'tab_id': 3}},
-              'd': {'app': 'ship', 'rm': 1, 'apply': {'stage': 'fill', 'tab_id': 4}},
-              'e': {'app': 'ship', 'form': {'lock': 1}, 'apply': {'stage': 'fill', 'tab_id': 5}},
-              'f': {'app': 'ship', 'apply': {'stage': 'fill', 'tab_id': 6, 'runtime': 'claude-code'}},
-              # 已投出又退回可以投了:agent 在那頁按過送出,那頁是「已收到申請」,不是等他的
-              'g': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'tab_id': 7, 'sent': {'at': '2026-01-01'}}}}
+    def test_protected_pages_are_grouped_by_the_family_that_opened_them(self):
+        # 停著的頁由投遞狀態決定(tests/test_delivery_state.py);這裡只看照開它的那一家分(沒記到的另一堆,不當成 Codex)
+        fb = {'a': {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': 1}},
+              'f': {'app': 'ship', 'ds': 'stuck', 'apply': {'stage': 'fill', 'tab_id': 6, 'runtime': 'claude-code'}}}
         path = os.path.join(self.tmp, 'board.html')
         with open(path, 'w') as f:
             f.write('x')
-        with mock.patch('board_doc.parse', return_value={'fb': json.dumps(fb)}):
-            self.assertEqual(agent_chrome.protected_tabs(path), {'1', '2', '6'})
-            self.assertEqual(agent_chrome.protected_tabs(path, 'claude-code'), {'6'})
+        with mock.patch('board_doc.parse', return_value={'fb': json.dumps(fb), 'data': {'jobs': []}}):
+            self.assertEqual(agent_chrome.protected_tabs(path), {'1', '6'})
+            self.assertEqual(agent_chrome.held_tabs(path), {None: {'1'}, 'claude-code': {'6'}})
 
     def test_window_he_opened_is_never_closed_under_him(self):
         # 他按「🔑 打開」叫出來、視窗還開著(正在登入):背景流程不准重開、收尾也不准關
@@ -413,16 +406,11 @@ class OwnChrome(unittest.TestCase):
             self.assertTrue(agent_chrome._mine())
 
     def _close(self, keep, tabs, quit_ok=True, claude=(), conf=None, bid='b1'):
-        class Session:
-            def __init__(self, _):
-                pass
-
-            def close(self):
-                pass
+        held = {k: set(v) for k, v in (('codex', keep), ('claude-code', claude)) if v}
         with mock.patch('agent_chrome.conf', return_value=conf or {'instance': 'x', 'dir': self.dir}), \
              mock.patch('agent_chrome.pid', return_value=9), \
-             mock.patch('agent_chrome.protected_tabs', side_effect=lambda b, runtime=None: set(claude) if runtime else keep), \
-             mock.patch('apply_tab.Session', Session), \
+             mock.patch('agent_chrome.held_tabs', return_value=held), \
+             mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])), \
              mock.patch('agent_chrome.browser_id', return_value=bid), \
              mock.patch('agent_chrome.tabs', return_value=tabs), \
              mock.patch('agent_chrome.quit_chrome', return_value=quit_ok) as q:
@@ -434,10 +422,10 @@ class OwnChrome(unittest.TestCase):
         q.assert_not_called()
 
     def test_gone_pages_only_when_chrome_certainly_lost_them(self):
-        fb = {'filled': {'apply': {'stage': 'fill', 'ok': True, 'at': '2026-09-29T17:06:02', 'tab_id': '5'}},
-              'running': {'apply': {'stage': 'fill', 'ok': True, 'at': '2026-09-29T17:06:02', 'tab_id': '6'}},
-              'sent': {'apply': {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '7'}, 'form': {'lock': 1}},
-              'no_tab': {'apply': {'stage': 'fill', 'ok': False, 'at': '2026-09-29T17:06:02', 'tab_id': ''}}}
+        fb = {'filled': {'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '5'}},
+              'running': {'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '6'}},
+              'sent': {'ds': 'sent', 'apply': {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '7'}, 'form': {'lock': 1}},
+              'no_tab': {'ds': 'nopage', 'apply': {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': ''}}}
         at = datetime.datetime(2026, 9, 29, 17, 6, 2).timestamp()
         with mock.patch('agent_chrome.pid', return_value=None):          # Chrome 沒在跑
             self.assertEqual(agent_chrome.gone_pages(fb, 'running'), ['filled'])
@@ -448,7 +436,7 @@ class OwnChrome(unittest.TestCase):
         with mock.patch('agent_chrome.pid', return_value=9), mock.patch('agent_chrome.started_at', return_value=None):
             self.assertEqual(agent_chrome.gone_pages(fb), [])                      # 問不到:不動
         agent_chrome.mark_gone(fb, ['filled'])
-        self.assertEqual((fb['filled']['apply']['ok'], fb['filled']['apply']['tab_id']), (False, ''))
+        self.assertEqual((fb['filled']['ds'], fb['filled']['apply']['tab_id']), ('gone', ''))
 
     def test_close_keeps_chrome_when_the_extension_cannot_list_tabs(self):
         # 2026-09-29:外掛跟 agent 的 Chrome 斷線、問不到分頁,收尾當成「沒有頁在等」,把他還沒核對的那一頁連 Chrome 一起關了
@@ -466,7 +454,7 @@ class OwnChrome(unittest.TestCase):
         # 只用 Claude(沒有 Codex 外掛可以問)又讀不到看板:以前當成沒有頁在等,連 Chrome 一起關;說明寫的是讀不到當成有
         with mock.patch('agent_chrome.conf', return_value={'dir': self.dir}), \
              mock.patch('agent_chrome.pid', return_value=9), \
-             mock.patch('agent_chrome.protected_tabs', return_value=None), \
+             mock.patch('agent_chrome.held_tabs', return_value=None), \
              mock.patch('agent_chrome.quit_chrome', return_value=True) as q:
             msg = agent_chrome.close_if_idle('/tmp/board.html')
         self.assertIn('在等他', msg)
@@ -487,6 +475,15 @@ class OwnChrome(unittest.TestCase):
              mock.patch('os.kill') as kill, mock.patch('time.sleep'):
             self.assertFalse(agent_chrome.quit_chrome(wait=1))
         self.assertEqual([c[0][1] for c in kill.call_args_list][-1], 9)     # SIGTERM 關不掉才強制
+
+    def test_quit_when_nothing_runs_or_it_closes_normally_never_forces(self):
+        with mock.patch('agent_chrome.pid', return_value=None), mock.patch('os.kill') as kill:
+            self.assertTrue(agent_chrome.quit_chrome(wait=1))
+        kill.assert_not_called()
+        with mock.patch('agent_chrome.pid', side_effect=[5, 5, None]), \
+             mock.patch('os.kill') as kill, mock.patch('time.sleep'):
+            self.assertTrue(agent_chrome.quit_chrome(wait=1))
+        self.assertEqual([c[0][1] for c in kill.call_args_list], [15])     # 正常結束就好,不強制
 
     def test_show_asks_that_chrome_for_a_new_window_without_restarting_it(self):
         # 只有他按了才出現:請同一個資料夾的 Chrome 開新視窗(交給已經在跑的那一個,填好的頁都還在),不關、不重開
@@ -523,6 +520,75 @@ class OwnChrome(unittest.TestCase):
         self.assertEqual(order, ['open'])                      # 已經在跑:不能換它的資料,只請它開新視窗
 
 
+class SweepMarksOnlyWhatItIsSureOf(unittest.TestCase):
+    """每分鐘掃「頁面不見了」(sweep_gone):照程序判斷的、照開它的那一家判斷的,兩條併在一起標;
+    每一條不確定就不標,卡上寫的是真的原因。"""
+    CODEX_CARD = {'app': 'ship', 'ds': 'parked', 'apply': {
+        'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '5', 'runtime': 'codex', 'agent_id': 'primary',
+        'chrome': {'pid': 100, 'start': 1000.0}}}
+
+    def setUp(self):
+        import tempfile
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='sweep-'))
+        self.board = os.path.join(self.d, 'board.html')
+        _env.make_board(self.board)
+
+    def seed(self, fb):
+        import board_doc as bd
+        bd.set_fb(lambda d: d.update(json.loads(json.dumps(fb))), live=self.board, by='test')
+
+    def sweep(self, agents, pid=200, start=2000.0, **kw):
+        import config as cf
+        with mock.patch.dict(cf.C, {'agent': {'agents': agents}}), \
+             mock.patch('agent_chrome.pid', return_value=pid), mock.patch('agent_chrome.started_at', return_value=start):
+            return agent_chrome.sweep_gone(self.board, unreachable=True, **kw)
+
+    def card(self, u):
+        return _env.read_fb(self.board)[u]
+
+    CLAUDE = [{'id': 'cc', 'runtime': 'claude-code', 'browser': True}]
+    CODEX = [{'id': 'primary', 'runtime': 'codex', 'browser': True}]
+
+    def test_a_card_filled_before_the_update_says_so(self):
+        import chrome_door
+        old = json.loads(json.dumps(self.CODEX_CARD))
+        del old['apply']['runtime']
+        old['apply']['chrome'] = {'pid': 200, 'start': 2000.0}          # 現在這個 Chrome 開的:照程序看頁還在
+        self.seed({'u': old})
+        got = self.sweep(self.CODEX)
+        self.assertEqual(got, {'u': chrome_door.BEFORE_UPDATE})
+        self.assertEqual(self.card('u')['apply']['issues'], [chrome_door.BEFORE_UPDATE])
+
+    def test_when_chrome_start_is_unknown_only_the_family_check_marks(self):
+        # 問不到 Chrome 什麼時候開的:照程序判斷不了(不標);開它的那一家換掉了是確定的(標)
+        import chrome_door
+        import delivery_state as ds
+        claude_card = json.loads(json.dumps(self.CODEX_CARD))
+        claude_card['apply'].update(runtime='claude-code', agent_id='cc')
+        self.seed({'old-chrome': claude_card, 'swapped': self.CODEX_CARD})
+        got = self.sweep(self.CLAUDE, start=None)
+        self.assertEqual(got, {'swapped': chrome_door.AGENT_SWAPPED})
+        self.assertEqual(ds.state(self.card('old-chrome')), 'parked')
+        self.assertEqual((ds.state(self.card('swapped')), self.card('swapped')['apply']['issues']),
+                         ('gone', [chrome_door.AGENT_SWAPPED]))
+
+    def test_unreadable_settings_do_not_mark_pages_as_swapped(self):
+        # jobsalvo.json 讀不懂時設定退回預設(只有 Codex):Claude 開的頁不是真的換掉了,不標
+        import config as cf
+        import delivery_state as ds
+        home = os.path.join(self.d, 'home')
+        os.makedirs(home)
+        with open(os.path.join(home, cf.NAME), 'w', encoding='utf-8') as f:
+            f.write('{ 壞掉的')
+        claude_card = json.loads(json.dumps(self.CODEX_CARD))
+        claude_card['apply'].update(runtime='claude-code', agent_id='cc', chrome={'pid': 200, 'start': 2000.0})
+        self.seed({'u': claude_card})
+        with mock.patch.object(cf, 'HOME', home):
+            got = self.sweep(self.CODEX)
+        self.assertEqual(got, {})
+        self.assertEqual(ds.state(self.card('u')), 'parked')
+
+
 class WhichChromeOpenedThePage(unittest.TestCase):
     """填好的頁還在不在,要看它是不是現在這個 Chrome 程序開的(Chrome 關掉、重開過,頁一定不在)。"""
 
@@ -542,7 +608,7 @@ class WhichChromeOpenedThePage(unittest.TestCase):
     def test_page_from_an_earlier_chrome_is_gone_even_if_the_record_was_touched_later(self):
         # 改表失敗、送出前擋下的紀錄會把 at 換成現在、tab_id 照留:以前拿 at 跟 Chrome 什麼時候開的比,重開過也抓不到
         now = datetime.datetime.now().isoformat(timespec='seconds')
-        fb = {'u': {'apply': {'stage': 'fix', 'ok': False, 'at': now, 'tab_id': '5',
+        fb = {'u': {'ds': 'stuck', 'apply': {'stage': 'fix', 'at': now, 'tab_id': '5',
                               'chrome': {'pid': 9, 'start': 1000.0}}}}
         with mock.patch('agent_chrome.pid', return_value=9), mock.patch('agent_chrome.started_at', return_value=5000.0):
             self.assertEqual(agent_chrome.gone_pages(fb), ['u'])       # 同一個程序編號、另一個時間開的:換過程序
@@ -553,13 +619,6 @@ class WhichChromeOpenedThePage(unittest.TestCase):
         with mock.patch('agent_chrome.pid', return_value=None):
             self.assertEqual(agent_chrome.gone_pages(fb), ['u'])       # Chrome 沒在跑
 
-    def test_gone_page_also_drops_his_confirmation(self):
-        # 按了確認送出、還沒送就發現頁面不見了:確認留著的話,自動流程看到有確認就整張跳過,永遠不會重填
-        fb = {'u': {'approve': {'at': '2026-09-29T17:06:02'}, 'apply': {'stage': 'fill', 'ok': True, 'tab_id': '5'}}}
-        agent_chrome.mark_gone(fb, ['u'])
-        self.assertNotIn('approve', fb['u'])
-        self.assertEqual((fb['u']['apply']['tab_id'], fb['u']['apply']['gone']), ('', True))
-
     def test_identity_of_the_running_chrome(self):
         with mock.patch('agent_chrome.pid', return_value=9), mock.patch('agent_chrome.started_at', return_value=1000.4):
             self.assertEqual(agent_chrome.chrome_id(), {'pid': 9, 'start': 1000.4})
@@ -569,17 +628,16 @@ class WhichChromeOpenedThePage(unittest.TestCase):
     def test_eye_never_shows_a_tab_number_from_an_earlier_chrome(self):
         # 分頁編號每個 Chrome 程序從頭數:Chrome 重開後舊編號可能剛好是別張卡的頁,👀 會截到別張
         import apply_tab
-        fb = {'u': {'apply': {'stage': 'fill', 'session': 's', 'tab_id': '5', 'at': '2026-09-29T17:06:02',
-                              'chrome': {'pid': 9, 'start': 1000.0}}}}
-        with mock.patch('board_doc.parse', return_value={'fb': json.dumps(fb)}), \
-             mock.patch('builtins.open', mock.mock_open(read_data='x')), \
+        fb = {'u': {'ds': 'parked', 'apply': {'stage': 'fill', 'session': 's', 'tab_id': '5', 'at': '2026-09-29T17:06:02',
+                              'runtime': 'codex', 'chrome': {'pid': 9, 'start': 1000.0}}}}
+        with mock.patch('board_doc.load', return_value={'fb': json.dumps(fb)}), \
              mock.patch('agent_chrome.pid', return_value=12), mock.patch('agent_chrome.started_at', return_value=9000.0):
             with self.assertRaises(LookupError):
                 apply_tab._lookup('u', '/tmp/board.html')
-        with mock.patch('board_doc.parse', return_value={'fb': json.dumps(fb)}), \
-             mock.patch('builtins.open', mock.mock_open(read_data='x')), \
+        with mock.patch('board_doc.load', return_value={'fb': json.dumps(fb)}), \
              mock.patch('agent_chrome.pid', return_value=9), mock.patch('agent_chrome.started_at', return_value=1000.0):
-            self.assertEqual(apply_tab._lookup('u', '/tmp/board.html'), ('s', '5', 'codex'))
+            session, tab, door = apply_tab._lookup('u', '/tmp/board.html')
+        self.assertEqual((session, tab, door.runtime), ('s', '5', 'codex'))     # 照卡上記的那一家接回去
 
 
 class SetupSaysWhy(unittest.TestCase):
@@ -591,12 +649,6 @@ class SetupSaysWhy(unittest.TestCase):
         if has_ext:
             os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
 
-        class Session:
-            def __init__(self, _):
-                pass
-
-            def close(self):
-                pass
         seen = iter([list(before)] + [list(before) + list(new)] * 5)
         with mock.patch('agent_chrome._codex_ready', return_value=True), \
              mock.patch('agent_chrome.data_dir', return_value=d), \
@@ -605,7 +657,7 @@ class SetupSaysWhy(unittest.TestCase):
              mock.patch('agent_chrome.save') as save, \
              mock.patch('agent_chrome.quit_chrome', return_value=True), \
              mock.patch('agent_chrome.launch', return_value=5), \
-             mock.patch('apply_tab.Session', Session), \
+             mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])), \
              mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)), \
              mock.patch('agent_chrome.close_if_idle', return_value='') as close, \
              mock.patch('time.sleep'):
@@ -634,12 +686,6 @@ class SetupSaysWhy(unittest.TestCase):
         d = tempfile.mkdtemp()
         os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
 
-        class Session:
-            def __init__(self, _):
-                pass
-
-            def close(self):
-                pass
         for keep in ({'655', '656'}, None):          # None:讀不到看板,當成有
             with mock.patch('agent_chrome._codex_ready', return_value=True), \
                  mock.patch('agent_chrome.data_dir', return_value=d), \
@@ -650,7 +696,7 @@ class SetupSaysWhy(unittest.TestCase):
                  mock.patch('agent_chrome.protected_tabs', return_value=keep), \
                  mock.patch('agent_chrome.quit_chrome', return_value=True) as q, \
                  mock.patch('agent_chrome.launch', return_value=7), \
-                 mock.patch('apply_tab.Session', Session):
+                 mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])):
                 ok, msg = agent_chrome.setup('/tmp/board.html', wait=1)
             self.assertIsNone(ok)                    # 要他確認,不是失敗
             self.assertIn('不見', msg)
@@ -667,7 +713,7 @@ class SetupSaysWhy(unittest.TestCase):
              mock.patch('agent_chrome.quit_chrome', return_value=True) as q, \
              mock.patch('agent_chrome.launch', return_value=8), \
              mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)), \
-             mock.patch('apply_tab.Session', Session), mock.patch('time.sleep'):
+             mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])), mock.patch('time.sleep'):
             ok, _ = agent_chrome.setup('/tmp/board.html', wait=2, force=True)    # 他確認過了
         self.assertTrue(ok)
         q.assert_called_once()
@@ -677,6 +723,72 @@ class SetupSaysWhy(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('認不出哪個是 agent 的', msg)
         save.assert_not_called()
+
+
+class SetupOtherOutcomes(unittest.TestCase):
+    """連接的其他結果,每一種都講清楚是哪裡、下一步按什麼;全部 mock,不開不關任何 Chrome。"""
+
+    def run_setup(self, seen=((),), **over):
+        import tempfile
+        d = self.enterContext(tempfile.TemporaryDirectory())
+        os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
+
+        seen = iter([list(x) for x in seen] + [list(seen[-1])] * 10)
+        patches = {'_codex_ready': True, 'data_dir': d, 'prepare': '', 'conf': {}, 'save': None,
+                   'quit_if_safe': (True, ''), 'launch': 5, 'close_if_idle': '', 'pid': None}
+        patches.update(over)
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                kw = {'side_effect': value} if isinstance(value, BaseException) or callable(value) else {'return_value': value}
+                stack.enter_context(mock.patch('agent_chrome.' + name, **kw))
+            stack.enter_context(mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])))
+            stack.enter_context(mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)))
+            stack.enter_context(mock.patch('time.sleep'))
+            return agent_chrome.setup('/tmp/board.html', wait=2)
+
+    def test_codex_not_installed(self):
+        ok, msg = self.run_setup(_codex_ready=False)
+        self.assertFalse(ok)
+        self.assertIn('還沒裝 Codex', msg)
+
+    def test_already_connected(self):
+        with mock.patch('agent_chrome._mine', return_value=True), mock.patch('agent_chrome.browser_id', return_value='b1'):
+            ok, msg = self.run_setup(conf={'instance': 'x'}, pid=7)
+        self.assertTrue(ok)
+        self.assertIn('已經連上了', msg)
+
+    def test_chrome_that_will_not_close(self):
+        ok, msg = self.run_setup(quit_if_safe=(False, ''))
+        self.assertFalse(ok)
+        self.assertIn('關不掉', msg)
+
+    def test_chrome_that_will_not_open(self):
+        ok, msg = self.run_setup(launch=None)
+        self.assertFalse(ok)
+        self.assertEqual(msg, agent_chrome._cant_launch())
+
+    def test_extension_that_never_shows_up_says_how_long_and_what_to_press(self):
+        ok, msg = self.run_setup(seen=((), ()))
+        self.assertFalse(ok)
+        self.assertIn('2 秒內', msg)
+        self.assertIn('打開 agent 的 Chrome', msg)
+
+    def test_a_chrome_that_was_left_running_asks_before_closing_waiting_pages(self):
+        ok, msg = self.run_setup(prepare=RuntimeError('還開著'), quit_if_safe=(None, '還有 1 頁'))
+        self.assertIsNone(ok)
+        self.assertIn('不見', msg)
+
+    def test_a_chrome_that_was_left_running_is_closed_then_prepared(self):
+        calls = []
+
+        def prepare():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError('還開著')
+            return ''
+        ok, _msg = self.run_setup(prepare=prepare, seen=((), (('b2', 'new-id'),)))
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 2)
 
 
 class ClaudeConnect(unittest.TestCase):
@@ -755,8 +867,8 @@ class ClaudeConnect(unittest.TestCase):
         asked.assert_not_called()
 
     def test_device_is_read_from_the_extensions_own_folder(self):
-        import tempfile, shutil
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        import tempfile
+        d = self.enterContext(tempfile.TemporaryDirectory())
         store = os.path.join(d, 'Default', agent_chrome.CLAUDE_EXT_STORE)
         os.makedirs(store)
         with open(os.path.join(store, '000003.log'), 'wb') as f:
@@ -775,18 +887,19 @@ class ErrorsSayWhyAndWhichButton(unittest.TestCase):
         # 查應徵進度連不上時,以前叫他「打開 Chrome 的「agent」設定檔並完成登入」(已經淘汰的做法),不管用哪一家
         import sys
         import tempfile
-        from types import SimpleNamespace
+        import config as cf
         import reply_run as rr
         u = 'https://job.example/1'
-        for program_reads, button in ((True, '連接 Codex'), (False, '連接 Claude')):
-            chrome = SimpleNamespace(ensure=lambda *_: (False, '連不上'), wait_claude=lambda *_: (False, '看不到'),
-                                     close_if_idle=lambda *_: None)
+        for runtime, button in (('codex', '連接 Codex'), ('claude-code', '連接 Claude')):
+            agents = [{'id': 'a', 'runtime': runtime, 'model': '', 'effort': 'max', 'browser': True}]
             with tempfile.TemporaryDirectory() as d, \
+                 mock.patch.dict(cf.C, {'agent': {'agents': agents}}), \
+                 mock.patch('agent_chrome.ensure', return_value=(False, '連不上')), \
+                 mock.patch('agent_chrome.wait_claude', return_value=(False, '看不到')), \
+                 mock.patch('agent_chrome.close_if_idle'), \
                  mock.patch.object(rr, 'SP', d), mock.patch.object(rr, 'load', return_value=({u: {'id': u}}, {})), \
                  mock.patch.object(rr, 'waiting', return_value=[u]), mock.patch.object(rr.jobrun, 'write'), \
                  mock.patch.object(rr.agent_report, 'report') as report, \
-                 mock.patch.object(rr, '_program_can_read', return_value=program_reads), \
-                 mock.patch.dict(sys.modules, {'agent_chrome': chrome}), \
                  mock.patch.object(sys, 'argv', ['reply_run.py', '--board', os.path.join(d, 'board.html')]):
                 self.assertEqual(rr.main(), 1)
             need = report.call_args.kwargs['need']
@@ -796,10 +909,10 @@ class ErrorsSayWhyAndWhichButton(unittest.TestCase):
     def test_claude_users_are_not_told_the_platform_profile_cannot_be_read_back(self):
         # 只用 Claude:程式自己開頁讀走 Codex 的外掛,Claude 沒有這條路;平台履歷改由 Claude 在那一輪讀給程式(#288)。
         # 以前叫他按畫面上根本沒有的「🔌 連接 Codex」,後來寫「讀不回,改用 Codex」:都不對
-        with mock.patch('agent_run.browser_runtime', return_value='claude-code'), \
-             mock.patch('agent_chrome.conf', return_value={'claude_device': 'dev'}):
-            with self.assertRaises(RuntimeError) as e:
-                agent_chrome.read_pages(['https://pda.104.com.tw/profile'])
+        import chrome_door
+        with mock.patch('agent_chrome.read_pages', side_effect=AssertionError('不該走 Codex 外掛那一條')):
+            with self.assertRaises(chrome_door.NotNow) as e:
+                chrome_door.of('claude-code').read_pages(['https://pda.104.com.tw/profile'])
         msg = str(e.exception)
         self.assertNotIn('Codex', msg)
         self.assertNotIn('讀不回', msg)
@@ -808,8 +921,6 @@ class ErrorsSayWhyAndWhichButton(unittest.TestCase):
 
     def test_no_chrome_on_this_mac_is_said_plainly(self):
         # 沒裝 Chrome:以前等 15 秒後說「開不起來」叫他按連接;🔑 則是 Popen('') 丟 OSError,而且先把「叫出來過」記下了
-        import tempfile, shutil
-        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         with mock.patch('chrome_bin.find', return_value=''), mock.patch('agent_chrome.pid', return_value=None), \
              mock.patch('agent_chrome.conf', return_value={'instance': 'i', 'dir': agent_chrome.data_dir()}), \
              mock.patch('agent_chrome.save') as save, mock.patch('subprocess.run') as run, \
@@ -829,16 +940,10 @@ class ErrorsSayWhyAndWhichButton(unittest.TestCase):
 
     def test_codex_row_shows_when_it_was_last_seen_connected(self):
         # 設定頁 Codex 那一列以前只要記過外掛身分就寫「✅ 已連接」,外掛斷線了也一樣;改成講最近一次實際連上的時間
-        class Session:
-            def __init__(self, _):
-                pass
-
-            def close(self):
-                pass
         saved = {}
         with mock.patch('agent_chrome.conf', return_value={'instance': 'i', 'dir': agent_chrome.data_dir()}), \
              mock.patch('agent_chrome.save', side_effect=saved.update), mock.patch('agent_chrome.launch', return_value=7), \
-             mock.patch('agent_chrome.browser_id', return_value='b1'), mock.patch('apply_tab.Session', Session):
+             mock.patch('agent_chrome.browser_id', return_value='b1'), mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])):
             self.assertTrue(agent_chrome.ensure()[0])
         self.assertTrue(saved.get('codex_checked'))
         import settings_api as sa
@@ -855,22 +960,21 @@ class ChromeIsPutAwayAfterUse(unittest.TestCase):
         # 以前只有程式自己讀(Codex)的那條會收;用 Claude 查應徵進度,做完 Chrome 一直開著
         import sys
         import tempfile
-        from types import SimpleNamespace
         import agent_run as ar
         import reply_run as rr
+        import fake_chrome as fc
         u = 'https://job.example/1'
         closed = []
-        chrome = SimpleNamespace(wait_claude=lambda *_: (True, ''), close_if_idle=lambda b=None: closed.append(b))
         with tempfile.TemporaryDirectory() as d:
             board = os.path.join(d, 'board.html')
-            with mock.patch.object(rr, 'SP', d), mock.patch.object(rr, 'load', return_value=({u: {'id': u}}, {})), \
+            with fc.installed(fc.FakeChrome('claude-code', not_now={'read_pages'})), \
+                 mock.patch('agent_chrome.close_if_idle', side_effect=lambda b=None: closed.append(b)), \
+                 mock.patch.object(rr, 'SP', d), mock.patch.object(rr, 'load', return_value=({u: {'id': u}}, {})), \
                  mock.patch.object(rr, 'waiting', return_value=[u]), mock.patch.object(rr.jobrun, 'write'), \
                  mock.patch.object(rr.agent_report, 'report'), \
-                 mock.patch.object(rr, '_program_can_read', return_value=False), \
                  mock.patch.object(rr, 'collect_sources', return_value=({}, [u])), \
                  mock.patch.object(rr, 'prompt_for', return_value='prompt'), \
                  mock.patch.object(rr.ar, 'run', return_value=ar.AgentResult('failed', 9, 1)), \
-                 mock.patch.dict(sys.modules, {'agent_chrome': chrome}), \
                  mock.patch.object(sys, 'argv', ['reply_run.py', '--board', board]):
                 rr.main()
         self.assertEqual(closed, [board])
@@ -920,9 +1024,8 @@ class CodexSiteAllowList(unittest.TestCase):
     以前只寫在文件:設定頁、環境檢查、連上的訊息、失敗訊息都沒提,照設定頁操作的朋友第一次填表就卡住。"""
 
     def setUp(self):
-        import tempfile, shutil
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        import tempfile
+        self.tmp = self.enterContext(tempfile.TemporaryDirectory())
         self.path = os.path.join(self.tmp, 'config.toml')
         p = mock.patch.object(agent_chrome, 'CODEX_BROWSER_CONFIG', self.path, create=True)
         p.start(); self.addCleanup(p.stop)
@@ -954,8 +1057,7 @@ class CodexSiteAllowList(unittest.TestCase):
         fb = {'https://jobs.example-ats.com/a/1': {'app': 'ship'}, 'https://apply.other.test/2': {'app': 'ready'},
               'https://gone.test/3': {'app': 'ship', 'rm': 1}, 'https://sent.test/4': {'app': 'sent'}}
         reg = {'jobsite': {'zh/x': {'read': 'https://profile.jobsite.test/p?v=1'}}, '_attachment_checks': {}}
-        with mock.patch.object(bd, 'parse', return_value={'fb': json.dumps(fb), 'data': {'jobs': []}}), \
-             mock.patch('builtins.open', mock.mock_open(read_data='x')), \
+        with mock.patch.object(bd, 'load', return_value={'fb': json.dumps(fb), 'data': {'jobs': []}}), \
              mock.patch('profile_sync.registry', return_value=reg):
             self.assertEqual(agent_chrome.codex_sites_needed('/tmp/b.html'),
                              {'uploads': ['apply.other.test', 'jobs.example-ats.com'], 'downloads': ['profile.jobsite.test']})
@@ -979,18 +1081,12 @@ class CodexSiteAllowList(unittest.TestCase):
         d = tempfile.mkdtemp()
         os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
 
-        class Session:
-            def __init__(self, _):
-                pass
-
-            def close(self):
-                pass
         seen = iter([[], [('b2', 'new-id')]])
         with mock.patch('agent_chrome._codex_ready', return_value=True), mock.patch('agent_chrome.data_dir', return_value=d), \
              mock.patch('agent_chrome.prepare', return_value=''), mock.patch('agent_chrome.conf', return_value={}), \
              mock.patch('agent_chrome.save'), mock.patch('agent_chrome.pid', return_value=None), \
              mock.patch('agent_chrome.quit_chrome', return_value=True), mock.patch('agent_chrome.launch', return_value=5), \
-             mock.patch('agent_chrome.close_if_idle', return_value=''), mock.patch('apply_tab.Session', Session), \
+             mock.patch('agent_chrome.close_if_idle', return_value=''), mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])), \
              mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)), mock.patch('time.sleep'), \
              self.need(['a.test']):
             ok, msg = agent_chrome.setup(wait=2)
@@ -1039,10 +1135,12 @@ class QuitOnlyThroughTheGuard(unittest.TestCase):
              mock.patch('agent_chrome.quit_chrome', return_value=True) as q:
             with mock.patch('agent_chrome.protected_tabs', return_value=None):          # 讀不到看板
                 self.assertIsNone(agent_chrome.quit_if_safe('/x', ask_extension=False)[0])
-            with mock.patch('agent_chrome.protected_tabs', side_effect=lambda b, runtime=None: set() if runtime else {'7'}), \
+            with mock.patch('agent_chrome.held_tabs', return_value={'codex': {'7'}}), \
                  mock.patch('agent_chrome.conf', return_value={}):                         # 看板記著 Codex 的頁、沒有外掛身分可問
                 self.assertIsNone(agent_chrome.quit_if_safe('/x')[0])
+            with mock.patch('agent_chrome.held_tabs', return_value={None: {'8'}}):         # 卡上沒記是哪一家開的:也當成還在等他
+                self.assertIsNone(agent_chrome.quit_if_safe('/x')[0])
             q.assert_not_called()
-            with mock.patch('agent_chrome.protected_tabs', return_value=set()):
+            with mock.patch('agent_chrome.held_tabs', return_value={}):
                 self.assertTrue(agent_chrome.quit_if_safe('/x')[0])
             q.assert_called_once()

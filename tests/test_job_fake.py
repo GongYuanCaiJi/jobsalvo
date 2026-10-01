@@ -1,6 +1,6 @@
 """副本上的假流程(job_fake)要跟真的一樣照「跑幾張」「只跑這張」,填表要留下表單紀錄與交履歷方式。
 不然副本上走介面時,選了 1 張卻整頁都被填掉,新卡也永遠走不到核准。"""
-import json, os, shutil, tempfile, unittest
+import json, os, tempfile, unittest
 import _env  # noqa: F401
 import board_doc as bd
 import demo
@@ -12,12 +12,9 @@ from _env import read_board as _read  # noqa: E402
 
 class _FakeBoard(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='jobfake-')
+        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='jobfake-'))
         self.board = demo.build(os.path.join(self.dir, 'board.html'))
         self.ids = [j['id'] for j in _read(self.board)['data']['jobs']][:4]
-
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
 
     def _fb(self):
         return json.loads(_read(self.board)['fb'])
@@ -69,7 +66,8 @@ class JobFakeMatchesApplyRun(_FakeBoard):
         fb = self._fb()
         self.assertEqual(fr.validate(fb), [])
         self.assertEqual(fr.approval_problem(fb, u, fr.board_status(self.board)), '還沒確認送出')
-        bd.set_fb(lambda f: f[u].__setitem__('approve', {'snap': fr.snapshot(f, u)}), live=self.board)
+        import delivery_state as ds
+        bd.set_fb(lambda f: ds.fire(f, u, 'confirm', approve={'snap': fr.snapshot(f, u)}), live=self.board)
         self.assertIsNone(fr.approval_problem(self._fb(), u, fr.board_status(self.board)))
         job_fake.apply(self.board, self.dir, 0, 'submit', '')
         m = self._fb()[u]

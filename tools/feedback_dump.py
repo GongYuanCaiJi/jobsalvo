@@ -33,7 +33,7 @@ def _cardsum(url):
     """那份缺真實長怎樣(對著真 JD 生成的摘要)。看他的反應「對著什麼樣的缺」才學得到他的邏輯。"""
     f=os.path.join(cf.SUMS,card.card_id_from_url(url)+'.json')
     try: return json.load(open(f,encoding='utf-8'))
-    except Exception: return {}
+    except (OSError,ValueError): return {}   # 這張還沒有摘要(或寫壞了):只給他的反應
 
 def build(live=None, only_ids=None, heading=True):
     with open(live or bd.LIVE, encoding='utf-8') as f:

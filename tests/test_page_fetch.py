@@ -12,7 +12,6 @@ ORIGINAL_GETADDRINFO = socket.getaddrinfo
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 
 
 class ChromeFallbackLimit(unittest.TestCase):
@@ -275,11 +274,7 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertEqual(result.text, 'Dynamic job content')
 
     def test_lever_public_postings_api_precedes_the_job_page(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'lever': self.base + '/api'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://jobs.lever.co/acme/fake-id')
+        result = self._api_fetch('lever', 'https://jobs.lever.co/acme/fake-id', '/api')
 
         self.assertEqual(result.status, 'ok')
         self.assertEqual(result.via, 'lever')
@@ -312,11 +307,7 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertEqual(self.requests, ['/api/acme/fake-id?mode=json'])
 
     def test_104_api_returns_page_text_and_exposure_date_first(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'104': self.base + '/api/104'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://www.104.com.tw/job/ABC1')
+        result = self._api_fetch('104', 'https://www.104.com.tw/job/ABC1')
 
         self.assertEqual(result.via, '104')
         self.assertTrue(result.verified_live)
@@ -326,33 +317,21 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertEqual(self.requests, ['/api/104/ABC1'])
 
     def test_104_official_switch_off_is_closed_without_reading_page(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'104': self.base + '/api/104'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://www.104.com.tw/job/CLOSED')
+        result = self._api_fetch('104', 'https://www.104.com.tw/job/CLOSED')
 
         self.assertEqual(result.status, 'closed')
         self.assertEqual(result.via, '104')
         self.assertEqual(self.requests, ['/api/104/CLOSED'])
 
     def test_104_official_gone_code_is_closed_without_reading_page(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'104': self.base + '/api/104'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://www.104.com.tw/job/GONE')
+        result = self._api_fetch('104', 'https://www.104.com.tw/job/GONE')
 
         self.assertEqual(result.status, 'closed')
         self.assertEqual(result.via, '104')
         self.assertEqual(self.requests, ['/api/104/GONE'])
 
     def test_ashby_last_published_date_comes_from_the_public_posting_api(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'ashby': self.base + '/api/ashby'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://jobs.ashbyhq.com/acme/posting-1')
+        result = self._api_fetch('ashby', 'https://jobs.ashbyhq.com/acme/posting-1')
 
         self.assertEqual(result.via, 'ashby')
         self.assertIn('Investigate product security.', result.text)
@@ -361,11 +340,7 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertEqual(self.requests, ['/api/ashby/acme'])
 
     def test_greenhouse_uses_first_published_not_updated_at(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'greenhouse': self.base + '/api/greenhouse'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://boards.greenhouse.io/acme/jobs/123')
+        result = self._api_fetch('greenhouse', 'https://boards.greenhouse.io/acme/jobs/123')
 
         self.assertEqual(result.via, 'greenhouse')
         self.assertIn('Build platform systems.', result.text)
@@ -374,15 +349,18 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertEqual(self.requests, ['/api/greenhouse/acme/jobs/123?content=true'])
 
     def test_greenhouse_eu_job_board_uses_public_api_first(self):
-        import page_fetch
-
-        with patch.dict(page_fetch.API_ROOTS, {'greenhouse': self.base + '/api/greenhouse'}), \
-             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
-            result = page_fetch.fetch('https://job-boards.eu.greenhouse.io/acme/jobs/123')
+        result = self._api_fetch('greenhouse', 'https://job-boards.eu.greenhouse.io/acme/jobs/123')
 
         self.assertEqual(result.via, 'greenhouse')
         self.assertEqual(result.posted_at, '2026-09-03')
         self.assertEqual(self.requests, ['/api/greenhouse/acme/jobs/123?content=true'])
+
+    def _api_fetch(self, kind, url, root=None):
+        """用本機假的 ATS 官方 API(kind 那一家)抓 url;職缺網域一律當成公開位址。"""
+        import page_fetch
+        with patch.dict(page_fetch.API_ROOTS, {kind: self.base + (root or '/api/' + kind)}), \
+             patch.object(socket, 'getaddrinfo', side_effect=self._public_dns):
+            return page_fetch.fetch(url)
 
     def _public_dns(self, host, port, *args, **kwargs):
         if host in ('jobs.lever.co', 'www.104.com.tw', 'jobs.ashbyhq.com',
@@ -625,6 +603,32 @@ class PostedAgeCache(unittest.TestCase):
             job = board_doc.parse(f.read())['data']['jobs'][0]
         self.assertEqual(job['posted_at'], '2026-09-07')
         self.assertEqual(job['posted_src'], 'Posted on')
+
+
+    def test_a_date_that_is_not_on_the_page_is_not_written_and_is_reported(self):
+        """安檢門(#317):agent 交的日期在程式給它的那幾行裡看不到,這一張不寫、原因寫出 agent 說什麼、實際是什麼。"""
+        import config as cf, page_fetch, posted_age, board_doc, agent_report
+        from types import SimpleNamespace
+        page = page_fetch.PageResult(self.url, 'ok', text='Posted on September 7, 2026. Platform Engineer.',
+                                     via='reader')
+
+        def run_agent(prompt, _log, _home, **kwargs):
+            with open(posted_age.RESULT, 'w', encoding='utf-8') as f:
+                json.dump({'dates': [{'url': self.url, 'posted_at': '2026-08-01', 'source': 'Posted on'}],
+                           'inaccessible': []}, f)
+            return SimpleNamespace(ok=True, message=lambda: 'completed')
+
+        with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
+             patch.object(page_fetch, 'fetch', return_value=page), \
+             patch.object(posted_age.ar, 'run', side_effect=run_agent), \
+             patch.object(agent_report, 'report') as report:
+            self.assertEqual(posted_age.main(['--board', self.board]), 0)
+
+        with open(self.board, encoding='utf-8') as f:
+            job = board_doc.parse(f.read())['data']['jobs'][0]
+        self.assertNotIn('posted_at', job)
+        said = [c.args[1] for c in report.call_args_list if c.kwargs.get('job') == self.url]
+        self.assertTrue(any('刊登日期' in m and '2026-08-01' in m and '2026-09-07' in m for m in said), said)
 
 
 class FetchMany(unittest.TestCase):

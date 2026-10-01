@@ -50,8 +50,13 @@ jobs:
           google-chrome --version
           google-chrome --headless=new --no-sandbox --disable-gpu --print-to-pdf=/tmp/smoke.pdf about:blank
           test -s /tmp/smoke.pdf
-      - name: 單元測試
-        run: uv run --frozen python -m unittest discover -s tests
+      - name: 單元測試(帶分岔覆蓋率:沒測到的分岔列在這次執行的 Summary)
+        # 本機同一組指令(不加 --frozen、不寫 Summary);設定(branch、只算 tools/、子程序也算)在 pyproject.toml 的 [tool.coverage]。
+        # 測試沒過第一行就停,不出報告
+        run: |
+          uv run --frozen coverage run -m unittest discover -s tests
+          uv run --frozen coverage combine
+          uv run --frozen coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
       - name: 看板規矩檢查
         if: steps.changed.outputs.board == 'true'
         env:

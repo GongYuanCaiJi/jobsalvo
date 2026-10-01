@@ -65,11 +65,8 @@ def page_key(entry):
 def fingerprint(path):
     if not os.path.isfile(path):
         return 'MISSING'
-    digest = hashlib.sha256()
     with open(path, 'rb') as source:
-        for chunk in iter(lambda: source.read(65536), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
 def entry_fingerprint(entry):
@@ -211,7 +208,7 @@ def refresh(manifest, check_only=False, board=None, diagnostics=None):
             try:
                 import settings_api
                 manifest[page_key(entry)] = settings_api.pdf_pages(output)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — 讀不了的原因照實寫進這一份的錯誤清單
                 manifest.pop(page_key(entry), None)
                 errors.append(f'{os.path.basename(entry["path"])}:PDF 頁數讀取失敗({str(exc)[:80]})')
                 if diagnostics is not None:

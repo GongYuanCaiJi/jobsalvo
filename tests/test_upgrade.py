@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """升級相容:舊版的設定檔(tests/fixtures/settings-history/,全是假資料)換成新程式也要能用。
 每一份:讀得懂、轉完驗證會過、再轉一次不會變、看板真的能用它起來。"""
-import glob, json, os, shutil, sys, tempfile, unittest
+import glob, json, os, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import config as cf  # noqa: E402
 import settings_api  # noqa: E402
 
@@ -22,8 +21,7 @@ class Upgrade(unittest.TestCase):
             with self.subTest(os.path.basename(path)):
                 with open(path, encoding='utf-8') as f:
                     old = json.load(f)
-                home = tempfile.mkdtemp(prefix='upgrade-')
-                self.addCleanup(shutil.rmtree, home, True)
+                home = self.enterContext(tempfile.TemporaryDirectory(prefix='upgrade-'))
                 new = cf.migrate_settings(old, home=home)
                 self.assertEqual(settings_api._check(new), [], '舊設定轉完驗證不過')
                 self.assertEqual(cf.migrate_settings(new, home=home), new, '轉第二次又變了(轉換不穩)')

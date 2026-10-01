@@ -11,12 +11,11 @@ settings_api —— 看板「⚙ 設定」頁背後的讀寫。使用者只碰�
 
 檔案一律照資料夾裡的相對路徑存,設定裡記的也是相對路徑:整個資料夾搬家也不會壞。
 """
-import os, re, sys, json, copy, subprocess, hashlib
+import os, re, sys, json, copy, subprocess, hashlib, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config as cf
-import pdf_tools as pdf
 import chrome_bin
 
 UPLOAD_DIRS = ('resume/', 'custom/')
@@ -37,12 +36,17 @@ def write_hard_rules(text):
     prefs.save_custom_text(str(text))
 
 
-def _write(p, text):
+def _write(p, data, mode='w'):
+    """先寫旁邊的暫存檔再換名;寫壞了暫存檔不留。mode='wb' 寫二進位。"""
     os.makedirs(os.path.dirname(p) or '.', exist_ok=True)
     tmp = p + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(text)
-    os.replace(tmp, p)
+    try:
+        with open(tmp, mode, encoding=None if 'b' in mode else 'utf-8') as f:
+            f.write(data)
+        os.replace(tmp, p)
+    finally:
+        with contextlib.suppress(OSError):   # 換好名就沒有暫存檔了
+            os.remove(tmp)
 
 
 def _files():
@@ -117,17 +121,10 @@ def create_skill(name, content, kind=''):
     full = safe_rel(rel)
     if not full:
         return None, f'{word}路徑不安全'
-    tmp = full + '.tmp'
+    mark = 'jobsalvo-research-skill' if kind == 'research' else 'jobsalvo-skill'
     try:
-        with open(tmp, 'w', encoding='utf-8') as f:
-            mark = 'jobsalvo-research-skill' if kind == 'research' else 'jobsalvo-skill'
-            f.write(f'<!-- {mark}: {name} -->\n\n{content}\n')
-        os.replace(tmp, full)
+        _write(full, f'<!-- {mark}: {name} -->\n\n{content}\n')
     except OSError as e:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
         return None, f'{word}存檔失敗:{str(e)[:100]}'
     return {'path': rel, 'name': name, 'kind': kind}, ''
 
@@ -203,7 +200,7 @@ def _retire_legacy_builder():
         try:
             import agent_report
             agent_report.report('設定遷移', message, live=cf.LIVE)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — 寫不進看板就把失敗併進回給設定頁的訊息
             message += f' 看板提醒寫入失敗({type(exc).__name__})。'
     return [message]
 
@@ -645,7 +642,7 @@ def save(body):
         return [f'「你的喜好」或「填表做法」沒存成({e.strerror or e}),設定也還沒動;處理好再按一次']
     if s is not None:
         if legacy_profile_cmd:
-            cf.queue_profile_cmd_removal_notice()
+            cf.queue_notice(cf.PROFILE_CMD_REMOVAL_NOTICE)
         try:
             cf.save(_without_untouched_defaults(s, cf.user_settings()))
         except OSError as e:
@@ -694,10 +691,7 @@ def put_file(rel, data):
         return None, '只能上傳到 resume/ 或 custom/,而且要是履歷類的檔(pdf、md、docx…)'
     if len(data) > MAX_UPLOAD:
         return None, '檔案太大(上限 20 MB)'
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full + '.tmp', 'wb') as f:
-        f.write(data)
-    os.replace(full + '.tmp', full)
+    _write(full, data, 'wb')
     return os.path.relpath(full, os.path.realpath(cf.HOME)), ''
 
 
@@ -709,14 +703,9 @@ def delete_file(rel):
     return False
 
 
-def _pypdf_python():
-    return pdf.python()
-
-
 def pdf_pages(full):
     """讀取 PDF 頁數;full 由程式從設定或卡片資料解析,不是網頁傳入的路徑。"""
-    py = _pypdf_python()
-    r = subprocess.run([py, '-c', 'import sys,pypdf;print(len(pypdf.PdfReader(sys.argv[1]).pages))', full],
+    r = subprocess.run([sys.executable, '-c', 'import sys,pypdf;print(len(pypdf.PdfReader(sys.argv[1]).pages))', full],
                        capture_output=True, text=True, timeout=120)
     if r.returncode:
         raise ValueError((r.stderr or 'PDF 無法讀取')[-300:])
@@ -725,8 +714,7 @@ def pdf_pages(full):
 
 def pdf_text(full):
     """抽取 PDF 文字;full 由程式解析,可指向使用者資料夾外的原檔。"""
-    py = _pypdf_python()
-    r = subprocess.run([py, '-c', 'import sys,pypdf;print("\\n".join((p.extract_text() or "") for p in pypdf.PdfReader(sys.argv[1]).pages))', full],
+    r = subprocess.run([sys.executable, '-c', 'import sys,pypdf;print("\\n".join((p.extract_text() or "") for p in pypdf.PdfReader(sys.argv[1]).pages))', full],
                        capture_output=True, text=True, timeout=120)
     if r.returncode:
         raise ValueError((r.stderr or 'PDF 無法讀取')[-300:])
@@ -745,7 +733,7 @@ def text_of(rel):
         return '', '只抽得出 pdf、md、markdown、txt 的文字,其他格式請直接把內容貼進框裡'
     try:
         t = pdf_text(full)
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError, ValueError) as e:   # 讀不了、逾時、pypdf 讀不懂:照實回給設定頁
         return '', f'抽不出文字({str(e)[:80]}),請直接把內容貼進框裡'
     return (t, '') if t else ('', '這份 PDF 抽不出文字(可能是掃描的圖),請直接把內容貼進框裡')
 
@@ -753,23 +741,9 @@ def text_of(rel):
 
 def remember_pasted_resume(text):
     """Keep the user's pasted fallback available to every later agent task."""
-    import tempfile
     text = str(text or '').strip()[:100000]
-    if not text:
-        return
-    os.makedirs(cf.HOME, exist_ok=True)
-    target = os.path.join(cf.HOME, '.resume-paste.md')
-    temp_path = ''
-    try:
-        with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=cf.HOME,
-                                         prefix='.resume-paste-', suffix='.tmp',
-                                         delete=False) as f:
-            temp_path = f.name
-            f.write(text + '\n')
-        os.replace(temp_path, target)
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+    if text:
+        _write(os.path.join(cf.HOME, '.resume-paste.md'), text + '\n')
 
 
 LOGS = {'prep': ('prep_launch.out', 'cut_tailor_finish.out', 'cut_tailor.out'),

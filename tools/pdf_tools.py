@@ -1,30 +1,10 @@
 """Small PDF operations shared by migration and delivery-package code."""
-import importlib
-import subprocess
-import sys
 
-
-def python():
-    """讀 PDF 用的 python:就是現在這個(整個程式跑在 uv 建的 .venv 裡,套件都在)。"""
-    return sys.executable
-
-
-def _pypdf():
-    try:
-        return importlib.import_module('pypdf')
-    except ImportError:
-        interpreter = python()
-        site = subprocess.check_output(
-            [interpreter, '-c', 'import sysconfig; print(sysconfig.get_paths()["purelib"])'], text=True).strip()
-        if site not in sys.path:
-            sys.path.insert(0, site)
-        importlib.invalidate_caches()
-        return importlib.import_module('pypdf')
+import pypdf
 
 
 def merge(paths, destination):
     """Write the pages from each PDF to one PDF, preserving source order."""
-    pypdf = _pypdf()
     writer = pypdf.PdfWriter()
     readers = [pypdf.PdfReader(path, strict=False) for path in paths]
     for reader in readers:
@@ -70,8 +50,6 @@ def _normal(value, pypdf, stack=None):
         return ('bytes', bytes(value))
     if isinstance(value, str):
         return ('text', str(value))
-    if isinstance(value, (int, float, bool)):
-        return (type(value).__name__, str(value))
     return (type(value).__name__, str(value))
 
 
@@ -89,15 +67,13 @@ def same_pages(candidate, parts, page_cache=None):
         return False
     cache = page_cache if page_cache is not None else {}
     try:
-        pypdf = _pypdf()
-
         def signatures(path):
             if path not in cache:
                 try:
                     with open(path, 'rb') as f:
                         reader = pypdf.PdfReader(f, strict=False)
                         cache[path] = tuple(_page_signature(page, pypdf) for page in reader.pages)
-                except Exception:
+                except Exception:  # noqa: BLE001 — pypdf 讀壞檔丟的例外五花八門;讀不了就算「不是同一份」,檔案照舊留著(往不刪那邊錯)
                     cache[path] = None
             return cache[path]
 
@@ -109,5 +85,5 @@ def same_pages(candidate, parts, page_cache=None):
             expected.extend(pages)
         actual = signatures(candidate)
         return bool(expected) and actual is not None and actual == tuple(expected)
-    except Exception:
+    except Exception:  # noqa: BLE001 — 同上:判斷不了就算「不是合併出來的」,檔案照舊留著
         return False

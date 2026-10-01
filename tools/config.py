@@ -138,49 +138,38 @@ def _paths(value):
     return []
 
 
-_MIGRATION_HASH_CACHE = {}
 _PENDING_NOTICES = []
 LEGACY_BUILD_CMD_REMOVAL_NOTICE = (
     '舊版 resume.build_cmd 已停用，已從設定移除；現在由內建流程處理 Markdown 與 PDF。'
 )
+PROFILE_CMD_REMOVAL_NOTICE = '已移除舊版平台履歷指令設定;平台欄位現在由 jobsalvo 通用欄位對照驗證。'
 
 
-def queue_profile_cmd_removal_notice():
-    notice = '已移除舊版平台履歷指令設定;平台欄位現在由 jobsalvo 通用欄位對照驗證。'
+def queue_notice(notice):
     if notice not in _PENDING_NOTICES:
         _PENDING_NOTICES.append(notice)
 
 
-def queue_build_cmd_removal_notice():
-    if LEGACY_BUILD_CMD_REMOVAL_NOTICE not in _PENDING_NOTICES:
-        _PENDING_NOTICES.append(LEGACY_BUILD_CMD_REMOVAL_NOTICE)
+def _abs(p, home):
+    """設定裡的路徑 → 絕對路徑(~ 展開,相對的接在 home 後面)。"""
+    p = os.path.expanduser(p or '')
+    return p if os.path.isabs(p) else os.path.join(home, p)
+
+
+def _dump(f, settings):
+    """整份設定寫回 f:先寫暫存檔再換名。"""
+    tmp = f + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(settings, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, f)
 
 
 def _file_digest(path, home):
-    full_path = os.path.expanduser(path)
-    if not os.path.isabs(full_path):
-        full_path = os.path.join(home, full_path)
     try:
-        stat = os.stat(full_path)
+        with open(_abs(path, home), 'rb') as source:
+            return hashlib.file_digest(source, 'sha256').hexdigest()
     except OSError:
         return ''
-    cache_key = (full_path, stat.st_dev, stat.st_ino, stat.st_size,
-                 stat.st_mtime_ns, stat.st_ctime_ns)
-    cached = _MIGRATION_HASH_CACHE.get(cache_key)
-    if cached:
-        return cached
-    digest = hashlib.sha256()
-    try:
-        with open(full_path, 'rb') as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b''):
-                digest.update(chunk)
-    except OSError:
-        return ''
-    result = digest.hexdigest()
-    if len(_MIGRATION_HASH_CACHE) >= 1024:
-        _MIGRATION_HASH_CACHE.clear()
-    _MIGRATION_HASH_CACHE[cache_key] = result
-    return result
 
 
 def _legacy_merged_name(path):
@@ -286,9 +275,6 @@ def migrate_settings(settings, home=None):
                 master = files.get(lang)
                 if not master or not master.lower().endswith('.pdf'):
                     continue
-                master_path = os.path.expanduser(master)
-                if not os.path.isabs(master_path):
-                    master_path = os.path.join(home, master_path)
                 for candidate in paths:
                     if candidate in legacy_merged_paths:
                         merged_paths.add(candidate)
@@ -298,20 +284,12 @@ def migrate_settings(settings, home=None):
                     others = [p for p in paths if p != candidate]
                     if not others:
                         continue
-                    part_paths = []
-                    for part in [master] + others:
-                        part_path = os.path.expanduser(part)
-                        if not os.path.isabs(part_path):
-                            part_path = os.path.join(home, part_path)
-                        part_paths.append(part_path)
-                    candidate_path = os.path.expanduser(candidate)
-                    if not os.path.isabs(candidate_path):
-                        candidate_path = os.path.join(home, candidate_path)
+                    part_paths = [_abs(part, home) for part in [master] + others]
+                    candidate_path = _abs(candidate, home)
                     if all(os.path.isfile(p) for p in [candidate_path] + part_paths) and \
                             pdf.same_pages(candidate_path, part_paths, page_cache):
                         merged_paths.add(candidate)
-        except Exception:  # noqa: S110
-            # If a PDF cannot be inspected, keep it as an attachment rather than risk data loss.
+        except Exception:  # noqa: BLE001, S110 — PDF 讀不了就照舊當附件留著,不冒險丟掉他的檔(往不刪那邊錯)
             pass
         if merged_paths:
             legacy_merged_paths.update(merged_paths)
@@ -381,14 +359,15 @@ def user_settings(home=None):
         return {}
     settings, migrated = _migrate_agents(settings)
     if migrated or legacy_profile_cmd or legacy_build_cmd:
-        tmp = f + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            json.dump(settings, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, f)
+        # 舊格式寫回成新格式回不了頭:走 folder_history.convert 先留退回點(存一版或備份設定檔),
+        # 沒有退回點就不寫回,這一次照樣用記憶體裡轉好的跑。只有真的要轉才進來,平常讀設定不碰 git。
+        import folder_history
+
+        folder_history.convert(home, [f], '舊設定格式轉換', lambda: _dump(f, settings))
     if legacy_profile_cmd and os.path.realpath(home) == os.path.realpath(HOME):
-        queue_profile_cmd_removal_notice()
+        queue_notice(PROFILE_CMD_REMOVAL_NOTICE)
     if legacy_build_cmd and os.path.realpath(home) == os.path.realpath(HOME):
-        queue_build_cmd_removal_notice()
+        queue_notice(LEGACY_BUILD_CMD_REMOVAL_NOTICE)
     return settings
 
 
@@ -401,11 +380,13 @@ def _migrate_agents(settings):
     if not any(key in agent for key in legacy):
         return settings, False
 
+    import chrome_door
     runtime = agent.get('runtime') or 'codex'
     effort = agent.get('effort') or 'max'
     agents = [{
         'id': 'primary', 'runtime': runtime, 'model': agent.get('model') or '',
-        'effort': effort, 'speed': 'standard', 'browser': runtime == 'codex',
+        # 能開 agent 的 Chrome 的那幾家照實勾(以前只勾 Codex,舊的 Claude Code 主 agent 遷移後就用不了 Chrome)
+        'effort': effort, 'speed': 'standard', 'browser': runtime in chrome_door.DOORS,
     }]
     if 'alt_runtime' in agent or 'alt_model' in agent:
         agents.append({
@@ -452,17 +433,13 @@ def save(settings):
     if settings_problem(HOME):
         import shutil, time
         shutil.copy2(f, f + '.broken-' + time.strftime('%Y%m%d-%H%M%S'))
-    tmp = f + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as fh:
-        json.dump(migrate_settings(settings), fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, f)
+    _dump(f, migrate_settings(settings))
     reload()
 
 
 def path(p):
     """設定裡的路徑 → 絕對路徑(~ 展開,相對的接在 home 後面)。"""
-    p = os.path.expanduser(p or '')
-    return p if os.path.isabs(p) else os.path.join(HOME, p)
+    return _abs(p, HOME)
 
 
 def _apply(cfg):
@@ -472,7 +449,6 @@ def _apply(cfg):
     g['HOME'] = cfg['home']
     g['LIVE'] = path(cfg['board']['file'])
     g['SUMS'] = path(cfg['paths']['summaries'])
-    g['COMPANY_CACHE'] = path(cfg['paths']['company_cache'])
     g['RESEARCH'] = path(cfg['paths']['research'])
     g['PREFS'] = path(cfg['paths']['prefs'])
     g['PREFERENCE_NOTE'] = path(cfg['paths']['preference_note'])
@@ -497,7 +473,7 @@ def _apply(cfg):
             import agent_report
             for notice in _PENDING_NOTICES:
                 agent_report.report('設定', notice, need='無需本人處理', live=g['LIVE'])
-        except Exception:
+        except Exception:  # noqa: BLE001 — 寫不進看板就先留著這幾則,下一次讀設定再寫(不清掉)
             return
         _PENDING_NOTICES.clear()
 

@@ -20,7 +20,7 @@ apply_accept —— 代投整條流程的驗收。真的派 agent、真的在 ag
 驗「照母稿填」要知道母稿上的事實:設定的 accept.facts(name/email/phone/links,各一個清單);
 沒寫就跳過那幾條。
 """
-import os, sys, re, json, time, shutil, signal, hashlib, argparse, datetime, threading, subprocess
+import os, sys, re, json, time, signal, hashlib, argparse, datetime, threading, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -28,8 +28,10 @@ import board_doc as bd          # noqa: E402
 import config as cf             # noqa: E402
 import card                     # noqa: E402
 import form_record as fr        # noqa: E402
+import delivery_state as ds     # noqa: E402
 import ship                     # noqa: E402
 from apply_fakeform import FakeForm, FIELDS   # noqa: E402
+from apply_profile_accept import make_pdf     # noqa: E402
 
 # 假職缺用兩份 PDF 組成可投遞夾,只會上傳到本機假表單。
 MERGED = ship.MERGED_FILE
@@ -37,23 +39,9 @@ FACTS = (cf.C.get('accept') or {}).get('facts') or {}
 
 
 def tiny_pdf(path, text='jobsalvo acceptance test'):
-    """一頁、一行字的合法 PDF(不靠任何套件)。"""
-    body = f'BT /F1 18 Tf 72 720 Td ({text}) Tj ET'.encode()
-    objs = [b'<< /Type /Catalog /Pages 2 0 R >>', b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-            b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R '
-            b'/Resources << /Font << /F1 5 0 R >> >> >>',
-            b'<< /Length %d >>\nstream\n' % len(body) + body + b'\nendstream',
-            b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>']
-    out, offs = bytearray(b'%PDF-1.4\n'), []
-    for i, o in enumerate(objs, 1):
-        offs.append(len(out))
-        out += b'%d 0 obj\n' % i + o + b'\nendobj\n'
-    x = len(out)
-    out += b'xref\n0 %d\n0000000000 65535 f \n' % (len(objs) + 1)
-    out += b''.join(b'%010d 00000 n \n' % o for o in offs)
-    out += b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n' % (len(objs) + 1, x)
+    """一頁、一行字的合法 PDF(不靠任何套件;跟平台履歷驗收同一份做法)。"""
     with open(path, 'wb') as f:
-        f.write(out)
+        f.write(make_pdf(text))
 WHY_V = ('I want to do risk work where finding anomalies directly protects users, and this role pairs that with '
          'SQL-driven investigation. (acceptance-test answer)')
 WHY_ZH = '我想做能直接保護使用者的風險工作,這個職位把它和用 SQL 查案結合在一起。(驗收用的測試答案)'
@@ -93,7 +81,7 @@ class Screen(threading.Thread):
         try:
             w = json.loads(subprocess.run(['osascript', '-l', 'JavaScript', '-e', JXA_WINDOWS],
                                           capture_output=True, text=True, timeout=5).stdout or '[]')
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError):   # 問不到視窗清單:這一次取樣當成沒有
             w = []
         try:
             asn = subprocess.run(['lsappinfo', 'front'], capture_output=True, text=True, timeout=3).stdout.strip()
@@ -101,7 +89,7 @@ class Screen(threading.Thread):
                                 capture_output=True, text=True, timeout=3).stdout
             front = (re.search(r'"LSDisplayName"="(.*?)"', nm) or [None, ''])[1]
             fpid = int((re.search(r'"pid"=(\d+)', nm) or [None, 0])[1])
-        except Exception:
+        except (OSError, subprocess.SubprocessError, ValueError):   # 問不到最前面的 app:這一次取樣當成沒有
             front, fpid = '', 0
         return front, [tuple(x) for x in w], fpid
 
@@ -168,9 +156,8 @@ class Accept:
         self.srv = FakeForm().start()
         self.url = self.srv.url('accept')
         self.board = os.path.join(self.out, 'board-accept.html')
-        shutil.copy2(bd.LIVE, self.board)
-        with open(bd.LIVE, encoding='utf-8') as f:
-            live_fb = json.loads(bd.parse(f.read())['fb'])
+        bd.copy_board(bd.LIVE, self.board)
+        live_fb = json.loads(bd.load(bd.LIVE)['fb'])
         self.live_ans = len(live_fb.get('__ans__', []))
         today = datetime.date.today().isoformat()
 
@@ -207,8 +194,7 @@ class Accept:
         self.say(f'假職缺:{self.url}\n看板副本:{self.board}')
 
     def fb(self):
-        with open(self.board, encoding='utf-8') as f:
-            return json.loads(bd.parse(f.read())['fb'])
+        return json.loads(bd.load(self.board)['fb'])
 
     def run(self, stage, *extra):
         t0 = time.time()
@@ -232,9 +218,9 @@ class Accept:
         import apply_tab
         err = ''
         try:
-            session, tab, runtime = apply_tab._lookup(self.url, self.board)
-            apply_tab.shot(session, tab, os.path.join(self.out, name + '.jpg'), runtime=runtime)
-        except Exception as e:
+            session, tab, door = apply_tab._lookup(self.url, self.board)
+            door.shot(session, tab, os.path.join(self.out, name + '.jpg'))
+        except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;截不到照實印進驗收紀錄
             err = str(e)[:120]
             self.say(f'  (截不到 {name}:{err})')
         if step is not None:
@@ -269,7 +255,7 @@ class Accept:
         fb = self.fb()
         a = (fb.get(self.url) or {}).get('apply') or {}
         self.sid = a.get('session')
-        self.ok(1, 'apply_run 判定填好了(包含程式自己讀那一頁對答案庫)', a.get('ok'), a.get('issues'))
+        self.ok(1, 'apply_run 判定填好了(包含程式自己讀那一頁對答案庫)', ds.state(fb.get(self.url)) == 'parked', a.get('issues'))
         self.ok(1, '看板記下了那段對話和分頁', self.sid and a.get('tab_id'), f"session={self.sid} tab={a.get('tab_id')}")
         loads = [b for b in self.srv.beacons(t0) if b.get('ev') == 'load']
         self.inst = loads[-1]['inst'] if loads else None
@@ -338,7 +324,7 @@ class Accept:
         a = (fb.get(self.url) or {}).get('apply') or {}
         self.ok(3, '叫回的是同一段對話', self.session_of('fix') == self.sid and a.get('session') == self.sid,
                 f"fix.log {self.session_of('fix')} / 看板 {a.get('session')}")
-        self.ok(3, 'apply_run 判定改好了', a.get('stage') == 'fix' and a.get('ok'), a.get('issues'))
+        self.ok(3, 'apply_run 判定改好了', a.get('stage') == 'fix' and ds.state(fb.get(self.url)) == 'parked', a.get('issues'))
         self.same_page(3, t0)
         self.no_submit_since(3, t0)
         v = (self.page() or {}).get('vals') or {}
@@ -361,8 +347,8 @@ class Accept:
     def step_submit(self):
         self.say('\n5 他核准 → 同一段對話在同一頁送出')
 
-        def approve(fb):
-            fb[self.url]['approve'] = {'at': datetime.datetime.now().isoformat(timespec='seconds'), 'snap': fr.snapshot(fb, self.url)}
+        def approve(fb):                      # 看板的「✅ 確認送出」:照狀態表送確認事件
+            ds.fire(fb, self.url, 'confirm', approve=fr.approval(fb, self.url, datetime.datetime.now().isoformat(timespec='seconds')))
         bd.set_fb(approve, live=self.board, by='apply_accept')
         fb = self.fb()
         st = fr.board_status(self.board)
@@ -404,8 +390,7 @@ class Accept:
         fronts = sorted({fp for _, (_, _, fp, agent, _) in self.screen.snaps if agent and fp == agent})
         self.ok('全程', '前台 app 從來沒變成 agent 的 Chrome', not fronts,
                 f'開始時 {self.base_front};agent 的 Chrome 當過前台 {len(fronts)} 次')
-        with open(bd.LIVE, encoding='utf-8') as f:
-            live = json.loads(bd.parse(f.read())['fb'])
+        live = json.loads(bd.load(bd.LIVE)['fb'])
         self.ok('全程', '現行看板沒被碰到', self.url not in live and len(live.get('__ans__', [])) == self.live_ans,
                 f"答案庫 {self.live_ans} → {len(live.get('__ans__', []))} 條")
         inbox = [it for it in self.fb().get('__inbox__', []) if it.get('job') == self.url]

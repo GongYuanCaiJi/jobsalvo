@@ -4,9 +4,9 @@ import sys
 import unittest
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
-from apply_fakeform import FakeForm
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _env  # noqa: E402  測試跑在暫存資料夾
+from apply_fakeform import FakeForm  # noqa: E402
 
 
 def _file_inputs(page):
@@ -16,19 +16,9 @@ def _file_inputs(page):
 
 
 def _submit(server, job, files):
-    boundary = '----jobsalvo-test-boundary'
-    parts = []
-    for field, name, content in files:
-        parts.extend((
-            f'--{boundary}\r\n'.encode(),
-            f'Content-Disposition: form-data; name="{field}"; filename="{name}"\r\n'.encode(),
-            b'Content-Type: application/pdf\r\n\r\n', content, b'\r\n',
-        ))
-    parts.append(f'--{boundary}--\r\n'.encode())
+    body, content_type = _env.multipart(files=files)
     endpoint = server.url(job).replace('/apply?', '/submit?')
-    request = urllib.request.Request(endpoint, data=b''.join(parts), method='POST', headers={
-        'Content-Type': f'multipart/form-data; boundary={boundary}',
-    })
+    request = urllib.request.Request(endpoint, data=body, method='POST', headers={'Content-Type': content_type})
     with urllib.request.urlopen(request) as response:
         response.read()
     return server.submits()[-1]['files']

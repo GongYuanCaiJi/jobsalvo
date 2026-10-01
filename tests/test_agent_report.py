@@ -10,7 +10,6 @@ import os, sys, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import agent_report as ar      # noqa: E402
 import agent_run               # noqa: E402
 

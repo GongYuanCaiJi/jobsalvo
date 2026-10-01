@@ -17,11 +17,15 @@ prompt 只講目標、唯一真相和規矩,平台上怎麼點由 agent 自己�
           對話的 id 記在看板(apply.session)。
   fix     codex exec resume 叫回那一段對話,在原本那一頁上改:使用者在答案庫改過的答案(欄位標 refill),
           或他寫給 agent 的話。改完重記表單、重截圖,又回到等他核准。
-  submit  只對核准過、核准之後答案沒再變的卡。叫回同一段對話,對過核准快照、在同一頁送出、截確認頁。
+  submit  只對核准過、核准之後答案沒再變的卡。程式先自己讀那一頁跟驗收時核對過的樣子比(變了就不送),
+          再叫回同一段對話在同一頁送出;按完送出程式自己讀那一頁判斷送出沒有、截確認頁。
           送成功了這張就結束,那段對話不會再被叫回來。
 對話不見了(沒記到 id、resume 失敗)就不改也不送:使用者核准的是那一頁,換一段新的對話找不回來,要重新填一次給他看。
 
 程式守的閘門(不靠 agent 自律):
+  · agent 交回來的交件單(fill.json、pre-submit.json、submit.json)只經安檢門(gate.py)進來:每一格跟程式自己讀的頁面、
+    紀錄、檔案比,對不上就停並寫出哪一格、agent 說什麼、實際是什麼;沒登記核對方式的格子程式不用。
+  · 他按確認送出前、程式送出前,程式自己讀那一頁,跟驗收時核對過的樣子比;變了就停,寫出哪一格從什麼變成什麼和下一步。
   · submit 只對核准有效的卡啟動(form_record.approval_problem;看板的按鈕、伺服器都用同一套規則)。
   · 填表、修改這兩輪不送出:規矩寫明送出不在這一輪的授權裡,Codex 自己的規則也要求求職送出前一定要當下確認。
     頁面上裝不了擋送出的程式:Codex 外掛不准改頁面(window 是凍結的、沒有 CDP),
@@ -34,7 +38,7 @@ prompt 只講目標、唯一真相和規矩,平台上怎麼點由 agent 自己�
   uv run python tools/apply_run.py --stage fill|fix|submit [--url U] [--note "要改什麼"] [--board B] [--dry]
   (--board 給副本就只動副本;--dry 只印 prompt、不派 agent)
 """
-import os, sys, re, json, time, argparse, datetime, subprocess, tempfile, shutil, shlex
+import os, sys, json, time, argparse, datetime, tempfile, shutil, shlex, contextlib, copy
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -46,6 +50,8 @@ import agent_report           # noqa: E402
 import config as cf           # noqa: E402
 import ship                   # noqa: E402
 import card                   # noqa: E402
+import delivery_state as ds   # noqa: E402
+import evidence               # noqa: E402
 
 # 可投遞夾。驗收(apply_accept)用環境變數換成暫存夾,放假職缺的檔,不碰真的可投遞夾。
 SHIP_ROOT = os.environ.get('APPLY_SHIP_ROOT') or cf.SHIP_DIR
@@ -59,6 +65,8 @@ WRAPUP = ('時間到了。不要再開新分頁、不要再做別的步驟,也�
 STAGES = ('fill', 'fix', 'submit')
 # 送出沒確認成功的回報開頭:要他去信箱、平台確認過才收,重填、改好了都不算
 SUBMIT_UNSURE = '送出沒確認成功'
+# 幫你填表這一段的回報來源:程式自己回報、agent 回報都記這個(agent_run.run 的 report_from),重填成功時照它收
+REPORT_FROM = agent_report.FROM_APPLY   # 這個流程的回報來源(存在資料裡的代號)
 UNFINISHED = {'fill': '這一輪填表沒跑完(被停止或中途停掉),頁面可能只填到一半,要重填',
               'fix': '這一輪修改沒跑完(被停止或中途停掉),頁面可能只改到一半,再叫它改一次或重填'}
 
@@ -72,8 +80,7 @@ def now():
 
 
 def load(board):
-    with open(board, encoding='utf-8') as f:
-        p = bd.parse(f.read())
+    p = bd.load(board)      # 看板檔被繞過狀態表改過就停(bd.Tampered),不照改過的內容派 agent
     return {j['id']: j for j in p['data']['jobs']}, json.loads(p['fb'])
 
 
@@ -98,18 +105,14 @@ def eligible(jobs, fb, stage, url=None, status=None):
     for u, m in fb.items():
         if not isinstance(m, dict) or m.get('app') != 'ship' or m.get('rm') or (url and u != url) or u not in jobs:
             continue                  # 移到「🗑 已移除」的不填也不送(前端的張數本來就不算它)
-        if ((m.get('form') or {}).get('lock')):
-            continue
-        prob = fr.approval_problem(fb, u, status)
         a = m.get('apply') or {}
-        if stage == 'submit' and prob is None:
+        if stage == 'submit' and fr.approval_problem(fb, u, status) is None:
             out.append(u)
-        elif stage == 'fix' and a.get('session') and (url or to_translate(fb, u) or any(x.get('refill') for x in (m.get('form') or {}).get('f', []))):
+        elif stage == 'fix' and ds.allowed(m, 'fix_start') and a.get('session') and (
+                url or to_translate(fb, u) or any(x.get('refill') for x in (m.get('form') or {}).get('f', []))):
             out.append(u)
-        elif stage == 'fill' and prob is not None:
-            if not url and a.get('stage') in ('fill', 'fix') and a.get('ok'):
-                continue              # 上一輪已經填好、等他核准的不重填(要重填就指定 --url)
-            out.append(u)
+        elif stage == 'fill' and ds.allowed(m, 'fill_start'):
+            out.append(u)             # 停著等你、你已確認的不重填(狀態表不准);卡住的要他按才重填(指定 --url)
     return out
 
 
@@ -152,7 +155,7 @@ FILL = """你是代投 agent。這一輪只做「填好、不送出」,送出要
 職缺:{title}
 職缺頁:{url}
 這張的可投遞夾:{ship}(ship.json 的 files 是個別檔, merged 是程式產的合併版)
-這張之前記過的表單(答案庫的 k 指向哪一條):{prior}
+這張以前用過的常用答案(值是常用答案現在的值;k 指向常用答案那一條):{prior}
 
 【共用答案】(使用者確認過、每張表單都一樣的答案,程式從答案庫抄的):
 {shared}
@@ -188,14 +191,14 @@ FILL = """你是代投 agent。這一輪只做「填好、不送出」,送出要
    有錯它會說哪一欄不對,照訊息改 fill.json 再跑一次。
    fields 每一欄都有 "q"(表單上的題目)和 "value"(頁面上現在的值,照抄全文,長答案也整段照抄,不要寫成說明或字數),再照來源加:
      履歷直接對上的  "src": "rz"
-     答案庫現成的    "src": "bank", "k": 那條的 k(上面「之前記過的表單」有 k 和原文)
+     答案庫現成的    "src": "bank", "k": 那條的 k(上面「以前用過的常用答案」有 k 和原文)
      刻意不填的      "src": "skip", "why": 為什麼
      新答案          "src": "bank", "zh": 中文(英文答案必附), "why": 依據,
                      "kind": "txt"(短文)/"op"(意見)/"pick"(選項)/"val"(數字日期)/"ck"(勾選), "pj": 1(這缺專用) 或 0, "pjw": 理由,
                      "bank_q": 這題的通用問法(選填;表單問法很特別時給)
     {{"url": ..., "platform": ..., "tab_id": "那個分頁的 id", "tab_url": "那個分頁現在的網址", "handoff": true,
     "posting": {{"title": "頁面上的職稱", "company": "頁面上的公司", "same_job": true/false}},
-    "profile": {{"needed": true/false, "updated": ["改了哪幾段"], "url": "看得到全文的那一頁(程式不知道在哪時才要)", "edit": "編輯頁", "application_history_url": "可讀的應徵紀錄頁(有就填)", "equivalents": [{{"master": "程式列出的那一格原文", "platform": "頁面上實際顯示的字", "why": "..."}}], "note": "..."}},
+    "profile": {{"needed": true/false, "updated": ["改了哪幾段"], "url": "看得到全文的那一頁(程式不知道在哪時才要)", "edit": "編輯頁", "name": "平台上這份的名稱(程式要你寫時才要)", "application_history_url": "可讀的應徵紀錄頁(有就填)", "equivalents": [{{"master": "程式列出的那一格原文", "platform": "頁面上實際顯示的字", "why": "..."}}], "note": "..."}},
     "uploaded": ["只有申請表實際收到的檔名;平台履歷管理頁的附件只寫在 profile_attachments"], "uploaded_files": [{{"name": "申請表上傳檔名", "path": "下載檔完整路徑"}}], "upload_readback": "downloaded 或 unavailable(平台讀不回上傳檔時)", "uploaded_from": [{{"name": "申請表上顯示的檔名", "path": "交給 setFiles 的完整路徑(讀不回時才填)"}}], "fields": [{{"q": "表單上的題目", "value": "頁面上現在的值", "src": "rz/bank/skip", "k": "答案庫的 k(有才給)"}}],
     "blank_for_him": [], "problems": ["沒填完、卡住的地方(沒有就空陣列)"],
     "notes": ["其他觀察,不影響填表"],
@@ -312,18 +315,17 @@ SUBMIT = """使用者在 {approve_at} 在看板上按了「✅ 核准送出」:�
 職缺:{title}
 
 步驟:
-1. 回到你留著的那個分頁(分頁 id {tab_id},網址 {tab_url})。不要重填、不要開新分頁、不要重新載入:
+1. 回到你留著的那個分頁(分頁 id {tab_id},網址 {tab_url})。不要重填、不要開新分頁、不要重新載入、不要改任何一格:
    他核准的是他親眼看過的那一頁。分頁找不到了:不要送,寫進 problems 停下。
-2. 讀一次頁面上每一欄現在的值,跟核准的答案逐題對。欄位空了、或有任何一題不同:不要送,寫進 problems 停下。
-   外掛讀回頁面時有兩種讀不到,不算空:上傳欄的 input.files / FormData 讀不到(會是 0 個檔),
-   要讀 input.value(選了檔會是「C:\\fakepath\\檔名」);type=email / tel / password 一律讀成空的,看截圖對。
-3. 一樣才送:按送出,等頁面出現成功的證據(確認頁網址,或「Application submitted」「Thank you」「已送出」「應徵成功」這類字)。
+2. 程式剛自己讀過這一頁、跟他確認時的樣子逐格比過了,一樣才叫你來送;你不用再逐題比對。
+3. 按送出,等頁面出現成功的證據(確認頁網址,或{sent_words}這類字)。
    Greenhouse 成功時網址會變成 .../confirmation;停在「Page not found」或還在原本的職缺頁,就是沒送成。
 4. 寫 {out}/submit.json:
    {{"submitted": true/false, "clicked": 有沒有按下送出, "confirm_url": "...", "confirm_text": "頁面上成功的那句話", "problems": [...]}}
 5. 不管成功與否,都對那個分頁呼叫 markHandoff():程式會自己從那一頁截圖存證(外掛不准你寫圖檔),
    存完證據、確認送成功後由程式把分頁關掉;沒送成功就留著等使用者處理。
-沒看到成功的頁面就算沒送出,照實寫 false。最後一行印 @@DONE@@。"""
+沒看到成功的頁面就算沒送出,照實寫 false;跳出驗證碼、真人驗證就停下,照實寫進 problems,不要自己解。
+程式會自己讀按完送出之後那一頁,判斷到底送出沒有。最後一行印 @@DONE@@。"""
 
 
 def to_translate(fb, url):
@@ -339,32 +341,35 @@ TRANSLATE = """要重翻的答案(使用者在看板上改了{read},{other}還�
 每一條:照{read}翻成表單那一格的語言(意思照{read},不要自己加內容),填進表單那一格,再把翻好的記回答案庫:
    python3 - <<'PY'
    import sys; sys.path.insert(0,{tools!r}); import form_record as fr
-   fr.translate('<k>', en='<你翻的英文>', live={board!r})
+   fr.translate('<k>', en='<你翻的英文>')
    PY
 """
 
 
-def translate_block(fb, url, board):
+def translate_block(fb, url):
     tr = to_translate(fb, url)
     if not tr:
         return ''
     read, other = fr.lang_words()
-    return TRANSLATE.format(items=json.dumps(tr, ensure_ascii=False, indent=1), tools=HERE, board=board,
+    return TRANSLATE.format(items=json.dumps(tr, ensure_ascii=False, indent=1), tools=HERE,
                             read=read, other=other) + '\n'
 
 
+# 答案作廢、改由 agent 重新代填的題目(form_record.redo:他在看板上清掉,或它過時了)
+REDO = '之前的答案作廢了:照規矩重新代填,fields 這一題當新答案寫(不要給 k)'
+
+
 def changed_fields(fb, url):
-    """答案改過、網頁上還是舊字的欄位(refill):題目 → 答案庫現在的值。"""
+    """答案改過、網頁上還是舊字的欄位(refill):題目 → 答案庫現在的值;答案作廢的 → 要它重新代填。"""
     bank = {e.get('k'): e for e in fb.get('__ans__', [])}
     out = {}
     for x in ((fb.get(url) or {}).get('form') or {}).get('f', []):
         if x.get('refill'):
             e = bank.get(x.get('k')) or {}
-            out[x.get('q') or ''] = {'v': e.get('v') or '', 'zh': e.get('zh') or ''}
+            out[x.get('q') or ''] = {'redo': REDO} if e.get('redo') else {'v': e.get('v') or '', 'zh': e.get('zh') or ''}
     return out
 
 
-PROFILE_NONE = '這次不使用平台履歷,程式略過平台履歷文字比對;直接上傳仍會核對申請表實際收到的檔案。'
 # 平台用自己的格式存的格子(下拉選單、日期、自己的用詞)字面永遠比不過:agent 在填表那一輪(平台履歷頁本來就開著)
 # 順手回報「母稿這一格 ＝ 頁面上這幾個字」,程式驗過才記下,以後照記下的說法比。
 # 以前是填完後另開一輪建「欄位對照」:打開平台編輯頁每一個視窗、列出每一格(104 一次 13 分鐘),
@@ -381,50 +386,48 @@ EQUIVALENTS_RULE = (
 )
 
 
-def profile_step(url, lang, var, master, profile=None, custom=False, delivery=None):
-    """只在 agent 回報實際使用平台履歷時提供文字比對指引。"""
+def profile_step(url, decision, master, profile=None):
+    """第 0 步:這張卡用哪一份平台履歷、固定版還是客製版、哪個語言,程式照這張卡現在的狀態寫明(decision:profile_sync.decided),
+    agent 照做,不用選也不用回報(#313)。profile:程式剛讀回固定版跟原始履歷比的結果 (那一份, 差異, 讀不到的原因)。"""
     import profile_sync as ps
-    if custom:
+    plat, lang, var = decision.get('platform'), decision.get('lang'), decision.get('variant')
+    which = f'{ps.LANG_WORDS.get(lang, lang)}({lang})「{cf.resume_name(var) or var}」那一份'
+    if decision.get('profile_kind') == 'custom':
         return (
-            '這張卡有已收下的客製檔。先看實際申請表:能直接上傳就用這張卡的檔;'
+            f'這張卡有已收下的客製檔,用{which}的客製版(程式照這張卡決定的,不用你選)。先看實際申請表:能直接上傳就用這張卡的檔;'
             '不能才另外開一份新的客製平台履歷,放這張卡的檔並在投遞時選它。'
             '固定平台履歷只能讀,不可以修改或放客製檔。回報 profile.url 時只填固定平台履歷網址;'
             '新開那份網址只放在 delivery.profile_url。若固定版找不到,或平台格子滿了需要刪檔才能繼續,'
             '停止並回報,不要自行處理。'
         )
-    method = (delivery or {}).get('method')
-    if method in ('direct_upload', 'no_profile'):
-        return PROFILE_NONE
-    if method != 'platform_profile':
-        return (
-            '本輪尚未回報投遞方式。依實際申請頁選擇 direct_upload、no_profile 或 platform_profile,'
-            '並照實回報 delivery。程式只在 method=platform_profile 時比平台履歷文字;'
-            'direct_upload 和 no_profile 會跳過平台履歷文字比對。'
-        )
-    plat = ps.profile_key(url)
-    if not plat or not lang or not var:
-        return '已回報使用平台履歷,但程式缺少申請頁或履歷版本資料,無法比對文字。'
+    fixed = decision.get('fixed_url')
+    # 認得出編號的平台(104)程式自己從申請頁的連結讀得到選的是哪一份,不用 agent 抄名稱
+    name_ask = ('' if decision.get('name') or ps.ID_PARAMS.get(plat) else
+                '這份在平台上叫什麼名字(申請頁選平台履歷時顯示的字),照抄寫進輸出的 profile.name;'
+                '程式會在那一份的頁面上確認真的是這個名字才記下,之後自己讀申請頁核對選對了沒有。')
+    if not fixed:
+        if not ps.platform_of(url):
+            return (f'這個網站程式沒有登記平台履歷。申請表能直接上傳檔就照最後面的上傳規則上傳;'
+                    f'要選平台上存好的履歷時,選{which}(固定版),把它看得到全文的網址寫進 profile.url、編輯頁寫進 profile.edit。'
+                    + name_ask)
+        return (f'這個平台({plat})要在平台上存一份履歷、投遞時選那一份:這張用{which},固定版。程式還不知道它在哪。'
+                f'打開平台上那一份,逐段跟原始履歷 {master} 比,不一致就改到一致並存檔。把「看得到全文的那一頁」網址寫進輸出的 '
+                'profile.url、編輯頁寫進 profile.edit,程式下次起會自己讀回來比。' + name_ask + EQUIVALENTS_RULE)
+    head = (f'這張用 {plat} 上{which}的平台履歷,固定版:{fixed}'
+            + (f'(平台上叫「{decision["name"]}」)' if decision.get('name') else '')
+            + '。申請頁要選平台履歷時就選這一份,不要選別份,也不要照以前的紀錄選;程式填完後會自己讀申請頁核對選的是哪一份。'
+            + name_ask)
     if profile is None:
-        profile_url = str((delivery or {}).get('profile_url') or '').strip()
-        if profile_url:
-            return (
-                f'這次實際使用的平台履歷是 {profile_url};程式會在填表後讀回來比對母稿 {master}。'
-                '若這份固定履歷還沒有登記,回報 profile.url 和 profile.edit,讓程式記下位置。' + EQUIVALENTS_RULE
-            )
-        return '已回報使用平台履歷,但沒有網址,程式無法讀回來比對文字。'
+        return head + f'程式會在填表後讀回這一份比對原始履歷 {master}。' + EQUIVALENTS_RULE
     w, ds, prob = profile
-    if not w:
-        return (f'這個平台({plat})要在平台上存一份履歷、投遞時選那一份,程式還不知道 {lang}/{var} 那一份在哪。'
-                f'打開平台上那一份,逐段跟母稿 {master} 比,不一致就改到一致並存檔。把「看得到全文的那一頁」網址寫進輸出的 '
-                'profile.url、編輯頁寫進 profile.edit,程式下次起會自己讀回來比。' + EQUIVALENTS_RULE)
     if prob:
-        return (f'程式想讀回平台上那一份({w["read"]})但{prob}。你打開 {w["edit"]} 逐段跟母稿 {master} 比,'
-                '不一致就改並存檔。' + EQUIVALENTS_RULE)
+        return head + (f'程式想讀回平台上那一份({(w or {}).get("read") or fixed})但{prob}。你打開 {(w or {}).get("edit") or fixed} '
+                       f'逐段跟原始履歷 {master} 比,不一致就改並存檔。' + EQUIVALENTS_RULE)
     if not ds:
-        return f'程式剛把平台上那一份({w["read"]})讀回來跟母稿比過,都對得上,這一步跳過,不要動它。'
-    return (f'程式剛把平台上那一份({w["read"]})讀回來跟母稿 {master} 比,下面這幾格對不上。只處理這幾格(在 {w["edit"]}),'
-            '其他沒列的不要動。改完存檔,程式會再讀回來比一次。\n'
-            + ps.describe(ds) + EQUIVALENTS_RULE)
+        return head + f'程式剛把平台上那一份({w["read"]})讀回來跟原始履歷比過,都對得上,內容不用動。'
+    return head + (f'程式剛把平台上那一份({w["read"]})讀回來跟原始履歷 {master} 比,下面這幾格對不上。只處理這幾格(在 {w["edit"]}),'
+                   '其他沒列的不要動。改完存檔,程式會再讀回來比一次。\n'
+                   + ps.describe(ds) + EQUIVALENTS_RULE)
 
 
 def _pick(url):
@@ -432,24 +435,23 @@ def _pick(url):
     return record.get('lang'), record.get('variant')
 
 
-def profile_check(url, board=None, delivery=None, reported=None, reader=None):
-    """只有 agent 回報使用平台履歷時,才讀回文字比對。
-    reader(讀取網址) → 頁面:不給就是程式自己在 agent 的 Chrome 開頁讀(Codex);Claude 給從它那一輪紀錄拿的(claude_profile_reader)。"""
+def profile_check(url, board=None, reported=None, reader=None, name=None):
+    """這張卡的固定平台履歷(程式登記過的那一份)讀回來跟母稿比;沒登記、不是平台履歷的卡回 (None, [], '')。
+    reader(讀取網址) → 頁面:照那一家的門路讀(chrome_door 的 profile_reader);不給就是現在用 Chrome 的那一家自己開頁讀。"""
     import profile_sync as ps
-    if (delivery or {}).get('method') != 'platform_profile':
-        return None
     lang, var = _pick(url)
     platform = ps.profile_key(url)
     if not platform or not lang or not var:
         return None
     try:
-        return ps.check(platform, lang, var, board, reported=reported, reader=reader)
-    except Exception as e:
+        return ps.check(platform, lang, var, board, reported=reported, reader=reader, name=name)
+    except Exception as e:  # noqa: BLE001 — 比對出錯的原因照實當成這張的問題回報(看板回報、卡被擋)
         return ps.where(platform, lang, var), [], f'比對出錯({str(e)[:80]})'
 
 
 def profile_after(url, res, board=None, reader=None):
-    """agent 回報使用平台履歷後,讀回固定版文字;對不上就不放行。
+    """用平台履歷時,讀回固定版文字;對不上就不放行。
+    res['delivery'] 是程式認的那一份(profile_sync.delivery_for:固定版還是客製版、哪一份都是程式決定的)。
     agent 回報的「平台用自己說法寫」(profile.equivalents)在同一次讀回裡先驗、再比。"""
     import profile_sync as ps
     delivery = res.get('delivery') or {}
@@ -457,8 +459,8 @@ def profile_after(url, res, board=None, reader=None):
         return []
     profile_url = str(delivery.get('profile_url') or '').strip()
     profile_kind = delivery.get('profile_kind')
-    if not profile_url or profile_kind not in ('fixed', 'custom'):
-        return ['agent 沒回報可核對的平台履歷網址或版本']
+    if profile_kind == 'custom' and not profile_url:
+        return ['交件單上沒寫它新開的客製平台履歷網址']
     platform = ps.profile_key(url)
     lang, var = _pick(url)
     if not platform or not lang or not var:
@@ -467,20 +469,12 @@ def profile_after(url, res, board=None, reader=None):
     custom_profile_url = profile_url if profile_kind == 'custom' else None
     pr = res.get('profile') or {}
 
-    def profile_url_key(value):
-        from urllib.parse import urlsplit
-        parsed = urlsplit(value or '')
-        return (parsed.scheme.lower(), parsed.netloc.lower(),
-                parsed.path.rstrip('/'), parsed.query)
-
     is_custom_profile = (
         custom_profile_url and pr.get('url')
-        and profile_url_key(pr['url']) == profile_url_key(custom_profile_url)
+        and ps.identity(pr['url']) == ps.identity(custom_profile_url)
     )
     fixed = ps.where(platform, lang, var)
-    reported_fixed_url = pr.get('url') or (
-        profile_url if profile_kind == 'fixed' else None
-    )
+    reported_fixed_url = pr.get('url')    # 程式還不知道固定版在哪時,agent 告訴我們位置;之後由程式自己讀回來驗
     if (reported_fixed_url and not is_custom_profile and not fixed
             and ps._safe_page_url(reported_fixed_url)
             and ps._safe_page_url(pr.get('edit') or reported_fixed_url)):
@@ -493,9 +487,10 @@ def profile_after(url, res, board=None, reader=None):
     # agent 回報的「平台用自己說法寫」講的是它看的那一頁:客製版跟程式要讀回的固定版是同一頁時一樣收
     # (以前客製版一律不收,同一頁的等值說法被丟掉,全部照原句比,每張都判對不上)
     same_page = bool(fixed and custom_profile_url
-                     and profile_url_key(fixed.get('read') or '') == profile_url_key(custom_profile_url))
+                     and ps.identity(fixed.get('read') or '') == ps.identity(custom_profile_url))
     reported = pr.get('equivalents') if (not is_custom_profile or same_page) else None
-    result = profile_check(url, board, delivery, reported=reported, reader=reader)
+    result = profile_check(url, board, reported=reported, reader=reader,
+                           name=pr.get('name') if profile_kind == 'fixed' else None)
     w, ds, prob = result or (None, [], '')
     if not w:
         return [f'{label}({platform} {lang}/{var})程式不知道在哪,沒辦法讀回來驗']
@@ -521,23 +516,24 @@ def _upload_rule(directory, record):
 
 
 def prompt_for(stage, url, j, fb, board, note='', profile=None,
-              attachment_download_dir=None, prepared=None, runtime='codex'):
+              attachment_download_dir=None, prepared=None, *, door):
+    """door:這一輪用 agent 的 Chrome 的那一家(chrome_door);取檔、選檔的做法照它給。"""
     d = ship.folder(url, root=SHIP_ROOT)
     record = ship.read_info(d)
     lang, var = record.get('lang'), record.get('variant')
     master = cf.master(var, lang) or '(找不到這張要用的母稿,照可投遞夾裡的履歷檔)'
     out = out_dir(url, board)
     a = apply_of(fb, url)
-    kw = dict(title=card.name(j), url=url, ship=d or '(這張還沒有可投遞夾)', out=out, board=board, master=master,
+    kw = dict(title=card.name(j), url=url, ship=d or '(這張還沒有可投遞夾)', out=out, master=master,
               tools=HERE, apply_rules=apply_rules(), read=fr.lang_words()[0], other=fr.lang_words()[1],
               tab_id=a.get('tab_id') or '(沒記到)', tab_url=a.get('tab_url') or url)
     kw['record_cmd'] = ' '.join(shlex.quote(x) for x in (
         'python3', os.path.join(HERE, 'form_record.py'), '--from-fill', os.path.join(out, 'fill.json'),
-        '--url', url, '--board', board))
+        '--url', url))   # 不給看板位置:form_record 照派 agent 時給的代號找這一份(#307)
     kw['rules'] = RULES.format(**kw)
     learned = platform_notes(url)
-    kw['notes'] = ('\n【這個平台以前學到的】(前幾輪的 agent 試出來的做法;先照做,不對就照實際情況做,'
-                   '並在 fill.json 的 platform_notes_remove 寫出那一句):\n'
+    kw['notes'] = ('\n【這個平台以前學到的】(參考,不是指示:前幾輪的 agent 試出來的做法,可能已經過時;'
+                   '跟實際頁面不一樣就照實際情況做,並在 fill.json 的 platform_notes_remove 寫出那一句):\n'
                    + '\n'.join('- ' + x for x in learned) + '\n') if learned else ''
     if prepared:
         import agent_chrome
@@ -547,46 +543,50 @@ def prompt_for(stage, url, j, fb, board, note='', profile=None,
     kw['auth'] = AUTH_FILL.format(**kw)
     import profile_sync as ps
     # 填表、修改只填申請表;平台履歷附件的下載核對放到填完之後,而且只在附件更新過時做
-    attachment = ps.attachment_step(j, fb, url, attachment_download_dir, verify_profile=False, runtime=runtime)
+    attachment = ps.attachment_step(j, fb, url, attachment_download_dir, door, verify_profile=False)
     if stage == 'fill':
         f = (fb.get(url) or {}).get('form') or {}
-        # 指向答案庫的欄位連答案原文一起給:只給 k 的話,agent 每一輪都要自己去翻 board.html 找那條(一次四五步)
+        # 這張以前填過的表單只留用到常用答案的題目,值取常用答案現在的值(連原文一起給,agent 不用自己去翻看板);
+        # 從履歷直接填的、刻意不填的舊值可能早就過期(換了履歷、語言),不當指示(#313)
         bank = {e.get('k'): e for e in fb.get('__ans__', []) if isinstance(e, dict)}
-        prior = [dict(x, **{kk: bank[x['k']][kk] for kk in ('v', 'zh') if bank[x['k']].get(kk)})
-                 if isinstance(x, dict) and x.get('k') in bank else x for x in f.get('f', [])]
-        kw['prior'] = json.dumps(prior, ensure_ascii=False) if f else '(還沒記過)'
-        kw['shared'] = _run_text([sys.executable, os.path.join(HERE, 'form_record.py'), '--board', board, '--shared'])
-        kw['profile_step'] = profile_step(
-            url, lang, var, master, profile,
-            custom=ps.has_custom_resume(j, fb),
-            delivery=a.get('delivery'),
-        )
+        prior = [({'q': x.get('q'), 'redo': REDO} if bank[x['k']].get('redo') else
+                  dict(x, **{kk: bank[x['k']][kk] for kk in ('v', 'zh') if bank[x['k']].get(kk)}))
+                 for x in f.get('f', []) if isinstance(x, dict) and x.get('src') == 'bank' and x.get('k') in bank]
+        kw['prior'] = json.dumps(prior, ensure_ascii=False) if prior else '(沒有)'
+        kw['shared'] = (fr.shared_text(fb).strip() or '(沒有輸出)')[:12000]   # 他確認過的共用答案(form_record --shared 那一份)
+        kw['profile_step'] = profile_step(url, ps.decided(j, fb, url), master, profile)
         return (FILL.format(**kw) + '\n\n' + _upload_rule(d, record)
-                + ('\n' + translate_block(fb, url, board) if to_translate(fb, url) else '')
+                + ('\n' + translate_block(fb, url) if to_translate(fb, url) else '')
                 + attachment), out
     if stage == 'fix':
         ch = changed_fields(fb, url)
         kw['note'] = (note or '').strip() or '(沒有另外寫;照下面改過的答案重打)'
         kw['changed'] = json.dumps(ch, ensure_ascii=False, indent=1) if ch else '(沒有)'
-        kw['translate'] = translate_block(fb, url, board)
+        if any('redo' in v for v in ch.values()):   # 要它重新代填的題目:照填表那一輪的規矩
+            kw['changed'] += '\n' + kw['rules']
+        kw['translate'] = translate_block(fb, url)
         return FIX.format(**kw) + attachment, out
     kw['snap'] = json.dumps(fr.snapshot(fb, url), ensure_ascii=False, indent=1)
     kw['approve_at'] = ((fb.get(url) or {}).get('approve') or {}).get('at') or '(沒記到時間)'
+    import gate
+    kw['sent_words'] = ''.join(f'「{w}」' for w in gate.SENT_WORDS)   # 程式判斷送出成功也看這幾句
     return SUBMIT.format(**kw), out
 
-def pre_submit_prompt(url, j, fb, board, attachment_download_dir, after_fill=False,
-                      attachments=True, profile_read_url=None, runtime='codex'):
+def pre_submit_prompt(url, j, fb, board, attachment_download_dir, door, after_fill=False,
+                      attachments=True, profile_read_url=None, page_tab=None):
     """讀回平台履歷上的所有附件給程式比;這一步絕不送出。
     after_fill:剛填好、附件更新後第一次用這份平台履歷(附件沒變就不用取)。
-    attachments=False:附件已經用現在的檔核對過,不取。profile_read_url:用 Claude 時,這一輪要它讀給程式的平台履歷頁。"""
+    attachments=False:附件已經用現在的檔核對過,不取。profile_read_url:程式自己讀不到時(door.program_reads 是假),
+    這一輪要 agent 讀給程式的平台履歷頁。page_tab:程式自己讀不到申請表那一頁時(door.reads_live_page 是假),
+    這一輪要 agent 讀給程式的那一頁(送出前程式要跟確認時的樣子比)。"""
     import profile_sync as ps
     delivery = apply_of(fb, url).get('delivery') or {}
     # 填完後的核對:附件和欄位對照各自看要不要做。以前這裡一律重抓附件,只是欄位對照要重建也把三個附件再下載一次
-    step = ps.attachment_step(j, fb, url, attachment_download_dir, force=not after_fill,
-                              runtime=runtime) if attachments else ''
+    step = ps.attachment_step(j, fb, url, attachment_download_dir, door, force=not after_fill) if attachments else ''
     if profile_read_url:
-        step += (f'\n平台履歷的文字也要重新核對:照【讀平台履歷給程式】打開 {profile_read_url},'
-                 '在那一頁跑那支唯讀函式(先長度、再分段,程式碼照抄不要改)。')
+        step += door.profile_reread(profile_read_url)
+    if page_tab:
+        step += door.page_reread(page_tab)
     out = out_dir(url, board)
     head = (f'平台履歷核對:{card.name(j)}(附件更新後,第一次用這份平台履歷)\n' if after_fill
             else f'送出前的最後核對:{card.name(j)}\n')
@@ -604,9 +604,9 @@ def pre_submit_prompt(url, j, fb, board, attachment_download_dir, after_fill=Fal
 PROFILE_CHECK_TIMEOUT = 30 * 60
 
 
-def _profile_check_after_fill(url, board, sid, agent_id, status=None):
+def _profile_check_after_fill(url, board, sid, door, status=None):
     """填好之後:這張用的平台履歷還沒用「現在的履歷和附件」核對過,就叫回同一段對話核對一次。
-    核對過而且指紋沒變(同一份履歷、附件沒改)就不派 agent。回問題清單。"""
+    核對過而且指紋沒變(同一份履歷、附件沒改)就不派 agent。door:填這一張的那一家。回問題清單。"""
     import profile_sync as ps
     jobs, fb = load(board)
     job = jobs.get(url)
@@ -616,41 +616,31 @@ def _profile_check_after_fill(url, board, sid, agent_id, status=None):
     if ps.profile_attachments_fresh(job, fb, url):
         return []           # 附件用現在的檔核對過:不用再派 agent
     with tempfile.TemporaryDirectory(prefix='jobsalvo-profile-attachments-') as downloads:
-        p, out = pre_submit_prompt(url, job, fb, board, downloads, after_fill=True,
-                                   runtime=ar.browser_runtime(agent_id) or 'codex')
+        p, out = pre_submit_prompt(url, job, fb, board, downloads, door, after_fill=True)
         outcome = _run_agent(
             p, os.path.join(out, 'profile-check.log'), cf.HOME, board, timeout=PROFILE_CHECK_TIMEOUT,
-            browser_required=True, browser=ar.apply_overrides(), resume=sid, agent_id=agent_id,
+            browser_required=True, browser=ar.apply_overrides(), resume=sid, agent_id=door.agent_id,
             on_start=(lambda proc: status(proc.pid)) if status else None,
         )
         if not outcome.ok:
             return ['平台履歷核對沒跑完:' + outcome.message()]
-        try:
-            with open(os.path.join(out, 'pre-submit.json'), encoding='utf-8') as fh:
-                report = json.load(fh)
-        except Exception:
-            return ['平台履歷核對沒有寫出 pre-submit.json']
-        claude = ar.browser_runtime(agent_id) == 'claude-code'
-        bad = _check_delivery_attachments(fb, url, job, report, downloads, expected_delivery=delivery,
-                                          hash_reader=claude_attachment_hashes([os.path.join(out, 'profile-check.log')]) if claude else None)
+        bad = _pre_submit_check(out, url, job, fb, downloads, '平台履歷核對', expected_delivery=delivery,
+                                hash_reader=door.attachment_hashes([os.path.join(out, 'profile-check.log')]))
+    rnd = evidence.active()
+    if rnd:
+        rnd.handoff(os.path.join(out, 'pre-submit.json'))
+        rnd.check(bad, what='平台履歷附件')
     return bad
 
 
-def claude_attachment_hashes(logs):
-    """用 Claude 時:平台履歷上的附件雜湊從它那一輪的紀錄拿(它照 CLAUDE_PROFILE_READ 第 3 步在那一頁算的,#294)。"""
-    import apply_tab
-    return lambda profile_url: apply_tab.attachments_from_log(logs, profile_url)
-
-
-def claude_profile_reader(logs):
-    """用 Claude 時:平台履歷頁從它那一輪的紀錄拿(它照 apply_tab.CLAUDE_PROFILE_READ 自己讀的),程式不另外開頁。"""
-    import apply_tab
-    return lambda read_url: apply_tab.profile_from_log(logs, read_url)
-
-
-def _claude_not_yet(_read_url):
-    # 填表前:Claude 的分頁只有它那段對話拿得到,程式自己開不了;這一輪由它讀給程式,填完再比(不是「改用 Codex」)
-    raise LookupError('用 Claude 時程式填表前讀不到,這一輪由你照【讀平台履歷給程式】讀給程式')
+def _pre_submit_check(out, url, job, fb, downloads, who, **attachments):
+    """送出前核對那一輪的交件單(pre-submit.json)經安檢門:平台履歷上的附件、投遞方式跟這張卡該附的、核准時的比。回問題清單。"""
+    import gate
+    sheet, missing = gate.read(out, 'pre_submit')
+    if sheet is None:
+        return [f'{who}{missing}']
+    verdict = gate.inspect('pre_submit', sheet, gate.Truth(url, job, fb, download_dir=downloads, attachments=attachments))
+    return verdict.problems + _cleanup_downloads(downloads, sheet, job, fb, url)
 
 
 def _profile_block_detail(checked):
@@ -666,17 +656,13 @@ def _profile_block_detail(checked):
     return ''
 
 
-def _run_text(argv):
-    """跑一支固定的程式、拿它印的字塞進 prompt(以前叫 agent 自己跑)。跑不了就照實寫,agent 看得到。"""
-    try:
-        r = subprocess.run(argv, cwd=cf.HOME, capture_output=True, text=True, timeout=120)
-        return (r.stdout.strip() or r.stderr.strip() or '(沒有輸出)')[:12000]
-    except Exception as e:
-        return f'(程式跑不了:{str(e)[:120]},這一段你自己照母稿判斷)'
-
-
 def _run_agent(prompt, log, home, board, **kwargs):
-    """Give the child agent the same board target used by this run."""
+    """Give the child agent the same board target used by this run.
+    填表時限扣掉暫停的時間:⏸ 暫停把整串行程凍住,按繼續時牆上時鐘早就過了時限(#308)。"""
+    status = os.path.join(SP, STATUS)
+    kwargs.setdefault('waiter', lambda procs, timeout: ar.wait_done(
+        procs, timeout, paused=lambda: jobrun.paused_seconds(status)))
+    kwargs.setdefault('report_from', REPORT_FROM)     # agent 回報的來源由程式給,不讓它自己取(#316)
     return ar.run(prompt, log, home, board=board, **kwargs)
 
 
@@ -696,8 +682,12 @@ def preview(stage, url=None, board=None, note=''):
         url = todo[0]
     if url not in jobs:
         return '看板上沒有這張職缺'
-    p, _ = prompt_for(stage, url, jobs[url], fb, board, note, runtime=ar.browser_runtime() or 'codex')
-    return ar.rules_for('main', browser=ar.apply_overrides(), board=board) + p
+    import chrome_door
+    door = chrome_door.current()
+    if door is None:
+        return chrome_door.NO_BROWSER_AGENT
+    p, _ = prompt_for(stage, url, jobs[url], fb, board, note, door=door)
+    return ar.rules_for('main', browser=ar.apply_overrides(), board=board) + p + door.task_tail(stage)
 
 
 def preview_meta(stage, board=None):
@@ -726,10 +716,6 @@ def rename(url, title, company, board):
         ship.rename(url, new)   # 可投遞夾照名字取名,跟著改(裡面有這一輪的 .apply/)
 
 
-def _same(a, b):
-    return re.sub(r'\s+', ' ', str(a or '')).strip() == re.sub(r'\s+', ' ', str(b or '')).strip()
-
-
 def _clean_attachment_downloads(path):
     if not path:
         return ''
@@ -745,92 +731,137 @@ def _clean_attachment_downloads(path):
     return ''
 
 
-def _check_delivery_attachments(fb, url, job, report, download_dir, force=False,
-                                expected_delivery=None, verify_profile=True, hash_reader=None):
+def _cleanup_downloads(download_dir, report, job, fb, url):
+    """比完附件把下載回來的清掉;清不掉就照實當成問題,那一份的核對紀錄作廢(下次重比)。"""
     import profile_sync as ps
-    try:
-        problems = ps.check_attachments(
-            job, fb, url, report, download_dir, force=force,
-            expected_delivery=expected_delivery, verify_profile=verify_profile, hash_reader=hash_reader,
-        )
-    except Exception as e:
-        problems = [f'平台附件比對出錯({str(e)[:80]})']
     cleanup_problem = _clean_attachment_downloads(download_dir)
-    if cleanup_problem:
-        problems.append(cleanup_problem)
-        delivery = (report or {}).get('delivery') or {}
-        ps.invalidate_attachment_check(delivery.get('profile_url'))
-        if delivery.get('profile_kind') == 'custom':
-            fixed = ps.fixed_profile_delivery(job, fb, url)
-            if fixed:
-                ps.invalidate_attachment_check(fixed.get('profile_url'))
-    return problems
+    if not cleanup_problem:
+        return []
+    delivery = (report or {}).get('delivery') or {}
+    ps.invalidate_attachment_check(delivery.get('profile_url'))
+    if delivery.get('profile_kind') == 'custom':
+        fixed = ps.fixed_profile_delivery(job, fb, url)
+        if fixed:
+            ps.invalidate_attachment_check(fixed.get('profile_url'))
+    return [cleanup_problem]
 
 
 def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
-               attachment_download_dir=None, runtime='codex', log=None):
-    """程式自己對一遍 agent 填的結果。回 (問題清單, fill.json);問題清單空的就是沒事。
-    除了看 agent 寫的 fill.json,還用 apply_tab 直接去讀它留在他 Chrome 裡的那一頁(不經過 agent):
+               attachment_download_dir=None, door=None, log=None, tab_id=None):
+    """程式自己對一遍 agent 填的結果。回 (問題清單, 核對過的交件單);問題清單空的就是沒事。
+    交件單只經安檢門(gate)進來:程式直接去讀它留在他 Chrome 裡的那一頁(不經過 agent),每一格跟頁面、紀錄、檔案比,
     分頁在不在、是不是還是填好的那一頁(沒被送出、沒換頁)、答案庫的每個答案是不是真的在頁面上、上傳的檔是不是真的選上了。
-    runtime:填這一輪的是哪一種 agent;Codex、Claude 的分頁各用自己家的門路讀(apply_tab.read),驗收標準一樣。
-    log:這一輪的紀錄;Claude 的頁面內容從這裡拿(它那一輪最後自己讀一次,見 apply_tab.CLAUDE_SELF_READ)。"""
+    door:填這一輪的那一家(chrome_door);各家用自己家的門路讀那一頁,驗收標準一樣。
+    log:這一輪的紀錄(有的門路從這裡拿頁面內容,見 apply_tab.CLAUDE_SELF_READ)。tab_id:程式自己開好給它的那一頁(有才給)。
+    回的交件單只有核對過的格子;分頁、分頁網址、交接照它說的也放著(記下是哪一頁,之後 👀、重填找得到)。"""
+    import gate
     bad = []
     f = (fb.get(url) or {}).get('form') or {}
     # 表單要是這一輪開始之後記的(form_record 記到秒;舊的只有日期,一定比這一輪早)。跨過半夜也照樣對
     if str(f.get('at') or '') < datetime.datetime.fromtimestamp(int(t0)).isoformat(timespec='seconds'):
         bad.append('表單沒有記進看板')
     bad += fr.validate(fb, [url])            # 別張表單壞掉不是這一張的問題
-    try:
-        with open(os.path.join(out, 'fill.json'), encoding='utf-8') as fh:
-            res = json.load(fh)
-    except Exception:
-        return bad + ['沒有寫出 fill.json'], {}
-    if res.get('submitted'):
-        bad.append('⚠ 填表階段回報「已送出」,要人看')
-    if (res.get('posting') or {}).get('same_job') is False:
-        bad.append('agent 判斷這一頁不是這張卡的職缺(或已經關了),沒有填:' + str((res.get('posting') or {}).get('title') or '')[:60])
+    sheet, missing = gate.read(out, 'fill')
+    if sheet is None:
+        return bad + [missing], {}
     if (not os.path.isfile(os.path.join(out, 'fill.png'))
                           or os.path.getmtime(os.path.join(out, 'fill.png')) < t0):
         bad.append('沒有這一輪的截圖')
-    if not res.get('tab_id') or res.get('handoff') is not True:
-        bad.append('填好的分頁沒有留在他的 Chrome(他要在真的頁面上檢查)')
-    # agent 自己回報的值只在程式讀不到那一頁時拿來比:讀得到的話 page_problems 直接看頁面上答案庫的答案在不在,
-    # agent 回報時把長答案寫成「(bank answer, 556 chars)」這種說明也不會被誤判成填錯
-    bank = {e.get('k'): e for e in fb.get('__ans__', [])}
-    reported = []
-    for x in res.get('fields') or []:
-        e = bank.get(x.get('k'))
-        if e and e.get('v') and not _same(x.get('value'), e.get('v')) and not _same(x.get('value'), e.get('zh')):
-            reported.append(f'「{x.get("q")}」頁面上是 {str(x.get("value"))[:40]!r},答案庫是 {str(e.get("v"))[:40]!r}')
-    if not (sid and res.get('tab_id')):
-        bad += reported
-    else:
-        import apply_tab
+    page, why, claimed = None, '', str(sheet.get('tab_id') or '')
+    read_tab = tab_id or claimed
+    if sid and read_tab:
         try:
-            page = reader(sid, res['tab_id']) if reader else apply_tab.read(sid, res['tab_id'], runtime=runtime, log=log)
-        except Exception as e:
-            bad.append(f'程式讀不到留在他 Chrome 的那一頁({str(e)[:80]})')
-            bad += reported
-        else:
-            uploaded_on_form = res.get('uploaded') or []
-            if (res.get('delivery') or {}).get('method') == 'platform_profile':
-                uploaded_on_form = []
-            bad += apply_tab.page_problems(
-                page, fb, url, uploaded_on_form, res.get('tab_url'),
-            )
+            if not (reader or door):
+                raise LookupError('不知道這一頁是哪一家開的')
+            page = read_page(lambda: reader(sid, read_tab) if reader else door.read_page(sid, read_tab, log),
+                             '驗收', shot=os.path.join(out, 'fill.png'))
+        except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫進這張的問題(看板回報)
+            why = str(e)[:80] or type(e).__name__
+    verdict = gate.inspect('fill', sheet, gate.Truth(url, job, fb, page=page, page_why=why, tab_id=read_tab or None,
+                                                     download_dir=attachment_download_dir))
+    if page is not None:
+        # 程式自己的比對(不管交件單寫了什麼):看板上記的這張表單,答案庫的答案、履歷直接對上的值都要在頁面上
+        import apply_tab
+        bad += apply_tab.page_problems(page, fb, url)
+    bad += [p for p in verdict.problems if p not in bad]
     if job is not None:
-        bad += _check_delivery_attachments(
-            fb, url, job, res, attachment_download_dir, verify_profile=False,
-        )
-    import agent_chrome                       # Codex 沒被允許上傳、下載的,照實講要改哪個檔
-    return bad + [f'卡住:{agent_chrome.explain_blocked(p)}' for p in (res.get('problems') or [])], res   # notes 是不影響填表的觀察,不算問題
+        bad += _cleanup_downloads(attachment_download_dir, sheet, job, fb, url)
+    res = verdict.facts
+    for k in ('tab_id', 'tab_url', 'handoff'):
+        if k in verdict.said:
+            res[k] = verdict.said[k]
+    if page is not None:
+        res['seen'] = gate.seen(page)    # 驗收時核對過的樣子:確認前、送出前程式讀那一頁跟它比(程式自己讀的,不是 agent 說的)
+    if res.get('submitted'):
+        bad.append('⚠ 填表階段回報「已送出」,要人看')
+    rnd = evidence.active()
+    if rnd and verdict.unregistered:
+        rnd.note('check', what='交件單沒登記的格子(程式不用)', cells=verdict.unregistered)
+    return bad, res   # notes 是不影響填表的觀察,不算問題
 
 
-def fill_record(stage, prev, res, bad, sid, shot, agent_id=None, note=''):
+def _picked_problem(url, job, fb, sid, res, door, logs):
+    """填完後程式自己讀留著的那一頁,核對選的平台履歷是不是該選的那一份(profile_sync.picked_problem)。"""
+    import profile_sync as ps
+    if not (sid and res.get('tab_id')):
+        return '程式讀不到填好的那一頁,沒核對選的是哪一份平台履歷'
+    try:
+        page = read_page(lambda: door.read_page(sid, res['tab_id'], logs), '核對選的平台履歷')
+    except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫成這張的問題(卡被擋)
+        return f'程式讀不到填好的那一頁,沒核對選的是哪一份平台履歷({str(e)[:80]})'
+    return ps.picked_problem(page, job, fb, url)
+
+
+def read_page(read, why, shot=None):
+    """程式自己讀一次那一頁(read() 照那一家的門路讀);讀到的樣子連同同一刻程式截的圖(shot)記進這一輪的證據。
+    agent 做完之後程式每一次讀這一頁(驗收、確認前、送出前)都走這一支,之後才查得出頁面什麼時候變的(#315)。"""
+    rnd = evidence.active()
+    try:
+        page = read()
+    except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到也記進證據,原樣丟回給呼叫的那一段處理
+        if rnd:
+            rnd.note('page', why=why, error=f'{type(e).__name__}: {str(e)[:300]}')
+        raise
+    if rnd:
+        rnd.page(page, why, shot)
+    return page
+
+
+MISSING_EVIDENCE = '缺證據'
+
+
+def question_evidence(fb, url, page, shot):
+    """這張表單上 agent 推論、要他確認的題目,附程式自己截的那一頁(#315):shot 是這一輪證據夾裡那張圖(<輪>/<檔名>),
+    page 是程式同一刻讀到的那一頁。題目要真的在那一頁上(跟截圖對得上,不是只有 agent 轉述)才叫他確認(ev 記那張圖);
+    沒有截圖、或頁面上找不到這一題,標 noev、不列進要你處理的(form_record.find_pending),回這幾題給呼叫的回報「缺證據」。"""
+    import apply_tab
+    seen = [apply_tab._norm(f.get('label')) for f in (page or {}).get('fields') or [] if isinstance(f, dict)]
+    seen += [apply_tab._norm(x) for x in (page or {}).get('lines') or []]
+    seen = [x for x in seen if x]
+    bank = {e.get('k'): e for e in fb.get('__ans__') or [] if isinstance(e, dict)}
+    missing = []
+    for x in ((fb.get(url) or {}).get('form') or {}).get('f', []):
+        e = bank.get(x.get('k')) if x.get('src') == 'bank' else None
+        if not e or not e.get('inf'):
+            continue
+        q = apply_tab._norm(x.get('q'))
+        on_page = bool(q) and any(q in s or (len(s) >= 6 and s in q) for s in seen)
+        if shot and on_page:
+            e['ev'] = {'u': url, 'f': shot, 'q': x.get('q'), 'at': now()}
+            e.pop('noev', None)
+        else:
+            e.pop('ev', None)
+            e['noev'] = '沒有程式自己截的那一頁' if not shot else '程式讀到的那一頁上沒有這一題'
+            missing.append(x.get('q'))
+    return missing
+
+
+def fill_record(stage, prev, res, bad, sid, shot, agent_id=None, note='', runtime=None, ev=None):
     """填表/修改這一輪寫進看板的 apply 紀錄(卡上的代投那一行、核准規則都讀它)。
+    runtime:開這一頁的是哪一家(之後 👀、讀頁、修改、送出、收分頁都找同一家;沒記到就是接不回來)。
     副本的假流程(job_fake)也用這一支組紀錄:以前兩邊各寫一份,假的少了 delivery 就走不到核准。"""
     prev = prev or {}
-    rec = {'stage': stage, 'at': now(), 'ok': not bad, 'issues': bad[:10], 'shot': shot,
+    rec = {'stage': stage, 'at': now(), 'issues': bad[:10], 'shot': shot,
            'profile': res.get('profile') if stage == 'fill' else prev.get('profile'),
            'delivery': res.get('delivery'),
            'blank': res.get('blank_for_him') or [], 'uploaded': res.get('uploaded') or prev.get('uploaded') or [],
@@ -838,147 +869,319 @@ def fill_record(stage, prev, res, bad, sid, shot, agent_id=None, note=''):
            # 分頁編號跟開它的 Chrome 程序綁在一起記:沿用舊分頁就沿用舊的(agent_chrome.gone_pages 靠它判斷頁還在不在)
            'chrome': (res.get('chrome') if res.get('tab_id') else prev.get('chrome')) or {},
            'tab_url': res.get('tab_url') or prev.get('tab_url') or '', 'session': sid,
-           'agent_id': agent_id or prev.get('agent_id') or 'primary', 'where': 'chrome'}
+           'agent_id': agent_id or prev.get('agent_id') or 'primary', 'where': 'chrome',
+           'runtime': runtime or prev.get('runtime')}
+    if res.get('seen'):
+        rec['seen'] = res['seen']   # 驗收時程式讀到、核對過的那一頁(確認前、送出前拿來比)
+    if ev:
+        rec['ev'] = ev              # 這一輪程式自己截的那一頁,在那張卡的證據夾(看板點得開,#315)
     if stage == 'fix':
         rec['fixes'] = (prev.get('fixes') or []) + [{'at': rec['at'], 'note': (note or '').strip(),
                                                       'fixed': res.get('fixed') or []}]
-    if prev.get('submit_fail'):
-        # 上次送出結果不明(可能其實送出去了):重填、重打都不算確認過,記號跟著走,不然核准不再擋,會投兩次
-        rec['submit_fail'] = prev['submit_fail']
     return rec
 
 
 def submit_evidence(res, shot):
-    """送出成功頁的證據(apply_mark_sent 收的那一份);假流程也用它。"""
+    """送出成功頁的證據(看到已收到申請頁那一格收的那一份);假流程也用它。"""
     return {'at': now(), 'url': res.get('confirm_url'), 'text': res.get('confirm_text'), 'shot': shot}
 
 
-def check_submit(out, t0):
-    try:
-        with open(os.path.join(out, 'submit.json'), encoding='utf-8') as fh:
-            res = json.load(fh)
-    except Exception:
-        return False, {'problems': ['沒有寫出 submit.json']}
+def _site(url):
+    """網址是哪一個網站(登記的網域):jobs.lever.co → lever.co、www.104.com.tw → 104.com.tw。"""
+    import url_origin
+    labels = url_origin.origin(str(url or ''))[1].split('.')
+    n = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in ('com', 'co', 'org', 'net', 'gov', 'edu', 'ac') else 2
+    return '.'.join(labels[-n:])
+
+
+def check_submit(out, t0, page_url='', page=None, page_why='', tab_id=None, before=None):
+    """送出那一輪算不算看到已收到申請頁。回 (送出了沒, 核對過的交件單)。
+    page:程式自己讀到按完送出之後的那一頁(讀不到是 None,page_why 是原因)。送出了沒由程式看那一頁判斷(gate.after_send),
+    不看 agent 說什麼:還停在申請表(表單還在、或跳出真人驗證)就是沒送出,交件單上加 not_sent(原因),不算送出結果不明、
+    不用叫他去信箱查;已經不是申請表、頁面上有送出成功的字,agent 說不確定也算送出了。
+    before:驗收時核對過的那一頁(apply.seen):那幾格還在就不是確認頁。page_url:agent 填的那一頁;確認頁不是那個網站的,不當成已送出(可能是別的分頁、別張卡),算送出結果不明。
+    程式判斷不了(讀不到、頁面上沒有成功的字)才看交件單:它說的確認頁網址、確認頁的字,程式讀得到那一頁時要在頁面上對得到。"""
+    import gate
+    state, why = gate.after_send(page, page_url, before)
+    sheet, missing = gate.read(out, 'submit')
+    verdict = gate.inspect('submit', sheet, gate.Truth(page_url, page=page, page_why=page_why, tab_id=tab_id,
+                                                      form_url=page_url)) if sheet is not None else None
+    if state == gate.NOT_SENT:
+        return False, dict(verdict.facts if verdict else {}, not_sent=why,
+                           problems=((verdict.problems if verdict else []) + [why]))
+    if verdict is None:
+        res = {'problems': [missing]}
+    else:
+        res = dict(verdict.facts, problems=list(verdict.problems) + [
+            p for p in (verdict.facts.get('problems') or []) if isinstance(p, str)])
     shot = os.path.join(out, 'submit.png')
-    ok = bool(res.get('submitted') and (res.get('confirm_text') or res.get('confirm_url'))
-              and os.path.isfile(shot) and os.path.getmtime(shot) >= t0)
+    shot_ok = os.path.isfile(shot) and os.path.getmtime(shot) >= t0
+    if state == gate.SENT:            # 程式自己看到的:確認頁網址、確認頁的字照頁面記
+        res = dict(res, submitted=True, confirm_url=page.get('url'), confirm_text=why)
+        ok = shot_ok
+    elif state == gate.FORM_STILL:    # 申請表還在:它說成功也不算;也不確定沒送出(可能是多步驟表單的下一步)
+        res = dict(res, problems=(res.get('problems') or []) + [why])
+        ok = False
+    else:
+        ok = bool(verdict is not None and not verdict.problems and res.get('submitted')
+                  and (res.get('confirm_text') or res.get('confirm_url')) and shot_ok)
+    if ok and res.get('confirm_url') and page_url and _site(res['confirm_url']) != _site(page_url):
+        res = dict(res, problems=(res.get('problems') or []) + [
+            f'確認頁網址不是這張卡的網站({_site(res["confirm_url"])} / {_site(page_url)}),不確定送的是不是這一張'])
+        ok = False
     return ok, res
 
 
-def shoot(sid, out, stage, tab_id=None, runtime='codex'):
-    """截圖由程式自己截:外掛不准 agent 寫圖檔(它截得到但存不下來)。
-    從它留著的那一頁當場截,存成 fill.png / submit.png;分頁照樣留著(apply_tab 會重新標 markHandoff)。"""
+PAGE_CHANGED = '程式讀那一頁,跟 agent 填完時程式核對過的樣子不一樣:'
+# 頁面變了、沒送出之後的下一步(卡上照寫,不會卡在按不下去的狀態)
+NEXT_STEP = '下一步:按「✏️ 要 agent 改」叫它照你確認的樣子改回來,或按「重填」重新填一次'
+
+
+def page_now_problems(fb, url, job, page):
+    """程式剛讀到的那一頁,跟驗收時核對過的樣子(apply.seen)比,再照驗收的標準核對一次(答案庫的答案、選的平台履歷)。
+    回問題清單:哪一格從什麼變成什麼。兩家都餵同一種頁面,標準一樣。"""
+    import gate
+    import apply_tab
+    import profile_sync as ps
+    a = apply_of(fb, url)
+    out = gate.page_changes(a.get('seen'), page)
+    for p in apply_tab.page_problems(page, fb, url, (), a.get('tab_url')):
+        if p not in out:
+            out.append(p)
+    if (a.get('delivery') or {}).get('method') == 'platform_profile':
+        picked = ps.picked_problem(page, job, fb, url)
+        if picked:
+            out.append(picked)
+    return out
+
+
+def recheck_page(url, board, why, door=None, logs=None):
+    """確認送出前、送出前:程式自己讀那一頁,跟驗收時核對過的樣子比(page_now_problems)。回問題清單(空的就是沒變)。
+    door:開那一頁的那一家(沒給照卡上記的);logs:程式自己讀不到頁的那一家,剛跑完那一輪的紀錄(沒給就是這一刻讀不到,照實記)。
+    讀到的那一頁記進這張卡的證據(read_page)。"""
+    import chrome_door
+    jobs, fb = load(board)
+    a = apply_of(fb, url)
+    if not (a.get('session') and a.get('tab_id')):
+        return ['看板上沒有記這張是哪一段對話、哪一頁,程式讀不到那一頁,沒辦法核對頁面變了沒']
     try:
-        with open(os.path.join(out, ('submit' if stage == 'submit' else 'fill') + '.json'), encoding='utf-8') as fh:
-            tid = json.load(fh).get('tab_id')
-    except Exception:
-        tid = None
-    tid = tid or tab_id                        # 送出那一輪 agent 不一定寫 tab_id,用看板上記的那一個
+        door = door or chrome_door.for_card(a)
+    except chrome_door.Unreachable as gone:
+        return [str(gone)]
+    import agent_chrome
+    if agent_chrome.gone_pages({url: fb.get(url) or {}}):
+        # 分頁編號每個 Chrome 程序從頭數:Chrome 重開過,記著的編號可能剛好是別張卡的頁,不能拿它去比(apply_tab._lookup 同一條)
+        return [ds.GONE]
+    if logs is None and not door.reads_live_page:
+        # 程式讀不到這一家即時的頁(docs/adr/0003),這一刻也沒有新的一輪可以從紀錄拿:照實記「沒讀」,
+        # 不拿填完那一輪的舊頁假裝讀過(那只是拿舊頁跟自己比)。頁面變了沒,送出前那一輪它把頁讀給程式時比
+        rnd = evidence.active()
+        if rnd:
+            rnd.note('page', why=why, unread=f'{door.runtime} 的頁程式讀不到即時的樣子,送出前那一輪它把頁讀給程式時再比')
+        return []
+    try:
+        page = read_page(lambda: door.read_page(a['session'], a['tab_id'], logs), why)
+    except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫成這張的問題(不放行)
+        return [f'程式讀不到那一頁,沒辦法核對頁面變了沒({str(e)[:80]})']
+    bad = page_now_problems(fb, url, jobs.get(url) or {'id': url}, page)
+    rnd = evidence.active()
+    if rnd:
+        rnd.check(bad, what=why + '讀頁比對')
+    return bad
+
+
+def confirm_check(url, board):
+    """看板按「✅ 確認送出」之前(board_server):程式自己讀那一頁跟驗收時的樣子比。回問題清單;空的才讓他確認。
+    這一次讀頁記進那張卡的證據(一輪「確認前」)。"""
+    with evidence.opened('apply', 'confirm', [url], board):
+        return recheck_page(url, board, '確認前')
+
+
+def page_changed(fb, url, problems, why):
+    """頁面變了(確認前、送出前):卡到填了卡住,寫出哪一格從什麼變成什麼和下一步。回有沒有動到卡。
+    那一頁已經不在(Chrome 關過、重開過)就是頁面不見了,要重填。"""
+    if problems[:1] == [ds.GONE]:
+        return ds.try_fire(fb, url, 'page_lost', issues=[ds.GONE])
+    return ds.try_fire(fb, url, 'check_failed', apply={
+        'issues': [f'{why}{PAGE_CHANGED}{problems[0]}'] + problems[1:9] + [NEXT_STEP]})
+
+
+def shoot(sid, out, stage, door, tab_id=None):
+    """截圖由程式自己截(照那一家的門路):外掛不准 agent 寫圖檔(它截得到但存不下來)。
+    從它留著的那一頁當場截,存成 fill.png / submit.png;分頁照樣留著(apply_tab 會重新標 markHandoff)。"""
+    import gate
+    # 送出那一輪截看板上記的那一頁(程式自己的紀錄);填表、修改截它說留著的那一頁(截得到、之後讀得到才算核對過,
+    # 見安檢門「分頁」那一格),沒寫就截看板上記的那一個
+    tid = (tab_id or gate.claimed_tab(out, 'submit')) if stage == 'submit' else (gate.claimed_tab(out, 'fill') or tab_id)
     if not (sid and tid):
         return
-    import apply_tab
     import time
     # 按下送出後頁面剛換成確認頁,第一次截常撞上還在載入;多試幾次,真的截不到把原因留在 shot-error.txt 當證據
     for attempt in range(3):
         try:
-            apply_tab.shot(sid, tid, os.path.join(out, ('submit' if stage == 'submit' else 'fill') + '.png'), runtime=runtime)
+            door.shot(sid, tid, os.path.join(out, ('submit' if stage == 'submit' else 'fill') + '.png'))
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;每次的原因寫進 shot-error.txt 當證據,截不到卡上就沒有截圖
             with open(os.path.join(out, 'shot-error.txt'), 'a', encoding='utf-8') as fh:
                 fh.write(f'{stage} 第 {attempt + 1} 次:{type(e).__name__}: {str(e)[:300]}\n')
             time.sleep(3)
     # 三次都截不到就沒有圖,後面的檢查會照實標「沒有這一輪的截圖」
 
 
+NO_SESSION = 'agent 填這張的那段對話找不回來了,要重新填一次給你看'
+
+
 def _no_session(url, board, stage):
-    """要叫回的那段對話不在:不改也不送,核准作廢,要重新填一次給他看。"""
+    """要叫回的那段對話不在:不改也不送,那一頁接不回來(頁面不見了、確認作廢),要重新填一次給他看。
+    送出那一輪已經派出去、接到的卻是別段對話:它可能在哪一頁按了送出,算送出結果不明,原因照實寫。"""
     def mut(fbx):
-        m = fbx.setdefault(url, {})
-        m.pop('approve', None)
-        a = dict(m.get('apply') or {}, ok=False, at=now(),
-                 issues=['agent 填這張的那段對話找不回來了,要重新填一次給你看'])
-        sf = a.get('submit_fail') or {}
-        if stage == 'submit' and sf.get('pending'):
-            # 送出那一輪已經派出去、接到的卻是別段對話:它可能在哪一頁按了送出,照樣擋重送,原因照實寫
-            a['submit_fail'] = dict(sf, pending=False,
-                                    problems=['叫回的不是填這張的那段對話,不確定它有沒有在哪一頁按了送出'])
-        m['apply'] = a
+        s = ds.state(fbx.get(url))
+        if s == 'sending':
+            ds.fire(fbx, url, 'submit_unsure', evidence={
+                'at': now(), 'problems': ['叫回的不是填這張的那段對話,不確定它有沒有在哪一頁按了送出'], 'clicked': None})
+        elif s == 'running':
+            ds.fire(fbx, url, 'fill_nopage', apply=dict(apply_of(fbx, url), at=now(), tab_id='', issues=[NO_SESSION]))
+        else:
+            ds.try_fire(fbx, url, 'page_lost', issues=[NO_SESSION])
     bd.set_fb(mut, live=board, by='apply_run')
     return False, ('沒送' if stage == 'submit' else '沒改') + ':那段對話找不回來了,要重新填一次給他看'
 
 
-def _agent_gone(url, board):
-    """填這張的那個 agent 已經不在設定清單(或改成不能開瀏覽器):修改、送出都固定要叫回它,派不出去。
-    一步都沒做,不是「送出結果不明」;對話叫不回來,核准作廢、拿掉對話 id,卡上寫要重填。"""
-    msg = f'填這張的那個 {cf.AGENT} 已經不在設定裡(或不能開瀏覽器了),改不了也送不了,要重新填一次給你看'
-
-    def mut(d):
-        m = d.setdefault(url, {})
-        m.pop('approve', None)
-        a = dict(m.get('apply') or {}, ok=False, at=now(), issues=[msg])
-        a.pop('session', None)
-        m['apply'] = a
-    bd.set_fb(mut, live=board, by='apply_run')
+def _agent_gone(url, board, gone):
+    """開這一頁的那一家接不回來(chrome_door.Unreachable):修改、送出都要叫回那一家,派不出去。
+    一步都沒做,不是「送出結果不明」;確定接不回來就送「填這張的 agent 接不回來」事件 → 頁面不見了,卡上寫原因、要重填。
+    判斷不了(設定檔讀不懂)就只講原因,卡不動。"""
+    msg = str(gone)
+    if gone.sure:
+        bd.set_fb(lambda d: ds.try_fire(d, url, 'page_lost', issues=[msg]), live=board, by='apply_run')
     return False, msg
 
 
-def _block_profile_submit(url, board, fb, problems):
-    app = dict(apply_of(fb, url))
-    app.pop('attachment_cache', None)
-    app.update(stage='fix', at=now(), ok=False, issues=problems[:10])
-    def mut(d):
-        d.setdefault(url, {})['apply'] = app
+def _page_changed(url, board, problems, why):
+    """確認前、送出前程式讀那一頁跟確認時不一樣:不送,卡到填了卡住,寫出哪一格從什麼變成什麼和下一步。"""
+    bd.set_fb(lambda d: page_changed(d, url, problems, why), live=board, by='apply_run')
+    msg = f'{why}{PAGE_CHANGED}{problems[0]}'
+    agent_report.report(REPORT_FROM, msg, need=NEXT_STEP.replace('下一步:', ''), job=url, live=board)
+    return False, '沒送:' + msg
 
-    bd.set_fb(mut, live=board, by='apply_run')
+
+def _not_sent(url, board, res, ev):
+    """按了送出,程式讀那一頁還停在申請表(或跳出真人驗證):沒送出。不是送出結果不明,不用去信箱查;
+    頁還在,卡到填了卡住,寫原因和下一步。"""
+    why = res['not_sent']
+    apply = {'issues': [why] + [p for p in (res.get('problems') or []) if p != why][:5] + [NEXT_STEP],
+             'not_sent': dict(ev, problems=res.get('problems') or [])}
+    if ev.get('ev'):
+        apply['ev'] = ev['ev']            # 按完送出程式自己截的那一頁(看板點得開,#315)
+    bd.set_fb(lambda d: ds.try_fire(d, url, 'submit_not_sent', apply=apply), live=board, by='apply_run')
+    agent_report.report(REPORT_FROM, why, need='這張沒送出,頁還開著;' + NEXT_STEP.replace('下一步:', ''), job=url, live=board)
+    return False, '沒送出:' + why
+
+
+def _block_profile_submit(url, board, fb, problems):
+    bd.set_fb(lambda d: ds.try_fire(d, url, 'check_failed', apply={'stage': 'fix', 'at': now(), 'issues': problems[:10]}),
+              live=board, by='apply_run')
     agent_report.report(
-        '代投', '送出前平台履歷或附件比對沒通過:' + problems[0],
+        REPORT_FROM, '送出前平台履歷或附件比對沒通過:' + problems[0],
         need='先讓 agent 修好平台履歷欄位或附件,再重新確認送出',
         job=url, live=board,
     )
     return False, '; '.join(problems)
 
 
+def _sent_version(url):
+    """送的是哪一份(語言-版本,照可投遞夾記的);沒記就是 None。"""
+    info = ship.read_info(ship.folder(url, root=SHIP_ROOT))
+    return f"{info['lang']}-{info['variant']}" if info.get('lang') and info.get('variant') else None
+
+
+def _submitted_while_filling(url, board, res, shot):
+    """填表那一輪 agent 違規按了送出,頁面已經是已收到申請:這張就是送出了(來源:agent 送出,附註違規),照實回報。"""
+    ev = dict(submit_evidence(res, shot), note='填表時 agent 違規按了送出')
+    sent_v = _sent_version(url)
+    def mut(d):
+        if ds.try_fire(d, url, 'fill_submitted', by='agent', sent_at=today(), evidence=ev,
+                       ev='填表時 agent 違規按了送出;送出頁是目前唯一證據,待查信箱與平台應徵紀錄'):
+            ship.record_sent(d, url, version=sent_v)
+    bd.set_fb(mut, live=board, by='apply_run')
+    msg = '填表時 agent 按了送出,這張已經送出了:' + str(res.get('confirm_text') or res.get('confirm_url'))
+    agent_report.report(REPORT_FROM, msg, need='去信箱或平台應徵紀錄看一下送出的內容;這張已記成已送出', job=url, live=board)
+    return False, msg
+
+
+def run_failed(fb, url, rec):
+    """這一輪填表、修改沒成:那一頁開著(記到分頁)就是填了卡住,沒開到頁就是沒填成。卡已經不在正在填(他標了外部送出、
+    平台對帳找到)就不動。"""
+    return ds.try_fire(fb, url, 'fill_bad' if rec.get('tab_id') else 'fill_nopage', apply=rec)
+
+
 def _drop_old(out, name):
-    try:
+    with contextlib.suppress(OSError):        # 沒有就算了
         os.remove(os.path.join(out, name))
-    except OSError:
-        pass                                  # 沒有就算了
 
 
 def _own_report(it):
     """重填、修改收得掉的回報:只收代投自己的(客製流程、可投遞夾建置那些不是填表解決的);
     送出沒確認成功要等他確認過或真的送成功才收。"""
-    return it.get('from') == '代投' and not str(it.get('msg') or '').startswith(SUBMIT_UNSURE)
+    return it.get('from') == REPORT_FROM and not str(it.get('msg') or '').startswith(SUBMIT_UNSURE)
 
 
-def _fail_record(url, board, stage, msg):
+def _fail_record(url, board, stage, msg, ev=None):
     """填表、修改還沒走到驗收就失敗(連不上 Chrome、agent 沒跑成):原因照樣寫在卡上。
-    以前只留在「📣 回報」,卡上和「🚀 填表進度」看起來像還沒填。原本的對話、分頁、投遞方式留著。"""
-    def mut(d):
-        a = d.setdefault(url, {}).setdefault('apply', {})
-        a.update(stage=stage, ok=False, at=now(), issues=[msg])
-    bd.set_fb(mut, live=board, by='apply_run')
+    以前只留在「📣 回報」,卡上和「🚀 填表進度」看起來像還沒填。原本的對話、分頁、投遞方式留著。
+    ev:這一輪沒跑完時程式自己截的那一頁(截得到才有)。"""
+    extra = {'ev': ev} if ev else {}
+    bd.set_fb(lambda d: run_failed(d, url, dict(apply_of(d, url), stage=stage, at=now(), issues=[msg], **extra)),
+              live=board, by='apply_run')
 
 
-# 規矩開頭講過,但接回的修改那一輪 Claude 會漏掉(實測);最後再講一次,程式才讀得到那一頁
-CLAUDE_TAIL = ('\n\n最後,寫 fill.json 之前,照最前面【填完、改完的最後一步】在那一頁跑那支唯讀函式'
-               '(先長度、再分段,程式碼照抄不要改)。這一步沒做,程式讀不到那一頁,這一輪就算沒完成。'
-               '用平台上存好的履歷投遞的話,也照【讀平台履歷給程式】把平台上那一份讀給程式。')
+def _shoot_left(out, stage, door, sid, t0, tab_id=None):
+    """這一輪沒跑完:那一頁還開著的話,程式自己截它停下來的樣子,記進這一輪的證據。回看板開的位置(截不到回 None)。"""
+    rnd = evidence.active()
+    if not (rnd and door):
+        return None
+    shoot(sid, out, stage, door, tab_id)
+    return _keep_shot(rnd, os.path.join(out, 'fill.png'), t0, '沒跑完')
 
 
-def _chrome_ready(runtime, board):
-    """那一家的 agent 用 Chrome 前的檢查,各家用各家的門路:Codex 看外掛,Claude 看 Claude in Chrome
-    (Chrome 剛開起來,Claude 擴充功能要一陣子才連得上:等到它看得到再派工)。回 (好了沒, 原因, 要他按哪顆)。"""
-    import agent_chrome
-    if runtime == 'codex':
-        return (*agent_chrome.ensure(board), '按「🔌 連接 Codex」')
-    if runtime == 'claude-code':
-        return (*agent_chrome.wait_claude(), '按「🔌 連接 Claude」')
-    return True, '', ''
+def _keep_shot(rnd, path, t0, why):
+    """這一輪程式自己截的圖記進證據;檔是上一輪留下的(比這一輪開始還舊)不算。回看板開的位置或 None。"""
+    try:
+        fresh = os.path.getmtime(path) >= t0
+    except OSError:
+        fresh = False
+    if not fresh:
+        rnd.note('shot', missing=os.path.basename(path), why=why)
+        return None
+    rnd.shot(path, why)
+    return rnd.last_shot()
+
+
+STOPPED_SUBMIT = '送出途中停掉了,不確定有沒有送出'
+
+
+def settle(fb, busy):
+    """卡停在正在填或改、正在送出,那一輪卻已經不在跑了(被按停止、當掉、伺服器重開):照狀態表收尾。
+    正在填 → 填了卡住或沒填成(這一輪沒跑完);正在送出 → 送出結果不明(可能其實送出去了)。
+    busy:現在在跑的那一張(None 是沒在跑,'*' 是整批在跑、不知道是哪一張:都不動)。回傳收了幾張。"""
+    n = 0
+    for u, m in list(fb.items()):
+        s = ds.state(m) if isinstance(m, dict) and not u.startswith('__') else None
+        if s not in ('running', 'sending') or busy == '*' or busy == u:
+            continue
+        if s == 'running':
+            stage = apply_of(fb, u).get('stage') if apply_of(fb, u).get('stage') in UNFINISHED else 'fill'
+            n += run_failed(fb, u, dict(apply_of(fb, u), at=now(), issues=[UNFINISHED[stage]]))
+        else:
+            n += ds.try_fire(fb, u, 'submit_unsure', evidence={'at': now(), 'problems': [STOPPED_SUBMIT], 'clicked': None})
+    return n
+
+
 
 
 def _run_one(stage, url, board, dry=False, status=None, note='', attachment_download_dir=None):
     jobs, fb = load(board)
+    rnd = evidence.active()       # 這一輪的證據(run_one 開的)
     approved_answers = None
     if stage == 'submit':
         problem = fr.approval_problem(fb, url, fr.board_status(board))
@@ -986,23 +1189,35 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
             return False, problem
         approved_answers = fr.snapshot(fb, url)
     sid = apply_of(fb, url).get('session') if stage in ('fix', 'submit') else None
-    pinned_agent_id = (apply_of(fb, url).get('agent_id') or 'primary') if sid else None
     if stage in ('fix', 'submit') and not sid and not dry:
         return _no_session(url, board, stage)
+    import chrome_door
+    # agent 的 Chrome 用哪一家的門路:填表是現在用 Chrome 的那一家;修改、送出找這張卡記的那一家(開那一頁的)。
+    # 那一家停用、移除,或卡上沒記:接不回來,一步都還沒做(不先記「這一輪還沒跑完」)
+    try:
+        door = chrome_door.for_card(apply_of(fb, url)) if stage in ('fix', 'submit') else chrome_door.current()
+    except chrome_door.Unreachable as gone:
+        if not dry:
+            return _agent_gone(url, board, gone)
+        door = chrome_door.current()
+    if door is None and dry:
+        print(chrome_door.NO_BROWSER_AGENT)
+        return True, 'dry'
+    pinned_agent_id = door.agent_id if sid and door else None
     delivery = apply_of(fb, url).get('delivery') or {}
     import profile_sync as ps
-    # 用 Claude 時程式自己開不了頁讀平台履歷:填完、送出前核對都從 Claude 那一輪的紀錄拿(#288)
-    claude = ar.browser_runtime(pinned_agent_id) == 'claude-code'
     platform_profile = stage == 'submit' and delivery.get('method') == 'platform_profile'
     profile = None
-    if stage == 'fill' and not dry:
-        profile = profile_check(url, board, delivery, reader=_claude_not_yet if claude else None)
-    if platform_profile and not claude:
-        detail = _profile_block_detail(profile_check(url, board, delivery))
+    if stage == 'fill' and not dry and door:
+        # 程式自己讀不到的那一家(照實丟「現在做不到」),profile_check 會把原因交給 agent:這一輪由它讀給程式
+        profile = profile_check(url, board, reader=door.profile_reader(board=board))
+    if platform_profile and door.program_reads:
+        detail = _profile_block_detail(profile_check(url, board, reader=door.profile_reader(board=board)))
         if detail:
             return _block_profile_submit(url, board, fb, [detail])
     profile_read_url = None
-    if platform_profile and claude:
+    if platform_profile and not door.program_reads:
+        # 程式自己開不了頁讀平台履歷:送出前叫回同一段對話讀給程式,從那一輪的紀錄拿(#288)
         lang, var = _pick(url)
         fixed = ps.where(ps.profile_key(url), lang, var) if lang and var else None
         if not fixed:
@@ -1010,8 +1225,10 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         profile_read_url = fixed['read']
     # 送出前:這份平台履歷已經用現在的履歷和附件核對過,就不再下載一遍(以前每張 104 送出前都重來一次)
     attachments_due = platform_profile and not ps.profile_attachments_fresh(jobs[url], fb, url)
-    # Claude:附件核對過也要叫回那段對話讀一次平台履歷(程式自己讀不到)
-    preflight = attachments_due or bool(profile_read_url)
+    # 程式自己讀不到平台履歷的那一家:附件核對過也要叫回那段對話讀一次。
+    # 程式自己讀不到申請表那一頁的那一家(docs/adr/0003):送出前也叫回那段對話把那一頁讀給程式,程式跟確認時的樣子比(#316)
+    page_tab = (apply_of(fb, url).get('tab_id') or None) if stage == 'submit' and door and not door.reads_live_page else None
+    preflight = attachments_due or bool(profile_read_url) or bool(page_tab)
     prepared = None
     if not dry and stage in ('fill', 'fix'):
         # 這張重新填、改:它之前那幾則回報講的是舊的那幾輪,收掉;這一輪沒成功會再留一則新的。
@@ -1025,38 +1242,33 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         # 重填是新的一段對話、照現在的履歷填:舊對話填的那一頁正被重開,不能再叫它回來改(下一步是重填);
         # 換履歷、頁面不見的記號由這一輪接手。這一輪沒成就停在卡上等他。
         # 以前記號留著、at 換新,自動流程每看一次就當成新的一次,同一張一輪接一輪重派。
+        why = []
+
         def begin(d):
-            a = dict(apply_of(d, url), stage=stage, ok=False, at=now(), issues=[UNFINISHED[stage]])
-            if stage == 'fill':
-                for k in ('session', 'stale', 'gone'):
-                    a.pop(k, None)
-            d.setdefault(url, {})['apply'] = a
+            try:
+                ds.fire(d, url, stage + '_start', apply={'stage': stage, 'at': now(), 'issues': [UNFINISHED[stage]]})
+            except ds.Forbidden as e:
+                why.append(str(e))
         bd.set_fb(begin, live=board, by='apply_run')
+        if why:
+            return False, why[0]
     if not dry:
-        import agent_chrome                    # agent 只在它專用的 Chrome 動:先確認連上、藏在螢幕外
-        # 各家用各家的門路確認連上:Codex 看外掛,Claude 看 Claude in Chrome;只裝其中一家也能用
-        runtime = ar.browser_runtime(pinned_agent_id)
-        if stage in ('fix', 'submit') and runtime is None:
-            return _agent_gone(url, board)
-        up, msg, need = _chrome_ready(runtime, board)
+        # agent 只在它專用的 Chrome 動:那一家用那一家的門路確認連上(Codex 看外掛;Claude 等 Claude in Chrome 看得到);只裝其中一家也能用
+        up, msg, need = door.ready(board) if door else (False, chrome_door.NO_BROWSER_AGENT, '勾一個「用它操作 Chrome」的 agent')
         if not up:
-            agent_report.report('代投', msg, need=need, job=url, live=board)
+            agent_report.report(REPORT_FROM, msg, need=need, job=url, live=board)
             if stage in ('fill', 'fix'):
                 _fail_record(url, board, stage, msg)
             return False, msg
-        if stage == 'fill' and runtime == 'codex':   # 程式先開好申請頁、讀好欄位,agent 接手就好
-            # Claude 只看得到自己分頁群組裡的分頁,接不了程式開的,讓它自己開
-            prepared = agent_chrome.open_for_agent(url, old_tab=apply_of(fb, url).get('tab_id'))
+        if stage == 'fill':   # 做得到的那一家:程式先開好申請頁、讀好欄位,agent 接手就好
+            prepared = door.open_for_agent(url, old_tab=apply_of(fb, url).get('tab_id'))
     if preflight:
-        p, out = pre_submit_prompt(url, jobs[url], fb, board, attachment_download_dir,
-                                   attachments=attachments_due, profile_read_url=profile_read_url,
-                                   runtime='claude-code' if claude else 'codex')
+        p, out = pre_submit_prompt(url, jobs[url], fb, board, attachment_download_dir, door,
+                                   attachments=attachments_due, profile_read_url=profile_read_url, page_tab=page_tab)
     else:
         p, out = prompt_for(stage, url, jobs[url], fb, board, note, profile,
-                            attachment_download_dir, prepared=prepared,
-                            runtime='claude-code' if claude else 'codex')
-        if stage in ('fill', 'fix') and claude:
-            p += CLAUDE_TAIL
+                            attachment_download_dir, prepared=prepared, door=door)
+        p += door.task_tail(stage)
     if dry:
         print(p)
         return True, 'dry'
@@ -1075,39 +1287,45 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         if ar.session_id(check_log) != sid:
             return _no_session(url, board, stage)
         if profile_read_url:
-            detail = _profile_block_detail(profile_check(url, board, delivery,
-                                                         reader=claude_profile_reader([check_log])))
+            detail = _profile_block_detail(profile_check(url, board, reader=door.profile_reader([check_log], board)))
             if detail:
                 return _block_profile_submit(url, board, fb, [detail])
         if attachments_due:
-            try:
-                with open(os.path.join(out, 'pre-submit.json'), encoding='utf-8') as fh:
-                    report = json.load(fh)
-            except Exception:
-                return _block_profile_submit(url, board, fb, ['送出前沒有寫出 pre-submit.json'])
-            bad = _check_delivery_attachments(
-                fb, url, jobs[url], report, attachment_download_dir,
-                force=True, expected_delivery=delivery,
-                hash_reader=claude_attachment_hashes([check_log]) if runtime == 'claude-code' else None,
-            )
+            bad = _pre_submit_check(out, url, jobs[url], fb, attachment_download_dir, '送出前',
+                                    force=True, expected_delivery=delivery,
+                                    hash_reader=door.attachment_hashes([check_log]))
+            if rnd:
+                rnd.handoff(os.path.join(out, 'pre-submit.json'))
+                rnd.check(bad, what='送出前平台履歷附件')
             if bad:
                 return _block_profile_submit(url, board, fb, bad)
         jobs, fb = load(board)
         problem = fr.approval_problem(fb, url, fr.board_status(board))
         if problem:
             return False, problem
-        p, out = prompt_for(stage, url, jobs[url], fb, board, note, profile,
-                            runtime='claude-code' if claude else 'codex')
+        p, out = prompt_for(stage, url, jobs[url], fb, board, note, profile, door=door)
+        p += door.task_tail(stage)
     if stage == 'submit':
+        # 送出前程式自己讀那一頁,跟確認時核對過的樣子比;變了就不送(以前是叫 agent 自己比,#316)。
+        # 程式自己讀不到的那一家從剛才那一輪(送出前核對)的紀錄拿
+        changed = recheck_page(url, board, '送出前', door=door, logs=[check_log] if page_tab else None)
+        if changed:
+            return _page_changed(url, board, changed, '送出前')
         # 送的是哪一份(語言、版本)派出去之前就記下:送出那幾分鐘他換了履歷、可投遞夾重建,
         # 跑完才讀會記成新的那份,成效統計就對錯版本
-        info = ship.read_info(ship.folder(url, root=SHIP_ROOT))
-        sent_v = f"{info.get('lang')}-{info.get('variant')}" if info.get('lang') and info.get('variant') else None
-        # 派 agent 之前先記「送出中」,確認成功才清掉:中途被按停止(SIGTERM,程式來不及寫)或當掉時留著它,
-        # approval_problem 會擋住重送,要他先確認到底送出沒有(不然可能投兩次)
-        pending = {'at': now(), 'pending': True, 'problems': ['送出途中停掉了,不確定有沒有送出'], 'clicked': None}
-        bd.set_fb(lambda d: d.setdefault(url, {}).setdefault('apply', {}).__setitem__('submit_fail', pending),
-                  live=board, by='apply_run')
+        sent_v = _sent_version(url)
+        # 派 agent 之前先記「正在送出」:中途被按停止(SIGTERM,程式來不及寫)或當掉時停在這裡,
+        # 伺服器發現沒有在跑就改成送出結果不明,要他先確認到底送出沒有(不然可能投兩次)
+        why = []
+
+        def start(d):
+            # 你已確認 → 正在送出 那一刻再跑一次檢查清單;不過就留在你已確認
+            problem = fr.start_submit(d, url, fr.board_status(board))
+            if problem:
+                why.append(problem)
+        bd.set_fb(start, live=board, by='apply_run')
+        if why:
+            return False, why[0]
     # 上一輪留下的交件檔先刪:這一輪 agent 沒重寫的話,程式不能拿舊的當成這一輪的結果
     _drop_old(out, 'submit.json' if stage == 'submit' else 'fill.json')
     t0 = time.time()
@@ -1115,19 +1333,19 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
     logs_before = []
 
     def prepare(agent):
-        """填表第一家不能用、換手到另一家(Codex↔Claude):照那一家重做 Chrome 檢查、重組 prompt(#288)。
+        """填表第一家不能用、換手到另一家(Codex↔Claude):照那一家的門路重做 Chrome 檢查、重組 prompt(#288)。
         修改、送出接回同一段對話(固定那一家),不會換手。"""
-        rt = agent.get('runtime')
-        if rt == runtime:
+        other = chrome_door.of(agent.get('runtime'))
+        if other is None or other.runtime == door.runtime:
             return p
-        up, msg, _need = _chrome_ready(rt, board)
+        up, msg, _need = other.ready(board)
         if not up:
             raise ar.AgentStartError(msg)
-        ready = agent_chrome.open_for_agent(url, old_tab=apply_of(fb, url).get('tab_id')) if rt == 'codex' else None
-        again = profile_check(url, board, delivery, reader=_claude_not_yet if rt == 'claude-code' else None)
+        ready = other.open_for_agent(url, old_tab=apply_of(fb, url).get('tab_id'))
+        again = profile_check(url, board, reader=other.profile_reader(board=board))
         task, _out = prompt_for(stage, url, jobs[url], fb, board, note, again, attachment_download_dir,
-                                prepared=ready, runtime=rt)
-        return task + (CLAUDE_TAIL if rt == 'claude-code' else '')
+                                prepared=ready, door=other)
+        return task + other.task_tail(stage)
     outcome = _run_agent(
         p, log, cf.HOME, board, timeout=TIMEOUT, browser_required=True,
         browser=ar.apply_overrides(), resume=sid, agent_id=pinned_agent_id,
@@ -1138,7 +1356,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         # 填完、交接了分頁,卻在寫交件檔前被砍掉,整輪就白做了(2026-09-26 一張 104 就是這樣)。
         # 叫回同一段對話,只把目前結果寫下來;程式照常驗收,沒做完的會列在卡上。
         wrap_sid = ar.session_id(log)
-        logs_before = [log]                       # Claude 讀頁的結果可能在前一輪的紀錄裡(收尾那一輪不一定再讀)
+        logs_before = [log]                       # 從紀錄讀頁的那一家,結果可能在前一輪的紀錄裡(收尾那一輪不一定再讀)
         log = os.path.join(out, stage + '-wrapup.log')
         outcome = _run_agent(
             WRAPUP.format(out=out), log, cf.HOME, board,
@@ -1146,74 +1364,93 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
             resume=wrap_sid, agent_id=getattr(outcome, 'agent_id', None) or pinned_agent_id,
             on_start=(lambda proc: status(proc.pid)) if status else None,
         )
+    if rnd:
+        rnd.handoff(os.path.join(out, 'submit.json' if stage == 'submit' else 'fill.json'))
     if not outcome.ok:
         msg = outcome.message()
         if stage == 'submit' and outcome.status == 'unavailable' and getattr(outcome, 'pid', None) is None:
-            # agent 的行程根本沒開起來:一步都沒做,不是「送出結果不明」。清掉「送出中」,核准照樣有效,再按一次就好
-            bd.set_fb(lambda d: ((d.get(url) or {}).get('apply') or {}).pop('submit_fail', None),
-                      live=board, by='apply_run')
-            agent_report.report('代投', '送出沒開始:' + msg, need='這張沒送出;看一下原因,好了再按一次「▶ 送出」',
+            # agent 的行程根本沒開起來:一步都沒做,不是「送出結果不明」。回到你已確認,再按一次就好
+            bd.set_fb(lambda d: ds.try_fire(d, url, 'submit_not_started'), live=board, by='apply_run')
+            agent_report.report(REPORT_FROM, '送出沒開始:' + msg, need='這張沒送出;看一下原因,好了再按一次「▶ 送出」',
                                 job=url, live=board)
             return False, '沒送出:' + msg
         if stage == 'submit':
             failure = {'at': now(), 'problems': [msg], 'clicked': None,
                        'runner_outcome': outcome.status}
-            bd.set_fb(lambda d: d.setdefault(url, {}).setdefault('apply', {}).__setitem__('submit_fail', failure),
-                      live=board, by='apply_run')
-            agent_report.report('代投', SUBMIT_UNSURE + ':' + msg,
+            bd.set_fb(lambda d: ds.try_fire(d, url, 'submit_unsure', evidence=failure), live=board, by='apply_run')
+            agent_report.report(REPORT_FROM, SUBMIT_UNSURE + ':' + msg,
                                 need='先去信箱或平台的應徵紀錄確認到底送出沒有,再決定要不要重送',
                                 job=url, live=board)
             return False, '送出結果不明:' + msg
-        agent_report.report('代投', ('填表' if stage == 'fill' else '修改') + '沒完成:' + msg,
+        agent_report.report(REPORT_FROM, ('填表' if stage == 'fill' else '修改') + '沒完成:' + msg,
                             need='看「看紀錄」的內容;確認後再重跑', job=url, live=board)
-        _fail_record(url, board, stage, msg)
+        _fail_record(url, board, stage, msg, ev=_shoot_left(out, stage, door, ar.session_id(log) or sid, t0,
+                                                            apply_of(fb, url).get('tab_id')))
         return False, msg
     if stage == 'fill':
         sid = ar.session_id(log)
     elif ar.session_id(log) != sid:
         # resume 沒接上同一段對話(codex 找不到那段、或開了新的):那一頁不是它開的,不能算數
         return _no_session(url, board, stage)
-    runtime = ar.browser_runtime(getattr(outcome, 'agent_id', None) or pinned_agent_id) or 'codex'
-    shoot(sid, out, stage, apply_of(fb, url).get('tab_id'), runtime)
+    # 真的開那一頁的那一家(填表可能換手到另一家;修改、送出就是卡上記的那一家):之後都找它
+    used = (chrome_door.of_agent(outcome.agent_id) if stage == 'fill' and getattr(outcome, 'agent_id', None)
+            else None) or door
+    shoot(sid, out, stage, used, apply_of(fb, url).get('tab_id'))
     jobs, fb = load(board)
     rel = os.path.relpath(out, cf.HOME) if out.startswith(cf.HOME) else out
     if stage in ('fill', 'fix'):
         bad, res = check_fill(
             fb, url, out, t0, sid, job=jobs[url],
-            attachment_download_dir=attachment_download_dir, runtime=runtime, log=logs_before + [log],
+            attachment_download_dir=attachment_download_dir, door=used, log=logs_before + [log],
+            # 程式自己開好給它的那一頁(做得到的那一家):讀這一頁核對,它說的分頁要是這一個
+            tab_id=(prepared or {}).get('tab_id') if stage == 'fill' and used is door else None,
         )
         remember_notes(url, res.get('platform_notes'), res.get('platform_notes_remove'))
+        if res.get('submitted') and (res.get('confirm_text') or res.get('confirm_url')):
+            return _submitted_while_filling(url, board, res, os.path.join(rel, 'fill.png'))
         if res.get('tab_id'):
             # 先把這一輪填好的分頁記到看板上,再做後面的核對:收尾的 agent_chrome.close_if_idle() 只留看板上記著的分頁,
             # 沒記著的話,填好的那一頁會跟著整個 agent Chrome 一起被關掉
             # 一起記現在是哪一個 Chrome 程序:之後 Chrome 關掉、重開過,就知道這一頁不在了
+            # 也記下是哪一家開的:之後 👀、讀頁、修改、送出、收分頁都找同一家(沒記到就是接不回來)
+            import agent_chrome
             tab, res['chrome'] = str(res['tab_id']), agent_chrome.chrome_id()
-            bd.set_fb(lambda d: d.setdefault(url, {}).setdefault('apply', {}).update(tab_id=tab, chrome=res['chrome']),
+            bd.set_fb(lambda d: ds.try_fire(d, url, 'tab_handed', apply={'tab_id': tab, 'chrome': res['chrome'],
+                                                                           'runtime': used.runtime}),
                       live=board, by='apply_run')
         prev = apply_of(fb, url)
-        delivery = dict(prev.get('delivery') or {}) if stage == 'fix' else {}
-        delivery.update(res.get('delivery') or {})
+        reported = dict(prev.get('delivery') or {}) if stage == 'fix' else {}
+        reported.update(res.get('delivery') or {})
+        # 交件單只拿投遞方式(和 agent 新開的客製版網址);用哪一份、固定版還是客製版照程式決定的(#313)
+        import profile_sync as ps
+        delivery = ps.delivery_for(jobs[url], fb, url, reported)
         checked_result = dict(res, delivery=delivery) if delivery else res
-        if (stage in ('fill', 'fix') and delivery.get('method') == 'platform_profile'
-                and delivery.get('profile_kind') in ('fixed', 'custom')):
-            bad += profile_after(url, checked_result, board,
-                                 reader=claude_profile_reader(logs_before + [log]) if runtime == 'claude-code' else None)
+        if delivery.get('method') == 'platform_profile':
+            bad += profile_after(url, checked_result, board, reader=used.profile_reader(logs_before + [log], board))
+            # 固定版這一輪才登記到位置的,記進卡上的要是登記好的那一份
+            checked_result = dict(res, delivery=ps.delivery_for(jobs[url], fb, url, reported))
+            # 程式自己讀申請頁,看選的是不是該選的那一份;選錯就停在這裡,不拿錯的那一份去比附件(#313)
+            picked = _picked_problem(url, jobs[url], fb, sid, res, used, logs_before + [log])
+            if picked:
+                bad = [picked] + [b for b in bad if b != picked]
         if not sid:
             bad.insert(0, '沒拿到 agent 那段對話的 id,之後叫不回同一隻 agent')
+        if rnd:
+            rnd.check(bad, what='填表驗收' if stage == 'fill' else '修改驗收')
         rec = fill_record(stage, prev, checked_result, bad, sid, os.path.join(rel, 'fill.png'),
-                          outcome.agent_id, note)
-        rec['runtime'] = runtime             # 👀、讀頁、收分頁都要用同一家的門路接回那一頁
+                          outcome.agent_id, note, runtime=used.runtime, ev=rnd.last_shot() if rnd else None)
+
+        read = next((p for p in reversed(rnd.pages) if p['why'] == '驗收'), None) if rnd else None
+        no_evidence = []
 
         def mut(d):
-            # 這一輪跑的期間別人記在卡上的照看板現在的留著:他換了履歷(stale,修改不換上傳檔,
-            # 重填一開始就清掉了,所以留著的一定是這一輪中途才換的)、送出結果不明、或他剛按了確認沒送出
-            cur = (d.get(url) or {}).get('apply') or {}
-            for k in ('stale', 'submit_fail'):
-                if cur.get(k):
-                    rec[k] = cur[k]
-                else:
-                    rec.pop(k, None)
-            d.setdefault(url, {})['apply'] = rec
+            # 要他確認的題目附程式自己截的那一頁;沒有就不叫他確認(#315)
+            no_evidence[:] = question_evidence(d, url, read and read['page'],
+                                               read and read['shot'] and rnd.rel(read['shot']))
+            # 這一輪跑的期間他換了履歷:狀態表讓它跑完直接到「上傳的是舊檔」。卡已經不在正在填(他標了外部送出、
+            # 平台對帳找到)就不動
+            if not (ds.try_fire(d, url, 'fill_ok', apply=rec) if not bad else run_failed(d, url, rec)):
+                return
             if not bad:
                 # 網頁已經照答案庫重打了:只清核對頁面時(fb)就是這個值的欄位。核對要讀頁、比附件,
                 # 這段期間他又改的答案,網頁上還是舊字,標記留著
@@ -1223,26 +1460,47 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
                     if x.get('refill') and bank.get(x.get('k')) == checked.get(x.get('k')):
                         del x['refill']
         bd.set_fb(mut, live=board, by='apply_run')
+        if no_evidence:
+            agent_report.report(
+                REPORT_FROM, MISSING_EVIDENCE + ':這幾題要你確認,可是沒有程式自己截的那一頁可以對(或那一頁上找不到這一題):'
+                + '、'.join(str(q)[:40] for q in no_evidence[:5]),
+                need='讓 agent 重填這張;有程式自己截的那一頁,這幾題才會交給你確認', job=url, live=board)
         pt = res.get('posting') or {}
         if stage == 'fill' and pt.get('same_job') is True and pt.get('title'):
             rename(url, pt['title'], pt.get('company') or '', board)
         if not bad and stage == 'fill':
             # 附件更新後第一次用這份平台履歷:把平台上的附件取回來比一次(不在填表的 40 分鐘裡);沒更新就直接跳過
-            later = _profile_check_after_fill(url, board, sid, outcome.agent_id or pinned_agent_id, status)
+            later = _profile_check_after_fill(url, board, sid, used, status)
             if later:
                 bad = later
-                bd.set_fb(lambda d: d.setdefault(url, {}).setdefault('apply', {}).update(ok=False, issues=later[:10]),
+                bd.set_fb(lambda d: ds.try_fire(d, url, 'check_failed', apply={'issues': later[:10]}),
                           live=board, by='apply_run')
         if not bad:   # 這一輪做成了:這張之前的回報(上一輪的問題)都過時了,收進已處理
             agent_report.resolve(url, ('填好了' if stage == 'fill' else '改好了') + ',之前的問題已經解決', live=board,
                                  only=_own_report)
         if bad:   # 程式驗出來的問題自己回報,不靠 agent 記得
-            agent_report.report('代投', ('填表' if stage == 'fill' else '修改') + '沒完成:' + bad[0],
+            agent_report.report(REPORT_FROM, ('填表' if stage == 'fill' else '修改') + '沒完成:' + bad[0],
                                 need='看卡上的原因;需要你處理的照回報做', job=url, live=board)
         return not bad, '; '.join(bad) or ('填好了' if stage == 'fill' else '改好了') + ',等你確認送出'
-    ok, res = check_submit(out, t0)
+    tab = apply_of(fb, url).get('tab_id')     # 送出成功就從卡上拿掉(那一頁是已收到申請);關分頁要用送出前的
+    # 按完送出之後程式自己讀那一頁:還停在申請表就是沒送出,不看 agent 說什麼(#316)
+    after, after_why = None, ''
+    if sid and tab:
+        try:
+            after = read_page(lambda: used.read_page(sid, tab, [log]), '送出後', shot=os.path.join(out, 'submit.png'))
+        except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到就照截圖和它說的判斷(判斷不了才是送出結果不明)
+            after_why = str(e)[:80]
+    ok, res = check_submit(out, t0, apply_of(fb, url).get('tab_url') or url, page=after, page_why=after_why, tab_id=tab,
+                           before=apply_of(fb, url).get('seen'))
     ev = submit_evidence(res, os.path.join(rel, 'submit.png'))
+    if rnd:
+        shot = _keep_shot(rnd, os.path.join(out, 'submit.png'), t0, '送出後')
+        rnd.check(res.get('problems') or [], what='送出', ok=ok)
+        if shot:
+            ev['ev'] = shot                  # 送出結果附程式自己截的那一頁(看板點得開,#315)
     changed_questions = []
+    if not ok and res.get('not_sent'):
+        return _not_sent(url, board, res, ev)
 
     def mut(fbx):
         if ok:
@@ -1253,36 +1511,51 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
             )
             if changed_questions:
                 ev['not_sent_questions'] = changed_questions[:]
-            fr.apply_mark_sent(fbx, url, ev, today(), sent_v)
-            fbx[url]['ev'] = '送出頁是目前唯一證據;待查信箱與平台應徵紀錄'
-            (fbx[url].get('apply') or {}).pop('submit_fail', None)      # 「送出中」清掉
+            if ds.try_fire(fbx, url, 'submit_ok', by='agent', sent_at=today(), evidence=ev,
+                           ev='送出頁是目前唯一證據;待查信箱與平台應徵紀錄'):
+                ship.record_sent(fbx, url, version=sent_v)   # 寄出的是哪一份:只有 ship.record_sent 寫
         else:
-            fbx.setdefault(url, {}).setdefault('apply', {})['submit_fail'] = dict(
-                ev, problems=res.get('problems') or [], clicked=bool(res.get('clicked') or res.get('submitted')))
+            ds.try_fire(fbx, url, 'submit_unsure', evidence=dict(
+                ev, problems=res.get('problems') or [], clicked=bool(res.get('clicked') or res.get('submitted'))))
     bd.set_fb(mut, live=board, by='apply_run')
-    if ok:
-        agent_report.resolve(url, '送出成功,這張結束了', live=board)
-        if changed_questions:
-            msg = '這幾題改的內容沒有送出去:' + '、'.join(changed_questions)
-            agent_report.report('代投', msg, need='這張已照確認頁送出;新答案不在這次送出的內容裡',
-                                job=url, live=board)
-        import apply_tab                     # 證據存好了,這張結束:那一頁關掉(這一輪收尾不再標它,外掛會收掉)
-        try:
-            apply_tab.release(sid, apply_of(fb, url).get('tab_id'), runtime)
-        except Exception:  # noqa: S110
-            pass
     if not ok:
-        agent_report.report('代投', SUBMIT_UNSURE + ':' + ('; '.join(res.get('problems') or []) or '沒看到成功頁面'),
+        agent_report.report(REPORT_FROM, SUBMIT_UNSURE + ':' + ('; '.join(res.get('problems') or []) or '沒看到成功頁面'),
                             need='先去信箱或平台的應徵紀錄確認到底送出沒有,再決定要不要重送', job=url, live=board)
-    if ok:
-        msg = '送出了:' + str(res.get('confirm_text') or res.get('confirm_url'))
-        if changed_questions:
-            msg += ';這幾題改的內容沒有送出去:' + '、'.join(changed_questions)
-        return True, msg
-    return False, '沒送出:' + '; '.join(res.get('problems') or ['沒看到成功頁面'])
+        return False, '沒送出:' + '; '.join(res.get('problems') or ['沒看到成功頁面'])
+    agent_report.resolve(url, '送出成功,這張結束了', live=board)
+    if changed_questions:
+        msg = '這幾題改的內容沒有送出去:' + '、'.join(changed_questions)
+        agent_report.report(REPORT_FROM, msg, need='這張已照確認頁送出;新答案不在這次送出的內容裡',
+                            job=url, live=board)
+    # 證據存好了,這張結束:那一頁放掉(照那一家的門路)
+    try:  # noqa: SIM105 — 已送出、證據存好,放不掉的頁不影響結果(理由同下一行)
+        used.release(sid, tab)
+    except Exception:  # noqa: BLE001, S110 — 各家門路丟的例外不一樣;這張已送出、證據存好,放不掉的頁不是等他的頁,這一批收尾關 agent 的 Chrome 時一起關
+        pass
+    msg = '送出了:' + str(res.get('confirm_text') or res.get('confirm_url'))
+    if changed_questions:
+        msg += ';這幾題改的內容沒有送出去:' + '、'.join(changed_questions)
+    return True, msg
 
 
 def run_one(stage, url, board, dry=False, status=None, note=''):
+    """跑一張卡的一輪。這一輪的證據(指示、動作紀錄、交件單、讀頁和截圖、比對結果)都記進那張卡的證據夾(evidence)。"""
+    if dry:
+        return _run_one_with_downloads(stage, url, board, dry, status, note)
+    with evidence.opened('apply', stage, [url], board) as rnd:
+        try:
+            return _run_one_with_downloads(stage, url, board, dry, status, note)
+        finally:
+            # 這一輪留給他的回報附上這一輪程式自己截的那一頁(沒有就照實標沒有);沒有要附的就不寫看板
+            try:
+                if agent_report.apply_attach(copy.deepcopy(load(board)[1]), url, rnd.started, rnd.last_shot()):
+                    bd.set_fb(lambda d: agent_report.apply_attach(d, url, rnd.started, rnd.last_shot()),
+                              live=board, by='apply_run')
+            except (OSError, ValueError, bd.Tampered) as e:   # 不能蓋掉這一輪本身出錯的原因;照實印出來
+                print(f'回報附不上這一輪的截圖:{e}', file=sys.stderr)
+
+
+def _run_one_with_downloads(stage, url, board, dry=False, status=None, note=''):
     jobs, fb = load(board)
     delivery = apply_of(fb, url).get('delivery') or {}
     needs_download_dir = not dry and (
@@ -1292,15 +1565,11 @@ def run_one(stage, url, board, dry=False, status=None, note=''):
     if not needs_download_dir:
         return _run_one(stage, url, board, dry, status, note, None)
 
-    temporary = tempfile.TemporaryDirectory(prefix='jobsalvo-profile-attachments-')
+    downloads = tempfile.mkdtemp(prefix='jobsalvo-profile-attachments-')
     try:
-        result = _run_one(stage, url, board, dry, status, note, temporary.name)
+        result = _run_one(stage, url, board, dry, status, note, downloads)
     finally:
-        cleanup_problem = _clean_attachment_downloads(temporary.name)
-        try:
-            temporary.cleanup()
-        except OSError as e:
-            cleanup_problem = cleanup_problem or f'平台附件比對暫存檔清理失敗({str(e)[:80]})'
+        cleanup_problem = _clean_attachment_downloads(downloads)
     if cleanup_problem:
         ok, message = result
         return False, '; '.join(x for x in (message, cleanup_problem) if x)
@@ -1337,7 +1606,7 @@ def main():
         import agent_chrome                   # 這一批做完:沒有頁面在等他,就把 agent 的 Chrome 整個關掉
         try:
             print(agent_chrome.close_if_idle(board))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 收尾關 Chrome 失敗照實印進這一輪的紀錄(看板上看得到),不影響已經做完的卡
             print('關 agent 的 Chrome 時出錯:', e)
     failed = any(not item['ok'] for item in results)
     jobrun.write(st, dict(base, phase='failed' if failed else 'done', done=len(todo),

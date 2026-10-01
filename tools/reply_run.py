@@ -4,12 +4,13 @@ reply_run —— 「📬 查回音」:已投遞的卡,誰回了、回了什麼�
 agent 在自己的 Chrome 搜尋適合的來源,回傳回音證據、平台應徵紀錄上的職缺和無法讀取的來源。
 程式只驗證交件形狀,再依證據更新看板、對帳應徵紀錄(sync_sent)、記錄待辦和無下文狀態。
 """
-import os, sys, json, time, argparse, datetime, hashlib, re, urllib.parse
+import contextlib, os, sys, json, time, argparse, datetime, hashlib, re, urllib.parse
 from dataclasses import dataclass, field
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd
 import agent_run as ar
+import evidence
 import jobrun
 import agent_report
 import config as cf
@@ -37,7 +38,7 @@ def mailbox(url=None):
     return url, False
 
 
-def _mailbox_message_ref(link, box=None):
+def mailbox_message_ref(link, box=None):
     """不是 Gmail 的信箱:agent 補查回來的原文連結指向同一個信箱(同一台主機、https),才算信件來源。"""
     base, is_gmail = box or mailbox()
     if is_gmail:
@@ -173,10 +174,14 @@ def gmail_query(fb, jobs, urls):
 
 
 def _read_pages(urls, board=None, reader=None, ready=None, settle=0):
+    """程式自己讀這幾頁:照現在用 Chrome 的那一家的門路(做不到的那一家照實丟「現在做不到」,那幾個來源交給 agent 補查)。"""
     if reader:
         return reader(urls)
-    import agent_chrome
-    return agent_chrome.read_pages(urls, board, ready=ready, settle=settle)
+    import chrome_door
+    door = chrome_door.current()
+    if door is None:
+        raise RuntimeError(chrome_door.NO_BROWSER_AGENT)
+    return door.read_pages(urls, board, ready=ready, settle=settle)
 
 
 def _page_problem(page):
@@ -206,7 +211,7 @@ def _gmail_page_problem(page, source_url):
     return ''
 
 
-def _gmail_message_id(value):
+def gmail_message_id(value):
     """Accept only a specific Gmail conversation URL and return its thread id."""
     try:
         parsed = urllib.parse.urlsplit(str(value or ''))
@@ -259,7 +264,7 @@ def _gmail_search_thread_ids(page):
     ]
     return list(dict.fromkeys(
         thread_id for anchor in anchors if isinstance(anchor, dict)
-        if (thread_id := _gmail_message_id(anchor.get('href')))
+        if (thread_id := gmail_message_id(anchor.get('href')))
     ))
 
 
@@ -353,7 +358,6 @@ VERIFY_FN = (
     " return {url: location.href, title: document.title, readyState: document.readyState, hasText: text.trim().length > 0,"
     " lines, links, printView, messageCount: bodies.length, bodies: full.length, bodiesInText: full.every(b => text.includes(b))};}")
 _VERIFY_WHOLE = 'JSON.stringify((' + VERIFY_FN + ')())'
-VERIFY_LEN_JS = 'String(' + _VERIFY_WHOLE + '.length)'
 
 
 def _digest(page):
@@ -390,7 +394,7 @@ def _digest_problem(d, kind, platform=''):
         return '來源要求登入'
     if kind == 'record':
         import profile_sync as ps
-        return '' if ps._same_platform_url(url, platform) else '平台應徵紀錄讀取後跳到其他網站'
+        return '' if ps.same_platform_url(url, platform) else '平台應徵紀錄讀取後跳到其他網站'
     problem = _gmail_page_problem({'url': url, 'text': 'x'}, url)
     if problem:
         return problem
@@ -459,19 +463,31 @@ def unverified_cards(unavailable, digests, box=None):
     return out
 
 
-def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS):
+def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, texts=None):
     """Codex:agent 補查完,程式自己把補查清單上的網頁再讀一次(它可能剛登入好了),算成摘要給 unverified_cards。
-    讀不到的就沒有摘要,那幾張卡照樣不推論沒下文。「超過每輪上限」那一條不重讀(本來就讀不完)。"""
+    讀不到的就沒有摘要,那幾張卡照樣不推論沒下文。「超過每輪上限」那一條不重讀(本來就讀不完)。
+    texts:給了就把程式讀到的全文記進去({來源代號: 全文}),安檢門拿它核對 agent 補查交回的回音。"""
     box = mailbox()[0]
     got = []
+    refs = {it['url']: str(it.get('source_ref') or '') for it in unavailable or [] if it.get('url')}
 
     def read(urls, **kw):
         try:
             pages = _read_pages(urls, board, reader, **kw)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;原因照實印進這一輪的紀錄,這批當成沒讀到
             print(f'程式核實補查來源讀取失敗:{str(e)[:120]}')
             return {}
         got.extend(dict(_digest(pages.get(u) or {}), _asked=u) for u in urls)
+        if texts is not None:
+            for u in urls:
+                text = str((pages.get(u) or {}).get('text') or '')
+                th = (urllib.parse.parse_qs(urllib.parse.urlsplit(u).query).get('th') or [''])[0]
+                ref = f'email:{th}' if th else refs.get(u, '')
+                if not (th or ref.startswith('application_record:')):
+                    continue                              # 搜尋頁本身不是一封信
+                if text and not _digest_problem(_digest(pages.get(u) or {}),
+                                                        'thread' if th else 'record', ref.split(':', 1)[-1]):
+                    texts[ref] = text
         return pages
 
     items = [it for it in unavailable or [] if it.get('url') and it.get('source_ref') != 'email:search-more']
@@ -526,7 +542,7 @@ def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS
         try:
             search_page = _read_pages([search_url], board, reader,
                                       ready=_gmail_search_ready, settle=2).get(search_url) or {}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 原因照實記進 search_error,跟著結果回報
             search_page = {}
             search_error = f'Gmail 搜尋頁讀取失敗:{str(e)[:120]}'
         else:
@@ -568,7 +584,7 @@ def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS
                 ready=_gmail_thread_ready if source_type == 'email' else _page_ready,
                 settle=2 if source_type == 'email' else 0,
             ))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 原因照實記進每一頁的錯誤,跟著結果回報
             error = f'來源頁讀取失敗:{str(e)[:120]}'
             page_errors.update({target: error for target in targets})
     for source_url, source_type, source_id, source_ref in read_specs:
@@ -581,7 +597,7 @@ def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS
             problem = _gmail_thread_problem(page)
         if not problem and source_type == 'application_record':
             final_url = page.get('url') or source_url
-            if not ps._same_platform_url(final_url, source_id):
+            if not ps.same_platform_url(final_url, source_id):
                 problem = '平台應徵紀錄讀取後跳到其他網站'
         if problem:
             source_label = ('Gmail 郵件 ' + source_id if source_type == 'email'
@@ -647,7 +663,7 @@ def apply_findings(fb, found, day=None):
             )
             it = {k: it.get(k) for k in
                   ('src', 'source_type', 'source_ref', 'date', 'subject', 'snippet', 'link', 'kind',
-                   'todo', 'reason') if it.get(k)}
+                   'todo', 'reason', 'quote', 'unverified') if it.get(k)}
             if it.get('kind') != 'reject':
                 it.pop('reason', None)
             it['id'] = _key(it)
@@ -797,19 +813,20 @@ PROMPT = """你是查回音的 agent。程式已經搜尋信箱並把可讀來�
 {fallback_sources}
 
 請分析複製的郵件全文和平台應徵紀錄頁全文:
-1. 回音要給卡片網址、source_ref、來源、日期、摘要、原文連結、種類、source_type 和待辦。source_ref 必須照抄來源全文中的值,或照抄補查清單的值。kind 只能是 confirm(確認收到或仍在處理)、reject(沒錄取)、interview(面試、測驗或作業邀請)、offer(錄取)。source_type 只能是 email、application_record、fallback。待辦只記對方要求本人完成且尚未完成的事。同一家有好幾張卡、一封信看不出是哪一張時,不要自己挑一張:每張可能的卡各給一則(同一個 source_ref、同一個原文連結),程式會在卡上標「可能是這封」讓本人判斷。
-2. 讀平台應徵紀錄頁時,將能確認已投遞的記為 confirm/source_type=application_record;每筆應徵紀錄放進 job_ids:有職缺連結就照抄連結,沒有就給平台名稱和頁面上的職缺代號,程式只用平台+代號比對。
+1. 回音要給卡片網址、source_ref、來源、日期、摘要、原文連結、種類、信裡那一句和待辦。source_ref 必須照抄來源全文中的值,或照抄補查清單的值;來源是信還是平台紀錄程式照 source_ref 自己認,不用寫。kind 只能是 confirm(確認收到或仍在處理)、reject(沒錄取)、interview(面試、測驗或作業邀請)、offer(錄取)。quote 逐字抄信裡(或紀錄上)決定是這一種的那一句。待辦只記對方要求本人完成且尚未完成的事。同一家有好幾張卡、一封信看不出是哪一張時,不要自己挑一張:每張可能的卡各給一則(同一個 source_ref、同一個原文連結),程式會在卡上標「可能是這封」讓本人判斷。
+2. 讀平台應徵紀錄頁時,將能確認已投遞的記為 confirm(source_ref 照抄那一頁的);每筆應徵紀錄放進 job_ids:有職缺連結就照抄連結,沒有就給平台名稱和頁面上的職缺代號(逐字照抄),程式只用平台+代號比對。
 3. 只有檢查完信箱搜尋全文和該卡可用的應徵紀錄來源,且沒有未解的存取問題,才把卡列入 checked。沒有找到回音也可列入 checked。
 4. 無法進入的來源要列 source、reason、need 和受影響卡片網址;影響範圍不明時不要把任何卡放進 checked。
 
 輸出 JSON 檔 {out},格式如下:
 {{
   "checked": ["本輪已完成來源檢查、沒有未解存取問題的卡片網址"],
-  "findings": [{{"url":"卡片網址","source_ref":"複製來源或補查來源中的識別值","source":"來源名稱","source_type":"email|application_record|fallback","date":"YYYY-MM-DD","summary":"重點,200字內","link":"原文連結","kind":"confirm|reject|interview|offer","reason":"拒絕信明確寫出的理由原文;制式信留空","todo":"尚未完成的待辦,沒有填空字串"}}],
+  "findings": [{{"url":"卡片網址","source_ref":"複製來源或補查來源中的識別值","source":"來源名稱","date":"YYYY-MM-DD","summary":"重點,200字內","link":"原文連結","kind":"confirm|reject|interview|offer","quote":"信裡決定是這一種的那一句,逐字抄","reason":"拒絕信明確寫出的理由原文;制式信留空","todo":"尚未完成的待辦,沒有填空字串"}}],
   "job_ids": [{{"url":"應徵紀錄上的職缺連結,沒有就空字串","platform":"平台,例:104、linkedin","id":"頁面上的職缺代號","applied_at":"YYYY-MM-DD","title":"方便人閱讀,不參與配對"}}],
   "inaccessible": [{{"source":"來源","reason":"進不去的原因","need":"本人需要做什麼","jobs":["受影響的卡片網址"]}}]
 }}
 
+程式會拿日期、原文連結、quote、拒絕理由、應徵紀錄的代號跟它複製的全文比,對不上的那一則不收、那張卡這一輪不算查完。
 不要直接改看板或呼叫 agent_report.py;程式會記錄回報。只寫這份 JSON 檔,其他檔案不要改,最後一行印 @@DONE@@。
 """
 
@@ -833,6 +850,14 @@ def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inacc
     fallback = json.dumps(inaccessible or [], ensure_ascii=False, indent=2) if inaccessible else '(沒有;不要開瀏覽器)'
     return PROMPT.format(cards=cards, out=out, source_file=source_file, fallback_sources=fallback) + (
         '\n' + self_read_rule() if self_read and inaccessible else '')
+
+
+def source_texts(sources):
+    """程式複製的來源全文:{來源代號: 全文}(信、平台應徵紀錄頁)。"""
+    records = list(((sources or {}).get('gmail') or {}).get('threads') or [])
+    records += list((sources or {}).get('application_records') or [])
+    return {r['source_ref']: str(r.get('text') or '') for r in records
+            if isinstance(r, dict) and r.get('source_ref') and r.get('text')}
 
 
 def _source_type_index(sources, inaccessible):
@@ -860,61 +885,77 @@ def _iso_date(value):
         raise ValueError(f'日期不是 YYYY-MM-DD: {value}') from e
 
 
-def parse_result(data, urls, source_types=None, since_dates=None):
-    """驗證 agent 交件並將回音整理成看板格式;不接受清單外的卡片。
-    整份的形狀不對才整批不收;單獨一筆格式不對只丟那一筆,那張卡這一輪不算查完(不推論沒下文、查過日期不往前推),
-    看不出是哪張卡的就每張都不算查完。以前一筆日期寫錯整份作廢,真的面試邀請也一起丟掉。"""
+def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
+    """交件單經安檢門(gate.inspect):每一則回音、每一筆應徵紀錄跟程式複製的來源全文比(texts {來源代號: 全文})。
+    整份的形狀不對才整批不收;一則對不上(或格式不對)只丟那一則,那張卡這一輪不算查完(不推論沒下文、查過日期不往前推),
+    看不出是哪張卡的就每張都不算查完。程式沒讀到全文的來源(agent 補查的)核對不了:那一則標 unverified,卡上照實講。
+    平台應徵紀錄的代號核對不了就不收(不拿 agent 的話把卡標成已投遞)。"""
+    import gate
     if not isinstance(data, dict) or not isinstance(data.get('checked'), list):
         raise ValueError('缺少 checked 卡片清單')
     for key in ('findings', 'job_ids', 'inaccessible'):
         if not isinstance(data.get(key, []), list):
             raise ValueError(f'{key} 必須是陣列')
+    data = dict(data, job_ids=[{'id': r} if isinstance(r, str) else r for r in data.get('job_ids', [])])
 
     allowed = set(urls)
+    texts = dict(texts or {})
+    verdict = gate.inspect('reply', data, gate.Truth(cards=allowed, source_types=source_types, texts=texts))
     box = mailbox()
     checked = {str(url) for url in data['checked'] if str(url) in allowed}
-    found, dropped, unsure = {}, [], set()
-    for row in data.get('findings', []):
-        url = str(row.get('url') or '') if isinstance(row, dict) else ''
+    found, dropped, unsure = {}, [p for p in verdict.problems if '「查完的卡」' in p], set()
+    shape = [p for p in verdict.problems if '不是物件' in p]
+    if shape:
+        dropped += shape
+        unsure.add('*')
+    for row in verdict.rows.get('findings', []):
+        url = row.key
+        if url not in allowed:                           # 清單外的卡不能改狀態(安檢門已經記下這一則對不上)
+            dropped += row.problems
+            continue
         try:
-            if not isinstance(row, dict):
-                raise ValueError('findings 裡有非物件資料')
-            if url not in allowed:                       # 清單外的卡不能改狀態
-                continue
-            item = _finding(row, url, source_types, since_dates, box)
+            if not row.ok:
+                raise ValueError('；'.join(row.problems))
+            item = _finding(row.row, url, source_types, since_dates, box)
         except ValueError as e:
-            dropped.append(str(e)[:200])
-            unsure.add(url if url in allowed else '*')
+            dropped.append(str(e)[:300])
+            unsure.add(url)
             continue
         if item:
+            if not texts.get(resolved_ref(row.row)):
+                item['unverified'] = True                # agent 補查、程式沒讀到原文:卡上照實講
             found.setdefault(url, []).append(item)
 
     job_ids = []
-    for row in data.get('job_ids', []):
+    for row in verdict.rows.get('job_ids', []):
         try:
-            rec = _job_id(row)
+            if not row.ok:
+                raise ValueError('；'.join(row.problems))
+            if not any(k in row.facts for k in ('id', 'url')):
+                continue                                  # 程式沒讀到應徵紀錄全文:核對不了,不拿來標已投遞
+            rec = _job_id(dict(row.facts, title=row.row.get('title')))
         except ValueError as e:
-            dropped.append(str(e)[:200])
+            dropped.append(str(e)[:300])
             continue
         if rec:
             job_ids.append(rec)
 
     inaccessible = []
-    for row in data.get('inaccessible', []):
-        jobs = row.get('jobs', []) if isinstance(row, dict) else None
+    for row in verdict.rows.get('inaccessible', []):
+        jobs = row.row.get('jobs', [])
         affected = [str(url) for url in jobs if str(url) in allowed] if isinstance(jobs, list) else []
         try:
-            if not isinstance(row, dict):
-                raise ValueError('inaccessible 裡有非物件資料')
-            source = str(row.get('source') or '').strip()
-            reason = str(row.get('reason') or '').strip()
-            need = str(row.get('need') or '').strip()
+            if not row.ok:
+                raise ValueError('；'.join(row.problems))
+            source = str(row.row.get('source') or '').strip()
+            reason = str(row.row.get('reason') or '').strip()
+            need = str(row.row.get('need') or '').strip()
             if not isinstance(jobs, list):
                 raise ValueError('inaccessible.jobs 必須是陣列')
             if not source or not reason or not need:
                 raise ValueError('無法讀取的來源必須包含來源、原因和本人待辦')
         except ValueError as e:
-            dropped.append(str(e)[:200])
+            dropped.append(str(e)[:300])
             unsure.update(affected or ['*'])
             continue
         if affected:
@@ -935,6 +976,19 @@ def parse_result(data, urls, source_types=None, since_dates=None):
     return EchoReadResult(found, checked, job_ids, inaccessible, dropped)
 
 
+SEARCH_REFS = ('email:search', 'email:search-more')   # agent 補查信箱時的來源代號(程式沒先複製那一封)
+
+
+def resolved_ref(row, box=None):
+    """一則回音對到哪一個來源:照抄的 source_ref;補查信箱的照原文連結對到那一封(email:<代號>),對不到回原樣。
+    安檢門核對原文(gate)和整理成看板格式(_finding)都用這一條。"""
+    ref = str(row.get('source_ref') or '').strip()
+    if ref in SEARCH_REFS:
+        thread = gmail_message_id(row.get('link')) or mailbox_message_ref(row.get('link'), box)
+        return f'email:{thread}' if thread else ref
+    return ref
+
+
 def _finding(row, url, source_types, since_dates, box):
     """一則回音驗過、整理成看板格式;比這張卡上次查過還舊的回 None;格式不對丟 ValueError。"""
     kind = str(row.get('kind') or '').strip()
@@ -950,10 +1004,10 @@ def _finding(row, url, source_types, since_dates, box):
     source_ref = str(row.get('source_ref') or '').strip()
     trusted_source_type = (source_types or {}).get(source_ref, 'fallback')
     source_verified = bool(source_ref and source_ref in (source_types or {}))
-    if trusted_source_type == 'email' and source_ref in ('email:search', 'email:search-more'):
-        thread_id = _gmail_message_id(link) or _mailbox_message_ref(link, box)
-        if thread_id:
-            source_ref = f'email:{thread_id}'
+    if trusted_source_type == 'email' and source_ref in SEARCH_REFS:
+        resolved = resolved_ref(row, box)
+        if resolved != source_ref:
+            source_ref = resolved
         else:
             trusted_source_type = 'fallback'
             source_verified = False
@@ -976,6 +1030,9 @@ def _finding(row, url, source_types, since_dates, box):
     todo = str(row.get('todo') or '').strip()
     if todo:
         item['todo'] = todo[:240]
+    quote = str(row.get('quote') or '').strip()
+    if quote:
+        item['quote'] = quote[:240]          # 信算哪一種是 agent 判斷:卡上附它抄的那一句
     return item
 
 
@@ -1031,14 +1088,6 @@ def _copy_only_agent_id():
     return agent.get('id') if agent else None
 
 
-def _program_can_read():
-    """程式自己讀信箱、平台應徵紀錄,走的是 Codex 的 Chrome 外掛;清單裡沒有能開瀏覽器的 Codex 就沒有這條路。"""
-    agents = ((cf.C.get('agent') or {}).get('agents') or [])
-    return any(item.get('runtime') == 'codex' and item.get('browser') for item in agents)
-
-
-def _no_program_reader(urls):
-    raise RuntimeError('只裝 Claude Code:程式讀不了,改由 agent 在它的 Chrome 裡讀')
 
 
 def main():
@@ -1081,22 +1130,23 @@ def main():
     # agent 交的件照樣讀。以前在這裡改丟例外,整輪結果被丟掉,還說「agent 沒完成」
     cleanup_errors = []
     verified = []
+    rnd = None
     try:
-        import agent_chrome
-        program_reads = _program_can_read()
-        # 只裝 Claude Code:不碰 Codex 外掛那一套,每個來源都交給 Claude 在 agent 的 Chrome 裡讀(Claude in Chrome);
-        # agent 的 Chrome 照樣在背景藏著開
-        up, msg = agent_chrome.ensure(board) if program_reads else agent_chrome.wait_claude()
+        import agent_chrome, chrome_door
+        # 查應徵進度跟其他工作一樣,交給設定裡用 Chrome 的那一家。程式自己讀得到的那一家先由程式讀;
+        # 讀不到的那一家(Claude)每個來源都交給它在 agent 的 Chrome 裡讀,程式從紀錄核實。agent 的 Chrome 照樣在背景藏著開
+        door = chrome_door.current()
+        up, msg, need = door.ready(board) if door else (False, chrome_door.NO_BROWSER_AGENT, '勾一個「用它操作 Chrome」的 agent')
+        program_reads = bool(door and door.program_reads)
         if not up:
-            agent_report.report('查回音', msg, live=board,
-                                need='到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「🔌 ' + ('連接 Codex' if program_reads else '連接 Claude') + '」')
+            agent_report.report('查回音', msg, live=board, need='到「⚙ 設定 → 🤖 Agent 與瀏覽器」' + need)
             jobrun.write(st, dict(base, phase='failed', n=len(urls), done=0, msg=msg,
                                   finished_at=time.time()))
             print(msg)
             return 1
         try:
-            sources, program_unavailable = collect_sources(
-                fb, jobs, urls, board, reader=None if program_reads else _no_program_reader)
+            sources, program_unavailable = collect_sources(fb, jobs, urls, board)
+            texts = source_texts(sources)     # 安檢門拿程式複製的全文核對 agent 交回的每一則
             os.makedirs(os.path.dirname(source_file), exist_ok=True)
             with open(source_file, 'w', encoding='utf-8') as f:
                 json.dump(sources, f, ensure_ascii=False)
@@ -1108,14 +1158,19 @@ def main():
             if not program_unavailable and not copy_agent:
                 raise RuntimeError('查應徵進度需要 Codex agent 只讀分析程式複製的來源')
             overrides = ar.apply_overrides() if program_unavailable else ar.lean()
-            outcome = ar.run(prompt, log, cf.HOME, timeout=TIMEOUT,
-                             browser_required=bool(program_unavailable),
-                             browser=overrides + ['-c', 'tools.web_search=false'],
-                             board=board, web=False,
-                             agent_id=None if program_unavailable else copy_agent)
-            # agent 補查過的來源,程式自己核實讀完了沒(要在收掉 agent 的 Chrome 之前):Codex 程式再讀一次,Claude 看它的紀錄
+            # 證據(#315):這一輪查的每一張卡各記一份:程式讀到的來源、指示、動作紀錄、交件單
+            with evidence.opened('reply', 'check', urls, board) as rnd:
+                rnd.text('page', 'sources', sources, ext='.json', why='程式讀的來源')
+                outcome = ar.run(prompt, log, cf.HOME, timeout=TIMEOUT,
+                                 browser_required=bool(program_unavailable),
+                                 browser=overrides + ['-c', 'tools.web_search=false'],
+                                 board=board, web=False,
+                                 agent_id=None if program_unavailable else copy_agent)
+                rnd.handoff(out)
+            # agent 補查過的來源,程式自己核實讀完了沒(要在收掉 agent 的 Chrome 之前):程式讀得到的那一家再讀一次,
+            # 讀不到的那一家看它的紀錄
             if program_unavailable and outcome.ok:
-                verified = (reread_fallback(program_unavailable, board) if program_reads
+                verified = (reread_fallback(program_unavailable, board, texts=texts) if program_reads
                             else claude_verified_reads(log))
         finally:
             try:
@@ -1126,9 +1181,9 @@ def main():
                 cleanup_errors.append(f'無法清除複製的查應徵進度來源檔({type(e).__name__})')
             try:
                 agent_chrome.close_if_idle(board)      # 用 Claude 讀的那條也收:以前只有程式自己讀的會收,Chrome 一直開著
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — 收尾失敗照實記進 cleanup_errors 回報
                 cleanup_errors.append(f'agent Chrome 收尾失敗({type(e).__name__})')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 這一輪最外層:原因照實寫進看板的回報與進度
         outcome = None
         error = f'查回音 agent 沒完成:{str(e)[-200:]}'
     if outcome is not None and not outcome.ok:
@@ -1144,13 +1199,18 @@ def main():
 
     unverified = unverified_cards(program_unavailable, verified) & set(urls)
     try:
-        with open(out, encoding='utf-8') as f:
+        import gate
+        sheet, missing = gate.read(os.path.dirname(out), 'reply', where=out)   # 交件單只經安檢門讀
+        if sheet is None:
+            raise ValueError(missing)
+        with (evidence.activated(rnd) if rnd is not None else contextlib.nullcontext()):   # 比對結果記進同一輪
             parsed = parse_result(
-                json.load(f), urls,
+                sheet, urls,
                 source_types=_source_type_index(sources, program_unavailable),
                 since_dates={url: since_of(fb, url) for url in urls},
+                texts=texts,
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — agent 交的檔什麼樣子都有可能;原因照實寫進看板的回報
         error = f'查回音 agent 交件無法使用:{str(e)[:200]}'
         agent_report.report('查回音', error, need=RETRY_NEED, live=board)
         jobrun.write(st, dict(base, phase='failed', n=len(urls), done=0, msg=error,

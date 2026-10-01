@@ -2,12 +2,13 @@
 
 鎖住四個會出事的地方:開啟當下已在流程裡的卡不碰(不然一開就派幾十隻 agent)、
 失敗過的不自動重跑(不然同一張永遠重跑)、驗收要等這張進來之後跑的那一輪、任何路徑都不會替他送出。"""
-import datetime, json, os, shutil, tempfile, unittest
+import datetime, json, os, tempfile, unittest
 from unittest import mock
 import _env  # noqa: F401
 import agent_chrome
 import autopilot as ap
 import board_doc as bd
+import delivery_state as ds
 import demo
 
 CFG = {'auto_prep': True, 'auto_advance': True, 'auto_fill': True, 'replies_at': '09:00'}
@@ -129,31 +130,66 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(run(data('a'), fb)['fill'])                        # 這一次也只填一次
 
     def test_fill_skips_filled_approved_sent_and_running(self):
-        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': False, 'at': 't1'}},
-              'b': {'app': 'ship', 'approve': {'at': 'x'}}, 'c': {'app': 'ship', 'form': {'lock': 1}},
-              'd': {'app': 'sent'}}
-        self.assertIsNone(run(data('a', 'b', 'c', 'd'), fb)['fill'])
+        # 填了卡住、停著等你、你已確認、已送出、沒填成(原因在卡上等他)都不自動填
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'ds': 'stuck', 'apply': {'stage': 'fill', 'at': 't1', 'tab_id': '7'}},
+              'b': {'app': 'ship', 'ds': 'confirmed', 'approve': {'at': 'x'}}, 'c': {'app': 'ship', 'ds': 'parked'},
+              'd': {'app': 'sent', 'ds': 'sent'}, 'f': {'app': 'ship', 'ds': 'nopage', 'apply': {'stage': 'fill', 'at': 't1'}}}
+        self.assertIsNone(run(data('a', 'b', 'c', 'd', 'f'), fb)['fill'])
         fb['e'] = {'app': 'ship'}
-        self.assertIsNone(run(data('a', 'b', 'c', 'd', 'e'), fb, running={'apply': True})['fill'])
+        self.assertIsNone(run(data('a', 'b', 'c', 'd', 'e', 'f'), fb, running={'apply': True})['fill'])
 
     def test_fill_stops_when_enough_filled_pages_are_waiting_for_him(self):
         # 每張填好的都開著一個分頁等他看:停滿了就先不填新的,他核准(送出)或退掉一張再接著填
-        held = {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': 't1', 'tab_id': '7'}}
+        held = {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': 't1', 'tab_id': '7'}}
         fb = {'__auto__': auto(), 'a': dict(held), 'b': dict(held), 'c': {'app': 'ship'}}
         cfg = dict(CFG, fill_max=2)
         self.assertIsNone(run(data('a', 'b', 'c'), fb, cfg=cfg)['fill'])
         # 已經停著、履歷換過要重填的那張不算新的,照樣填
-        fb['a'] = {'app': 'ship', 'apply': dict(held['apply'], stale='履歷換了')}
+        fb['a'] = {'app': 'ship', 'ds': 'stale', 'apply': dict(held['apply'], stale='履歷換了')}
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=cfg)['fill'], 'a')
-        fb['a'] = {'app': 'sent', 'form': {'lock': 1}}                    # 他送出了一張:空出位子
+        fb['a'] = {'app': 'sent', 'ds': 'sent', 'form': {'lock': 1}}      # 他送出了一張:空出位子
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=cfg)['fill'], 'c')
         fb['a'] = dict(held)
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=0))['fill'], 'c')   # 0 = 不限
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=None))['fill'], 'c')  # 沒設 = 預設 5,才停 2 張
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=''))['fill'], 'c')    # 設定頁那格清空 = 預設 5
 
+    def test_the_cap_counts_codex_and_claude_pages_together(self):
+        """停著的頁上限是 Codex、Claude 合計(兩家的頁都佔他要看的一頁)。"""
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '7', 'runtime': 'codex'}},
+              'b': {'app': 'ship', 'ds': 'stuck', 'apply': {'stage': 'fill', 'tab_id': '8', 'runtime': 'claude-code'}},
+              'c': {'app': 'ship'}}
+        self.assertIsNone(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=2))['fill'])
+        self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=3))['fill'], 'c')
+
+    def test_a_card_that_was_not_sent_after_all_is_filled_again_once(self):
+        """「已試過」分第幾輪(修正 10):沒送成回到還沒填的卡,上一輪收進投遞歷史,自動流程再填一次(只一次)。"""
+        fb = {'__auto__': auto(tried=['fill:a:new']),
+              'a': {'app': 'ship', 'history': [{'event': 'undo_sent', 'apply': {'stage': 'fill'}}]}}
+        p = run(data('a'), fb)
+        self.assertEqual(p['fill'], 'a')
+        fb['__auto__']['tried'] += p['tried']
+        self.assertIsNone(run(data('a'), fb)['fill'])
+
+    def test_after_not_sent_after_all_the_card_is_auto_filled_and_stops_before_submit(self):
+        """看板按「沒送成」(#303):agent 送出、表單鎖著的卡回到還沒填(表單留著、解凍),自動流程當成新的一次填它,
+        填好停在送出前(停著等你),不會自己送出。"""
+        sent = {'app': 'sent', 'ds': 'sent', 'sent_by': 'agent', 'sent_at': '2026-01-02',
+                'form': {'plat': 'x', 'f': [{'q': 'Q', 'src': 'bank', 'k': 'k1'}], 'lock': 1},
+                'apply': {'stage': 'fill', 'at': '2026-01-01T00:00:00', 'tab_id': '',
+                          'sent': {'at': '2026-01-02T00:05:00', 'text': '已收到申請'}}}
+        fb = {'__auto__': auto(tried=['fill:a:2026-01-01T00:00:00', 'fill:a:new']), 'a': sent}
+        ds.fire(fb, 'a', 'undo_sent', at='2026-01-03T00:00:00')
+        self.assertIn('form', fb['a'])
+        p = run(data('a'), fb)
+        self.assertEqual(p['fill'], 'a')
+        ds.fire(fb, 'a', 'fill_start', apply={'stage': 'fill', 'at': '2026-01-04T00:00:00', 'issues': []})
+        ds.fire(fb, 'a', 'fill_ok', apply={'stage': 'fill', 'at': '2026-01-04T00:00:00', 'issues': [], 'tab_id': '9'})
+        self.assertEqual((ds.state(fb['a']), fb['a']['app']), ('parked', 'ship'))
+        self.assertFalse(ds.allowed(fb['a'], 'submit_start'))    # 只有你已確認能走到正在送出
+
     def test_stale_fill_is_refilled_once(self):
-        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': 't1', 'stale': '履歷換了'}}}
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'ds': 'stale', 'apply': {'stage': 'fill', 'at': 't1', 'stale': '履歷換了'}}}
         p = run(data('a'), fb)
         self.assertEqual(p['fill'], 'a')
         fb['__auto__']['tried'] = p['tried']
@@ -161,7 +197,7 @@ class PlanTest(unittest.TestCase):
 
     def test_page_gone_is_refilled_once(self):
         # agent 的 Chrome 關過:那一頁不在了。卡住的卡平常等他,但頁面不見不是他要處理的事,自動重填
-        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': '2026-01-05T09:00:00', 'tab_id': '7'}}}
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-01-05T09:00:00', 'tab_id': '7'}}}
         with mock.patch('agent_chrome.pid', return_value=None):
             gone = agent_chrome.gone_pages(fb)
         self.assertEqual(gone, ['a'])
@@ -172,16 +208,16 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(run(data('a'), fb)['fill'])
 
     def test_changing_files_after_approval_requires_new_fill_and_approval(self):
-        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'approve': {'at': 't1'},
-              'apply': {'stage': 'fill', 'ok': True, 'at': 't1'}, 'form': {'f': []}}}
-        self.assertTrue(ap.fr.mark_stale(fb, 'a', '履歷換了'))
+        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'ds': 'confirmed', 'approve': {'at': 't1'},
+              'apply': {'stage': 'fill', 'at': 't1', 'tab_id': '7'}, 'form': {'f': []}}}
+        ds.fire(fb, 'a', 'files_changed', why='履歷換了')
         self.assertEqual(run(data('a'), fb)['fill'], 'a')
         self.assertNotIn('approve', fb['a'])
 
-    def _filled(self, **apply):
-        a = dict({'stage': 'fill', 'ok': True, 'at': 't1', 'session': 's1'}, **apply)
+    def _filled(self, state='parked', **apply):
+        a = dict({'stage': 'fill', 'at': 't1', 'session': 's1', 'tab_id': '7'}, **apply)
         return {'__ans__': [{'k': 'why', 'q': '為什麼', 'zh': '新的', 'v': 'new'}],
-                '__auto__': auto(), 'a': {'app': 'ship', 'apply': a,
+                '__auto__': auto(), 'a': {'app': 'ship', 'ds': state, 'apply': a,
                                           'form': {'f': [{'q': '為什麼', 'src': 'bank', 'k': 'why', 'refill': 1}]}}}
 
     def test_refix_waits_until_he_stops_editing_then_runs_once(self):
@@ -216,15 +252,15 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(run(data('a'), fb)['fix'], 'a')
 
     def test_refix_skips_stuck_stale_unfilled_and_waits_for_running(self):
-        for kw in ({'ok': False}, {'stale': '履歷換了'}, {'session': ''}):
-            fb = self._filled(**kw)
-            self.assertFalse(run(data('a'), fb, real=False)['rf'], kw)
+        for st, kw in (('stuck', {}), ('stale', {'stale': '履歷換了'}), ('parked', {'session': ''}), ('confirmed', {})):
+            fb = self._filled(st, **kw)
+            self.assertFalse(run(data('a'), fb, real=False)['rf'], (st, kw))
         fb = self._filled()
         fb['a']['form']['f'].append({'q': '還沒答', 'src': 'bank', 'k': 'nope'})   # 還有答案等他確認
         self.assertFalse(run(data('a'), fb)['rf'])
         fb = self._filled()
         self.assertFalse(run(data('a'), fb, running={'apply': True})['rf'])
-        fb['a']['form']['lock'] = 1
+        fb['a'].update(app='sent', ds='sent')
         self.assertFalse(run(data('a'), fb)['rf'])
 
     def test_refix_goes_before_fill_and_blocks_it(self):
@@ -237,13 +273,12 @@ class PlanTest(unittest.TestCase):
     def test_an_uncertain_submit_is_not_touched_automatically(self):
         # 送出沒確認成功(可能其實送出去了):自動流程不替它重打、也不重填,等他先確認到底送出沒有
         sf = {'at': 't1', 'problems': ['沒看到成功頁面']}
-        fb = self._filled(submit_fail=sf)
+        fb = self._filled('unsure', submit_fail=sf)
         fb['__auto__']['rf'] = {'a': {'sig': ap.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
         self.assertIsNone(run(data('a'), fb)['fix'])
-        fb = {'__auto__': auto(), 'a': {'app': 'ship', 'apply': {'stage': 'fill', 'ok': False, 'gone': True,
-                                                                  'at': 't1', 'session': 's1', 'submit_fail': sf}}}
+        ds.fire(fb, 'a', 'page_lost', issues=[ds.GONE])                    # Chrome 關過:仍是送出結果不明
         self.assertIsNone(run(data('a'), fb)['fill'])
-        sf['cleared'] = True                                                 # 他確認過沒送出:照常
+        ds.fire(fb, 'a', 'not_sent', issues=[ds.GONE])                      # 他確認過沒送出、頁也不在:重填
         self.assertEqual(run(data('a'), fb)['fill'], 'a')
 
     def test_replies_once_a_day_after_the_time(self):
@@ -297,12 +332,9 @@ class PilotStepTest(unittest.TestCase):
     """接上一份真的看板檔:寫得進 __auto__、推進得了可投遞、派出去的只有填表,不會送出。"""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='autopilot-')
+        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='autopilot-'))
         self.board = demo.build(os.path.join(self.dir, 'board.html'))
         self.calls = []
-
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
 
     def pilot(self, real=False):
         def start_run(kind, args):
@@ -334,6 +366,26 @@ class PilotStepTest(unittest.TestCase):
             p.step()
         self.assertEqual(calls, ['replies'])
         self.assertEqual(self.fb()['__auto__']['replies_retry'], {'day': today, 'n': 1})
+
+    def test_a_page_whose_family_is_no_longer_used_is_marked_gone_without_waiting_for_him(self):
+        # 設定裡把 Codex 換成 Claude 之後,Codex 開的那一頁接不回來:每分鐘看的時候就改成頁面不見了、要重填,
+        # 不用等他按確認送出、按 👀 才發現(卡上一直寫停著等你、還能確認)
+        import chrome_door
+        import config as cf
+        import delivery_state as ds
+        jobs = [j['id'] for j in _read(self.board)['data']['jobs']]
+        page = {'stage': 'fill', 'issues': [], 'session': 'S1', 'tab_id': '7', 'runtime': 'codex'}
+        bd.set_fb(lambda fb: fb.update({jobs[0]: {'app': 'ship', 'ds': 'parked', 'apply': dict(page)},
+                                        jobs[1]: {'app': 'ship', 'ds': 'parked', 'apply': dict(page, runtime='claude-code')}}),
+                  live=self.board)
+        claude = {'agent': {'agents': [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]}}
+        with mock.patch.dict(cf.C, claude), mock.patch('agent_chrome.gone_pages', return_value=[]), \
+             mock.patch.object(ap, 'flow', return_value=dict(CFG, auto_prep=False, auto_advance=False, auto_fill=False,
+                                                             replies_at='')):
+            self.pilot(real=True).step()
+        fb = self.fb()
+        self.assertEqual((ds.state(fb[jobs[0]]), fb[jobs[0]]['apply']['issues']), ('gone', [chrome_door.AGENT_SWAPPED]))
+        self.assertEqual(ds.state(fb[jobs[1]]), 'parked')                  # 還在用的那一家開的頁不動
 
     def test_end_to_end_on_a_board_file(self):
         before = self.sent()
@@ -454,7 +506,7 @@ class PilotStepTest(unittest.TestCase):
 
         def put(fb):
             fb.setdefault('__ans__', []).append({'k': 'why', 'q': '為什麼', 'zh': '新的', 'v': 'new'})
-            fb.setdefault(new, {}).update(app='ship', apply={'stage': 'fill', 'ok': True, 'at': 't1', 'session': 's1'},
+            fb.setdefault(new, {}).update(app='ship', ds='parked', apply={'stage': 'fill', 'at': 't1', 'session': 's1', 'tab_id': '7'},
                                           form={'f': [{'q': '為什麼', 'src': 'bank', 'k': 'why', 'refill': 1}]})
         bd.set_fb(put, live=self.board)
         p.step()
@@ -486,26 +538,18 @@ class PilotStepTest(unittest.TestCase):
 class StaleAfterFillTest(unittest.TestCase):
     """agent 填好之後換了要上傳的檔:網頁上傳的是舊的,核准要擋(form_record)、收下客製版要標起來(customize)。"""
 
-    def test_mark_stale_only_on_filled_unsent(self):
-        import form_record as fr
-        fb = {'a': {'apply': {'stage': 'fill', 'ok': True}}, 'b': {'apply': {'stage': 'fill'}, 'form': {'lock': 1}},
-              'c': {}}
-        self.assertTrue(fr.mark_stale(fb, 'a', '換了'))
-        self.assertFalse(fr.mark_stale(fb, 'b', '換了'))
-        self.assertFalse(fr.mark_stale(fb, 'c', '換了'))
-        self.assertEqual(fb['a']['apply']['stale'], '換了')
-
     def test_accepting_a_custom_version_marks_the_filled_page_stale(self):
         import customize as cu
-        d = tempfile.mkdtemp(prefix='stale-')
-        self.addCleanup(shutil.rmtree, d, True)
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='stale-'))
         board = demo.build(os.path.join(d, 'board.html'))
         url = _read(board)['data']['jobs'][0]['id']
-        bd.set_fb(lambda fb: fb.__setitem__(url, {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True}}), live=board)
+        bd.set_fb(lambda fb: fb.__setitem__(url, {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '7'}}), live=board)
         cu._set_entries(board, url, {'resume:x': {'status': 'review', 'name': '履歷', 'candidate_path': 'x.pdf'}})
         self.assertNotIn('stale', json.loads(_read(board)['fb'])[url]['apply'])     # 還在等他看,不算換
         cu._set_entries(board, url, {'resume:x': {'status': 'accepted', 'name': '履歷', 'path': 'x.pdf'}})
-        self.assertIn('履歷', json.loads(_read(board)['fb'])[url]['apply']['stale'])
+        m = json.loads(_read(board)['fb'])[url]
+        self.assertEqual(ds.state(m), 'stale')
+        self.assertIn('履歷', m['apply']['stale'])
 
 
 class FlowSettingsTest(unittest.TestCase):
@@ -515,6 +559,21 @@ class FlowSettingsTest(unittest.TestCase):
         self.assertTrue([b for b in sa._check({'flow': {'replies_at': '99:99'}}) if '查應徵進度' in b])
         self.assertFalse([b for b in sa._check({'flow': {'replies_at': '08:30'}}) if '查應徵進度' in b])
         self.assertFalse([b for b in sa._check({'flow': {'replies_at': ''}}) if '查應徵進度' in b])
+
+
+class PilotErrorTest(unittest.TestCase):
+    """自動流程這一步出錯:伺服器照樣活著、下一次再試,但他要在看板的回報看到出了什麼事(以前只記在沒人看的變數裡)。"""
+
+    def test_a_failing_step_is_reported_on_the_board(self):
+        from unittest.mock import patch
+        said = []
+        p = ap.Pilot('unused.html', None, None, None, lambda: False,
+                     report=lambda src, msg, **k: said.append((src, msg)))
+        with patch.object(p, 'step', side_effect=RuntimeError('看板讀不懂')):
+            p._safe_step()                       # 不能丟出去拖垮伺服器
+        self.assertEqual(len(said), 1)
+        self.assertEqual(said[0][0], '自動流程')
+        self.assertIn('看板讀不懂', said[0][1])
 
 
 class PilotStopTest(unittest.TestCase):

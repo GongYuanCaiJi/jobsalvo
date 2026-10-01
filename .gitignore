@@ -4,6 +4,9 @@ __pycache__/
 *.lock
 !uv.lock
 *.tmp
+.coverage
+.coverage.*
+coverage.json
 # 資料夾(JOBSALVO_HOME)不該放在 repo 裡;萬一放了也別 commit
 /board.html
 /*-marks.jsonl

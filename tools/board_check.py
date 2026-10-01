@@ -21,9 +21,10 @@ reconcile 換外殼之前會先在副本上跑這支(完整版,不用 --fast),�
 機器忙的時候固定秒數等不到,閒的時候又白等。只有要證明「過了多久還是沒發生」才用固定秒數。
 改到存檔或看板程式時,也要先跑 python3 -m unittest discover -s tests(commit 時會自動跑)。
 """
-import os,sys,json,argparse,tempfile,re,time,subprocess
-import urllib.request
+import os,sys,json,argparse,tempfile,re,time,subprocess,copy
+import urllib.request, urllib.parse
 from contextlib import ExitStack
+from unittest import mock
 HERE=os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0,HERE)
 
@@ -281,7 +282,32 @@ window.T={
       quiet=busy?0:quiet+1; if(quiet>=3)return true; await T.sleep(100);}
     return false;},
   // 跟伺服器對一次:先等存檔送完(存檔中的頁面不會去拿),再叫它拿,等拿完。
-  resync:async function(){await T.idle(); T.sync(); await T.idle();}
+  resync:async function(){await T.idle(); T.sync(); await T.idle();},
+  // 投遞狀態只能靠事件改(看板存檔送來的卡上狀態欄不算數):照狀態表送一串事件給伺服器,回傳被擋下的那幾個
+  ds:async function(id,evs){var body={__rev__:1,__events__:evs.map(function(e){return {u:id,ev:e[0],data:e[1]||{}};})};
+    var r=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    return ((await r.json())||{}).rejected||[];},
+  // 從還沒填走到某個投遞狀態(看板檢查種卡用);extra 併進填好那一輪的填表紀錄
+  toState:async function(id,st,extra){
+    var at='2026-01-01T00:00:00', GONE='填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填';
+    var rec=Object.assign({stage:'fill',at:at,issues:[],tab_id:'1',session:'S-test',where:'chrome',delivery:{method:'direct_upload'}},extra||{});
+    var ev=[['fill_start',{apply:{stage:'fill',at:at,issues:['這一輪還沒跑完']}}]];
+    if(st==='stuck')ev.push(['fill_bad',{apply:Object.assign({},rec,{issues:(extra&&extra.issues)||['測試用的卡住原因']})}]);
+    else if(st==='nopage')ev.push(['fill_nopage',{apply:Object.assign({},rec,{tab_id:'',issues:(extra&&extra.issues)||['測試用的卡住原因']})}]);
+    else if(st!=='sent'&&st!=='todo')ev.push(['fill_ok',{apply:rec}]);
+    if(st==='gone')ev.push(['page_lost',{issues:[GONE]}]);
+    if(st==='stale')ev.push(['files_changed',{why:'履歷換過了'}]);
+    if(st==='sent')ev=[['sent_manual',{by:'manual',at:at,sent_at:'2026-01-01'}]];
+    if(st==='todo')ev=[];
+    var bad=await T.ds(id,ev);
+    if(['confirmed','sending','unsure'].indexOf(st)>=0){var fb=await T.state(), bank={};
+      (fb.__ans__||[]).forEach(function(e){bank[e.k]=e;});
+      var snap={}; ((fb[id]||{}).form||{f:[]}).f.forEach(function(x){var e=x.src==='bank'?bank[x.k]:x; snap[x.q||'']=(e&&e.v)||'';});
+      var more=[['confirm',{approve:{at:at,snap:snap,round:rec.at}}]];
+      if(st!=='confirmed')more.push(['submit_start',{}]);
+      if(st==='unsure')more.push(['submit_unsure',{evidence:{at:at,problems:['沒看到成功頁面'],clicked:true}}]);
+      bad=bad.concat(await T.ds(id,more));}
+    return bad;}
 };
 // 記還在路上的請求(T.idle 用)。檢查裡自己包 fetch 再還原時,還原回來的就是這一層。
 // 超過 10 秒還沒回來的不算(例如截圖那種慢請求),免得 T.idle 為它一直等到上限。
@@ -662,13 +688,13 @@ WEB_CHECKS.append(('設定頁:偏好筆記分開顯示、編輯後存得住,手�
  """))
 
 CHECKS=CHECKS+WEB_CHECKS
-from board_check_ans import ANS_CHECKS   # 表單答案庫那幾條,獨立一支檔
+from board_check_ans import ANS_CHECKS, ANS_PRE   # 表單答案庫那幾條,獨立一支檔
 CHECKS=CHECKS+ANS_CHECKS
 
 def external_write(board):
     """模擬 cut_tailor/custom_queue 那種不經過伺服器、直接寫檔的改動。"""
     import board_doc as bd
-    d=bd.parse(open(board,encoding='utf-8').read()); fb=json.loads(d['fb'])
+    d=bd.load(board); fb=json.loads(d['fb'])
     # 挑一張還沒標過的;前面的檢查可能把每一張都碰過(留下空的標記),那就挑一張不是 grow、不在管線裡的
     fid=next((j['id'] for j in d['data']['jobs'] if not fb.get(j['id'])),None) or \
         next(j['id'] for j in d['data']['jobs']
@@ -779,14 +805,14 @@ PREP_CHECKS=[
 ]
 
 def status_issue(board):
-    """模擬投遞前驗收重跑之後多了一個問題(board_status --write 也是直接寫檔)。"""
+    """模擬投遞前驗收重跑之後多了一個問題(board_status --write 也是走看板檔唯一的寫入)。"""
     import board_doc as bd
-    with bd.live_lock(board):
-        d=bd.parse(open(board,encoding='utf-8').read()); fb=json.loads(d['fb'])
+    def put(d):
+        fb=d['fb']
         ready=[j['id'] for j in d['data']['jobs'] if (fb.get(j['id']) or {}).get('app')=='ready']
         fid=ready[0] if ready else None
         sid=ready[1] if len(ready)>1 else None
-        if not fid: return {}
+        if not fid: return bd.SKIP
         st=dict(d['data'].get('status') or {},schema_version=2,checked_links=True)
         st['issues']=[x for x in st.get('issues') or [] if x.get('jid') not in ready]+[
             {'jid':fid,'t':'','stage':'ready','msg':'測試用的原因'}]
@@ -794,9 +820,9 @@ def status_issue(board):
             st['issues'].append({'jid':sid,'kind':'unverified','soft':True,'stage':'ready',
                                  'msg':'無法確認是否已下架'})
         d['data']['status']=st
-        doc=bd.assemble(d['sty'],d['thdr'],d['tail'],d['data'],d['fb'],d['app'])
-        open(board+'.tmp','w',encoding='utf-8').write(doc); os.replace(board+'.tmp',board)
-    return {'fid':fid,'sid':sid}
+        return {'fid':fid,'sid':sid}
+    got=bd.rewrite(put,board,by='board_check')
+    return {} if got is bd.SKIP else got
 
 # 找新職缺:副本上跑的是 job_fake(照真的格式寫進度、在副本加兩筆假職缺),不會派 agent。
 FIND_CHECKS=[
@@ -1072,7 +1098,7 @@ def research_round(board):
         'direction': '測試方向二', 'judged': 3, 'kept': 0, 'added': [], 'dropped': {}, 'notes': '往 X 找'}]), live=board)
     return {}
 
-CHECK_RESUME = 'board-check'   # 副本唯一那份履歷的 id:要寫客製紀錄的檢查照它寫,才是卡上真的會寄的那份
+from board_check_apply import CHECK_RESUME  # noqa: E402  副本唯一那份履歷的 id(定義在那支,代投那幾條也要用)
 
 
 def seed_check_resume(url):
@@ -1100,20 +1126,16 @@ def seed_check_resume(url):
         if response.status != 200:
             raise RuntimeError('無法儲存看板檢查用履歷設定')
 
-FLOW_OFF = {'like_to_prep': False, 'auto_prep': False, 'auto_advance': False, 'auto_fill': False, 'replies_at': ''}
-FLOW_ON = {'like_to_prep': True, 'auto_prep': True, 'auto_advance': True, 'auto_fill': True, 'replies_at': ''}
-
-
 def flow_off(home):
     """這些規矩驗的是他手動按的那條路(種資料、按按鈕、看結果)。自動流程開著的話,
     種下去的新卡會被它接走(自動準備、自動填表),驗不到手動那條。所以副本預設關著,
-    自動流程那幾條自己開、驗完自己關(見 flow_set)。"""
+    自動流程那幾條自己開、驗完自己關(見 shot.flow)。"""
     path = os.path.join(home, 'jobsalvo.json')
     data = {}
     if os.path.isfile(path):
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
-    data['flow'] = dict(FLOW_OFF)
+    data['flow'] = dict(shot.FLOW_OFF)
     # agent 的 Chrome 用副本自己的資料夾(當成還沒建過):設定頁畫的是第一次設定的樣子,也碰不到真的那一個
     data['browser'] = {**(data.get('browser') or {}),
                        'data_dir': os.path.join(home, 'agent-chrome'), 'state': os.path.join(home, 'agent-chrome.json')}
@@ -1121,27 +1143,9 @@ def flow_off(home):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-SB_URL = ['']
-
-
-def sandbox(path, body=None, method=None, headers=None, timeout=10, raw=False, base=None):
-    """打副本看板的 API(shot.sandbox_api,先驗是本機);沒給 base 就用這一輪開的那一份。"""
-    return shot.sandbox_api(base or SB_URL[0], path, body, method, headers, timeout, raw)
-
-
-def sandbox_flow(**flow):
-    return shot.sandbox_flow(SB_URL[0], **flow)
-
-
-def flow_set(on):
-    """透過副本伺服器的設定 API 開關自動流程(跟使用者在設定頁按儲存同一條路)。"""
-    base = SB_URL[0]
-    cur = json.load(urllib.request.urlopen(base + '/api/settings', timeout=10))
-    settings = cur.get('settings') or {}
-    settings['flow'] = dict(FLOW_ON if on else FLOW_OFF)
-    req = urllib.request.Request(base + '/api/settings', data=json.dumps({'settings': settings}).encode('utf-8'),
-                                 headers={'Content-Type': 'application/json'}, method='POST')
-    json.load(urllib.request.urlopen(req, timeout=10))
+def sandbox(path, body=None, method=None, headers=None, timeout=10, raw=False):
+    """打這一輪開的副本看板的 API(shot.sandbox_api,先驗是本機)。"""
+    return shot.sandbox_api(shot.SB_URL[0], path, body, method, headers, timeout, raw)
 
 
 def preference_note(home):
@@ -1238,29 +1242,46 @@ def check_bank_export_and_history():
                     if settings_api.get()['git_history']['message'] != '沒有版本紀錄，因為找不到 git':
                         raise RuntimeError('設定頁沒有說明 Git 不存在')
 
-            with tempfile.TemporaryDirectory(prefix='boardcheck-foreign-history-') as foreign_home:
-                git = folder_history._git()
-                folder_history._run(git, foreign_home, 'init', '--initial-branch=main')
-                folder_history._run(git, foreign_home, 'remote', 'add', 'origin',
-                                    'https://example.invalid/project.git')
-                settings = copy.deepcopy(cf.DEFAULTS)
-                settings['board']['file'] = 'board.html'
-                with open(os.path.join(foreign_home, cf.NAME), 'w', encoding='utf-8') as target:
-                    json.dump(settings, target, ensure_ascii=False)
-                with open(os.path.join(foreign_home, 'board.html'), 'w', encoding='utf-8') as target:
-                    target.write(bd.assemble(':root{}', '<b id="stat-first">0</b>', '',
-                                             {'jobs': []}, '{}', '/*app*/'))
-                cf.reload(foreign_home)
-                try:
-                    folder_history.flush_now(foreign_home)
-                    history_message = settings_api.get()['git_history']['message']
-                    if '不是 jobsalvo 建立' not in history_message:
-                        raise RuntimeError('設定頁沒有說明外部 Git repo 不會被 jobsalvo 提交')
-                    if folder_history._run(git, foreign_home, 'rev-parse', '--verify', 'HEAD',
-                                            check=False).returncode == 0:
-                        raise RuntimeError('jobsalvo 在外部 Git repo 建立了 commit')
-                finally:
-                    cf.reload(home)
+            # 已經是 git repo 的資料夾三種情況(#301):從舊系統搬來的(repo 根目錄就是資料夾、有 jobsalvo.json、
+            # 沒有 remote)要接手照常存版;有 remote、只是別的 repo 的子資料夾不存,設定頁照實寫原因和怎麼處理
+            git = folder_history._git()
+            old_identity = ('-c', 'user.name=Old system', '-c', 'user.email=old@example.invalid')
+            for case in ('搬來的資料夾', '有 remote', '別的 repo 的子資料夾'):
+                with tempfile.TemporaryDirectory(prefix='boardcheck-existing-repo-') as outer:
+                    existing_home = os.path.join(outer, 'jobsearch') if case == '別的 repo 的子資料夾' else outer
+                    os.makedirs(existing_home, exist_ok=True)
+                    folder_history._run(git, outer, 'init', '--initial-branch=main')
+                    settings = copy.deepcopy(cf.DEFAULTS)
+                    settings['board']['file'] = 'board.html'
+                    with open(os.path.join(existing_home, cf.NAME), 'w', encoding='utf-8') as target:
+                        json.dump(settings, target, ensure_ascii=False)
+                    if case != '別的 repo 的子資料夾':
+                        folder_history._run(git, outer, 'add', '-A')
+                        folder_history._run(git, outer, *old_identity, 'commit', '-m', 'old system')
+                    if case == '有 remote':
+                        folder_history._run(git, outer, 'remote', 'add', 'origin',
+                                            'https://example.invalid/project.git')
+                    with open(os.path.join(existing_home, 'board.html'), 'w', encoding='utf-8') as target:
+                        target.write(bd.assemble(':root{}', '<b id="stat-first">0</b>', '',
+                                                 {'jobs': []}, '{}', '/*app*/'))
+                    commits_before = folder_history._run(git, outer, 'rev-list', '--all', '--count').stdout.strip()
+                    cf.reload(existing_home)
+                    try:
+                        folder_history.flush_now(existing_home)
+                        history = settings_api.get()['git_history']
+                        commits = folder_history._run(git, outer, 'rev-list', '--all', '--count').stdout.strip()
+                        if case == '搬來的資料夾':
+                            if not re.search(r'最近一次 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$', history['message']) \
+                                    or commits != '2':
+                                raise RuntimeError('搬來的資料夾沒有接手存版:' + history['message'])
+                        else:
+                            word = 'remote' if case == '有 remote' else '子資料夾'
+                            if word not in history['message'] or not history.get('fix'):
+                                raise RuntimeError(f'{case}:設定頁沒有照實寫原因和怎麼處理:' + history['message'])
+                            if commits != commits_before or os.path.isdir(os.path.join(outer, 'jobsearch', '.git')):
+                                raise RuntimeError(f'{case}:jobsalvo 不該存版卻存了')
+                    finally:
+                        cf.reload(home)
         finally:
             listener.shutdown()
             listener.server_close()
@@ -1300,12 +1321,12 @@ def shared_rule_cases(_board):
 def lazy_resume(board):
     """在副本的待決與準備卡放 PDF 頁圖,語言挑沒有原檔的那個,驗點開才載入。"""
     import board_doc as bd
-    with bd.live_lock(board):
-        d=bd.parse(open(board,encoding='utf-8').read()); fb=json.loads(d['fb'])
+    def put(d):
+        fb=d['fb']
         fid=next((j['id'] for j in d['data']['jobs'] if (fb.get(j['id']) or {}).get('app')=='ready'),None)
         top_id=next((j['id'] for j in d['data']['jobs'] if (fb.get(j['id']) or {}).get('app')=='ready' and j['id']!=fid),None)
         prep_id=next((j['id'] for j in d['data']['jobs'] if (fb.get(j['id']) or {}).get('app')=='prep'),None)
-        if not fid or not top_id or not prep_id: return {}
+        if not fid or not top_id or not prep_id: return bd.SKIP
         page='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='
         for j in d['data']['jobs']:
             if j['id'] in (fid,prep_id):
@@ -1316,9 +1337,9 @@ def lazy_resume(board):
                              'variants':{'en-board-check':{'motive':{'txt':'混合舊資料'}}}}
         for jid in (fid,top_id,prep_id):
             f=fb.get(jid) or {}; f.pop('lang',None); f.pop('variant',None); f.pop('resume_id',None); fb[jid]=f
-        doc=bd.assemble(d['sty'],d['thdr'],d['tail'],d['data'],json.dumps(fb,ensure_ascii=False),d['app'])
-        open(board+'.tmp','w',encoding='utf-8').write(doc); os.replace(board+'.tmp',board)
-    return {'fid':fid,'top_id':top_id,'prep_id':prep_id}
+        return {'fid':fid,'top_id':top_id,'prep_id':prep_id}
+    got=bd.rewrite(put,board,by='board_check')
+    return {} if got is bd.SKIP else got
 
 LAZY_CHECKS=[
  ('履歷預覽不跟著頁面一起送,點「📄」才抓,抓到就打開',"""
@@ -1676,8 +1697,9 @@ CHECKS=CHECKS+UX_CHECKS
 
 PRE={'external_write':external_write,'status_issue':status_issue,'research_round':research_round,
      'shared_rule_cases':shared_rule_cases,'lazy_resume':lazy_resume,'xss_job':xss_job}
+PRE.update(ANS_PRE)
 CHECKS=CHECKS+SAVE_CHECKS+PREP_CHECKS+FIND_CHECKS+[
-  ('共用規則案例表:空值、核准與核准前預覽、卡名、公司分組與同一家、分類關鍵字、死線(當地時間)、存檔衝突合併',r"""
+  ('共用規則案例表:空值、卡名、公司分組與同一家、分類關鍵字、死線(當地時間)、存檔衝突合併',r"""
     var R=window.__jobsalvoSharedRules, bad=[];
     if(!R)return '看板沒有提供共用規則介面';
     // 欄位順序不算(合併後的物件照鍵出現的先後排,案例表不一定照那個順序寫)
@@ -1691,17 +1713,7 @@ CHECKS=CHECKS+SAVE_CHECKS+PREP_CHECKS+FIND_CHECKS+[
       var equal=JSON.stringify(sorted(value))===JSON.stringify(sorted(base));
       if(equal!==c.same)bad.push('標記比對/'+c.name+':same='+equal+'，預期 '+c.same);
     });
-    (P.approvals||[]).forEach(function(c){
-      var problem=R.approvalProblem(c.url,c.state,c.status), blocked=problem!==null;
-      if(blocked!==c.blocked)bad.push('核准/'+c.name+':blocked='+blocked+'，預期 '+c.blocked+' ('+problem+')');
-      if(c.problem&&c.name!=='page refill needed'&&problem!==c.problem)bad.push('核准/'+c.name+':原因 '+problem+'，預期 '+c.problem);
-    });
-    (P.approve_blockers||[]).forEach(function(c){
-      var r=R.approveBlocker(c.url,JSON.parse(JSON.stringify(c.state)),c.status);
-      if(c.problem_contains){if(!r.problem||r.problem.indexOf(c.problem_contains)<0)bad.push('核准前預覽/'+c.name+':'+r.problem+'，預期含 '+c.problem_contains);}
-      else if(r.problem!==c.problem)bad.push('核准前預覽/'+c.name+':'+r.problem+'，預期 '+c.problem);
-      if(r.approve_after)bad.push('核准前預覽/'+c.name+':預覽完把核准留下來了');
-    });
+    // 核准兩段(approvals、approve_blockers)併進投遞狀態的檢查清單案例表(「能不能確認送出」那一條)
     (P.companies||[]).forEach(function(c){
       var co=R.companyOf({id:c.id||'',target:c.target},c.alias||{});
       if(co!==c.expected)bad.push('公司分組/'+c.target+': '+co+'，預期 '+c.expected);
@@ -1802,7 +1814,7 @@ CHECKS=CHECKS+SAVE_CHECKS+PREP_CHECKS+FIND_CHECKS+[
 def custom_profile_reminder_cases(board):
     """在看板副本上安排三種投遞方式,檢查提醒只出現在另開客製履歷。"""
     import board_doc as bd
-    data = bd.parse(open(board, encoding='utf-8').read())
+    data = bd.load(board)
     jobs = (data['data'].get('jobs') or [])[:3]
     if len(jobs) < 3:
         raise ValueError('示範看板少於三張卡,無法驗三種投遞方式')
@@ -1867,7 +1879,7 @@ def attachment_approval_issue_case(board):
     """在示範投遞卡上放一筆平台附件不符,驗核准鈕和點擊處理都會擋下。"""
     import board_doc as bd
     import re
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     jobs = parsed['data'].get('jobs') or []
     if len(jobs) < 9:
         raise ValueError('示範看板少於九張卡,無法驗投遞核准')
@@ -1886,8 +1898,9 @@ def attachment_approval_issue_case(board):
         entry['app'] = 'ship'
         entry['form'] = {'f': []}
         entry.pop('approve', None)
+        entry['ds'] = 'stuck'
         entry['apply'] = {
-            'stage': 'fill', 'ok': False, 'issues': [issue],
+            'stage': 'fill', 'issues': [issue], 'tab_id': '5',
             'delivery': delivery, 'session': 'board-check-e2e',
         }
 
@@ -1929,7 +1942,7 @@ def review_cards(board):
     """「一張一張看」要至少三張沒表態的卡。以前靠前面「找新職缺」那條在副本加的兩張假職缺,
     單跑或快版跳過那條就只剩一張,檢查一定失敗。自己補,不靠別條的順序。"""
     import board_doc as bd, time as _t
-    d=bd.parse(open(board,encoding='utf-8').read()); fb=json.loads(d['fb'])
+    d=bd.load(board); fb=json.loads(d['fb'])
     have=[j for j in d['data']['jobs'] if not fb.get(j['id']) and not j.get('bk')]
     need=max(0,3-len(have))
     if need:
@@ -2059,7 +2072,7 @@ CHECKS.append((
 def filled_ship_case(board):
     """一張 agent 填好、停在送出前的可投遞卡(有那段對話)。"""
     import board_doc as bd
-    jobs = bd.parse(open(board, encoding='utf-8').read())['data'].get('jobs') or []
+    jobs = bd.load(board)['data'].get('jobs') or []
     job = jobs[11]
 
     def mut(fb):
@@ -2067,7 +2080,8 @@ def filled_ship_case(board):
         entry.pop('approve', None)
         entry['app'] = 'ship'
         entry['form'] = {'plat': '測試', 'f': []}
-        entry['apply'] = {'stage': 'fill', 'ok': True, 'issues': [], 'session': 'board-check-live', 'tab_id': '12345',
+        entry['ds'] = 'parked'
+        entry['apply'] = {'stage': 'fill', 'issues': [], 'session': 'board-check-live', 'tab_id': '12345',
                           'delivery': {'method': 'direct_upload'}, 'at': '2026-01-01T00:00:00'}
 
     bd.set_fb(mut, live=board, by='board_check')
@@ -2211,7 +2225,7 @@ def human_check_ship_case(board):
     """一張可投遞卡:agent 去填,那個網站停在真人驗證(Cloudflare),填不了。"""
     import apply_tab
     import board_doc as bd
-    jobs = bd.parse(open(board, encoding='utf-8').read())['data'].get('jobs') or []
+    jobs = bd.load(board)['data'].get('jobs') or []
     job = next(j for j in jobs[12:] if str(j['id']).startswith('http'))
 
     def mut(fb):
@@ -2219,7 +2233,8 @@ def human_check_ship_case(board):
         entry.pop('approve', None)
         entry['app'] = 'ship'
         entry['form'] = {'plat': '測試', 'f': []}
-        entry['apply'] = {'stage': 'fill', 'ok': False, 'issues': [apply_tab.HUMAN_CHECK], 'session': 'board-check-cf',
+        entry['ds'] = 'stuck'
+        entry['apply'] = {'stage': 'fill', 'issues': [apply_tab.HUMAN_CHECK], 'session': 'board-check-cf',
                           'tab_id': '777', 'at': '2026-01-01T00:00:00'}
 
     bd.set_fb(mut, live=board, by='board_check')
@@ -2248,14 +2263,14 @@ CHECKS.append((
 def unfilled_ship_case(board):
     """一張可投遞卡:表單答案都確認過,但 agent 還沒填過(沒有 apply)。"""
     import board_doc as bd
-    jobs = bd.parse(open(board, encoding='utf-8').read())['data'].get('jobs') or []
+    jobs = bd.load(board)['data'].get('jobs') or []
     if len(jobs) < 11:
         raise ValueError('示範看板少於十一張卡')
     job = jobs[10]
 
     def mut(fb):
         entry = fb.setdefault(job['id'], {})
-        for k in ('apply', 'approve', 's'):
+        for k in ('apply', 'approve', 's', 'ds'):
             entry.pop(k, None)
         entry['app'] = 'ship'
         entry['form'] = {'plat': '測試', 'f': []}
@@ -2309,6 +2324,43 @@ CHECKS.append((
       return bad.join('；');
     """,
     'no_setup', {'fresh_page': True},   # 從乾淨的頁面開始:前面的檢查可能留下沒存的設定改動
+))
+
+
+# 資料夾沒在存版、舊資料沒有退回點沒轉(#301):不擋找缺,但環境檢查要攤開、標 ⚠️、寫怎麼處理,設定頁版本紀錄那列也要寫
+CHECKS.append((
+    '設定頁環境檢查:資料夾版本紀錄沒在存、舊資料沒轉,環境檢查攤開標 ⚠️ 寫處理方式,版本紀錄那列也寫',
+    r"""
+      var bad=[], f0=window.fetch;
+      window.fetch=function(u,o){
+        if(String(u)!=='/api/settings'||(o&&o.method))return f0.apply(this,arguments);
+        return f0.apply(this,arguments).then(function(r){return r.json();}).then(function(st){
+          st.doctor={ok:true,checks:[{key:'python',label:'Python',ok:true,detail:'3.12'},
+            {key:'folder_history',label:'資料夾版本紀錄',ok:false,required:false,warn:true,
+             detail:'bc-history-reason',fix:'bc-history-fix'}]};
+          st.git_history={available:true,message:'版本紀錄未啟用：bc-history-reason',fix:'bc-history-fix',
+                          conversion:'bc-conversion-skipped',pending:false};
+          return new Response(JSON.stringify(st),{headers:{'Content-Type':'application/json'}});});
+      };
+      try{
+        document.querySelector('[data-tab="cfg"]').click(); await T.idle(); await T.sleep(300);
+        if(document.querySelector('details[data-fold="cfg:doctor"]'))bad.push('有要處理的提醒,環境檢查還是收成一行');
+        var doc=Array.from(document.querySelectorAll('.cfg-check')).filter(function(e){return /環境檢查/.test(e.textContent);})[0];
+        var text=doc?doc.textContent:'';
+        if(!/有要處理的提醒/.test(text))bad.push('環境檢查標題沒說有要處理的提醒');
+        if(!/⚠️ 資料夾版本紀錄｜bc-history-reason/.test(text))bad.push('版本紀錄那一列沒標 ⚠️ 或沒寫原因');
+        if(!/處理方式：bc-history-fix/.test(text))bad.push('版本紀錄那一列沒寫處理方式');
+        var all=document.body.textContent;
+        if(!/⚠️ 版本紀錄未啟用：bc-history-reason/.test(all)||!/bc-conversion-skipped/.test(all)
+           ||(all.match(/處理方式：bc-history-fix/g)||[]).length<2)
+          bad.push('設定頁版本紀錄那列沒寫原因、沒轉的轉換或處理方式');
+      }finally{
+        window.fetch=f0;
+        document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
+      }
+      return bad.join('；');
+    """,
+    'no_setup', {'fresh_page': True},
 ))
 
 
@@ -2403,20 +2455,19 @@ CHECKS.append((
 
 def lang_case(_board):
     """一份履歷有中文和英文兩個檔(示範資料只有中文)。透過設定 API 放好,原本的設定回傳給檢查自己還原。"""
-    url = SB_URL[0]
-    settings = sandbox('/api/settings', timeout=60, base=url)['settings']
-    original = json.loads(json.dumps(settings))
+    settings = sandbox('/api/settings', timeout=60)['settings']
+    original = copy.deepcopy(settings)
     files = {}
     for lang in ('zh', 'en'):
         rel = f'resume/bc-lang/{lang}/bc-lang.md'
         sandbox('/api/file?path=' + rel, f'# {lang}'.encode('utf-8'), method='PUT', headers={'User-Agent': 'board-check'},
-                timeout=60, raw=True, base=url)
+                timeout=60, raw=True)
         files[lang] = rel
     resume = settings.setdefault('resume', {})
     resume['langs'] = ['zh', 'en']
     resume['resumes'] = list(resume.get('resumes') or []) + [
         {'id': 'bc-lang', 'name': '雙語檢查版', 'enabled': True, 'files': files}]
-    sandbox('/api/settings', {'settings': settings}, timeout=60, base=url)
+    sandbox('/api/settings', {'settings': settings}, timeout=60)
     return {'original': original}
 
 
@@ -2788,9 +2839,9 @@ CHECKS.append((
 def settings_preview_case(_board):
     """示範資料沒有可預覽的履歷:透過設定 API 放一份假的 .md。頁面要重新載入才會重讀設定
     (前面的檢查打開過設定頁,頁面上留著舊的那份),原本的設定回傳給檢查自己還原。"""
-    url = SB_URL[0]
-    settings = sandbox('/api/settings', timeout=60, base=url)['settings']
-    original = json.loads(json.dumps(settings))
+    url = shot.SB_URL[0]
+    settings = sandbox('/api/settings', timeout=60)['settings']
+    original = copy.deepcopy(settings)
     put = urllib.request.Request(url + '/api/file?path=resume/bc-preview.md', data='# 示範履歷'.encode('utf-8'),
                                  method='PUT', headers={'User-Agent': 'board-check'})
     urllib.request.urlopen(put, timeout=60)
@@ -2853,8 +2904,7 @@ CHECKS.append((
 def weak_submission_evidence_case(board):
     """在看板副本安排只有送出頁證據的已投遞卡。"""
     import board_doc as bd
-    with open(board, encoding='utf-8') as source:
-        parsed = bd.parse(source.read())
+    parsed = bd.load(board)
     jobs = parsed['data'].get('jobs') or []
     if not jobs:
         raise ValueError('示範看板沒有職缺,無法驗送出頁證據標記')
@@ -2862,7 +2912,7 @@ def weak_submission_evidence_case(board):
     evidence = '已查信箱與可讀平台應徵紀錄,仍未找到確認信或平台紀錄;目前只有送出頁證據'
 
     def mut(fb):
-        fb.setdefault(job['id'], {}).update(app='sent', sent_at='2026-09-20', ev=evidence)
+        fb.setdefault(job['id'], {}).update(app='sent', ds='sent', sent_by='manual', sent_at='2026-09-20', ev=evidence)
 
     bd.set_fb(mut, live=board, by='board_check')
     return {'id': job['id'], 'evidence': evidence}
@@ -2892,7 +2942,7 @@ CHECKS.append((
 def checked_reply_date_case(board):
     """在副本放一張已完整查過來源但沒有回音的卡。"""
     import board_doc as bd
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     jobs = parsed['data'].get('jobs') or []
     if not jobs:
         raise ValueError('示範看板沒有職缺,無法驗查過回音日期')
@@ -2901,7 +2951,7 @@ def checked_reply_date_case(board):
 
     def mut(fb):
         fb.setdefault(job['id'], {}).update(
-            app='sent', sent_at='2026-09-20',
+            app='sent', ds='sent', sent_by='manual', sent_at='2026-09-20',
             replies={'items': [], 'at': checked_at},
         )
 
@@ -2930,15 +2980,13 @@ def confirmed_submission_evidence_case(board):
     """經過正式回音 parser 與套用函式,在副本加入一封確認信。"""
     import board_doc as bd
     import reply_run as rr
-    with open(board, encoding='utf-8') as f:
-        parsed_board = bd.parse(f.read())
+    parsed_board = bd.load(board)
     feedback = json.loads(parsed_board['fb'])
     jobs = parsed_board['data'].get('jobs') or []
     job = next((item for item in jobs if (feedback.get(item['id']) or {}).get('ev')), None)
     if not job:
         weak_submission_evidence_case(board)
-        with open(board, encoding='utf-8') as f:
-            parsed_board = bd.parse(f.read())
+        parsed_board = bd.load(board)
         feedback = json.loads(parsed_board['fb'])
         jobs = parsed_board['data'].get('jobs') or []
         job = next((item for item in jobs if (feedback.get(item['id']) or {}).get('ev')), None)
@@ -2980,18 +3028,9 @@ CHECKS.append((
 ))
 
 
-def _wait_for_page_ready(page, target_url, timeout=60):
-    try:
-        page.wait_for_url(target_url, timeout=timeout * 1000)
-        page.wait_for_load_state('load', timeout=timeout * 1000)
-        return True
-    except Exception:   # Playwright 的 TimeoutError:回 False,呼叫的人講「載入逾時」
-        return False
-
-
 # 快版(--fast)跳過的:這幾條要等副本上的假流程(job_fake)真的跑完,或等代投核准後 8 秒的反悔期,
 # 一條就 10~60 秒,合起來佔完整版一半以上的時間。規矩本身沒變,只是改介面時先不等它們。
-SLOW=('代投:','代投修改:','找新職缺:','找新職缺面板','找缺紀錄:','跑準備區:')
+SLOW=('代投:','幫你填表:','代投修改:','找新職缺:','找新職缺面板','找缺紀錄:','跑準備區:')
 
 
 def flow_on(board):
@@ -3000,10 +3039,18 @@ def flow_on(board):
     bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00',
                                                          'checked_links': True, 'issues': []}), live=board)
     # 一條他確認過的答案:檢查裡把它標成「改過、網頁待重打」,看自動流程會不會叫 agent 重打
-    bd.set_fb(lambda fb: fb.setdefault('__ans__', []).append({'k': 'bc_refix', 'q': '檢查用的題目', 'zh': '測試', 'v': 'test'}),
-              live=board)
-    flow_set(True)
-    return {}
+    # 挑一張還沒碰過的卡,先放一份用到它的表單(agent 填表時照記那幾欄):答案改了才有欄位可標重打。
+    # 只放這一張:同一份副本後面的檢查還要用其他卡
+    def put(d):
+        fb = d['fb']
+        fb.setdefault('__ans__', []).append({'k': 'bc_refix', 'q': '檢查用的題目', 'zh': '測試', 'v': 'test'})
+        fid = next((j['id'] for j in d['data']['jobs'] if not j.get('bk') and not j.get('dead') and not fb.get(j['id'])), None)
+        if fid:
+            fb[fid] = {'form': {'plat': '沙箱', 'f': [{'q': '檢查用的題目', 'src': 'bank', 'k': 'bc_refix'}]}}
+        return fid
+    fid = bd.rewrite(put, board, by='board_check')
+    shot.flow(like_to_prep=True, auto_prep=True, auto_advance=True, auto_fill=True)
+    return {'fid': fid}
 
 
 PRE['flow_on'] = flow_on
@@ -3018,14 +3065,15 @@ CHECKS.append((
       var bad=[], m, s;
       try{
       document.querySelector('[data-tab="none"]').click(); await T.sleep(300);
-      var c=T.open(); if(!c)return '找不到卡';
-      var fid=c.getAttribute('data-fid');
+      var fid=P.fid; if(!fid)return '副本上沒有還沒碰過的卡';
+      [].slice.call(document.querySelectorAll('#app .cohead')).forEach(function(h){if(!h.parentNode.open)h.click();});
+      await T.sleep(300); if(!T.card(fid))return '找不到那張卡';
       T.mood(fid,'like'); await T.sleep(1800);
       s=await T.state(); if((s[fid]||{}).app!=='prep')bad.push('按 👍 沒有加入準備(app='+(s[fid]||{}).app+')');
       var ok=false;
       for(var i=0;i<45;i++){await T.sleep(1000); s=await T.state(); m=s[fid]||{};
         if(m.app==='sent'){bad.push('自己送出了'); break;}
-        if(m.app==='ship'&&m.apply&&m.apply.ok&&m.form){ok=true; break;}}
+        if(m.app==='ship'&&m.ds==='parked'&&m.form){ok=true; break;}}
       if(!ok)return bad.concat('45 秒內沒有自己走到可投遞、填好(app='+(m||{}).app+')').join('；');
       await T.sleep(6000); s=await T.state(); m=s[fid]||{};
       if(m.app!=='ship'||m.approve)bad.push('填好之後自己往下走了(app='+m.app+(m.approve?',核准了':'')+')');
@@ -3035,19 +3083,19 @@ CHECKS.append((
       await T.sleep(300);
       var card=T.card(fid); if(!card)return bad.concat('可投遞頁找不到那張卡').join('；');
       var main=card.querySelector('.ap-main'); if(!main||!main.hasAttribute('data-approve'))bad.push('填好的卡主按鈕不是「✅ 核准送出」');
-      // 填完才換履歷(看板上換履歷／語言、收下客製版都會標 apply.stale):核准要擋,自動流程重填一次
-      var a=JSON.parse(JSON.stringify(m.apply)); a.stale='測試:履歷換了';
-      var body={__rev__:1,__base__:{}}; body.__base__[fid]=m; body[fid]=Object.assign({},m,{apply:a});
-      await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-      var p=window.__jobsalvoSharedRules.approvalProblem(fid,(function(){var o={}; o[fid]=body[fid]; o.__ans__=s.__ans__; return o;})());
+      // 填完才換履歷(看板上換履歷／語言、收下客製版都送「換檔」事件 → 上傳的是舊檔):核准要擋,自動流程重填一次
+      await T.ds(fid,[['files_changed',{why:'測試:履歷換了'}]]);
+      s=await T.state();
+      var p=window.__jobsalvoSharedRules.approvalProblem(fid,(function(){var o={}; o[fid]=s[fid]; o.__ans__=s.__ans__; return o;})());
       if(!/履歷換過了/.test(p||''))bad.push('換了履歷,核准規則沒擋('+p+')');
-      var re=false; for(var k=0;k<25;k++){await T.sleep(1000); s=await T.state(); if(!((s[fid]||{}).apply||{}).stale){re=true; break;}}
+      var re=false; for(var k=0;k<25;k++){await T.sleep(1000); s=await T.state(); if(!((s[fid]||{}).apply||{}).stale&&(s[fid]||{}).ds!=='stale'){re=true; break;}}
       if(!re)bad.push('換了履歷之後沒有自己重填');
       if(((s[fid]||{}).app)==='sent')bad.push('重填之後自己送出了');
       // 答案改過(表單上用到那條的欄位標 refill):卡上寫「會自動重打」、不列進要他處理的;停手一下就叫回同一隻 agent 重打
-      m=s[fid]; var f=JSON.parse(JSON.stringify(m.form||{f:[]}));
-      f.f=(f.f||[]).concat([{q:'檢查用的題目',src:'bank',k:'bc_refix',refill:1}]);
-      body={__rev__:1,__base__:{}}; body.__base__[fid]=m; body[fid]=Object.assign({},m,{form:f});
+      // (表單上那一欄是 flow_on 先放的,agent 填表時照記;看板改答案只送 {refill:答案鍵},表單只有後台寫,#308)
+      m=s[fid];
+      if(!((m.form||{}).f||[]).some(function(x){return x.k==='bc_refix';}))bad.push('填好的表單上沒有檢查用的那一欄');
+      body={__rev__:1,__events__:[{refill:'bc_refix'}]};
       await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       T.sync(); await T.sleep(1800);
       card=T.card(fid);
@@ -3060,14 +3108,19 @@ CHECKS.append((
       if(!fx)bad.push('答案改過之後沒有自己重打(apply.stage='+((m.apply||{}).stage)+')');
       // 核准之後改語言:舊核准須撤銷,自動流程才能照新的履歷檔重填,之後仍要重新核准。
       if(fx){
-        body={__rev__:1,__base__:{}}; body.__base__[fid]=m;
-        body[fid]=Object.assign({},m,{approve:{at:'2026-01-01T00:00:00',snap:{}}});
-        await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-        T.sync(); await T.sleep(500); card=T.card(fid);
-        var other=card&&card.querySelector('.vd-b.lg:not(.on)');
+        await T.until(async function(){s=await T.state(); m=s[fid]||{}; return m.ds==='parked';},15000);
+        // 先挑一份履歷(沒挑的話換語言也不會換到要寄的檔案):換了檔,自動流程會先重填一次,等它停著等你
+        card=T.card(fid); var rz=card&&card.querySelector('.vd-b[data-vd]:not(.on):not([disabled])');
+        if(rz){rz.click(); await T.idle();
+          await T.until(async function(){s=await T.state(); m=s[fid]||{}; return m.ds==='parked'&&m.resume_id;},25000);}
+        await T.ds(fid,[['confirm',{approve:{at:'2026-01-01T00:00:00',snap:{},round:(m.apply||{}).at}}]]);
+        // agent 那一輪還在跑(頁面還沒拿到它結束)時換語言的按鈕是停用的:等它停用解除
+        var other=await T.until(async function(){T.sync(); await T.sleep(400); card=T.card(fid);
+          return card&&card.querySelector('.vd-b.lg:not(.on):not([disabled])');},15000);
         if(!other)bad.push('找不到可切換的語言');
         else{
-          other.click(); await T.sleep(1400); s=await T.state(); m=s[fid]||{};
+          other.click();   // 要寄的檔案當下問後台,回來後真的變了才送換檔事件:等它存進去
+          await T.until(async function(){await T.idle(); s=await T.state(); m=s[fid]||{}; return !m.approve&&(m.apply||{}).stale;},10000);
           if(m.approve)bad.push('換語言後仍沿用舊核准');
           if(!(m.apply||{}).stale)bad.push('換語言後沒有標記舊上傳檔失效');
         }
@@ -3093,7 +3146,7 @@ def reply_retry_on(board):
         a.update(replies_day=today, replies_retry={'day': today, 'n': 1})
         fb['__auto__'] = a
     bd.set_fb(mut, live=board, by='board_check')
-    sandbox_flow(**dict(FLOW_OFF, replies_at='23:59'))
+    shot.flow(replies_at='23:59')
     return {'auto0': before['a'], 'today': today}
 
 
@@ -3137,7 +3190,7 @@ CHECKS.append((
 
 def like_prep_only(_board):
     """只開「👍 順手加入準備」,其他自動流程關著:卡會停在準備區,不會被假流程接走。"""
-    sandbox_flow(**dict(FLOW_OFF, like_to_prep=True))
+    shot.flow(like_to_prep=True)
     return {}
 
 
@@ -3183,8 +3236,8 @@ CHECKS.append((
 def risky_case(board):
     """一張待評估的卡標成原頁打不開(可能已關)。"""
     import board_doc as bd
-    fb = json.loads(bd.parse(open(board, encoding='utf-8').read())['fb'])
-    jobs = bd.parse(open(board, encoding='utf-8').read())['data']['jobs']
+    parsed = bd.load(board)
+    fb, jobs = json.loads(parsed['fb']), parsed['data']['jobs']
     job = next(j for j in jobs if not (fb.get(j['id']) or {}).get('s') and not (fb.get(j['id']) or {}).get('app')
                and not (fb.get(j['id']) or {}).get('rm') and not j.get('bk'))
 
@@ -3221,7 +3274,7 @@ CHECKS.append((
 def closed_ship_case(board):
     """一張可投遞卡,驗收查到它已經下架。"""
     import board_doc as bd
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     job = parsed['data']['jobs'][12]
 
     def put_fb(fb):
@@ -3249,6 +3302,49 @@ CHECKS.append((
     """,
     'closed_ship_case',
 ))
+def judged_closed_case(board):
+    """一張待你決定的卡,驗收時 agent 判斷職缺關了(程式核對不了,只核對它抄的那一句在頁面上)(#317)。"""
+    import board_doc as bd
+    parsed = bd.load(board)
+    job = parsed['data']['jobs'][13]
+
+    def put_fb(fb):
+        fb.setdefault(job['id'], {})['app'] = 'ready'
+        fb[job['id']].pop('rm', None)
+        fb[job['id']].pop('judged_no', None)
+    bd.set_fb(put_fb, live=board, by='board_check')
+    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True,
+        'issues': [{'jid': job['id'], 't': 'x', 'stage': 'ready', 'kind': 'closed', 'judged': 'This position has been filled',
+                    'msg': 'agent 判斷職缺已關閉,頁面原文:「This position has been filled」'}]}), live=board)
+    return {'id': job['id']}
+
+
+PRE['judged_closed_case'] = judged_closed_case
+CHECKS.append((
+    '待你決定:agent 判斷職缺關了,卡上標明是 agent 判斷、附原文;按「不對,職缺還在」就不再因為它擋,可以復原',
+    r"""
+      var bad=[]; T.sync(); await T.sleep(1500);
+      async function open(){document.querySelector('[data-tab="ready"]').click(); await T.sleep(400);
+        [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
+        await T.sleep(200); return T.card(P.id);}
+      var c=await open(); if(!c)return '待你決定頁找不到那張卡';
+      var t=c.textContent;
+      if(t.indexOf('agent 判斷職缺已關閉')<0)bad.push('卡上沒標明是 agent 判斷');
+      if(t.indexOf('This position has been filled')<0)bad.push('卡上沒附 agent 抄的原文');
+      var b=c.querySelector('[data-judgedno]'); if(!b)return bad.concat(['卡上沒有「不對,職缺還在」']).join('；');
+      b.click(); await T.idle();
+      var s=await T.state(); if(!((s[P.id]||{}).judged_no||{}).closed)bad.push('按了之後沒記下「他說職缺還在」');
+      c=await open(); if(c&&c.textContent.indexOf('agent 判斷職缺已關閉')>=0&&c.querySelector('[data-judgedno]'))
+        bad.push('按了之後還因為 agent 判斷關了而擋');
+      var un=document.querySelector('#snack .snack-undo'); if(!un)bad.push('沒有「復原」');
+      else{un.click(); await T.idle(); s=await T.state();
+        if(((s[P.id]||{}).judged_no||{}).closed)bad.push('按了復原,「他說職缺還在」還在');
+        c=await open(); if(!(c&&c.querySelector('[data-judgedno]')))bad.push('復原後沒有回到被 agent 判斷擋住');}
+      document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
+      return bad.join('；');
+    """,
+    'judged_closed_case',
+))
 CHECKS.append((
     '可投遞:頁首說幾張沒過驗收、原因在卡上,那幾張卡上真的寫了原因,也按不了確認送出',
     r"""
@@ -3269,22 +3365,22 @@ CHECKS.append((
 ))
 
 
-def attachment_preview_case(_board):
-    """示範資料沒有履歷和附件:透過設定 API 放一份假履歷、一份假附件(PDF),
-    頁面重新載入後,待你決定/可投遞的卡上才會出現附件 pill。原本的設定回傳給檢查自己還原。"""
-    url = SB_URL[0]
-    settings = sandbox('/api/settings', timeout=60, base=url)['settings']
-    original = json.loads(json.dumps(settings))
+def attachment_preview_case(board):
+    """示範資料沒有履歷和附件:透過設定 API 放一份假履歷、一份假附件(PDF),一張待你決定的卡指定用那份履歷
+    (沒挑履歷的卡不列附件),頁面重新載入後卡上才會出現附件 pill。原本的設定回傳給檢查自己還原。"""
+    settings = sandbox('/api/settings', timeout=60)['settings']
+    original = copy.deepcopy(settings)
     for rel in ('resume/bc-rz.pdf', 'resume/bc-att.pdf'):
         sandbox('/api/file?path=' + rel, b'%PDF-1.4\n%%EOF\n', method='PUT', headers={'User-Agent': 'board-check'},
-                timeout=60, raw=True, base=url)
+                timeout=60, raw=True)
     resume = settings.setdefault('resume', {})
     lang = (resume.get('langs') or ['zh'])[0]
     resume['resumes'] = [{'id': 'bc-rz', 'name': '檢查履歷', 'enabled': True, 'files': {lang: 'resume/bc-rz.pdf'}}]
     resume['attachments'] = [{'id': 'bc-att', 'name': '檢查附件', 'enabled': True, 'files': {lang: 'resume/bc-att.pdf'}}]
-    save = urllib.request.Request(url + '/api/settings', data=json.dumps({'settings': settings}, ensure_ascii=False).encode('utf-8'),
-                                  method='POST', headers={'Content-Type': 'application/json'})
-    urllib.request.urlopen(save, timeout=60)
+    sandbox('/api/settings', {'settings': settings}, timeout=60)
+    import board_doc as bd
+    card = _ready_cards(board, 1)[0]
+    bd.set_fb(lambda f: f[card].update(resume_id='bc-rz', lang=lang), live=board, by='board_check')
     return {'original': original}
 
 
@@ -3332,8 +3428,7 @@ def _down(board, fn=None):
     """那張卡第一次看到時的樣子記著;fn(fb, id) 從原樣開始改,回 {id, orig} 給檢查最後放回去。"""
     import board_doc as bd
     if 'id' not in DOWN:
-        with open(board, encoding='utf-8') as f:
-            p = bd.parse(f.read())
+        p = bd.load(board)
         fb = json.loads(p['fb'])
         job = next(j for j in p['data']['jobs']
                    if (fb.get(j['id']) or {}).get('app') == 'sent' and not fb[j['id']].get('oc'))
@@ -3341,7 +3436,7 @@ def _down(board, fn=None):
     jid = DOWN['id']
     if fn:
         def mut(fb):
-            fb[jid] = json.loads(json.dumps(DOWN['orig']))
+            fb[jid] = copy.deepcopy(DOWN['orig'])
             fn(fb, jid)
         bd.set_fb(mut, live=board, by='board_check')
     return {'id': jid, 'orig': DOWN['orig']}
@@ -3570,7 +3665,8 @@ DOWN_CHECKS=[
       await sentTab(); var bad=[], c=T.card(P.id), line=c&&c.querySelector('.rp-auto');
       if(!line)bad.push('卡上沒有自動改狀態那一行');
       else{if(/照「」/.test(line.textContent))bad.push('那一行寫成「照「」改成」');
-        if(line.textContent.indexOf('Unfortunately')<0)bad.push('那一行沒講照哪一則回音:'+line.textContent.trim().slice(0,60));}
+        if(line.textContent.indexOf('Unfortunately')<0)bad.push('那一行沒講照哪一則回音:'+line.textContent.trim().slice(0,60));
+        if(line.textContent.indexOf('agent 判斷')<0)bad.push('那一行沒標明信算哪一種是 agent 判斷');}
       await putBack(); return bad.join('；');
     """,
     'down_reject_without_subject'),
@@ -3622,31 +3718,10 @@ DOWN_CHECKS=[
 ]
 CHECKS=CHECKS+DOWN_CHECKS
 # ── 上游(找缺 → 表態 → 準備履歷 → 待你決定 → 可以投了)的規矩 ──
-CHECKS.append((
-    '上游:客製還沒處理完擋不擋這張,看板跟程式用同一張案例表(只看這張現在會寄的那幾份)',
-    r"""
-      var R=window.__jobsalvoSharedRules, bad=[];
-      if(!R||!R.custPending)return '看板沒有提供客製擋不擋的共用規則';
-      var T0=P.custom_pending||{}; if(!(T0.cases||[]).length)return '案例表沒有 custom_pending';
-      // 案例表寫的是設定檔的形狀;換成伺服器送給頁面的形狀(每份檔有哪些語言)
-      function langs(files){return Object.keys(files||{}).filter(function(k){return files[k];});}
-      function page(cfg){return {langs:cfg.langs,
-        resumes:cfg.resumes.map(function(r){return {id:r.id,name:r.name,file_langs:langs(r.files)};}),
-        attachments:cfg.attachments.map(function(a){return {id:a.id,name:a.name,resume_ids:a.resume_ids||[],file_langs:langs(a.files)};})};}
-      T0.cases.forEach(function(c){
-        var state={}; state[T0.job.id]=JSON.parse(JSON.stringify(c.mark));
-        var got=R.custPending(T0.job,state,page(T0.cfg));
-        if(got!==c.problem)bad.push(c.name+':'+JSON.stringify(got)+',預期 '+JSON.stringify(c.problem));});
-      return bad.join('；');
-    """,
-    'shared_rule_cases',
-))
-
-
 def orphan_custom_case(board):
     """待你決定兩張卡都用副本那份履歷:一張留著換履歷之前那份的客製紀錄(等你看),一張是現在這份在等你看。"""
     import board_doc as bd
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     ready = [j['id'] for j in parsed['data']['jobs']
              if (fb.get(j['id']) or {}).get('app') == 'ready' and not (fb.get(j['id']) or {}).get('rm')][:2]
@@ -3686,53 +3761,190 @@ CHECKS.append((
 ))
 
 
-def stale_custom_case(board):
-    """待你決定三張卡都用副本那份履歷(中文):一張已收下的客製版是從現在這份原始檔做的,
-    一張是從換掉之前的原始檔做的(簽章對不上),一張收下的是中文、現在換成英文。"""
-    import hashlib
+def _ship_settings(resumes=(), attachments=(), files=()):
+    """透過副本的設定 API 加幾份假的履歷/附件(檔案先傳上去);回原本的設定,檢查最後自己還原。
+    另外確保語言清單有中文、英文兩個。"""
+    settings = sandbox('/api/settings', timeout=60)['settings']
+    original = copy.deepcopy(settings)
+    for rel, text in files:
+        sandbox('/api/file?path=' + rel, text.encode('utf-8'), method='PUT', headers={'User-Agent': 'board-check'},
+                timeout=60)
+    resume = settings.setdefault('resume', {})
+    resume['langs'] = list(dict.fromkeys(list(resume.get('langs') or []) + ['zh', 'en']))
+    resume['resumes'] = list(resume.get('resumes') or []) + list(resumes)
+    resume['attachments'] = list(resume.get('attachments') or []) + list(attachments)
+    sandbox('/api/settings', {'settings': settings}, timeout=60)
+    return original
+
+
+def _ready_cards(board, n):
     import board_doc as bd
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     live = [j['id'] for j in parsed['data']['jobs'] if not (fb.get(j['id']) or {}).get('rm')]
-    # 示範看板的待你決定不夠三張:不夠的從還沒進流程的卡搬進來
-    ready = ([u for u in live if (fb.get(u) or {}).get('app') == 'ready'] +
-             [u for u in live if not (fb.get(u) or {}).get('app')])[:3]
-    if len(ready) < 3:
-        raise ValueError('示範看板湊不到三張卡')
-    sig = hashlib.sha256('示範履歷：供看板找缺規矩檢查。'.encode('utf-8')).hexdigest()   # seed_check_resume 寫的那份
-    key = 'resume:' + CHECK_RESUME + ':zh'
+    # 示範看板的待你決定不夠:不夠的從還沒進流程的卡搬進來
+    picked = ([u for u in live if (fb.get(u) or {}).get('app') == 'ready'] +
+              [u for u in live if not (fb.get(u) or {}).get('app')])[:n]
+    if len(picked) < n:
+        raise ValueError(f'示範看板湊不到 {n} 張卡')
 
     def mut(f):
-        for u, s in zip(ready, (sig, '0' * 64, sig)):
-            f.setdefault(u, {}).update(app='ready', resume_id=CHECK_RESUME, lang='zh')
-            f[u]['custom_docs'] = {key: {'status': 'accepted', 'name': '看板檢查履歷',
-                                         'path': 'custom/board-check-' + s[:6] + '.pdf', 'source_sig': s}}
-        f[ready[2]]['lang'] = 'en'
+        for u in picked:
+            m = f.setdefault(u, {})
+            m.update(app='ready', resume_id=CHECK_RESUME, lang='zh')
+            for k in ('custom_docs', 'custom_file', 'variant'):
+                m.pop(k, None)
     bd.set_fb(mut, live=board, by='board_check')
-    return {'fresh': ready[0], 'stale': ready[1], 'other_lang': ready[2], 'item': key, 'rid': CHECK_RESUME}
+    return picked
+
+
+def _upload_custom(url, item):
+    """用看板「上傳自己的客製版」那條路收下一份(伺服器記它是從現在哪一份原始檔做的)。"""
+    q = urllib.parse.urlencode({'u': url, 'item': item, 'name': 'board-check-custom.pdf'})
+    sandbox('/api/card-file?' + q, b'%PDF-1.4 board-check custom', method='PUT', headers={'User-Agent': 'board-check'},
+            timeout=60)
+
+
+def stale_custom_case(board):
+    """待你決定三張卡都用副本那份履歷(中文)、都收下了自己上傳的客製版:一張原始檔沒換,
+    一張收下之後原始檔換過(簽章對不上),一張收下的是中文、現在換成英文(那份履歷英文有自己的原始檔)。"""
+    import board_doc as bd
+    original = _ship_settings(files=[('resume/board-check-en.txt', 'English resume for board check.')])
+    settings = sandbox('/api/settings', timeout=60)['settings']
+    for r in settings['resume']['resumes']:
+        if r.get('id') == CHECK_RESUME:
+            r.setdefault('files', {})['en'] = 'resume/board-check-en.txt'
+    sandbox('/api/settings', {'settings': settings}, timeout=60)
+    cards = _ready_cards(board, 3)
+    key = 'resume:' + CHECK_RESUME + ':zh'
+    for u in cards:
+        _upload_custom(u, key)
+
+    def mut(f):
+        f[cards[1]]['custom_docs'][key]['source_sig'] = '0' * 64
+        f[cards[2]]['lang'] = 'en'
+    bd.set_fb(mut, live=board, by='board_check')
+    return {'fresh': cards[0], 'stale': cards[1], 'other_lang': cards[2], 'original': original}
 
 
 PRE['stale_custom_case'] = stale_custom_case
 CHECKS.append((
     '上游:已收下的客製版在原始檔換過、或換了語言之後,卡上照實講不寄它,預覽也換回原始檔',
     r"""
-      var bad=[], R=window.__jobsalvoSharedRules;
-      if(!R||!R.cardFile)return '看板沒有提供卡片用哪份檔的共用規則';
+      var bad=[];
+      try{
       document.querySelector('[data-tab="ready"]').click(); T.sync(); await T.sleep(700);
       document.querySelectorAll('#app .cohead').forEach(function(h){if(!h.parentNode.open)h.click();}); await T.sleep(250);
       function row(id){var c=T.card(id); return c?[...c.querySelectorAll('.cust-doc')].map(function(x){return x.textContent;}).join(' | '):null;}
+      // 卡上「📄」那顆預覽的是客製版還是原始檔
+      function preview(id){var b=T.card(id)&&T.card(id).querySelector('.ship-rz'); return b?b.getAttribute('data-rzkind'):'';}
       var fresh=row(P.fresh), stale=row(P.stale), other=row(P.other_lang);
       if(fresh===null||stale===null||other===null)return '待你決定找不到案例卡';
       if(!/已收下/.test(fresh))bad.push('原始檔沒換的那張沒寫已收下('+fresh+')');
       if(/已收下/.test(stale)||!/原始檔換過/.test(stale))bad.push('原始檔換過的那張還寫已收下,或沒講原始檔換過('+stale+')');
       if(/已收下/.test(other)||!/中文/.test(other))bad.push('換成英文的那張還寫中文那份已收下,或沒講那是中文的('+other+')');
-      var f1=R.cardFile(P.fresh,'resume',P.rid,'zh'), f2=R.cardFile(P.stale,'resume',P.rid,'zh'), f3=R.cardFile(P.other_lang,'resume',P.rid,'en');
-      if(!f1||f1.kind!=='custom')bad.push('原始檔沒換的那張預覽不是客製版');
-      if(f2&&f2.kind==='custom')bad.push('原始檔換過的那張預覽還是客製版');
-      if(f3&&f3.kind==='custom')bad.push('換成英文的那張預覽還是中文的客製版');
+      if(preview(P.fresh)!=='custom')bad.push('原始檔沒換的那張預覽不是客製版');
+      if(preview(P.stale)==='custom')bad.push('原始檔換過的那張預覽還是客製版');
+      if(preview(P.other_lang)==='custom')bad.push('換成英文的那張預覽還是中文的客製版');
+      } finally {
+        await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings:P.original})});
+      }
       return bad.join('；');
     """,
     'stale_custom_case', {'fresh_page': True},
+))
+
+
+def ship_pick_case(board):
+    """待你決定一張卡用副本那份履歷(中文);設定多一份「第二份履歷」(中英文都有)和一份只搭它、只有中文的附件。"""
+    original = _ship_settings(
+        resumes=[{'id': 'bc-second', 'name': '第二份履歷', 'enabled': True,
+                  'files': {'zh': 'resume/bc-second-zh.md', 'en': 'resume/bc-second-en.md'}}],
+        attachments=[{'id': 'bc-att', 'name': '只搭第二份的附件', 'enabled': True, 'resume_ids': ['bc-second'],
+                      'files': {'zh': 'resume/bc-att-zh.md'}}],
+        files=[('resume/bc-second-zh.md', '# 第二份履歷'), ('resume/bc-second-en.md', '# Second resume'),
+               ('resume/bc-att-zh.md', '# 附件')])
+    return {'id': _ready_cards(board, 1)[0], 'second': 'bc-second', 'att': '只搭第二份的附件', 'original': original}
+
+
+PRE['ship_pick_case'] = ship_pick_case
+CHECKS.append((
+    '上游:按了版本或語言,一秒內卡上的要寄的檔案(履歷、語言、附件)就等於後台算的,不等存檔、不等重建',
+    r"""
+      var bad=[];
+      try{
+      document.querySelector('[data-tab="ready"]').click(); T.sync(); await T.sleep(700);
+      document.querySelectorAll('#app .cohead').forEach(function(h){if(!h.parentNode.open)h.click();}); await T.sleep(250);
+      function shown(){var c=T.card(P.id); if(!c)return null;
+        var on=c.querySelector('.vd-b[data-vd].on'), lg=c.querySelector('.vd-b.lg.on'), rz=c.querySelector('.ship-rz,.ship-rz-missing');
+        return {resume:on?on.getAttribute('data-vv'):'', lang:lg?lg.getAttribute('data-lv'):'', rz:rz?rz.textContent:'',
+          atts:[...c.querySelectorAll('.ship-att .att-pill')].map(function(x){return x.getAttribute('title').replace(/^預覽 /,'');}).join('|')};}
+      async function backend(){return (await fetch('/api/ship-files?u='+encodeURIComponent(P.id))).json();}
+      function differ(s,r){
+        var atts=(r.files||[]).filter(function(f){return f.kind==='attachment';}).map(function(f){return f.name;}).join('|');
+        return (!s||s.resume!==r.resume_id||s.lang!==r.lang||s.rz.indexOf(r.resume_name)<0||s.atts!==atts)?
+          '畫面 '+JSON.stringify(s)+',後台算的是 '+JSON.stringify({resume:r.resume_id,lang:r.lang,name:r.resume_name,atts:atts}):'';}
+      var c=T.card(P.id); if(!c)return '待你決定找不到案例卡';
+      var b=c.querySelector('.vd-b[data-vv="'+P.second+'"]'); if(!b)return '卡上沒有「第二份履歷」那顆(設定新加的履歷沒出現)';
+      var t0=Date.now(); b.click();
+      var s=await T.until(function(){var x=shown(); return x&&x.resume===P.second&&x.atts.indexOf(P.att)>=0&&x;},1000);
+      if(!s)bad.push('按了第二份履歷,1 秒內卡上的附件沒換('+JSON.stringify(shown())+')');
+      else if((((await T.state())[P.id])||{}).resume_id===P.second&&Date.now()-t0<800)
+        bad.push('還沒存檔,伺服器上卻已經是新的(檢查本身有問題)');
+      await T.idle();
+      var d=differ(shown(),await backend()); if(d)bad.push('按了履歷之後:'+d);
+      var en=T.card(P.id).querySelector('.vd-b.lg[data-lv="en"]');
+      if(!en)bad.push('卡上沒有英文那顆');
+      else{en.click();
+        if(!await T.until(function(){var x=shown(); return x&&x.lang==='en'&&x.atts.indexOf(P.att)<0;},1000))
+          bad.push('按了英文,1 秒內只有中文的附件還列著('+JSON.stringify(shown())+')');
+        await T.idle();
+        d=differ(shown(),await backend()); if(d)bad.push('按了語言之後:'+d);}
+      } finally {
+        await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings:P.original})});
+      }
+      return bad.join('；');
+    """,
+    'ship_pick_case', {'fresh_page': True},
+))
+
+
+def source_replaced_case(board):
+    """待你決定一張卡用副本那份履歷(中文),收下了自己上傳的客製版(從現在這份原始檔做的)。"""
+    original = sandbox('/api/settings', timeout=60)['settings']
+    url = _ready_cards(board, 1)[0]
+    _upload_custom(url, 'resume:' + CHECK_RESUME + ':zh')
+    return {'id': url, 'original': original, 'which': 'resume|' + CHECK_RESUME + '|zh'}
+
+
+PRE['source_replaced_case'] = source_replaced_case
+CHECKS.append((
+    '上游:設定頁上傳新的原始履歷之後,不用重新整理,卡上就改成寄原始檔、講客製版不寄了',
+    r"""
+      var bad=[];
+      try{
+      function open(){document.querySelector('[data-tab="ready"]').click();
+        document.querySelectorAll('#app .cohead').forEach(function(h){if(!h.parentNode.open)h.click();});}
+      function row(){var c=T.card(P.id); return c?[...c.querySelectorAll('.cust-doc')].map(function(x){return x.textContent;}).join(' | '):'';}
+      function preview(){var b=T.card(P.id)&&T.card(P.id).querySelector('.ship-rz'); return b?b.getAttribute('data-rzkind'):'';}
+      open(); await T.sleep(400);
+      if(!/已收下/.test(row())||preview()!=='custom')return '案例卡一開始就不是「已收下、預覽客製版」('+row()+')';
+      document.querySelector('[data-tab="cfg"]').click(); await T.idle();
+      var inp=await T.until(function(){document.querySelectorAll('#app details.fold').forEach(function(x){x.open=true;});
+        return document.querySelector('#app input[data-cfup="'+P.which+'"]');},5000);
+      if(!inp)return '設定頁找不到那份履歷中文版的上傳';
+      var dt=new DataTransfer(); dt.items.add(new File(['換過的原始履歷 '+Date.now()],'board-check-new.txt',{type:'text/plain'}));
+      inp.files=dt.files; inp.dispatchEvent(new Event('change',{bubbles:true}));
+      if(!await T.until(function(){return /傳好了/.test(T.snack());},8000))bad.push('上傳新的原始檔沒成('+T.snack()+')');
+      await T.idle(); open();
+      if(!await T.until(function(){return /原始檔換過/.test(row());},3000))bad.push('換了原始檔、沒重新整理,卡上還寫「'+row()+'」');
+      if(preview()==='custom')bad.push('換了原始檔、沒重新整理,預覽還是客製版');
+      } finally {
+        await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings:P.original})});
+      }
+      return bad.join('；');
+    """,
+    'source_replaced_case', {'fresh_page': True},
 ))
 
 def auto_prep_tried_case(board):
@@ -3740,7 +3952,7 @@ def auto_prep_tried_case(board):
     __auto__ 先寫好同一組開關:伺服器不會當成「剛打開」把整區記成不碰的 backlog(那樣卡上本來就不會寫會自動準備)。
     其他在流程裡的卡全記成不碰,副本不會真的跑準備區。"""
     import board_doc as bd
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     jobs = parsed['data']['jobs']
     prep = [j['id'] for j in jobs if (fb.get(j['id']) or {}).get('app') == 'prep'
@@ -3752,7 +3964,7 @@ def auto_prep_tried_case(board):
         if not spare:
             raise ValueError('示範看板沒有可以放進準備區的卡')
         bd.set_fb(lambda f: f.setdefault(spare, {}).__setitem__('app', 'prep'), live=board, by='board_check')
-        fb = json.loads(bd.parse(open(board, encoding='utf-8').read())['fb'])
+        fb = json.loads(bd.load(board)['fb'])
         prep = [spare]
     target = prep[0]
     others = sorted(j['id'] for j in jobs if (fb.get(j['id']) or {}).get('app') in ('prep', 'ready', 'ship')
@@ -3762,7 +3974,7 @@ def auto_prep_tried_case(board):
         f['__auto__'] = {'since': '2026-01-01T00:00:00', 'skip': others, 'tried': ['prep:' + target], 'seen': {},
                          'flow': {'auto_prep': True, 'auto_advance': False, 'auto_fill': False}}
     bd.set_fb(mut, live=board, by='board_check')
-    sandbox_flow(**dict(FLOW_OFF, auto_prep=True))
+    shot.flow(auto_prep=True)
     return {'id': target}
 
 
@@ -3790,16 +4002,18 @@ CHECKS.append((
 def approved_lang_case(board):
     """一張可以投了的卡:agent 填好、他確認送出了;語言沒自己選過(卡上亮的是 agent 判的那個)。"""
     import board_doc as bd
-    parsed = bd.parse(open(board, encoding='utf-8').read())
+    parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     job = next(j for j in parsed['data']['jobs'] if (fb.get(j['id']) or {}).get('app') == 'ship'
                and not (fb.get(j['id']) or {}).get('rm') and not ((fb.get(j['id']) or {}).get('form') or {}).get('lock'))
 
     def mut(f):
         m = f[job['id']]
+        m['resume_id'] = CHECK_RESUME   # 沒挑履歷的卡兩排按鈕都不亮;這條要的是「有亮著的語言」
         m.pop('lang', None)
         m['form'] = {'plat': '測試', 'f': []}
-        m['apply'] = {'stage': 'fill', 'ok': True, 'issues': [], 'session': 'board-check-lang', 'tab_id': '1',
+        m['ds'] = 'confirmed'
+        m['apply'] = {'stage': 'fill', 'issues': [], 'session': 'board-check-lang', 'tab_id': '1',
                       'delivery': {'method': 'direct_upload'}, 'at': '2026-01-01T00:00:00'}
         m['approve'] = {'at': '2026-01-01T00:00:00', 'snap': {}}
     bd.set_fb(mut, live=board, by='board_check')
@@ -3828,57 +4042,347 @@ CHECKS.append((
 # 代投狀態那幾條(卡上寫的下一步跟真實狀態一致、按鈕按下去資料真的跟著變),獨立一支檔;排在最後,種的資料不影響別條
 import board_check_apply
 from board_check_apply import APPLY_CHECKS, APPLY_PRE
-board_check_apply.SB_URL = SB_URL
 PRE.update(APPLY_PRE)
 CHECKS=CHECKS+APPLY_CHECKS
-
-
-
-def state_matrix_case(_board):
-    """「可以投了」一張卡的狀態組合(tools/state_matrix.py 照固定種子抽),每一種附上從旗子直接定義的真實、後端的判斷。"""
-    import state_matrix
-    return {'cases': state_matrix.cases(), 'url': state_matrix.URL, 'job': state_matrix.JOB}
-
-
-PRE['state_matrix_case'] = state_matrix_case
+# 「每顆按鈕按一遍」補上已送出三種來源(agent 送出、外部送出、平台對帳,各有等回音和有結果的)和送出結果不明(頁在、頁不在)(#303):
+# 示範看板的卡只有外部送出一種,上面那條按不到「沒送成」「其實送出了」「確認沒送出」「再投一次」
 CHECKS.append((
-    '狀態矩陣:可以投了一張卡的每一種狀態組合,畫面講的等於真實、按得下去的後端一定放行、說會自動做的自動流程真的會做(#293)',
+    '流程按鍵:已送出三種來源、送出結果不明的每顆按鈕按一遍,每張卡只算在一個分頁、按了真的改、復原整張回到原樣',
+    FLOW_INV + board_check_apply.SENT_JS + r"""
+      var I=P.ids, bad=[], clicks=0, F=window.__jobsalvoFlow, SEL='[data-undosent],[data-actsent],[data-applyclear],[data-back],[data-again],[data-adv]';
+      stubConfirm(); ANSWER=true;
+      try{
+        for(const fid of I){
+          var st0=(await T.state())[fid]||{}, tab=st0.app;
+          var card=await openTab(tab,fid); if(!card){bad.push(tab+' 找不到 '+fid.slice(-12)); continue;}
+          var sels=[].slice.call(card.querySelectorAll(SEL)).filter(function(x){return !x.disabled;}).map(function(x){
+            var a=[].slice.call(x.attributes).filter(function(y){return /^data-/.test(y.name);})[0];
+            return '['+a.name+'="'+a.value.replace(/"/g,'\\"')+'"]';});
+          for(const sel of sels){
+            var c2=await openTab(tab,fid), b=c2&&c2.querySelector(sel); if(!b||b.disabled)continue;
+            var before=(await T.state())[fid], where=tab+' '+(st0.ds||'todo')+'/'+(st0.sent_by||'')+(st0.oc?'/'+st0.oc:'')+' '+sel.slice(0,20);
+            b.click(); clicks++; await T.idle();
+            inv().forEach(function(x){bad.push(where+':'+x);});
+            var now=(await T.state())[fid];
+            if(same(now,before))bad.push(where+':按了卡沒變');
+            if(F.tabOf(fid)!==tab&&T.card(fid))bad.push(where+':卡已經到「'+F.tabOf(fid)+'」,卻還留在這一頁');
+            var u=document.querySelector('#snack.on .snack-undo');
+            if(!u){bad.push(where+':按了沒有復原'); continue;}
+            u.click(); await T.idle();
+            inv().forEach(function(x){bad.push(where+' 復原後:'+x);});
+            var back=(await T.state())[fid]; if(!same(back,before))bad.push(where+':復原後沒回到原樣('+diff(before,back)+')');
+          }
+        }
+      }finally{unstubConfirm();}
+      await T.idle(); document.querySelector('[data-tab="none"]').click();
+      if(clicks<9)bad.push('只按到 '+clicks+' 顆(八張卡應該有九顆)');
+      return bad.slice(0,8).join('；');
+    """,
+    'sent_sources_case', {'fresh_page': True},
+))
+
+
+
+def delivery_views_case(_board):
+    """每一種投遞狀態 × 檢查清單的輸入(舊記號組合 tests/legacy_marks.py 轉成投遞狀態後,11 種狀態都有),
+    附上後台怎麼判斷:能不能確認、能不能送、讓 agent 填收不收、叫它改收不收、自動流程會不會接、那一頁在不在。"""
+    sys.path.insert(0, os.path.join(HERE, '..', 'tests'))
+    import copy, apply_run, autopilot, delivery_state as ds, form_record, legacy_marks as lm
+    out, seen = [], set()
+    for c in lm.combos():
+        fb, status = lm.state_of(c)
+        ds.migrate(fb)
+        key = json.dumps([fb[lm.URL], c['busy'], c['auto'], c['status']], sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        u = lm.URL
+        pl = autopilot.plan({'jobs': [lm.JOB], 'status': status}, copy.deepcopy(fb), verified_gen=0, build_running=False,
+                            running={'apply': bool(c['busy'])}, real=False,
+                            cfg={'auto_prep': False, 'auto_advance': False, 'auto_fill': True, 'fill_max': 0, 'replies_at': ''})
+        out.append({'c': c, 'fb': fb, 'status': status, 'backend': {
+            'problem': form_record.approval_problem(fb, u, status),
+            'page_up': ds.page_up(fb[u]),
+            'gate': autopilot.ship_blocked(fb, lm.JOB, status),
+            'approve_ok': form_record.confirm_problem(fb, u, status) is None,
+            'submit_ok': form_record.approval_problem(fb, u, status) is None,
+            'fill_ok': u in apply_run.eligible({u: lm.JOB}, fb, 'fill', url=u, status=status),
+            'fix_ok': u in apply_run.eligible({u: lm.JOB}, fb, 'fix', url=u, status=status),
+            'auto_pick': u in (pl.get('fill'), pl.get('fix')) or bool(pl.get('rf', {}).get(u))}})
+    return {'cases': out, 'url': lm.URL, 'job': lm.JOB}
+
+
+PRE['delivery_views_case'] = delivery_views_case
+CHECKS.append((
+    '每一種投遞狀態:畫面講的等於後台(頁面不在不給 👀、按得下去的後台一定收、說會自動做的自動流程真的會做、沒有死路,#293)',
     r"""
       var R=window.__jobsalvoSharedRules, bad={}, n=0;
       if(!R||!R.cardViews)return '看板沒有提供 cardViews';
       function el(h){var d=document.createElement('div'); d.innerHTML=h||''; return d;}
-      function add(k,c){(bad[k]=bad[k]||[]).push(Object.keys(c).filter(function(x){return c[x]&&c[x]!=='clean';}).map(function(x){return x+(c[x]===true?'':'='+c[x]);}).join(','));}
+      function add(k,c,s){(bad[k]=bad[k]||[]).push(s+':'+Object.keys(c).filter(function(x){return c[x]&&c[x]!=='clean';}).map(function(x){return x+(c[x]===true?'':'='+c[x]);}).join(','));}
       P.cases.forEach(function(x){
-        var c=x.c, busy=c.busy, now=Date.now()/1000;
+        var c=x.c, busy=c.busy, now=Date.now()/1000, b=x.backend;
         var v=R.cardViews(P.url, JSON.parse(JSON.stringify(x.fb)), {job:P.job, status:x.status,
           apply:busy?{running:true,url:P.url,stage:busy,t0:now}:{}, flow:{auto_fill:c.auto}});
-        var L=el(v.line), T=el(v.todo), F=el(v.fill), all=[L,T,F]; n++;
-        var locked=c.form&&c.lock;
+        var L=el(v.line), T=el(v.todo), F=el(v.fill), all=[L,T,F], s=v.state; n++;
         var eye=all.some(function(d){return d.querySelector('a[href^="/api/live?"],[data-livego]');});
-        if(eye&&!(x.truth.page_exists&&!busy))add('頁面不在(或正在跑)卻給 👀',c);
+        if(eye&&!(b.page_up&&!busy))add('頁面不在(或正在跑)卻給 👀',c,s);
         var ap=L.querySelector('[data-approve]:not([disabled])');
-        if(ap&&!(x.backend.approve_ok&&!busy))add('確認送出按得下去,後端卻不放行',c);
-        if(L.querySelector('[data-applysubmit]')&&!x.backend.submit_ok)add('給了「▶ 送出」,後端卻不放行',c);
-        var fx=[].slice.call(L.querySelectorAll('[data-applyfixopen]')).some(function(b){return !/取消/.test(b.textContent);});
-        if(fx&&!(x.truth.page_exists&&c.session))add('頁面不在卻叫 agent 在那一頁改',c);
-        if(L.querySelector('[data-runone^="apply|"]')&&!x.backend.fill_ok)add('給了填表鈕,後端卻不收',c);
-        if(c.auto&&!busy&&/會自動|排隊中/.test(L.textContent)&&!x.backend.auto_pick)add('寫會自動做,自動流程卻不會接',c);
-        if(!busy&&!locked&&v.line){
+        if(ap&&!(b.approve_ok&&!busy))add('確認送出按得下去,後台卻不放行',c,s);
+        if(L.querySelector('[data-applysubmit]')&&!b.submit_ok)add('給了「▶ 送出」,後台卻不放行',c,s);
+        var fx=[].slice.call(L.querySelectorAll('[data-applyfixopen]')).some(function(bb){return !/取消/.test(bb.textContent);});
+        if(fx&&!b.fix_ok)add('叫 agent 在那一頁改,後台卻不收',c,s);
+        if(L.querySelector('[data-runone^="apply|"]')&&!b.fill_ok)add('給了填表鈕,後台卻不收',c,s);
+        if(c.auto&&!busy&&/會自動|排隊中/.test(L.textContent)&&!b.auto_pick)add('寫會自動做,自動流程卻不會接',c,s);
+        if(!busy&&s!=='sent'&&v.line){
           var act=L.querySelector('button:not([disabled])'), why=L.querySelector('.ap-why,.ap-bad,.ap-run,.ap-ok');
-          if(!act&&!why)add('卡上沒有能按的、也沒寫原因(死路)',c);}
-        // 前後端同一條規則寫在兩種語言:每一種組合兩邊的結論和那一句要一字不差
-        var jsp=v.problem?v.problem.split(v.agent).join('agent'):null;   // 看板用設定的 agent 名字,後端寫 agent
-        if(jsp!==(x.backend.problem||null))add('核准規則前後端不一致(看板「'+v.problem+'」/後端「'+x.backend.problem+'」)',c);
-        if(!!v.pageUp!==!!x.backend.page_up)add('頁面在不在前後端不一致',c);
-        if((v.gate||'')!==(x.backend.gate||''))add('投遞前把關前後端不一致',c);
-        if(/填好了,等你確認送出/.test(F.textContent)&&!ap&&!(x.fb[P.url]||{}).approve)add('填表進度說填好了等確認,卡上卻按不了確認送出',c);
+          if(!act&&!why)add('卡上沒有能按的、也沒寫原因(死路)',c,s);}
+        var jsp=v.problem?v.problem.split(v.agent).join('agent'):null;   // 看板用設定的 agent 名字,後台寫 agent
+        if(jsp!==(b.problem||null))add('確認規則前後不一致(看板「'+v.problem+'」/後台「'+b.problem+'」)',c,s);
+        if(!!v.pageUp!==!!b.page_up)add('頁面在不在前後不一致',c,s);
+        if((v.gate||'')!==(b.gate||''))add('投遞前把關前後不一致',c,s);
+        if(/填好了,等你確認送出/.test(F.textContent)&&!ap)add('填表進度說填好了等確認,卡上卻按不了確認送出',c,s);
       });
       var keys=Object.keys(bad);
       return keys.map(function(k){return k+' '+bad[k].length+' 種,例:'+bad[k].slice(0,2).join(' | ');}).join('；')+(keys.length?'(共 '+n+' 種)':'');
     """,
-    'state_matrix_case',
+    'delivery_views_case',
 ))
 
+
+def _delivery_fixture():
+    with open(os.path.join(HERE, '..', 'tests', 'fixtures', 'delivery-cards.json'), encoding='utf-8') as f:
+        return json.load(f)
+
+
+def delivery_cells_case(_board):
+    """投遞狀態 × 事件表的每一格:後台(tools/delivery_state.py)照表走出來的那張卡,或擋下來的那一句。"""
+    import copy, delivery_state as ds
+    fx = _delivery_fixture()
+    u = fx['url']
+    cells = []
+    for s, card in fx['cards'].items():
+        for ev, data in fx['data'].items():
+            fb = {u: copy.deepcopy(card)}
+            try:
+                ds.fire(fb, u, ev, **copy.deepcopy(data))
+                why = None
+            except ds.Forbidden as e:
+                why = str(e)
+            cells.append({'s': s, 'ev': ev, 'card': card, 'data': data, 'want': fb[u], 'why': why})
+    return {'cells': cells}
+
+
+PRE['delivery_cells_case'] = delivery_cells_case
+CHECKS.append((
+    '投遞狀態表:11 種狀態 × 每一種事件,看板照表走出來的卡跟後台一模一樣,不准的擋下的那一句也一樣',
+    r"""
+      var R=window.__jobsalvoSharedRules, bad=[];
+      if(!R||!R.dsFire)return '看板沒有提供 dsFire';
+      function canon(v){if(Array.isArray(v))return v.map(canon);
+        if(v&&typeof v==='object'){var o={}; Object.keys(v).sort().forEach(function(k){o[k]=canon(v[k]);}); return o;} return v;}
+      P.cells.forEach(function(c){
+        var before=JSON.stringify(c.card), r=R.dsFire(c.card,c.ev,c.data);
+        if(JSON.stringify(c.card)!==before)bad.push(c.s+'×'+c.ev+':看板改到了傳進來的卡');
+        if((r.why||null)!==(c.why||null))bad.push(c.s+'×'+c.ev+':看板「'+r.why+'」/後台「'+c.why+'」');
+        else if(JSON.stringify(canon(r.card))!==JSON.stringify(canon(c.want)))bad.push(c.s+'×'+c.ev+':走出來的卡不一樣');
+      });
+      return bad.length?bad.length+' 格不一致,例:'+bad.slice(0,3).join(' | '):'';
+    """,
+    'delivery_cells_case',
+))
+
+
+def delivery_checklist_case(_board):
+    """能不能確認送出(狀態 + 檢查清單)的案例:原本規則案例表的核准兩段併進來(tests/fixtures/delivery-cards.json)。"""
+    return {'cases': _delivery_fixture()['checklist']}
+
+
+PRE['delivery_checklist_case'] = delivery_checklist_case
+CHECKS.append((
+    '能不能確認送出:同一張案例表,看板的 approvalProblem / approveBlocker 跟後台 approval_problem / confirm_problem 一字不差',
+    r"""
+      var R=window.__jobsalvoSharedRules, bad=[], AG=null;
+      P.cases.forEach(function(c){
+        var st=c.hasOwnProperty('status')?c.status:{schema_version:2,checked_links:true,issues:[]};
+        var fb=JSON.parse(JSON.stringify(c.fb));
+        var p=R.approvalProblem(c.url,fb,st), b=R.approveBlocker(c.url,fb,st);
+        function norm(x){return x===null||x===undefined?null:String(x).replace(/^\S+ 還沒填這張/,'agent 還沒填這張').split(' '+R.agentName+' ').join(' agent ');}
+        if(norm(p)!==c.problem)bad.push(c.name+':確認後「'+p+'」/後台「'+c.problem+'」');
+        if(norm(b.problem)!==c.confirm)bad.push(c.name+':確認前「'+b.problem+'」/後台「'+c.confirm+'」');
+        if(JSON.stringify(fb)!==JSON.stringify(c.fb))bad.push(c.name+':試算確認之後卡被改了');
+      });
+      return bad.join('；');
+    """,
+    'delivery_checklist_case',
+))
+
+
+def legacy_render_case(_board):
+    """舊記號組合(tests/legacy_marks.py)照伺服器起來時的轉換轉成投遞狀態,附上轉換前 board.js 畫出來的樣子
+    (tests/fixtures/legacy-render.json)。"""
+    sys.path.insert(0, os.path.join(HERE, '..', 'tests'))
+    import delivery_state as ds, legacy_marks as lm
+    with open(os.path.join(HERE, '..', 'tests', 'fixtures', 'legacy-render.json'), encoding='utf-8') as f:
+        gold = json.load(f)
+    out = []
+    for i, c in enumerate(lm.combos()):
+        fb, status = lm.state_of(c)
+        ds.migrate(fb)
+        out.append({'c': c, 'fb': fb, 'status': status, 'want': gold['cases'][i]})
+    return {'cases': out, 'renders': gold['renders'], 'url': lm.URL, 'job': lm.JOB}
+
+
+PRE['legacy_render_case'] = legacy_render_case
+CHECKS.append((
+    '舊資料轉成投遞狀態之後,看板畫出來(卡上那一行、這一頁要你處理的、🚀 填表進度)跟轉換前一樣',
+    r"""
+      var R=window.__jobsalvoSharedRules, bad={}, n=0;
+      function el(h){var d=document.createElement('div'); d.innerHTML=h||''; return d;}
+      function btns(d){return [].slice.call(d.querySelectorAll('button:not([disabled]),a[href]')).map(function(b){
+        var a=[].slice.call(b.attributes).map(function(x){return x.name;}).filter(function(n){return /^data-/.test(n);}).sort();
+        return a.join('+')||b.tagName;}).sort();}
+      P.cases.forEach(function(x){var c=x.c, busy=c.busy, now=Date.now()/1000;
+        var v=R.cardViews(P.url, JSON.parse(JSON.stringify(x.fb)), {job:P.job, status:x.status,
+          apply:busy?{running:true,url:P.url,stage:busy,t0:now}:{}, flow:{auto_fill:c.auto}});
+        var L=el(v.line), T=el(v.todo), F=el(v.fill);
+        var got={line:L.textContent, lb:btns(L), todo:T.textContent, fill:F.textContent,
+          eye:[L,T,F].some(function(d){return !!d.querySelector('a[href^="/api/live?"],[data-livego]');})};
+        var want=P.renders[x.want]; n++;
+        // 預期會不一樣的(舊記號本來就互相矛盾,轉成一個狀態後照狀態畫):
+        //  · 送出結果不明:卡上那一行、填表進度改成自己一格(以前照順手留著的其他記號畫成「填好了」「頁面不見了」)
+        //  · 確認只存在「你已確認」:舊資料在卡住、頁面不見了這些狀態還留著確認,以前寫「確認失效」,現在是「還不能確認送出」;
+        //    頁面不見了的確認作廢,自動流程照常重填(以前留著確認,自動流程永遠跳過)
+        //  · 填了卡住之後又換了檔:現在是「上傳的是舊檔」,卡上和填表進度不再寫成「卡住」「沒填成」
+        //  · 在可以投了卻帶著已送出紀錄(agent 送出證據、鎖住的表單):照「沒送成」轉成還沒填(#297),整張照還沒填畫
+        //  · 頁面不見了又換過檔:頁不在就只是頁面不見了,不再另外寫換了履歷
+        //  · 你已確認、之後才出問題(驗收沒過、要重打):先給「取消確認」(你已確認不能直接重填或叫它改)
+        //  · 填好了卻沒有表單紀錄:轉成填了卡住(原因照實寫),下一步一樣是重填
+        //  · 確認了、卻從來沒填過(舊資料):還沒填,確認送不出去(以前卡上給「▶ 送出」)
+        //  · 送出結果不明多一顆「其實送出了」(#303)
+        //  · 還沒填、留著上一輪表單紀錄、自動填表開著:自動流程本來就會填,卡上照實寫排隊中、不列進要你處理的
+        //    (以前寫「讓 agent 填這張」「照新答案重填」,#303)
+        function expected(k){return (v.state==='unsure'&&(k==='line'||k==='fill'||k==='lb'))||(v.state==='todo'&&c.form&&c.auto&&(k==='line'||k==='todo'))||
+          (v.state==='confirmed'&&v.problem&&(k==='lb'||k==='line'||k==='todo'))||(c.stage&&c.ok&&!c.gone&&!c.form&&k!=='lb'&&k!=='eye')||(!c.stage&&c.approve&&v.state==='todo')||
+          (c.approve&&v.state!=='confirmed'&&k==='line')||(c.approve&&(v.state==='gone'||v.state==='stale'))||(c.stale&&!c.ok&&v.state==='stale')||
+          (v.state==='todo'&&((c.stage&&c.sent)||(c.form&&c.lock)))||(c.gone&&c.stale&&v.state==='gone');}
+        ['line','lb','todo','fill','eye'].forEach(function(k){
+          if(JSON.stringify(got[k])!==JSON.stringify(want[k])&&!expected(k)){var key=k+'|'+v.state;
+            (bad[key]=bad[key]||[]).push(Object.keys(c).filter(function(q){return c[q]&&c[q]!=='clean';}).join(',')+' 舊「'+JSON.stringify(want[k]).slice(0,120)+'」新「'+JSON.stringify(got[k]).slice(0,120)+'」');}});
+      });
+      var keys=Object.keys(bad).sort();
+      return keys.map(function(k){return k+' '+bad[k].length+' 種,例:'+bad[k].slice(0,1).join(' | ');}).join('\n')+(keys.length?'(共 '+n+' 種)':'');
+    """,
+    'legacy_render_case',
+))
+
+
+def _fnv(text):
+    """FNV-1a 32 位元(照 UTF-16 一個一個算,看板那邊 charCodeAt 同一個):連續走法每一步只送指紋,不送整張卡。"""
+    h = 0x811c9dc5
+    b = text.encode('utf-16-le')
+    for i in range(0, len(b), 2):
+        h ^= b[i] | (b[i + 1] << 8)
+        h = (h * 0x01000193) & 0xffffffff
+    return h
+
+
+def delivery_walk_case(_board):
+    """連續很多步的隨機走法(tests/delivery_walk.py):每一步照狀態表送了哪些事件、改了哪些欄位,
+    後台走完之後三張卡的指紋、停著的頁是哪幾張。"""
+    sys.path.insert(0, os.path.join(HERE, '..', 'tests'))
+    import delivery_walk as dw
+    def canon(v):
+        return json.dumps(v, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    out = []
+    for w in dw.walks(400):
+        out.append({'i': w['i'], 'start': w['start'], 'log': w['log'],
+                    'rows': [{'ops': r['ops'], 'h': _fnv(canon([r['cards'][u] for u in dw.URLS])), 'held': r['held']}
+                             for r in w['rows']]})
+    return {'walks': out, 'jobs': dw.JOBS, 'seed': dw.SEED}
+
+
+PRE['delivery_walk_case'] = delivery_walk_case
+CHECKS.append((
+    '連續很多步的隨機走法:同一串事件在看板上重放,每一步卡片跟後台一模一樣、停著的頁看板和後台數得一樣',
+    r"""
+      var R=window.__jobsalvoSharedRules, bad=[];
+      function canon(v){if(Array.isArray(v))return v.map(canon);
+        if(v&&typeof v==='object'){var o={}; Object.keys(v).sort().forEach(function(k){o[k]=canon(v[k]);}); return o;} return v;}
+      function fnv(t){var h=0x811c9dc5; for(var i=0;i<t.length;i++){h^=t.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0;} return h>>>0;}
+      function lean(v){return R.lean(v);}
+      var urls=P.jobs.map(function(j){return j.id;});
+      P.walks.some(function(w){
+        var fb=JSON.parse(JSON.stringify(w.start));
+        return w.rows.some(function(r,k){
+          var why='';
+          r.ops.forEach(function(o){if(why)return;
+            if(o.op==='fire'){var x=R.dsFire(fb[o.u],o.ev,o.data); if(x.why)why='看板不准「'+o.ev+'」:'+x.why; else fb[o.u]=x.card;}
+            else if(o.op==='set'){fb[o.u]=fb[o.u]||{}; fb[o.u][o.k]=JSON.parse(JSON.stringify(o.v));}
+            else if(o.op==='del'){if(fb[o.u])delete fb[o.u][o.k];}
+            else if(o.op==='bank'){fb.__ans__[0].v=o.v;}
+            else if(o.op==='refill'){urls.forEach(function(u){var f=(fb[u]||{}).form;
+              if(f&&R.dsPageUp(fb[u]))(f.f||[]).forEach(function(q){if(q.k==='k1')q.refill=1;});});}
+            else if(o.op==='unrefill'){((fb[o.u].form||{}).f||[]).forEach(function(q){delete q.refill;});}
+            else if(o.op==='block'){fb.__block__=o.v;}
+            else if(o.op==='undo'){
+              if(JSON.stringify(canon(lean(R.dsPart(fb[o.u]))))!==JSON.stringify(canon(lean(o.after))))why='看板不准復原';
+              else fb[o.u]=JSON.parse(JSON.stringify(o.prev));}});
+          var h=fnv(JSON.stringify(canon(urls.map(function(u){return fb[u];}))));
+          var held=urls.filter(function(u){return R.dsHeldIn(fb,P.jobs,u);});
+          if(!why&&h!==r.h)why='卡片跟後台不一樣';
+          if(!why&&JSON.stringify(held)!==JSON.stringify(r.held))why='停著的頁:看板 '+held.length+' 張、後台 '+r.held.length+' 張';
+          if(why)bad.push('種子 '+P.seed+' 第 '+w.i+' 串第 '+(k+1)+' 步:'+why+'\n'+w.log.slice(0,k+1).join('\n'));
+          return !!why;});
+      });
+      return bad.join('\n');
+    """,
+    'delivery_walk_case',
+))
+
+
+def held_cap_case(_board):
+    """停著的頁上限(#297):上限 1,另一張卡是每一種舊記號組合(照伺服器起來時的轉換轉成投遞狀態);
+    這張還沒填的新卡,看板說會不會自動填、自動流程真的填不填。"""
+    sys.path.insert(0, os.path.join(HERE, '..', 'tests'))
+    import autopilot, delivery_state as ds, legacy_marks as lm
+    x = {'id': 'https://matrix.example/job/new', 'target': '**New Role · New Co**'}
+    cfg = {'auto_prep': False, 'auto_advance': False, 'auto_fill': True, 'fill_max': 1, 'replies_at': ''}
+    out, seen = [], set()
+    for c in lm.combos():
+        if c['busy']:
+            continue
+        fb, status = lm.state_of(c)
+        key = json.dumps(fb[lm.URL], sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        fb[x['id']] = {'app': 'ship'}
+        fb['__auto__']['skip'] = []
+        ds.migrate(fb)
+        pl = autopilot.plan({'jobs': [x, lm.JOB], 'status': status}, copy.deepcopy(fb), verified_gen=0,
+                            build_running=False, running={}, real=False, cfg=cfg)
+        out.append({'fb': fb, 'status': status, 'c': c, 'pick': pl.get('fill') == x['id']})
+    return {'cases': out, 'x': x, 'other': lm.JOB}
+
+
+PRE['held_cap_case'] = held_cap_case
+CHECKS.append((
+    '停著的頁上限:另一張卡在每一種狀態時,看板說會不會自動填新卡,跟自動流程真的填不填一樣(#297)',
+    r"""
+      var R=window.__jobsalvoSharedRules, bad=[];
+      P.cases.forEach(function(k){
+        var v=R.cardViews(P.x.id, JSON.parse(JSON.stringify(k.fb)), {job:P.x, others:[P.other], status:k.status, apply:{},
+          flow:{auto_fill:true, fill_max:1}});
+        var d=document.createElement('div'); d.innerHTML=v.line;
+        var says=/排隊中|會自動/.test(d.textContent);
+        if(says!==k.pick)bad.push((says?'看板說會自動填、自動流程不填':'看板說滿了、自動流程照填')+':'+
+          Object.keys(k.c).filter(function(n){return k.c[n]&&k.c[n]!=='clean';}).join(','));
+      });
+      return bad.length?bad.length+' 種不一致,例:'+bad.slice(0,3).join(' | '):'';
+    """,
+    'held_cap_case',
+))
 def chains(todo):
     """把「接著上一條」的檢查(opts 的 with_previous)跟上一條綁成一串;分組時一串整個放同一組、照順序跑。"""
     out=[]
@@ -3890,16 +4394,24 @@ def chains(todo):
     return out
 
 
+# 檢查的尺寸(CDP 模擬,手機連觸控一起);desktop 是不模擬
+VIEWPORTS={'mobile':{'width':390,'height':844,'deviceScaleFactor':1,'mobile':True},
+           'wide':{'width':1440,'height':900,'deviceScaleFactor':1,'mobile':False}}
+
+
+def _viewport(cdp, profile):
+    if profile in VIEWPORTS:
+        cdp.send('Emulation.setDeviceMetricsOverride',VIEWPORTS[profile])
+    else:
+        cdp.send('Emulation.clearDeviceMetricsOverride')
+    cdp.send('Emulation.setTouchEmulationEnabled',{'enabled':True,'maxTouchPoints':1} if profile=='mobile' else {'enabled':False})
+
+
 def run_shards(n):
     """分成 n 組同時跑(跟 Playwright 的 --shard、pytest-xdist 一樣的做法):每組一個行程,各自開看板副本和瀏覽器。
     回結束碼:任一組失敗就是 1。"""
-    args,skip=[],False
-    for x in sys.argv[1:]:                 # 拿掉 --workers N,其餘參數照傳
-        if skip: skip=False; continue
-        if x=='--workers': skip=True; continue
-        if not x.startswith('--workers='): args.append(x)
     logs=[tempfile.TemporaryFile(mode='w+',encoding='utf-8') for _ in range(n)]   # 各寫各的,不會互相卡住
-    procs=[subprocess.Popen([sys.executable,os.path.abspath(__file__),*args,'--shard',f'{k}/{n}'],
+    procs=[subprocess.Popen([sys.executable,os.path.abspath(__file__),*sys.argv[1:],'--shard',f'{k}/{n}'],   # 有 --shard 的不再分組
                             stdout=logs[k],stderr=subprocess.STDOUT) for k in range(n)]
     code=0
     for k,p in enumerate(procs):
@@ -3930,7 +4442,7 @@ def main():
         if shard==0:
             check_bank_export_and_history()
             if not a.quiet: print('  ✅ 題庫存檔、Markdown 匯出與資料夾版本紀錄')
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 檢查本身出錯算這一條沒過,照實列進失敗清單
         fails.append(('題庫存檔與資料夾版本紀錄',str(e)[:160]))
     with ExitStack() as stack:
         if a.board:
@@ -3941,12 +4453,7 @@ def main():
             demo_dir=stack.enter_context(tempfile.TemporaryDirectory(prefix='boardcheck-demo-'))
             board=demo.build(os.path.join(demo_dir,'board.html'),int(os.environ.get('JOBSALVO_DEMO_EXTRA') or 0))
         boardcheck_home=stack.enter_context(tempfile.TemporaryDirectory(prefix='boardcheck-home-'))
-        old_home=os.environ.get('JOBSALVO_HOME')
-        os.environ['JOBSALVO_HOME']=boardcheck_home
-        if old_home is None:
-            stack.callback(os.environ.pop,'JOBSALVO_HOME',None)
-        else:
-            stack.callback(os.environ.__setitem__,'JOBSALVO_HOME',old_home)
+        stack.enter_context(mock.patch.dict(os.environ,JOBSALVO_HOME=boardcheck_home))
         preference_note(boardcheck_home)
         flow_off(boardcheck_home)
         skill=os.path.join(boardcheck_home,'custom','skills','board-check.md')
@@ -3954,18 +4461,13 @@ def main():
         with open(skill,'w',encoding='utf-8') as f: f.write('# 看板檢查用 skill\n')
         sb=shot.Sandbox(board)
         stack.callback(sb.close)
-        previous_agent_board=os.environ.get('AGENT_BOARD')
-        os.environ['AGENT_BOARD']=sb.copy
-        if previous_agent_board is None:
-            stack.callback(os.environ.pop,'AGENT_BOARD',None)
-        else:
-            stack.callback(os.environ.__setitem__,'AGENT_BOARD',previous_agent_board)
+        stack.enter_context(mock.patch.dict(os.environ,AGENT_BOARD=sb.copy))
         # Prepare the fake resume before starting Chrome; both use the same local
         # server, and Chrome startup can otherwise starve this short API request.
         seed_check_resume(sb.url)
         # 開瀏覽器、載入頁面、尺寸模擬、失敗時的錄影交給 Playwright(以前自己用 CDP 寫,Chrome 沒關乾淨、卡住都要自己修)。
         # 用這台機器本來就有的 Chrome(跟截圖、印 PDF 同一個),不另外下載瀏覽器。
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
         import chrome_bin
         pw=stack.enter_context(sync_playwright())
         browser=pw.chromium.launch(executable_path=chrome_bin.chrome()[0], args=['--disable-gpu','--hide-scrollbars'])
@@ -3975,14 +4477,16 @@ def main():
         page=ctx.new_page()
         page.on('dialog', lambda d: d.accept())      # 例如按停止時的確認框:當成使用者按了確定
         cdp=ctx.new_cdp_session(page)
-        SB_URL[0]=sb.url
+        shot.SB_URL[0]=sb.url
         # 檢查用的 T/FB0 每次載入頁面都要在:有的動作(存設定)會重新載入頁面。
         page.add_init_script(HELPERS)
         page.add_init_script(axe_source())
         target_url=sb.url.rstrip('/') + '/'
+        def ready():   # 到了那個網址、而且載入完(load);逾時講中文
+            try: page.wait_for_url(target_url, timeout=60000)
+            except PWTimeout: raise TimeoutError('看板頁面載入逾時') from None
         page.goto(sb.url)
-        if not _wait_for_page_ready(page, target_url):
-            raise TimeoutError('看板頁面載入逾時')
+        ready()
         trace_dir=os.environ.get('BOARD_CHECK_TRACES') or os.path.join(tempfile.gettempdir(),'board-check-traces')
         todo=[x for x in CHECKS if a.only in x[0]] if a.only else CHECKS
         if a.fast:
@@ -3996,25 +4500,16 @@ def main():
                 t0=time.time()
                 ctx.tracing.start_chunk()
                 try:
-                    if not _wait_for_page_ready(page, target_url):
-                        raise TimeoutError('看板頁面重載後載入逾時')
-                    if profile=='mobile':
-                        cdp.send('Emulation.setDeviceMetricsOverride',{'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
-                        cdp.send('Emulation.setTouchEmulationEnabled',{'enabled':True,'maxTouchPoints':1})
-                    elif profile=='wide':
-                        cdp.send('Emulation.setDeviceMetricsOverride',{'width':1440,'height':900,'deviceScaleFactor':1,'mobile':False})
-                        cdp.send('Emulation.setTouchEmulationEnabled',{'enabled':False})
-                    elif profile=='desktop':
-                        cdp.send('Emulation.clearDeviceMetricsOverride')
-                        cdp.send('Emulation.setTouchEmulationEnabled',{'enabled':False})
-                    if profile is not None: page.wait_for_timeout(200)
+                    ready()
+                    if profile is not None:
+                        _viewport(cdp,profile); page.wait_for_timeout(200)
                     page.add_script_tag(content=HELPERS)   # 每一條開始前重新裝上 T(跟以前一樣)
                     arg=PRE[item[2]](sb.copy) if len(item)>2 else None
                     if len(item)>3 and item[3].get('fresh_page'):
                         # 頁面是載入時讀設定(自動流程開關);這條要先重新載入頁面(T 由 init script 自動裝上)再跑
                         page.goto(sb.url); page.wait_for_timeout(2500)
                     msg=page.evaluate("(async function(P){%s})(%s)"%(body,json.dumps(arg)))
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — 檢查本身出錯算這一條沒過,照實列進失敗清單
                     msg='檢查本身出錯:'+str(e)[:120]
                 report=name+(f' ({profile})' if profile is not None and len(profiles)>1 else '')
                 took.append((time.time()-t0,report))
@@ -4028,10 +4523,9 @@ def main():
                     if not a.quiet: print(f'  ✅ {report}')
             if 'mobile' in profiles or 'wide' in profiles:
                 try:
-                    cdp.send('Emulation.clearDeviceMetricsOverride')
-                    cdp.send('Emulation.setTouchEmulationEnabled',{'enabled':False})
+                    _viewport(cdp,'desktop')
                     page.wait_for_timeout(200)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — 照實列進失敗清單
                     fails.append((name,'切回桌機尺寸失敗:'+str(e)[:120]))
     if a.timing:
         print(f'\n每一條花幾秒(全部 {time.time()-t_all:.0f} 秒,含開沙箱與 Chrome):')

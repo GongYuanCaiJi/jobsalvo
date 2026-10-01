@@ -7,7 +7,7 @@ board_check 的「表單答案庫、代投、agent 回報」那幾條(由 board_
     要看要改答案一律去答案庫。
   · 任何推論的東西先進答案庫、標「我推論的」,他確認一次,用到它的每張卡一起算過,分頁 ⚠ 只算一次。
   · 答案庫每一條都能在看板上改、新增、刪,每一顆按鈕按了都能復原(怕手滑)。改值就是確認;值一改,
-    還沒送出的表單標「雇主網頁待重打」,已投遞的不標。還沒送出的表單在用的,刪除變成「清掉答案」(題目留著、等重寫)。
+    還沒送出的表單標「雇主網頁待重打」,已投遞的不標。還沒送出的表單在用的,刪除變成「清掉答案」(題目留著、下一輪 agent 代填)。
   · 每條答案分「共用」和「這缺專用」:我先判斷,他按一下切換(可復原)。這缺專用的連到那個 JD。
   · 面板和每一條都是看板共用的 fold:預設收起,有待確認的只在標題上亮 ⚠;他展開的那條,重畫後還開著。
   · 英文答案一定附中文,使用者看到的、能改的是中文。他改了中文,
@@ -17,24 +17,48 @@ board_check 的「表單答案庫、代投、agent 回報」那幾條(由 board_
 每一條開頭先等前一條的自動存檔送完、結尾也等,不然種資料會跟前一條還沒送出的存檔撞在一起。
 """
 
-# 種資料:挑三張沒被封鎖的職缺,兩張放可投遞、一張放已投遞,三張表單都有一欄指向 zz_nat;答案庫加一條「我推論的」。
+
+
+def ans_cards(board):
+    """種卡(直接寫副本的看板檔:投遞狀態只能靠事件改,看板存檔改不動):挑四張沒被封鎖的職缺,
+    兩張 agent 已經填好、停著等你(投遞狀態 parked),一張已投出,一張讀過表單、agent 還沒填過;表單都有一欄指向 zz_nat。"""
+    import board_doc as bd
+    jobs = [j for j in bd.load(board)['data']['jobs'] if not j.get('bk')]
+    ids = [j['id'] for j in jobs[:4]]
+
+    def form(lock=False, why=False):
+        f = {'plat': '測試', 'at': '2026-01-01', 'f': [{'q': 'What is your nationality?', 'src': 'bank', 'k': 'zz_nat'}]}
+        if why:
+            f['f'].append({'q': 'Why this role?', 'src': 'bank', 'k': 'zz_why'})
+        if lock:
+            f['lock'] = 1
+        return f
+    filled = {'stage': 'fill', 'at': '2026-01-01T00:00:00', 'issues': [], 'delivery': {'method': 'direct_upload'},
+              'tab_id': '1'}     # 沒有那段對話的 id:叫不回同一隻 agent(要它改的那一條自己補)
+
+    def mut(fb):
+        fb[ids[0]] = {'app': 'ship', 'ds': 'parked', 'form': form(why=True), 'apply': dict(filled)}
+        fb[ids[1]] = {'app': 'ship', 'ds': 'parked', 'form': form(), 'apply': dict(filled)}
+        fb[ids[2]] = {'app': 'sent', 'ds': 'sent', 'sent_by': 'manual', 'sent_at': '2026-01-01', 'form': form(lock=True)}
+        fb[ids[3]] = {'app': 'ship', 'form': form()}   # 第四張:讀過表單、agent 還沒填過(雇主網頁上什麼都還沒有)
+    bd.set_fb(mut, live=board, by='board_check')
+    return {'ids': ids}
+
+
+ANS_PRE = {'ans_cards': ans_cards}
+
+# 種資料:四張卡由 ans_cards 種好;答案庫加一條「我推論的」。
 SEED = r"""
 await T.idle();
-var jobs=JSON.parse(document.getElementById('data-jobs').textContent).jobs.filter(function(j){return !j.bk;});
-var ids=[jobs[0].id,jobs[1].id,jobs[2].id,jobs[3].id];
+var ids=P.ids;
 var fb=await T.state();
-var form=function(lock,why){var f={plat:'測試',at:'2026-01-01',f:[{q:'What is your nationality?',src:'bank',k:'zz_nat'}]};
-  if(why)f.f.push({q:'Why this role?',src:'bank',k:'zz_why'}); if(lock)f.lock=1; return f;};
 var ans=(fb.__ans__||[]).filter(function(e){return !/^zz_/.test(e.k);});
 ans.push({k:'zz_nat',q:'你的國籍(測試)',v:'Taiwan',zh:'台灣',why:'測試用的推論 '+Date.now(),inf:'2026-01-01'});
 ans.push({k:'zz_empty',q:'空白測試',v:'',why:'',inf:'2026-01-01'});
 ans.push({k:'zz_why',q:'為什麼對這個職位有興趣(測試)',v:'Because.',zh:'因為。',pj:1,pjw:'測試用',why:'',at:'2026-01-01'});   // 這缺專用,只有第一張在用   // 答案還空著:不給 ✓(一按就變成「都確認過了」)   // 每次內容都不同:版本號是內容雜湊,種回一模一樣的內容,頁面會以為沒變
-// 兩張可投遞都是 agent 已經填好、停在送出前的樣子:核准的是那一頁,還沒填過的卡不給核准
+// 兩張可投遞都是 agent 已經填好、停在送出前的樣子:確認的是那一頁,還沒填過的卡不給確認
 // (真的送出要叫回填這張的那段對話,沒有就整筆作廢,見 apply_run._no_session)。
-var filled=function(){return {stage:'fill',ok:true,at:'2026-01-01T00:00:00',issues:[],delivery:{method:'direct_upload'},tab_id:'1'};};
-var body={__rev__:1,__ans__:ans}; body[ids[0]]={app:'ship',form:form(0,1),apply:filled()}; body[ids[1]]={app:'ship',form:form(),apply:filled()};
-body[ids[2]]={app:'sent',sent_at:'2026-01-01',form:form(1)};
-body[ids[3]]={app:'ship',form:form()};   // 第四張:讀過表單、agent 還沒填過(雇主網頁上什麼都還沒有)
+var body={__rev__:1,__ans__:ans};
 await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 await T.resync();
 document.querySelector('[data-tab="ship"]').click(); await T.sleep(300);
@@ -76,7 +100,7 @@ ANS_CHECKS = [
    if(errs.length)bad.push('頁面丟了例外:'+errs.join('|'));
    if(badge()>=b0)bad.push('分頁 ⚠ 沒有跟著少('+b0+' → '+badge()+')');
    return await done();
- """),
+ """, 'ans_cards'),
  ('答案庫:預設收起(有待確認也只在標題亮 ⚠),一條一行字,點了那一條才展開,✓ 不用展開就能按,重畫後展開的還開著', SEED + r"""
    var d=document.querySelector('#app .ans-d'); if(!d)return '看不到答案庫面板';
    if(d.open)bad.push('答案庫預設是開的(有待確認也只該在標題亮 ⚠,不該自動展開)');
@@ -100,7 +124,7 @@ ANS_CHECKS = [
    r=row(); if(!r||r.classList.contains('pend'))bad.push('在收起的那一列直接按 ✓,沒有確認');
    else if(r.open)bad.push('按 ✓ 順便把那一列打開了');
    return await done();
- """),
+ """, 'ans_cards'),
  ('答案只在答案庫:卡上的表單只剩一行、沒有輸入框;按「去答案庫看」跳到那一條;按一次 ✓,用到它的每張卡一起算過', SEED + r"""
    [A,B].forEach(function(c,i){var l=line(c);
      if(!l)bad.push('第 '+(i+1)+' 張卡沒有表單那一行');
@@ -124,8 +148,8 @@ ANS_CHECKS = [
      if(!row().classList.contains('pend'))bad.push('按了復原,那一條沒有回到等你確認');
      if(badge()!==b0)bad.push('按了復原,分頁 ⚠ 沒回到 '+b0);}
    return await done();
- """),
- ('答案庫:他改值就是確認,agent 填好、還沒送出的表單標「雇主網頁待重打」,已投遞的、還沒填過的不標;表單在用的按刪除是「清掉答案」,沒人用的真的刪,兩種都能復原', SEED + r"""
+ """, 'ans_cards'),
+ ('答案庫:他改值就是確認,agent 填好、還沒送出的表單標「雇主網頁待重打」,已投遞的、還沒填過的不標;表單在用的按刪除是「清掉答案」(下一輪 agent 代填),沒人用的真的刪,兩種都能復原', SEED + r"""
    var ad=document.querySelector('#app .ans-d'); if(!ad.open){ad.querySelector('summary').click(); await T.sleep(200);}
    var r=await openRow(); var v=r.querySelector('[data-ansf="v"]'); if(!v)return '展開後找不到答案欄';
    T.type(v,'ROC'); v.dispatchEvent(new Event('change',{bubbles:true})); T.leave(v); await T.idle();
@@ -142,8 +166,13 @@ ANS_CHECKS = [
    r=await openRow(); var cl=r.querySelector('[data-ansd]');
    if(!cl||!/清掉答案/.test(cl.textContent))bad.push('還沒送出的表單在用的那一條,按鈕沒寫「清掉答案」');
    else{cl.click(); await T.idle();
-     if(!/等你寫/.test(row().querySelector('summary').textContent))bad.push('清掉答案後,那一條沒變成等你寫');
-     A=T.card(ids[0]); if(!/等你確認/.test((line(A)||{}).textContent||''))bad.push('清掉答案後,卡上沒說要他處理');
+     // #314:清掉之後不叫他重寫,下一輪 agent 代填;要他處理的清單裡不出現這一條
+     var sm=row().querySelector('summary').textContent, sn=(document.querySelector('#snack')||{}).textContent||'';
+     if(/等你寫/.test(sm)||!/代填/.test(sm))bad.push('清掉答案後,那一條沒寫下一輪 agent 代填(寫成等你寫)');
+     if(/等你重寫|等你寫/.test(sn)||!/代填/.test(sn))bad.push('清掉答案的提示還叫他重寫:'+sn.slice(0,60));
+     A=T.card(ids[0]); if(/等你確認/.test((line(A)||{}).textContent||''))bad.push('清掉答案後,卡上還叫他處理那一題');
+     var zz=((await T.state()).__ans__||[]).filter(function(e){return e.k==='zz_nat';})[0]||{};
+     if(!zz.redo||zz.at||zz.v)bad.push('清掉答案後存的不是「等 agent 代填」:'+JSON.stringify(zz).slice(0,80));
      var cu=document.querySelector('#snack .snack-undo');
      if(!cu)bad.push('清掉答案之後沒有「復原」');
      else{cu.click(); await T.idle();
@@ -168,7 +197,7 @@ ANS_CHECKS = [
      if(C.querySelector('.ans-t,textarea.fm-ta,.fm-q'))bad.push('已投遞的卡上還攤著表單內容');}
    document.querySelector('[data-tab="ship"]').click();
    return await done();
- """),
+ """, 'ans_cards'),
  ('答案庫:英文答案展開後中文在前、可以改;他改了中文,英文標「待重翻」、不算他的 ⚠,還沒送出的表單標待重打', SEED + r"""
    var ad=document.querySelector('#app .ans-d'); if(!ad.open){ad.querySelector('summary').click(); await T.sleep(200);}
    var r=await openRow(), z=r.querySelector('[data-ansf="zh"]'), v=r.querySelector('[data-ansf="v"]');
@@ -187,7 +216,7 @@ ANS_CHECKS = [
    var e=((await T.state()).__ans__||[]).filter(function(x){return x.k==='zz_nat';})[0]||{};
    if(e.zh!=='中華民國'||e.tr!==1||e.inf)bad.push('存下來的不對(zh='+e.zh+' tr='+e.tr+' inf='+e.inf+')');
    return await done();
- """),
+ """, 'ans_cards'),
  ('答案庫:每條分「共用」和「這缺專用」,按一下切換、可以復原;這缺專用的排在那個職缺底下,標題連到 JD', SEED + r"""
    var ad=document.querySelector('#app .ans-d'); if(!ad.open){ad.querySelector('summary').click(); await T.sleep(200);}
    var dn=document.querySelector('#app .ans-done'); if(dn&&!dn.open){dn.querySelector('summary').click(); await T.sleep(200);}
@@ -207,7 +236,7 @@ ANS_CHECKS = [
      var e=((await T.state()).__ans__||[]).filter(function(x){return x.k==='zz_why';})[0]||{};
      if(e.pj!==1||e.pjw!=='測試用')bad.push('按了復原,沒回到這缺專用和我的理由');}
    return await done();
- """),
+ """, 'ans_cards'),
  ('代投:答案都確認過才有「✅ 核准送出」;核准後可以復原;核准有效才會送,送出後搬到已投遞並鎖表單;核准後答案一改就作廢', SEED + r"""
    var ab=function(c){return c&&c.querySelector('[data-approve]');};
    if(!document.querySelector('#applybar [data-applyrun="fill"]'))bad.push('可投遞那一頁最上面沒有「讓 agent 填表單」');
@@ -243,15 +272,12 @@ ANS_CHECKS = [
    await T.sleep(9000);
    var s3=await T.state();
    if((s3[ids[0]]||{}).app==='sent')bad.push('核准之後答案改過,還是被送出去了');
-   A=T.card(ids[0]); if(A&&!/確認失效/.test(A.textContent))bad.push('確認送出作廢了,卡上沒說');
+   if((s3[ids[0]]||{}).ds==='confirmed')bad.push('核准之後答案改過,確認還在');
+   A=T.card(ids[0]); if(A&&!/答案改過|確認失效/.test(A.textContent))bad.push('確認送出作廢了,卡上沒說');
    return await done();
- """),
+ """, 'ans_cards'),
  ('頁面不見了(agent 的 Chrome 關過):卡上、「🚀 填表進度」、要你處理的都不給 👀、不給「要 agent 改」,主按鈕是重填', SEED + r"""
-   var s0=await T.state(), m=s0[ids[1]];
-   m.apply={stage:'fill',ok:false,gone:true,at:'2026-01-01T00:00:00',session:'S-test',tab_id:'',where:'chrome',
-            issues:['填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填'],delivery:{method:'direct_upload'}};
-   var body={__rev__:1}; body[ids[1]]=m;
-   await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+   await T.ds(ids[1],[['page_lost',{issues:['填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填']}]]);   // Chrome 關過
    await T.resync();
    document.querySelector('[data-tab="ship"]').click(); await T.sleep(300);
    [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
@@ -264,15 +290,17 @@ ANS_CHECKS = [
    if(fl&&[].slice.call(fl.querySelectorAll('[data-livego]')).some(function(x){return x.getAttribute('data-livego')===ids[1];}))bad.push('「🚀 填表進度」上頁面不見了的那張還有 👀');
    if([].slice.call(document.querySelectorAll('.todo-why [data-livego]')).some(function(x){return x.getAttribute('data-livego')===ids[1];}))bad.push('要你處理的那一條還有 👀');
    return await done();
- """),
+ """, 'ans_cards'),
  ('代投修改:agent 填好的卡有「👀 看現在的頁面」和「✏️ 要 agent 改」;答案改過、網頁待重打時藏起核准;寫一句話交給同一隻 agent,改好了才又能核准', SEED + r"""
    var ab=function(c){return c&&c.querySelector('[data-approve]');};
    var ad=document.querySelector('#app .ans-d'); if(!ad.open){ad.querySelector('summary').click(); await T.sleep(200);}
    row().querySelector('summary [data-ansok]').click(); await T.idle();
-   var s0=await T.state(), m=s0[ids[1]];     // 第二張:agent 填好了(有那段對話的 id),之後他改了答案,網頁待重打
-   m.apply={stage:'fill',ok:true,at:'2026-01-01T00:00:00',session:'S-test',tab_id:'1',where:'chrome'};
-   m.form.f[0].refill=1;
-   var body={__rev__:1}; body[ids[1]]=m;
+   // 第二張:agent 填好了(有那段對話的 id),之後他改了答案,網頁待重打。對話 id 只能靠填表那一輪記(事件):重填一次
+   var rec={stage:'fill',at:'2026-01-01T00:00:00',issues:[],tab_id:'1',session:'S-test',where:'chrome',delivery:{method:'direct_upload'}};
+   await T.ds(ids[1],[['page_lost',{issues:['x']}],['fill_start',{apply:{stage:'fill',at:rec.at,issues:[]}}],['fill_ok',{apply:rec}]]);
+   var s0=await T.state(), m=s0[ids[1]];
+   // 答案改了:看板送 {refill:答案鍵},伺服器在鎖內標在現在那份表單上(表單只有後台寫,#308)
+   var body={__rev__:1,__events__:[{refill:m.form.f[0].k}]};
    await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
    await T.resync();
    document.querySelector('[data-tab="ship"]').click(); await T.sleep(300);
@@ -303,7 +331,7 @@ ANS_CHECKS = [
    var r=await fetch('/api/run/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stage:'fix',url:ids[0],note:'x'})});
    if(r.status!==400)bad.push('沒有 agent 填過的卡也讓它跑修改(HTTP '+r.status+';叫不回同一隻 agent)');
    return await done();
- """),
+ """, 'ans_cards'),
  ('每一頁只放那一階段的東西:找新職缺只在找職缺的分頁;已投遞有「📬 查回音」;可投遞「要你處理的」點名字會跳到那張卡', SEED + r"""
    var vis=function(id){var el=document.getElementById(id); return !!el&&el.style.display!=='none'&&el.offsetHeight>0;};
    var go=async function(t){document.querySelector('[data-tab="'+t+'"]').click(); await T.sleep(350);};
@@ -318,18 +346,25 @@ ANS_CHECKS = [
      var card=document.querySelector('article[data-fid="'+CSS.escape(id)+'"]');
      if(!card||!shown(card))bad.push('點「要你處理的」那一條,沒有跳到那張卡');}
    return await done();
- """),
+ """, 'ans_cards'),
  ('agent 回報:每一頁最上面、預設收起,標題亮待處理件數;每一頁都列全部(這一頁有關的排前面,別頁的有「去那一頁」);按「處理好了」會收進已處理,可以復原', r"""
    await T.idle();
    var jobs=JSON.parse(document.getElementById('data-jobs').textContent).jobs.filter(function(j){return !j.bk;});
-   var box=[{id:'rzz1',at:'2026-01-01T09:00:00',from:'代投',msg:'測試:被網站的機器人驗證擋住 '+Date.now(),need:'測試用',n:1}];   // 代投的回報屬於可投遞那一頁
+   var box=[{id:'rzz1',at:'2026-01-01T09:00:00',from:'代投',msg:'測試:被網站的機器人驗證擋住 '+Date.now(),need:'測試用',n:1},   // 代投的回報屬於可投遞那一頁
+            // agent 自己寫、沒有程式自己截的那一頁:列出來但標缺證據,不算要他處理、不寫「你要做的」(#315)
+            {id:'rzz2',at:'2026-01-01T09:01:00',from:'查回音',msg:'測試:信箱要登入 '+Date.now(),need:'去登入信箱',n:1,agent:true,noev:'這一輪沒有程式自己截的那一頁'}];
    await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({__rev__:1,__inbox__:box})});
    await T.resync();
    document.querySelector('[data-tab="ship"]').click(); await T.sleep(300);
    var bad=[], d=document.querySelector('#inboxbar details.inbox-d');
    if(!d)return '頁面最上面看不到 agent 回報';
    if(d.open)bad.push('agent 回報預設是開的');
-   if(!/1 件要你處理/.test(d.querySelector('summary').textContent))bad.push('標題看不出有 1 件要他處理');
+   if(!/1 件要你處理/.test(d.querySelector('summary').textContent))bad.push('標題看不出有 1 件要他處理(缺證據的那則不算)');
+   if(!/1 件缺證據/.test(d.querySelector('summary').textContent))bad.push('標題沒寫有 1 件缺證據');
+   var r2=document.querySelector('#inboxbar [data-ib="rzz2"]');
+   if(!r2)bad.push('缺證據的回報沒列出來');
+   else{if(/你要做的/.test(r2.querySelector('summary').textContent))bad.push('缺證據的回報還寫「你要做的」');
+     if(!/缺證據/.test(r2.querySelector('summary').textContent))bad.push('缺證據的回報沒標缺證據');}
    document.querySelector('[data-tab="none"]').click(); await T.sleep(300);
    // 要他處理的事不能藏在別的分頁:待評估那頁也要看得到代投的回報,而且有一顆直接去「可以投了」
    var dn=document.querySelector('#inboxbar details.inbox-d');

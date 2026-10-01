@@ -13,7 +13,7 @@ agent_report —— agent 回報給使用者的唯一管道:做不到、需要�
 用法:
   uv run python tools/agent_report.py --from 代投 [--job 職缺網址] [--need 他要做什麼] "發生了什麼"
   import agent_report; agent_report.report('代投', '發生了什麼', need='…', job=url)
-看板用哪一份:--board,沒給就看環境變數 AGENT_BOARD(派 agent 的程式會設),再沒有就是現行看板。
+看板用哪一份:派 agent 的程式指定的那一份(board_doc.target;agent 只拿到代號、不拿位置),再來是 --board,再沒有就是現行看板。
 """
 import os, sys, argparse, datetime, hashlib
 
@@ -22,6 +22,11 @@ sys.path.insert(0, HERE)
 import board_doc as bd      # noqa: E402
 
 KEY = '__inbox__'
+# 回報的來源由派 agent 的程式給(#316):agent_run 把這一輪的來源放進這個環境變數,agent 跑這支時照它記,自己寫的 --from 不算數
+REPORT_FROM_ENV = 'JOBSALVO_REPORT_FROM'
+# 幫你填表那個流程的來源代號。存在資料裡的是舊叫法「代投」(舊回報也這樣存,改掉要搬資料);看板照 GLOSSARY 顯示「幫你填表」
+FROM_APPLY = '代投'
+NO_SHOT = '這一輪沒有程式自己截的那一頁'
 KEEP_DONE = 200        # 處理好的只留最近這麼多則:看板每次都整份讀寫這一格,永遠不清會越來越肥
 
 
@@ -29,8 +34,10 @@ def _now():
     return datetime.datetime.now().isoformat(timespec='seconds')
 
 
-def apply_report(fb, src, msg, need='', job='', now=None):
-    """純函式版(測試用)。回傳那一筆。"""
+def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False):
+    """純函式版(測試用)。回傳那一筆。
+    by_agent:agent 自己寫的(不是程式驗出來的):標 agent;還沒附程式自己截的那一頁就標 noev(缺證據),
+    不叫他照做(todo 不列),等程式附上截圖(apply_attach)才算數(#315)。"""
     now = now or _now()
     msg, need, job, src = (msg or '').strip(), (need or '').strip(), (job or '').strip(), (src or 'agent').strip()
     if not msg:
@@ -42,6 +49,10 @@ def apply_report(fb, src, msg, need='', job='', now=None):
             it['at'] = now
             if need:
                 it['need'] = need
+            if by_agent:            # 同一句又報一次:這一次要附的是這一輪的截圖
+                it['agent'] = True
+                it.pop('ev', None)
+                it['noev'] = NO_SHOT
             return it
     it = {'id': 'r' + hashlib.sha1(f'{src}|{job}|{msg}|{now}'.encode()).hexdigest()[:10],
           'at': now, 'from': src, 'msg': msg, 'n': 1}
@@ -49,6 +60,8 @@ def apply_report(fb, src, msg, need='', job='', now=None):
         it['need'] = need
     if job:
         it['job'] = job
+    if by_agent:
+        it['agent'], it['noev'] = True, NO_SHOT
     box.append(it)
     done = sorted((x for x in box if x.get('done')), key=lambda x: (str(x.get('done')), str(x.get('at'))))
     if len(done) > KEEP_DONE:
@@ -57,10 +70,11 @@ def apply_report(fb, src, msg, need='', job='', now=None):
     return it
 
 
-def report(src, msg, need='', job='', live=None):
-    live = live or os.environ.get('AGENT_BOARD') or bd.LIVE
+def report(src, msg, need='', job='', live=None, by_agent=False):
+    live = bd.target(live)
     out = []
-    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job)), live=live, by='agent_report')
+    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job, by_agent=by_agent)), live=live,
+              by='agent_report')
     return out[0]
 
 
@@ -78,7 +92,7 @@ def apply_resolve(fb, job, why, day=None, only=None):
 
 
 def resolve(job, why, live=None, only=None):
-    live = live or os.environ.get('AGENT_BOARD') or bd.LIVE
+    live = bd.target(live)
     out = []
     bd.set_fb(lambda fb: out.append(apply_resolve(fb, job, why, only=only)), live=live, by='agent_report')
     return out[0]
@@ -94,12 +108,34 @@ def resolve_from(src, why, before, live=None):
             if not it.get('done') and str(it.get('from', '')).startswith(src) and str(it.get('at', '')) < before:
                 it['done'], it['res'] = day, why
                 n[0] += 1
-    bd.set_fb(f, live=live or os.environ.get('AGENT_BOARD') or bd.LIVE, by='agent_report')
+    bd.set_fb(f, live=bd.target(live), by='agent_report')
     return n[0]
+
+
+def apply_attach(fb, job, since, ev):
+    """這一輪(since 之後)留給他的、這張卡的回報,附上程式自己截的那一頁(ev:證據夾裡的 <輪>/<檔名>,#315)。
+    這一輪沒有截圖就照實標出來(noev),不假裝有。回附了幾則。"""
+    n = 0
+    for it in fb.get(KEY, []):
+        if it.get('done') or it.get('job') != job or str(it.get('at') or '') < since or it.get('ev'):
+            continue
+        if ev:
+            it['ev'] = ev
+            it.pop('noev', None)
+        else:
+            it['noev'] = NO_SHOT
+        n += 1
+    return n
 
 
 def open_items(fb):
     return [it for it in fb.get(KEY, []) if not it.get('done')]
+
+
+def todo(fb):
+    """要他處理的:還開著的回報,除了 agent 自己寫、又沒有程式自己截的那一頁的(缺證據,不叫他照做,#315)。
+    看板的「要你處理」照同一條(board.js inboxTodo)。"""
+    return [it for it in open_items(fb) if not (it.get('agent') and it.get('noev'))]
 
 
 def main():
@@ -110,7 +146,9 @@ def main():
     ap.add_argument('--board', default='')
     ap.add_argument('msg', help='發生了什麼(繁體中文、白話、一句講清楚)')
     a = ap.parse_args()
-    it = report(a.src, a.msg, a.need, a.job, live=a.board or None)
+    # 派 agent 的程式給了來源就照它記:agent 自己寫的 --from 不算數(#316;它取的名字程式認不得、收不掉)
+    src = os.environ.get(REPORT_FROM_ENV) or a.src
+    it = report(src, a.msg, a.need, a.job, live=a.board or None, by_agent=True)
     print(f"回報了({it['id']},第 {it['n']} 次):{it['msg']}")
 
 

@@ -23,10 +23,10 @@ Chrome 沒連的檢查都一樣)。
     不拿舊的驗收結果放行。
 狀態記在標記的 __auto__(跟看板同一份檔,手機電腦都看得到,流水帳查得到)。
 """
-import datetime, hashlib, json, re, threading, time
+import copy, datetime, hashlib, json, re, threading, time
 
 import board_doc as bd
-import card
+import delivery_state as ds
 import config as cf
 import form_record as fr
 import ship
@@ -64,14 +64,6 @@ def ship_blocked(fb, job, status):
         return '職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)'
     bad = [x.get('msg') for x in st.get('issues') or [] if x.get('jid') == job['id'] and not x.get('soft')]
     return ('驗收未通過：' + '；'.join(bad)) if bad else ''
-
-
-def company_blocked(fb, job):
-    blocked = fb.get('__block__')
-    if not isinstance(blocked, list): return False
-    board = cf.C.get('board') or {}
-    name = card.company(job, board.get('company_alias'), board.get('title_words'))
-    return any(card.same_company(x, name) for x in blocked)
 
 
 def fix_sig(fb, i):
@@ -121,7 +113,7 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
 
     def mine(i):
         # 封鎖的公司:畫面上看不到,也不該在背景替它準備、填表
-        return live(i) and i not in skip and not company_blocked(fb, jobs[i])
+        return live(i) and i not in skip and not ds.company_blocked(fb, jobs[i])
 
     if cfg.get('auto_advance'):
         for i in jobs:
@@ -134,7 +126,7 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
                     continue
             elif real and (build_running or verified_gen <= int(seen[i])):
                 continue
-            if not company_blocked(fb, jobs[i]) and not ship_blocked(fb, jobs[i], data.get('status')):
+            if not ds.company_blocked(fb, jobs[i]) and not ship_blocked(fb, jobs[i], data.get('status')):
                 out['advance'].append(i)
                 out['tried'].append('adv:' + i)
 
@@ -151,21 +143,16 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
     # 代投和查應徵進度都用 agent 的 Chrome,一邊收尾會把 Chrome 關掉:一次只排一件
     chrome_busy = running.get('apply') or running.get('replies')
 
-    def unsure(m):
-        # 上次送出沒確認成功(可能其實送出去了):不替它重打、重填,等他先確認到底送出沒有
-        sf = (m.get('apply') or {}).get('submit_fail')
-        return bool(sf) and not sf.get('cleared')
     if cfg.get('auto_fill') and not chrome_busy:
-        # 先重打:這幾張離核准只差一步。只重打填好了(ok)的:卡住的原因在卡上等他;
-        # 履歷換過(stale)的整張重填,走下面那條。同一組「哪幾條、什麼值」只重打一次:
+        # 先重打:這幾張離確認只差一步。只重打停著等你的(填好了):卡住的原因在卡上等他;
+        # 上傳的是舊檔的整張重填,走下面那條。同一組「哪幾條、什麼值」只重打一次:
         # 重打完還標著(agent 沒翻、沒打好)就停在卡上等他。不能用 apply.at 當記號——
         # 每重打一次 at 就換新,會變成同一張一直重打、後面的永遠排不到(副本上真的發生過)。
         rfs = auto.get('rf') or {}
         for i in jobs:
             m = fb.get(i) or {}
-            a = m.get('apply') or {}
-            if (stage(i) != 'ship' or not mine(i) or (m.get('form') or {}).get('lock') or not a.get('ok')
-                    or a.get('stage') not in ('fill', 'fix') or not a.get('session') or a.get('stale') or unsure(m)):
+            if (stage(i) != 'ship' or not mine(i) or ds.state(m) != 'parked'
+                    or not (m.get('apply') or {}).get('session')):
                 continue
             if fr.answers_pending(fb, i):
                 continue                     # 還有答案等他確認:確認完再一次重打,不然確認一條就要再打一輪
@@ -191,11 +178,8 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
             break
 
     def held(i):
-        # 填好停在送出前、分頁留在 agent 的 Chrome 等他看的那幾張(卡住的也算:分頁一樣開著)
-        m = fb.get(i) or {}
-        a = m.get('apply') or {}
-        return (stage(i) == 'ship' and live(i) and not (m.get('form') or {}).get('lock')
-                and a.get('stage') in ('fill', 'fix') and bool(a.get('tab_id')) and not a.get('sent'))
+        # 停著的頁(投遞狀態是綠底那五種;看板的 held 同一條)
+        return i in jobs and ds.held(fb, i, jobs[i])
 
     try:
         cap = max(0, int(cfg.get('fill_max') if cfg.get('fill_max') is not None else 5))
@@ -207,16 +191,14 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
     if cfg.get('auto_fill') and not chrome_busy and not out['fix']:
         for i in jobs:
             m = fb.get(i) or {}
-            if stage(i) != 'ship' or not mine(i) or (m.get('form') or {}).get('lock') or m.get('approve') or unsure(m):
-                continue
+            if stage(i) != 'ship' or not mine(i) or ds.state(m) not in ds.AUTO_FILL:
+                continue                     # 只替還沒填、上傳的是舊檔、頁面不見了的填;沒填成、卡住的原因在卡上,等他
             a = m.get('apply') or {}
-            if a and not a.get('stale') and not a.get('gone'):
-                continue                     # 填過了(成功或卡住都一樣:卡住的原因在卡上,等他);頁面不見了的要重填
             if full and not held(i):
                 continue
             # 「🔁 再投一次」把上一次的表單和填表紀錄收進 tries:第幾次投要算進記號,
             # 不然跟第一次一樣是 fill:<id>:new,卡上寫排隊中,卻永遠不再填
-            n = len(m.get('tries') or [])
+            n = len(m.get('tries') or []) + len(m.get('history') or [])
             k = 'fill:' + i + ':' + str(a.get('at') or 'new') + (':' + str(n) if n else '')
             if k in tried:
                 continue
@@ -287,8 +269,11 @@ class Pilot:
             return
         try:
             self.step()
-        except Exception as e:                       # 自動跑出錯不能拖垮伺服器;下一次觸發再試
+        except Exception as e:  # noqa: BLE001 — 自動流程最外層:出錯不能拖垮伺服器、下一次觸發再試,原因照實寫進看板的回報
             self.last = {'error': str(e)[:200], 't': time.time()}
+            if self.report:                          # 同一句還沒處理前再報只加次數,不會每分鐘洗版
+                self.report('自動流程', f'自動流程這一步出錯了:{type(e).__name__}: {str(e)[:160]}',
+                            need='下一次存檔或每分鐘會再試;一直出現就重開看板伺服器')
 
     def _sync_flow(self, data, fb):
         a = fb.get(KEY)
@@ -317,15 +302,32 @@ class Pilot:
 
     def _sweep_gone(self, fb):
         """agent 的 Chrome 關掉或重開過:那之前填好的頁一定不在了,卡上改成要重填(👀、要它改都不再顯示)。
-        以前要等他按 👀 截不到才發現,這之間卡上一直寫填好了、還能按 👀。只看真的機器上的 Chrome,副本不看。"""
+        開那一頁的那一家確定接不回來(設定換了 agent、更新前填的沒記是哪一家):一樣改成要重填,卡上寫哪一種。
+        以前要等他按 👀 截不到、按送出才發現,這之間卡上一直寫填好了、還能按 👀。只看真的機器上的 Chrome,副本不看。"""
         import agent_chrome
         st = self.run_status('apply')
-        gone = agent_chrome.gone_pages(fb, st.get('url') if st.get('running') else '')
-        if gone:
-            bd.set_fb(lambda d: agent_chrome.mark_gone(d, [u for u in gone if isinstance(d.get(u), dict)]),
-                      live=self.state, by='autopilot')
-            agent_chrome.mark_gone(fb, gone)
-        return gone
+        running = st.get('url') if st.get('running') else ''
+        # 在看板鎖內照現在的看板算(不是這一輪開頭讀的快照):快照之後剛填好的新頁不會被誤標(#308)
+        got = agent_chrome.sweep_gone(self.state, running, by='autopilot', unreachable=True)
+        if got:
+            # 這一輪接下來照看板現在的樣子排(不在舊快照上再標一次:快照之後別處改過的卡,那樣會算錯)
+            fb.clear()
+            fb.update(json.loads(bd.parse(bd.read_doc(self.state))['fb']))
+        return list(got)
+
+    def _settle(self, fb):
+        """卡停在正在填、正在送出,那一輪卻已經不在跑(被停止、當掉):照狀態表收尾(apply_run.settle)。
+        在看板鎖裡再看一次有沒有在跑:剛開跑的那一輪先寫了進度才動卡,不會被當成停掉的。"""
+        import apply_run
+        if not any(ds.state(m) in ('running', 'sending') for k, m in fb.items() if isinstance(m, dict) and not k.startswith('__')):
+            return
+
+        def mut(d):
+            st = self.run_status('apply') or {}
+            apply_run.settle(d, (st.get('url') or '*') if st.get('running') else None)
+            fb.clear()
+            fb.update(copy.deepcopy(d))
+        bd.set_fb(mut, live=self.state, by='autopilot')
 
     def save_settings(self, saver):
         """設定儲存與流程切換共用鎖，避免開關之間的 timer 先派出舊卡。"""
@@ -357,6 +359,7 @@ class Pilot:
         bs = self.build_state()
         status = {k: self.run_status(k) or {} for k in ('prep', 'apply', 'replies')}
         running = {k: bool(st.get('running')) for k, st in status.items()}
+        self._settle(fb)
         if self.is_real():
             self._sweep_gone(fb)
         pl = plan(p['data'], fb, verified_gen=bs['gen'], build_running=bs['running'], running=running,

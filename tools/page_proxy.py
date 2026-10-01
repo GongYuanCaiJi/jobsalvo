@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Loopback proxy that pins every browser connection to its validated IP."""
+import contextlib
 import select
 import socket
 import socketserver
@@ -87,16 +88,12 @@ class _Handler(socketserver.BaseRequestHandler):
             self._relay(upstream)
         except (OSError, ValueError, IndexError, UnicodeError):
             if not connected:
-                try:
+                with contextlib.suppress(OSError):   # 瀏覽器可能在 502 送到前就關了
                     self.request.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
-                except OSError:  # The requesting browser may close its socket before the 502 response.
-                    pass
         finally:
             if upstream is not None:
-                try:
+                with contextlib.suppress(OSError):   # 轉送失敗時可能已經關了
                     upstream.close()
-                except OSError:  # The upstream socket may already be closed by the relay failure.
-                    pass
 
     def _relay(self, upstream):
         clients = (self.request, upstream)

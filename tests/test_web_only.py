@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """使用者只碰網頁就能做完的事:設定頁讀寫、上傳、卡片自己的檔、貼網址加入、分類建議、看紀錄、104 對帳。"""
-import os, sys, json, time, shutil, unittest, urllib.request
+import os, sys, json, time, shutil, unittest, urllib.request, contextlib
 from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
@@ -40,18 +40,8 @@ class WebOnly(tb.HttpBase):
         super().tearDown()
 
     def put(self, path, data, ua='Mozilla/5.0 (iPhone)'):
-        r = urllib.request.Request(self.base + path, data=data, method='PUT', headers={'User-Agent': ua})
-        try:
-            with urllib.request.urlopen(r, timeout=10) as resp:
-                return resp.status, json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            with e:
-                return e.code, json.loads(e.read() or b'{}')
-
-    def delete(self, path):
-        r = urllib.request.Request(self.base + path, method='DELETE', headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(r, timeout=10) as resp:
-            return resp.status
+        code, raw, _ = self.req(path, ua=ua, method='PUT', data=data)
+        return code, json.loads(raw or b'{}')
 
     def settings(self):
         return json.loads(self.req('/api/settings')[1])
@@ -162,8 +152,15 @@ class WebOnly(tb.HttpBase):
         )
         installed = {'codex', 'command-code', 'claude', 'git'}
         # 只算檢查本身(主執行緒)開的子行程。前面的測試存過檔,資料夾版本紀錄會在背景執行緒跑 git 快照,
-        # 剛好落在這段裡就被誤算成「環境檢查開了子行程」(偶發失敗)
+        # 剛好落在這段裡就被誤算成「環境檢查開了子行程」(偶發失敗)。
+        # 那個快照也會吃到下面假的 git 結果而失敗,環境檢查就多出一列「版本紀錄失敗」(偶發失敗):
+        # 先把前面排著的快照取消、正在跑的等它跑完,這段裡就沒有背景的 git
         import threading
+        import folder_history
+        for timer in threading.enumerate():
+            if isinstance(timer, threading.Timer) and getattr(timer, 'function', None) is folder_history._flush:
+                timer.cancel()
+                timer.join()
         mine = []
 
         def spawned(*a, **k):
@@ -200,7 +197,11 @@ class WebOnly(tb.HttpBase):
             # Claude Code 勾了可使用 Chrome 也算有瀏覽器 agent;還沒配對時教學連結要看得到
             self.assertIn('docs/agent-chrome.md', results['claude_code_with_chrome'][1]['agent_chrome']['fix'])
             # 不派 agent 跑一次(那會花額度,額度是使用者自己的事):只准讀本機的登入狀態
-            self.assertTrue(all(tuple(argv[0][1:]) in (('login', 'status'), ('auth', 'status')) for argv in mine), mine)
+            # (資料夾版本紀錄那一列只用 git 讀本機 repo 狀態,不花額度)
+            agent_calls = [argv for argv in mine if os.path.basename(argv[0][0]) != 'git']
+            self.assertTrue(all(tuple(argv[0][1:]) in (('login', 'status'), ('auth', 'status')) for argv in agent_calls), mine)
+            self.assertTrue(all(argv[0][1] in ('rev-parse', 'remote', 'log') for argv in mine
+                                if os.path.basename(argv[0][0]) == 'git'), mine)
 
             installed.remove('command-code')
             missing_command = doctor.check_environment(
@@ -222,6 +223,25 @@ class WebOnly(tb.HttpBase):
         after = self.settings()['effective']['agent']['agents']
         self.assertEqual([a['runtime'] for a in after], ['claude-code'] + before)   # 原本的清單留著,只是排到後面
         self.assertEqual(len({a['id'] for a in after}), len(after))
+
+    def test_use_agent_without_chrome_leaves_who_uses_chrome_alone(self):
+        # 改用一個不能操作 Chrome 的:原本用 Chrome 的那一個照舊(只有換成能用 Chrome 的才把舊的關掉)
+        import doctor
+        before = self.settings()['effective']['agent']['agents']
+        with patch.object(doctor, 'agent_state', side_effect=lambda rt: (True, '')):
+            code, raw, _ = self.req('/api/settings/use_agent', {'runtime': 'command-code'})
+        self.assertEqual(code, 200, raw)
+        after = self.settings()['effective']['agent']['agents']
+        self.assertEqual((after[0]['runtime'], after[0]['browser']), ('command-code', False))
+        self.assertEqual([a.get('browser') for a in after[1:]], [a.get('browser') for a in before])
+
+    def test_find_minutes_saves_blank_as_no_limit_and_refuses_nonsense(self):
+        code, raw, _ = self.req('/api/settings/find_minutes', {'minutes': ''})
+        self.assertEqual(code, 200, raw)
+        self.assertEqual(self.settings()['effective']['search']['find_minutes'], 0)
+        code, raw, _ = self.req('/api/settings/find_minutes', {'minutes': '很久'})
+        self.assertEqual(code, 400, raw)
+        self.assertEqual(self.settings()['effective']['search']['find_minutes'], 0)
 
     def test_health_endpoint_identifies_jobsalvo(self):
         code, raw, _ = self.req('/api/health')
@@ -311,45 +331,48 @@ class WebOnly(tb.HttpBase):
         # 👀 截不到、而且 agent 的 Chrome 是在這張填好之後才開的:那一頁一定不在了,卡上改成要重填(不再寫「填好了」)
         import agent_chrome, datetime
         u = 'https://jobs.example/1'
-        fb = {u: {'app': 'ship', 'apply': {'stage': 'fill', 'ok': True, 'at': '2026-09-29T14:00:00', 'tab_id': '7'}}}
+        fb = {u: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-09-29T14:00:00', 'tab_id': '7'}}}
         wrote = []
+
+        def rewrite(fn, live=None, by=''):          # 看板檔唯一的寫入(#308):在鎖內照現在的看板算、改
+            out = fn({'fb': fb})
+            if out is not bs.bd.SKIP:
+                wrote.append(fb)
+            return out
         filled = datetime.datetime.fromisoformat('2026-09-29T14:00:00').timestamp()
-        with patch.object(bs, 'read_doc', return_value='x'), \
-             patch.object(bs, 'is_real', return_value=True), \
-             patch.object(bs.bd, 'parse', return_value={'fb': json.dumps(fb)}), \
-             patch.object(bs.bd, 'set_fb', side_effect=lambda mut, **k: (mut(fb), wrote.append(fb))), \
+        with patch.object(bs, 'is_real', return_value=True), \
+             patch.object(bs.bd, 'rewrite', side_effect=rewrite), \
              patch.object(agent_chrome, 'pid', return_value=5):
             with patch.object(agent_chrome, 'started_at', return_value=filled - 60):
                 self.assertFalse(bs.page_gone(u))                 # Chrome 從填好前就開著:可能只是一時沒連上,不動
             with patch.object(agent_chrome, 'started_at', return_value=filled + 60):
                 self.assertTrue(bs.page_gone(u))
         a = wrote[-1][u]['apply']
-        self.assertFalse(a['ok'])
+        self.assertEqual(wrote[-1][u]['ds'], 'gone')
         self.assertIn('要重填', a['issues'][0])
         self.assertEqual(a['tab_id'], '')
 
     def test_closed_agent_chrome_does_not_block_a_new_run(self):
         # 每批做完都會把 agent 的 Chrome 關掉:開跑前只看連接設定過了沒,Chrome 沒在跑由流程自己開(以前一關就再也開不了跑)
         import agent_chrome
+        import config as cf
         with patch.object(agent_chrome, 'pid', return_value=None), \
              patch.object(agent_chrome, '_mine', return_value=True), \
-             patch.object(agent_chrome, '_codex_ready', return_value=True), \
-             patch('agent_run.browser_runtime', return_value='codex'):
+             patch.object(agent_chrome, '_codex_ready', return_value=True):
             self.assertTrue(agent_chrome.configured())
             self.assertFalse(agent_chrome.connected())
-        with patch.object(agent_chrome, 'conf', return_value={'claude_device': 'dev-1'}):
-            self.assertTrue(agent_chrome.configured('claude-code'))    # 只裝 Claude:不要求 Codex
-        with patch.object(agent_chrome, 'conf', return_value={}):
-            self.assertFalse(agent_chrome.configured('claude-code'))
+        claude = {'agent': {'agents': [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]}}
+        with patch.dict(cf.C, claude), patch.object(agent_chrome, 'conf', return_value={'claude_device': 'dev-1'}):
+            self.assertTrue(agent_chrome.configured())                 # 只裝 Claude:不要求 Codex
+        with patch.dict(cf.C, claude), patch.object(agent_chrome, 'conf', return_value={}):
+            self.assertFalse(agent_chrome.configured())
 
     def test_preference_note_migrates_rules_and_keeps_assumptions_distinct(self):
         from unittest.mock import patch
         import tempfile
-        import shutil
         import prefs
 
-        home = tempfile.mkdtemp(prefix='preference-note-test-')
-        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        home = self.enterContext(tempfile.TemporaryDirectory(prefix='preference-note-test-'))
         raw_prefs = os.path.join(home, 'prefs.md')
         note = os.path.join(home, 'preference-note.md')
         with patch.object(cf, 'HOME', home), patch.object(cf, 'PREFS', raw_prefs), \
@@ -451,16 +474,43 @@ class WebOnly(tb.HttpBase):
         self.assertNotIn('一頁履歷原文', page)
         payload = page.split('<script id="data-jobs" type="application/json">', 1)[1].split('</script>', 1)[0]
         cfg = json.loads(payload)['cfg']
-        self.assertEqual(cfg['resumes'], [{
-            'id': 'general', 'name': '通用版', 'when': '',
-            'file_langs': ['zh', 'en'], 'preview_langs': ['zh', 'en'],
-            'sigs': {'zh': '', 'en': ''},                  # 原始檔還沒上傳:沒有簽章,已收下的客製版一律不用
-        }])
-        self.assertEqual(cfg['attachments'], [{
-            'id': 'portfolio', 'name': '作品集', 'short': '',
-            'resume_ids': ['general'], 'file_langs': ['zh', 'en'],
-            'preview_langs': ['zh', 'en'], 'sigs': {'zh': '', 'en': ''},
-        }])
+        self.assertEqual(cfg['resumes'], [{'id': 'general', 'name': '通用版', 'when': ''}])
+        # 卡上能不能預覽原始檔(PDF、markdown 都可以)由後台的要寄的檔案給;停用的履歷、附件不出現
+        import ship
+        for lang in ('zh', 'en'):
+            got = ship.card_files({'id': 'test://jobs/preview', 'resume': {'recommend': 'general', 'lang': lang}}, {})
+            self.assertEqual([(f['name'], f['preview']) for f in got['files']], [('通用版', True), ('作品集', True)])
+            self.assertEqual([c['id'] for c in got['choices']], ['general'])
+
+    def test_changing_what_a_filled_card_sends_means_the_page_has_the_old_file(self):
+        """改原始履歷檔、設定裡刪掉語言:要寄的檔案真的變了的卡 → 上傳的是舊檔;沒變的不動
+        (狀態表額外抓到 5、修正 6、16)。"""
+        import delivery_state as ds
+        settings = self.settings()['settings']
+        resume = settings.setdefault('resume', {})
+        resume['langs'] = ['zh', 'en']
+        resume['resumes'] = [{'id': 'general', 'name': '通用版', 'enabled': True,
+                              'files': {'zh': 'resume/general-zh.pdf', 'en': 'resume/general-en.pdf'}}]
+        resume['attachments'] = []
+        for name in ('general-zh.pdf', 'general-en.pdf'):
+            self.addCleanup(lambda n=name: os.path.exists(cf.path('resume/' + n)) and os.remove(cf.path('resume/' + n)))
+        self.assertEqual(self.put('/api/file?path=resume/general-zh.pdf', b'%PDF-1.4 zh')[0], 200)
+        self.assertEqual(self.put('/api/file?path=resume/general-en.pdf', b'%PDF-1.4 en')[0], 200)
+        code, raw, _ = self.req('/api/settings', {'settings': settings})
+        self.assertEqual(code, 200, raw)
+        zh, en = JOBS[0]['id'], JOBS[1]['id']
+        filled = {'app': 'ship', 'ds': 'parked', 'resume_id': 'general', 'apply': {'stage': 'fill', 'tab_id': '7'}}
+        bs.bd.set_fb(lambda f: (f.__setitem__(zh, dict(filled, lang='zh')), f.__setitem__(en, dict(filled, lang='en'))),
+                     live=self.path)
+        self.assertEqual(self.put('/api/file?path=resume/general-zh.pdf', b'%PDF-1.4 zh again')[0], 200)
+        fb = read_fb(self.path)
+        self.assertEqual((ds.state(fb[zh]), ds.state(fb[en])), ('stale', 'parked'))
+        settings = self.settings()['settings']
+        settings['resume']['langs'] = ['zh']
+        settings['resume']['resumes'][0]['files'] = {'zh': 'resume/general-zh.pdf'}
+        code, raw, _ = self.req('/api/settings', {'settings': settings})
+        self.assertEqual(code, 200, raw)
+        self.assertEqual(ds.state(read_fb(self.path)[en]), 'stale')          # 英文拿掉了:改寄中文
 
     def test_ordered_agent_settings_round_trip_and_browser_validation(self):
         s = self.settings()['settings']
@@ -540,10 +590,31 @@ class WebOnly(tb.HttpBase):
         self.assertEqual(fb[u]['custom_file'], d['path'])
         self.assertEqual(fb[u]['s'], 'like')                      # 原本的標記不動
         import ship
-        src, _, own = ship.sources({'id': u}, fb)
+        import config as cf
+        # 這張挑的履歷用他自己傳的檔代替(沒挑履歷的卡什麼都不寄,見 ship.pick)
+        with patch.object(cf, 'RESUMES', {'general': {'id': 'general', 'files': {}, 'enabled': True}}):
+            src, _, own = ship.sources({'id': u, 'resume': {'recommend': 'general'}}, fb)
         self.assertTrue(own and src.endswith('mine.pdf'))
-        self.delete('/api/card-file?u=' + urllib.parse.quote(u))
-        self.assertNotIn('custom_file', read_fb(self.path)[u])
+
+    def test_own_file_after_filling_means_the_page_has_the_old_one(self):
+        # 狀態表額外抓到 5:舊版「這張用自己的檔」上傳,以前不會把已填好的卡標成舊檔
+        import delivery_state as ds
+        u = JOBS[0]['id']
+        bs.bd.set_fb(lambda f: f[u].update(app='ship', ds='parked', apply={'stage': 'fill', 'tab_id': '7'}), live=self.path)
+        code, d = self.put('/api/card-file?u=' + urllib.parse.quote(u) + '&name=mine.pdf', b'%PDF-1.4 mine')
+        self.assertEqual(code, 200, d)
+        self.assertEqual(ds.state(read_fb(self.path)[u]), 'stale')
+
+    def test_own_file_while_sending_is_refused(self):
+        # #338:正在送出時換檔,狀態表不收「換檔」;以前卡上照換、事件默默擋掉,送出去的是頁上的舊檔
+        u = JOBS[0]['id']
+        bs.bd.set_fb(lambda f: f[u].update(app='ship', ds='sending', approve={'snap': {}},
+                                           apply={'stage': 'submit', 'tab_id': '7'}), live=self.path)
+        before = read_fb(self.path)[u]
+        code, d = self.put('/api/card-file?u=' + urllib.parse.quote(u) + '&name=mine.pdf', b'%PDF-1.4 mine')
+        self.assertEqual(code, 409, d)
+        self.assertIn('正在送出', d['msg'])
+        self.assertEqual(read_fb(self.path)[u], before)
 
     def test_customize_settings_files_dispatch_and_run_status(self):
         import settings_api as sa
@@ -581,10 +652,8 @@ class WebOnly(tb.HttpBase):
             status = self.wait('customize', lambda s: s.get('phase') == 'done')
             self.assertEqual(status['url'], u)
         finally:
-            try:
+            with contextlib.suppress(OSError):   # 測試半路失敗時可能還沒寫出來
                 os.remove(resume_path)
-            except OSError:
-                pass
 
     def wait(self, kind, until, timeout=20):
         end = time.time() + timeout
@@ -713,9 +782,10 @@ class Translate(unittest.TestCase):
         u = JOBS[0]['id']
         fb = {'__ans__': [{'k': 'why', 'q': 'Why?', 'v': 'Old English', 'zh': '新的中文', 'tr': 1}],
               u: {'app': 'ship', 'form': {'f': [{'q': 'Why?', 'src': 'bank', 'k': 'why'}]},
-                  'apply': {'session': 'S', 'tab_id': '1'}}}
+                  'ds': 'parked', 'apply': {'session': 'S', 'tab_id': '1'}}}
         self.assertEqual(run.eligible({u: JOBS[0]}, fb, 'fix'), [u])
-        p, _ = run.prompt_for('fix', u, JOBS[0], fb, '/tmp/b.html')
+        import chrome_door
+        p, _ = run.prompt_for('fix', u, JOBS[0], fb, '/tmp/b.html', door=chrome_door.of('codex'))
         self.assertIn('新的中文', p)
         self.assertIn('fr.translate', p)
 
@@ -723,34 +793,28 @@ class Translate(unittest.TestCase):
 class Sync104(unittest.TestCase):
     def test_records_mark_cards_sent(self):
         import tempfile, sync_sent as ss
-        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
-        try:
-            a, b = 'https://www.104.com.tw/job/aaaa1', 'https://www.104.com.tw/job/bbbb2'
-            make_board(p, {a: {'app': 'ship'}, b: {'app': 'ready'}}, jobs=[{'id': a, 'target': 'A'}, {'id': b, 'target': 'B'}])
-            msg = ss.sync(p, [{'id': 'aaaa1', 'title': 'A', 'applied_at': time.strftime('%m/%d 10:00')}])
-            self.assertIn('1 張', msg)
-            fb = read_fb(p)
-            self.assertEqual((fb[a]['app'], fb[b]['app']), ('sent', 'ready'))
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        a, b = 'https://www.104.com.tw/job/aaaa1', 'https://www.104.com.tw/job/bbbb2'
+        make_board(p, {a: {'app': 'ship'}, b: {'app': 'ready'}}, jobs=[{'id': a, 'target': 'A'}, {'id': b, 'target': 'B'}])
+        msg = ss.sync(p, [{'id': 'aaaa1', 'title': 'A', 'applied_at': time.strftime('%m/%d 10:00')}])
+        self.assertIn('1 張', msg)
+        fb = read_fb(p)
+        self.assertEqual((fb[a]['app'], fb[b]['app']), ('sent', 'ready'))
 
     def test_marking_names_the_cards_says_which_were_removed_and_locks_the_form(self):
         """對帳把卡標成已投出:講是哪幾張、哪張原本在「🗑 已移除」;表單跟手動「📮 我已在外部送出」一樣鎖住。"""
         import tempfile, sync_sent as ss
-        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
-        try:
-            a, b = 'https://www.104.com.tw/job/aaaa1', 'https://www.104.com.tw/job/bbbb2'
-            make_board(p, {a: {'app': 'ship', 'rm': 1, 'form': {'f': []}}, b: {'app': 'ship', 'form': {'f': []}}},
-                       jobs=[{'id': a, 'target': '工程師 · 甲公司'}, {'id': b, 'target': '設計師 · 乙公司'}])
-            today = time.strftime('%Y-%m-%d')
-            msg = ss.sync(p, [{'id': 'aaaa1', 'applied_at': today}, {'id': 'bbbb2', 'applied_at': today}])
-            self.assertIn('甲公司', msg)
-            self.assertIn('乙公司', msg)
-            self.assertIn('已移除', msg)
-            fb = read_fb(p)
-            self.assertEqual((fb[a]['form'].get('lock'), fb[b]['form'].get('lock')), (1, 1))
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        a, b = 'https://www.104.com.tw/job/aaaa1', 'https://www.104.com.tw/job/bbbb2'
+        make_board(p, {a: {'app': 'ship', 'rm': 1, 'form': {'f': []}}, b: {'app': 'ship', 'form': {'f': []}}},
+                   jobs=[{'id': a, 'target': '工程師 · 甲公司'}, {'id': b, 'target': '設計師 · 乙公司'}])
+        today = time.strftime('%Y-%m-%d')
+        msg = ss.sync(p, [{'id': 'aaaa1', 'applied_at': today}, {'id': 'bbbb2', 'applied_at': today}])
+        self.assertIn('甲公司', msg)
+        self.assertIn('乙公司', msg)
+        self.assertIn('已移除', msg)
+        fb = read_fb(p)
+        self.assertEqual((fb[a]['form'].get('lock'), fb[b]['form'].get('lock')), (1, 1))
 
     def test_other_platforms_match_by_platform_and_posting_id(self):
         import sync_sent as ss, datetime
@@ -783,11 +847,24 @@ class Sync104(unittest.TestCase):
     def test_agent_result_keeps_link_and_platform(self):
         import reply_run as rr
         url = 'https://jobs.lever.co/x/1'
+        # 代號要在程式複製的平台應徵紀錄裡看得到才收(#317)
+        records = {'application_record:linkedin': 'Applied 4012345678 Senior Designer',
+                   'application_record:lever': 'acme 0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d'}
         got = rr.parse_result({'checked': [], 'job_ids': [
             {'url': 'https://jobs.lever.co/acme/0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d', 'title': 'B'},
-            {'platform': 'linkedin', 'id': '4012345678'}]}, [url]).job_ids
+            {'platform': 'linkedin', 'id': '4012345678'}]}, [url], texts=records).job_ids
         self.assertEqual(got[0]['url'], 'https://jobs.lever.co/acme/0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d')
         self.assertEqual((got[1]['platform'], got[1]['id']), ('linkedin', '4012345678'))
+
+    def test_an_id_the_program_did_not_see_on_the_records_page_marks_nothing(self):
+        """安檢門(#317):平台應徵紀錄的代號,程式複製的紀錄頁裡看不到(或程式根本沒讀到紀錄頁)就不拿來標已投遞。"""
+        import reply_run as rr
+        url = 'https://jobs.lever.co/x/1'
+        raw = {'checked': [], 'job_ids': [{'platform': '104', 'id': 'zz9zz'}]}
+        seen = rr.parse_result(raw, [url], texts={'application_record:104': 'aaaa1 已應徵'})
+        self.assertEqual(seen.job_ids, [])
+        self.assertTrue(any('zz9zz' in d for d in seen.dropped))
+        self.assertEqual(rr.parse_result(raw, [url]).job_ids, [])
 
     def test_agent_checks_104_application_history_on_every_run(self):
         import reply_run as rr
@@ -795,7 +872,7 @@ class Sync104(unittest.TestCase):
         p = rr.prompt_for({url: {'app': 'sent', 'sent_at': '2026-09-10'}},
                           {url: {'target': 'AI Engineer'}}, [url], '/tmp/replies.json')
         self.assertIn('讀平台應徵紀錄頁時', p)
-        self.assertIn('source_type=application_record', p)
+        self.assertIn('source_ref 照抄那一頁的', p)       # 來源種類程式照 source_ref 自己認(#317)
         self.assertIn('job_ids', p)
 
 
@@ -841,3 +918,104 @@ class BankHttp(tb.HttpBase):
         code, raw, _ = self.req('/api/bank/form?id=' + qid)
         self.assertEqual(json.loads(raw)['form']['t'], '為什麼換工作')
         self.assertEqual(self.req('/api/bank', {'op': 'put', 'item': {'t': 'x'}}, ua='Mozilla/5.0 Claude/1.0')[0], 403)
+
+
+class FileWritesFromTheBoard(tb.HttpBase):
+    """看板上傳、刪除他資料夾裡的檔:每一條擋的路和寫的路都走過(以前刪檔這支一次都沒測過)。"""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(shutil.rmtree, cf.path('custom'), True)
+
+    def send(self, method, path, data=None, headers=None):
+        return self.req(path, ua='Mozilla/5.0', headers=headers, method=method, data=data)[:2]
+
+    def test_delete_removes_only_an_existing_file(self):
+        rel = 'custom/delete-me.pdf'
+        self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'%PDF-1.4')[0], 200)
+        code, raw = self.send('DELETE', '/api/file?path=' + rel)
+        self.assertEqual((code, json.loads(raw)['ok']), (200, True))
+        self.assertFalse(os.path.exists(cf.path(rel)))
+        code, raw = self.send('DELETE', '/api/file?path=' + rel)
+        self.assertEqual((code, json.loads(raw)['ok']), (200, False))
+        self.assertEqual(self.send('DELETE', '/api/nothing')[0], 404)
+
+    def test_other_sites_and_agents_cannot_write_or_delete(self):
+        rel = 'custom/keep-me.pdf'
+        self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'%PDF-1.4')[0], 200)
+        evil = {'Origin': 'http://evil.example'}
+        self.assertEqual(self.send('DELETE', '/api/file?path=' + rel, headers=evil)[0], 403)
+        self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'x', headers=evil)[0], 403)
+        agent = {'User-Agent': 'Mozilla/5.0 ' + bs.AGENT_UA}
+        self.assertEqual(self.send('DELETE', '/api/file?path=' + rel, headers=agent)[0], 403)
+        self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'x', headers=agent)[0], 403)
+        with open(cf.path(rel), 'rb') as f:
+            self.assertEqual(f.read(), b'%PDF-1.4')
+
+    def test_card_file_needs_a_card_and_a_resume_like_file(self):
+        u = JOBS[0]['id']
+        self.assertEqual(self.send('PUT', '/api/card-file?name=x.pdf', b'%PDF-1.4')[0], 400)
+        self.assertEqual(self.send('PUT', '/api/card-file?u=%s&name=run.sh' % urllib.parse.quote(u, safe=''), b'x')[0], 400)
+        self.assertEqual(self.send('PUT', '/api/elsewhere', b'x')[0], 404)
+        self.assertNotIn('custom_file', read_fb(self.path).get(u, {}))
+
+    def test_customized_file_upload_goes_through_the_customize_rules(self):
+        u = urllib.parse.quote(JOBS[0]['id'], safe='')
+        path = '/api/card-file?u=%s&name=x.pdf&item=resume:general:zh' % u
+        with patch('customize.upload_custom', return_value=(None, '這份檔現在不收')):
+            code, raw = self.send('PUT', path, b'%PDF-1.4')
+        self.assertEqual((code, json.loads(raw)['msg']), (400, '這份檔現在不收'))
+        with patch('customize.upload_custom', return_value=('custom/x.pdf', '')) as up:
+            code, raw = self.send('PUT', path, b'%PDF-1.4')
+        self.assertEqual((code, json.loads(raw)['path']), (200, 'custom/x.pdf'))
+        self.assertEqual(up.call_args.args[:4], (JOBS[0]['id'], 'resume:general:zh', 'x.pdf', b'%PDF-1.4'))
+
+    def test_interview_bank_refuses_an_unknown_operation(self):
+        code, raw = self.send('POST', '/api/bank', json.dumps({'op': 'wipe'}).encode('utf-8'),
+                              headers={'Content-Type': 'application/json'})
+        self.assertEqual(code, 400)
+        self.assertIn('不知道要做什麼', json.loads(raw)['msg'])
+
+
+class SaveKicksTheAutoFlow(tb.HttpBase):
+    def test_a_save_with_a_click_wakes_the_auto_flow(self):
+        # 看板上按了一下(送事件)存檔:自動流程馬上看一次,不用等下一分鐘
+        pilot = Mock()
+        u = JOBS[0]['id']
+        with patch.object(bs, 'PILOT', pilot):
+            code, raw, _ = self.req('/api/save', {u: {'s': 'like', 'n': '備註'}, '__rev__': 1,
+                                                  '__events__': [{'u': u, 'ev': 'leave'}]})
+        self.assertEqual(code, 200, raw)
+        pilot.kick.assert_called_once()
+        self.assertEqual(read_fb(self.path)[u]['n'], '備註')
+
+
+class CustomizeAndControlFromTheBoard(tb.HttpBase):
+    """看板上收下、退回、清掉客製版,和暫停/停止跑到一半的工作:伺服器把每一種送到對的地方,不認得的擋下。"""
+
+    def post(self, path, body, ua='Mozilla/5.0'):
+        return self.req(path, body, ua=ua)
+
+    def test_each_customize_decision_goes_to_its_own_rule(self):
+        u = JOBS[0]['id']
+        for op, fn, rebuild in (('accept', 'accept', True), ('reject', 'reject', False), ('clear', 'clear', True)):
+            with self.subTest(op):
+                self.builds.clear()
+                with patch('customize.' + fn, return_value=(True, '好了')) as call:
+                    code, raw, _ = self.post('/api/customize', {'op': op, 'url': u, 'item': 'resume:general:zh'})
+                self.assertEqual((code, json.loads(raw)['ok']), (200, True))
+                self.assertEqual(call.call_args.args[:2], (u, 'resume:general:zh'))
+                self.assertEqual(bool(self.builds), rebuild)
+        with patch('customize.accept', return_value=(False, '這份不在等你看')):
+            code, raw, _ = self.post('/api/customize', {'op': 'accept', 'url': u, 'item': 'x'})
+        self.assertEqual((code, json.loads(raw)['msg']), (400, '這份不在等你看'))
+        code, raw, _ = self.post('/api/customize', {'op': 'wipe'})
+        self.assertEqual(code, 400)
+        agent = 'Mozilla/5.0 ' + bs.AGENT_UA
+        self.assertEqual(self.post('/api/customize', {'op': 'accept'}, ua=agent)[0], 403)
+
+    def test_agents_cannot_pause_or_stop_and_unknown_paths_are_404(self):
+        agent = 'Mozilla/5.0 ' + bs.AGENT_UA
+        with patch.object(bs, 'control_run', side_effect=AssertionError('agent 不准控制')):
+            self.assertEqual(self.post('/api/run/apply/stop', {}, ua=agent)[0], 403)
+        self.assertEqual(self.post('/api/nowhere', {})[0], 404)

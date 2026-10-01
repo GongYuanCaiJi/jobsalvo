@@ -7,7 +7,6 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import markdown_pdf  # noqa: E402
 import pdf_tools  # noqa: E402
 import settings_api  # noqa: E402
@@ -33,14 +32,14 @@ class MarkdownPdf(unittest.TestCase):
             self.assertIn('Headless renderer', text)
             self.assertIn('table marker', text)
             self.assertIn('code marker', text)
-            reader = pdf_tools._pypdf().PdfReader(native_pdf)
+            reader = pdf_tools.pypdf.PdfReader(native_pdf)
             native_size = (round(float(reader.pages[0].mediabox.width)),
                            round(float(reader.pages[0].mediabox.height)))
 
             with open(style, 'w', encoding='utf-8') as f:
                 f.write('@page { size: A4; margin: 0; }')
             markdown_pdf.render(source, styled_pdf, style_path=style)
-            reader = pdf_tools._pypdf().PdfReader(styled_pdf)
+            reader = pdf_tools.pypdf.PdfReader(styled_pdf)
             styled_size = (round(float(reader.pages[0].mediabox.width)),
                             round(float(reader.pages[0].mediabox.height)))
 
@@ -67,7 +66,7 @@ class MarkdownPdf(unittest.TestCase):
                         '[unsafe](javascript:alert(1))')
 
             result = subprocess.run(
-                [markdown_pdf._python_with_markdown(), os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
+                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
                  source, '', output], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             with open(output, encoding='utf-8') as f:
@@ -95,7 +94,7 @@ class MarkdownPdf(unittest.TestCase):
                              '<img src="portrait.png" onerror="alert(1)">\n')
 
             result = subprocess.run(
-                [markdown_pdf._python_with_markdown(), os.path.abspath(os.path.join(HERE, '..', 'tools',
+                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools',
                                                                    'markdown_html.py')),
                  source, '', output], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -110,7 +109,7 @@ class MarkdownPdf(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='markdown-leading-style-') as directory:
             source = os.path.join(directory, 'resume.md')
             output = os.path.join(directory, 'resume.html')
-            command = [markdown_pdf._python_with_markdown(),
+            command = [sys.executable,
                        os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
                        source, '', output]
             with open(source, 'w', encoding='utf-8') as target:
@@ -142,7 +141,7 @@ class MarkdownPdf(unittest.TestCase):
                 target.write('<style>p{color:red}</style foo><script>alert(1)</script></style>\n'
                              '# Synthetic resume\n')
             result = subprocess.run(
-                [markdown_pdf._python_with_markdown(), os.path.abspath(os.path.join(HERE, '..', 'tools',
+                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools',
                                                                    'markdown_html.py')),
                  source, '', output], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -150,6 +149,16 @@ class MarkdownPdf(unittest.TestCase):
                 rendered = rendered_file.read()
             self.assertNotIn('<script>', rendered)
             self.assertIn('Synthetic resume', rendered)
+
+    def test_markdown_that_cannot_be_converted_says_why(self):
+        # 以前排版子程式出錯只回結束碼 1:他只看到「無法排成 PDF」,不知道是原稿哪裡有問題
+        with tempfile.TemporaryDirectory(prefix='markdown-bad-bytes-') as directory:
+            source = os.path.join(directory, 'resume.md')
+            with open(source, 'wb') as target:
+                target.write(b'# \xff\xfe not utf-8\n')
+            with self.assertRaises(markdown_pdf.RenderError) as caught:
+                markdown_pdf.render(source, os.path.join(directory, 'resume.pdf'))
+        self.assertIn('UnicodeDecodeError', str(caught.exception))
 
     def test_markdown_html_hides_comments_outside_code_blocks(self):
         with tempfile.TemporaryDirectory(prefix='markdown-comments-') as directory:
@@ -162,7 +171,7 @@ class MarkdownPdf(unittest.TestCase):
                              '```html\n<!-- visible code example -->- still code\n```\n\n'
                              '    <!-- kept indented code -->- still code\n')
             result = subprocess.run(
-                [markdown_pdf._python_with_markdown(), os.path.abspath(os.path.join(HERE, '..', 'tools',
+                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools',
                                                                    'markdown_html.py')),
                  source, '', output], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -227,7 +236,7 @@ class MarkdownPdf(unittest.TestCase):
             for lang, want in (('en', 'lang="en"'), ('ja', 'lang="ja"'), ('zh', 'lang="zh-Hant"'),
                                ('', 'lang="zh-Hant"'), ('file', 'lang="zh-Hant"')):
                 with self.subTest(lang=lang):
-                    command = [markdown_pdf._python_with_markdown(),
+                    command = [sys.executable,
                                os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
                                source, '', output] + ([lang] if lang else [])
                     result = subprocess.run(command, capture_output=True, text=True)

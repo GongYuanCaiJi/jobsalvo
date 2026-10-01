@@ -1,4 +1,5 @@
 import os
+import plistlib
 import sys
 import tempfile
 import threading
@@ -61,8 +62,9 @@ class BoardServerVersion(unittest.TestCase):
             watcher.start()
             watcher.join(timeout=1)
         self.assertTrue(stopped.is_set())
-        self.assertIn('<key>KeepAlive</key><true/>', install_service.plist())
-        self.assertIn('<key>JOBSALVO_LAUNCHD</key><string>1</string>', install_service.plist())
+        launchd = plistlib.loads(install_service.plist().encode('utf-8'))
+        self.assertIs(launchd['KeepAlive'], True)
+        self.assertEqual(launchd['EnvironmentVariables']['JOBSALVO_LAUNCHD'], '1')
 
 
 class BackgroundBoardHandsOverToLaunchd(unittest.TestCase):

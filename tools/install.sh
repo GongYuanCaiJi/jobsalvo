@@ -105,7 +105,7 @@ elif [[ "$port_state" == "occupied" ]]; then
 elif [[ "$port_state" == "unknown" ]]; then
   echo "安裝中止：無法確認 $url 的埠狀態；請檢查本機網路設定或改用 JOBSALVO_PORT 後重跑。" >&2
   exit 1
-elif [[ "$port_state" == "free" ]]; then
+else  # free(probe_port 只會印 ready / occupied / unknown / free)
   log="$data_home/.jobsalvo-server.log"
   nohup env JOBSALVO_HOME="$data_home" "$python" "$app_dir/tools/board_server.py" \
     --host 127.0.0.1 --port "$port" >>"$log" 2>&1 </dev/null &
@@ -122,9 +122,6 @@ elif [[ "$port_state" == "free" ]]; then
     # unknown:看板剛起來那一兩秒連線可能被重設,不算失敗,繼續等(乾淨的 Mac 上實際遇到過);等滿還不行才停
     sleep 1
   done
-else
-  echo "安裝中止：收到無法辨識的埠狀態 ($port_state)，未啟動或打開看板。" >&2
-  exit 1
 fi
 if [[ "$server_ready" != 1 ]]; then
   echo "安裝中止：看板伺服器沒有在 $url 就緒；請查看 ${log}。" >&2

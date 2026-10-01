@@ -13,7 +13,7 @@
   --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
   --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
 }
-@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+@media (prefers-color-scheme:dark){ :root{
   --bg:#0c0e12; --surface:#14181f; --surface-2:#1b212a; --ink:#e7eaf0; --ink-dim:#94a0b0;
   --line:#252c36; --accent:#33cdbe; --accent-soft:#0f2e2b; --accent-ink:#8bf3e8;
   --warm:#e6a556; --warm-soft:#31260f; --owner:#a889f0; --owner-soft:#221a37;
@@ -21,14 +21,6 @@
   --blue:#5b8dfa; --blue-soft:rgba(47,109,246,.18);
   --shadow:0 1px 2px rgba(0,0,0,.5),0 6px 20px rgba(0,0,0,.35);
 } }
-:root[data-theme="dark"]{
-  --bg:#0c0e12; --surface:#14181f; --surface-2:#1b212a; --ink:#e7eaf0; --ink-dim:#94a0b0;
-  --line:#252c36; --accent:#33cdbe; --accent-soft:#0f2e2b; --accent-ink:#8bf3e8;
-  --warm:#e6a556; --warm-soft:#31260f; --owner:#a889f0; --owner-soft:#221a37;
-  --go:#5cc47f; --go-soft:#132a1b; --warn:#e0a05c; --warn-soft:#2c2110;
-  --blue:#5b8dfa; --blue-soft:rgba(47,109,246,.18);
-  --shadow:0 1px 2px rgba(0,0,0,.5),0 6px 20px rgba(0,0,0,.35);
-}
 
 /* ---------- base ---------- */
 *{box-sizing:border-box}
@@ -47,7 +39,6 @@ button{font:inherit}
 /* 頁首一列:標題、搜尋與想法兩顆開關、存檔狀態。以前工具列自己佔一列,手機上第一屏被頁首吃掉 ~350px */
 .tophd{display:flex;align-items:center;gap:10px}
 .topttl{flex:1;min-width:0}
-.eyebrow{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);font-weight:600}
 h1{font-size:22px;line-height:1.15;margin:2px 0 0;letter-spacing:-.01em}
 .sub{color:var(--ink-dim);font-size:12.5px;margin:8px 0 0;max-width:70ch}
 @media(max-width:720px){ .sub{display:none} }
@@ -129,10 +120,6 @@ body.scrolled .tab{padding:6px 10px}
 .catchip{font-size:12px;padding:5px 10px;border-radius:16px;border:1px solid var(--line);
   background:var(--surface);color:var(--ink-dim);cursor:pointer}
 .catchip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
-.facets{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 12px}
-.flabel{font-size:11px;color:var(--ink-dim);font-weight:600;margin-right:2px}
-.fchip{cursor:pointer;font-size:12px;padding:3px 9px}
-.fchip.clr{background:var(--surface-2);color:var(--ink-dim);border:1px solid var(--line)}
 
 /* ---------- 標籤 ---------- */
 .tags{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 8px}
@@ -146,10 +133,6 @@ body.scrolled .tab{padding:6px 10px}
 
 /* ---------- 分類標題 ---------- */
 .cat{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:700;margin:22px 0 10px;letter-spacing:-.01em}
-.cat-i{flex:none;width:26px;height:26px;border-radius:8px;display:grid;place-items:center;
-  font-size:13px;background:var(--accent-soft);color:var(--accent-ink)}
-.cat-n{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--surface-2);
-  padding:2px 8px;border-radius:999px;font-weight:600}
 
 /* ---------- 開合:整個看板只有這一種(details.fold,見 board.js 的 fold()) ----------
    公司列、頂部面板、答案庫每一條、卡片裡的「詳細」都是它:同一個箭頭、同一個位置(左邊)、
@@ -280,9 +263,6 @@ article.justhere{animation:justhere 2.4s ease-out}
   padding:6px 10px;min-height:34px}   /* 手指點得到:以前 2px 內距,手機上幾乎按不中 */
 .seeddel:hover{color:var(--warn)}
 .rchip.blk{border-color:var(--warn);color:var(--warn)}
-.blocklist{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
-.blockchip{font-size:12px;padding:5px 10px;border-radius:999px;border:1px solid var(--warn);
-  background:var(--warn-soft);color:var(--warn);cursor:pointer}
 .cohead{flex-wrap:wrap;row-gap:4px}          /* 窄螢幕擠不下就換行,不要把數字擠掉 */
 .conew{flex:none;font-size:11px;font-weight:700;color:var(--accent);background:var(--accent-soft);
   padding:1px 6px;border-radius:6px;margin-left:6px}
@@ -334,8 +314,6 @@ article.justhere{animation:justhere 2.4s ease-out}
 .jd-go{margin-left:6px;font-size:13px;color:var(--ink-dim)}
 .jd-link:hover .jd-go{color:var(--accent)}
 .fitrow .srk{color:var(--accent)}
-.srline{display:flex;gap:14px;flex-wrap:wrap}
-.srline .srk{min-width:auto}
 
 /* ---------- 卡片上的回饋 + 管線 ---------- */
 .fb{margin-top:6px;padding-top:9px;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:7px}
@@ -400,10 +378,6 @@ article.justhere{animation:justhere 2.4s ease-out}
 .cust-part.want .cust-st{color:var(--warn)}
 .cust-part.done .cust-st{color:var(--go)}
 .codot.cust{background:var(--accent-soft);color:var(--accent-ink)}
-/* 這張的動機句是通用版還是手寫的,一眼看得出來 */
-.mkind{font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;white-space:nowrap}
-.mkind.gen{background:var(--surface-2);color:var(--ink-dim)}
-.mkind.cust{background:var(--accent-soft);color:var(--accent-ink)}
 
 /* ---------- 管線分頁(正在準備 / 已準備 / 可投遞) ---------- */
 .applygrp{margin:0 0 26px}
@@ -413,16 +387,11 @@ article.justhere{animation:justhere 2.4s ease-out}
 .emptytab{color:var(--ink-dim);font-size:14px;padding:24px 4px}
 
 /* 母版與參考資料 */
-.mcard{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;
-  margin:6px 0;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;flex-wrap:wrap}
-.mname{flex:1;min-width:0;font-weight:600;font-size:13.5px}
-.mbtns{display:flex;gap:8px;flex:none}
 .rz-open{padding:7px 13px;border:0;border-radius:7px;background:var(--accent);color:#fff;
   font-size:13px;font-weight:700;cursor:pointer}
 .rz-open.en{background:var(--surface);color:var(--accent-ink);border:1px solid var(--accent)}
 
 /* 附件 */
-.rz-k{font-weight:700;margin-right:4px}
 .att-pill{display:inline-block;margin:2px 4px 2px 0;padding:2px 8px;background:var(--surface);
   border:1px solid var(--line);border-radius:999px;font-size:12px;text-decoration:none;color:inherit}
 a.att-pill:hover{border-color:var(--accent-ink)}
@@ -443,24 +412,9 @@ a.att-pill:hover{border-color:var(--accent-ink)}
 .cutcard.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
 .cutcard-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}
 .cutcard-nm{font-weight:650;font-size:13.5px}
-.cutcard-btns{display:flex;gap:6px;flex:0 0 auto}
-.cutact{font-size:12px;font-weight:600;padding:6px 12px;border:1px solid var(--accent);
-  border-radius:7px;background:var(--surface);color:var(--accent);cursor:pointer}
-.cutact.on{background:var(--accent);color:#fff}
-.cutdel{font-size:12px;padding:6px 10px;border:1px solid var(--line);border-radius:7px;
-  background:var(--surface);color:var(--ink-dim);cursor:pointer}
 .cutcard-f{display:flex;gap:8px;font-size:12.5px;line-height:1.5;margin:2px 0}
 .cutcard-k{font:600 11px/1.7 var(--mono);color:var(--ink-dim);flex:0 0 66px}
-.cutcard-state{margin-top:6px}
 .cuts-empty{font-size:12.5px;color:var(--ink-dim)}
-.cutadd{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px}
-.cutadd>summary{font-size:12.5px;font-weight:600;color:var(--accent)}
-.cut-in{display:block;width:100%;font:inherit;font-size:13px;padding:8px 10px;margin-top:8px;
-  border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
-.cut-in::placeholder{color:var(--ink-dim);opacity:.75}
-.cut-newbtn{margin-top:8px;font-size:12.5px;font-weight:600;padding:7px 14px;border:0;
-  border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
-.cut-st{font:600 11px/1.6 var(--mono);border-radius:5px;padding:1px 7px}
 
 /* verdict(切角判斷)區塊 */
 .vd{margin:8px 0 2px;padding:9px 10px;border-radius:9px;border:1px solid var(--line)}
@@ -468,13 +422,14 @@ a.att-pill:hover{border-color:var(--accent-ink)}
 .vd.n{background:var(--surface-2)}
 .vd-none{margin:8px 0 2px;padding:8px 10px;border-radius:9px;background:var(--surface-2);
   color:var(--ink-dim);font-size:12px}
+/* 選不出履歷、語言不在清單:後台給的原因,寫在兩排按鈕下面(不是送出的關卡,不用 stage-blocked) */
+.vd-problem{margin:6px 0 2px;font-size:12.5px;font-weight:650;color:var(--warn)}
 .vd-f{display:flex;gap:8px;font-size:12px;line-height:1.5;margin:2px 0}
 .vd-k{font:600 10.5px/1.7 var(--mono);color:var(--ink-dim);flex:0 0 52px}
 /* 兩個決定長一樣、緊鄰,標籤在左、切換在右;中間不放任何說明文字 */
 .vd-row{display:flex;align-items:center;gap:10px;font-size:12px;padding:3px 0}
 .vd-lb{flex:0 0 34px;color:var(--ink-dim);font-weight:600}
 .vd-seg{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
-.vd-warn{margin-top:6px;font-size:11.5px;color:var(--warn);line-height:1.5}
 /* agent 原始判斷:跟上面兩排同形狀的第三列,不用點開就看得到 */
 .vd-picks{flex-wrap:wrap;gap:6px 14px}
 .vd-pick{display:inline-flex;align-items:center;gap:8px;flex:1 1 auto;justify-content:space-between}
@@ -486,7 +441,6 @@ a.att-pill:hover{border-color:var(--accent-ink)}
 .vd-agent b.ch{color:var(--accent);border-color:var(--accent)}
 .vd-agent i{font-style:normal;font-size:11px;color:var(--accent)}
 .vd-why{color:var(--accent);text-decoration:underline;font-size:11.5px}
-.vd-diff{margin-left:8px;font-weight:400;color:var(--accent)}
 .vd-b{font-size:11.5px;font-weight:600;padding:6px 11px;border:0;border-right:1px solid var(--line);white-space:nowrap;
   background:var(--surface);color:var(--ink-dim);cursor:pointer}
 .vd-b:last-child{border-right:0}
@@ -500,10 +454,6 @@ a.att-pill:hover{border-color:var(--accent-ink)}
 .ship-att{flex:1;min-width:0;font-size:11.5px;color:var(--ink-dim)}
 .ship-att .att-pill{margin:0 2px 2px 0;padding:1px 6px;font-size:11px;max-width:100%;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:top}
-.alt-b{flex:none;font-size:11px;font-weight:600;padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink-dim)}
-.vd-alt{margin-top:6px;font-size:11px;color:var(--ink-dim)}
-.vd-alt .rz-open{font-size:11px;padding:2px 8px;border:1px solid var(--line);border-radius:6px;
-  background:var(--surface);color:var(--ink-dim);font-weight:600}
 
 /* ---------- 履歷檢視 ---------- */
 #rzmodal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;
@@ -570,9 +520,6 @@ details.iv-qf>summary{min-height:36px;font-size:13px;color:var(--ink-dim)}
 .iv-focus{color:var(--ink-dim);margin-top:6px}
 .iv-focus b{color:var(--ink);margin-right:4px}
 .iv-empty{font-size:13px;color:var(--ink-dim);margin:10px 0 0}
-.bk-tbl{overflow-x:auto;margin:6px 0 10px}
-.bk-tbl table{border-collapse:collapse;font-size:13px}
-.bk-tbl th,.bk-tbl td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
 /* 大字讀稿:整個畫面換成稿子。手動捲(不做自動滾動),字級與碼錶在頂端那一條 */
 #rzmodal.rd{background:var(--bg);padding:0}
 #rzmodal.rd .rd-box{max-width:780px;width:100%;margin:0 auto;min-height:100%}
@@ -603,10 +550,8 @@ footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);color:v
 /* 摺疊列 19px、切換鈕 26px,手指按不準。履歷版本是決定寄哪份履歷的控制項,
    更不能難按。桌機用滑鼠沒這問題,所以只在窄螢幕加高。 */
 @media(max-width:720px){
-  .cmore>summary,.vwhy>summary,.cutadd>summary{padding:11px 0}
+  .cmore>summary,.vwhy>summary{padding:11px 0}
   .vd-b{padding:9px 13px}
-  .alt-b{padding:8px 11px}
-  .cutact,.cutdel{padding:8px 13px}
   .note-actions button{padding:9px 16px}
   .masters-d>summary.applyhd{padding-top:8px;padding-bottom:10px}
 }
@@ -627,9 +572,8 @@ footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);color:v
 /* 履歷用文字顯示:白底黑字、像一張紙,手機上可選取可換行 */
 .rzm-doc{background:#fff;color:#111;border-radius:8px;padding:22px 24px;
   box-shadow:0 4px 24px rgba(0,0,0,.45);max-width:820px;margin:0 auto;overflow-wrap:anywhere}
-.rzm-doc img.rzm-photo{float:right;width:96px;margin:0 0 8px 14px;border-radius:4px}
 .rzm-doc a{color:#0a6a61}
-@media(max-width:520px){ .rzm-doc{padding:16px 15px} .rzm-doc img.rzm-photo{width:70px} }
+@media(max-width:520px){ .rzm-doc{padding:16px 15px} }
 
 /* 履歷回饋:跟「喜不喜歡這個職缺」那格分開,長相也要分得出來。寫過的加一條左邊界,
    一眼看得出哪幾張他留過話。 */
@@ -650,28 +594,13 @@ footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);color:v
 
 /* 未存時從底部浮出來的存檔條。頁首那顆會被捲走,而且沒東西可存時是灰的,他找不到。 */
 .savedock{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:900;
-  display:none;flex-direction:column;padding:11px 14px 11px 18px;border-radius:22px;
+  display:none;flex-direction:column;padding:11px 14px 11px 18px;border-radius:999px;
   background:var(--surface-2);border:1px solid var(--accent);
   box-shadow:0 10px 30px rgba(0,0,0,.55);max-width:calc(100vw - 28px);width:max-content}
 .savedock.on{display:flex}
-.savedock:not(.list){border-radius:999px}
 .sd-top{display:flex;align-items:center;gap:14px}
 .savedock .lbl{font-size:14px;font-weight:700;color:var(--accent);white-space:nowrap;cursor:pointer;
   text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}
-.sd-list:not(:empty){margin-top:9px;padding-top:9px;border-top:1px solid var(--line);
-  max-height:34vh;overflow:auto;display:flex;flex-direction:column;gap:6px;
-  width:min(86vw,420px)}
-.sd-row{display:flex;align-items:center;gap:10px;
-  padding:7px 9px;border-radius:10px;background:var(--surface);cursor:pointer}
-.sd-row>.sd-body{flex:1;min-width:0}
-.sd-t{display:block;font-size:12.5px;font-weight:700;line-height:1.3;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-c{display:block;font-size:11.5px;color:var(--ink-dim);line-height:1.45;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-c b{color:var(--accent);font-weight:700}
-.savedock .sd-undo{flex:none;font-size:12px;font-weight:700;
-  padding:6px 11px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);
-  color:var(--ink-dim);cursor:pointer;white-space:nowrap}
 .card.flash{outline:2px solid var(--accent);outline-offset:2px}
 .savedock button{font-size:15px;font-weight:800;padding:10px 24px;border-radius:999px;
   border:none;background:var(--accent);color:#04211a;cursor:pointer;white-space:nowrap}
@@ -718,10 +647,8 @@ body.scrolled .tab-arr{font-size:12px}
 /* 動機那句直接放在卡片上。他每張卡要判的就是這一句,不該為了讀一行字開一個全螢幕燈箱。 */
 .vd-mot{margin:10px 0 0;padding:10px 12px;border-radius:10px;background:var(--surface-2);
   border-left:3px solid var(--accent)}
-.vd-ttl{margin:6px 0 0;padding:0 12px}
 .vm-k{display:block;font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--ink-dim);margin-bottom:3px}
 .vm-t{display:block;font-size:13.5px;line-height:1.62}
-.vd-ttl .vm-t{font-size:12.5px;color:var(--ink-dim)}
 .stbar .stwho{display:block;opacity:.7;font-size:11.5px;margin-top:2px}
 
 /* ---------- 📋 申請表單:卡上只剩一行(平台、幾欄、還差幾條答案);答案全部在答案庫 ---------- */
@@ -746,7 +673,6 @@ body.scrolled .tab-arr{font-size:12px}
 .ap-bad{color:var(--warn);font-weight:650}
 .ap-ok{color:var(--go);font-weight:700}
 .ap-shot{font-size:12.5px;font-weight:650;color:var(--accent);text-decoration:underline;padding:6px 0}
-.ap-b{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-ink)}
 .stage-b.ap-approve.adv{border-color:var(--go);background:var(--go);color:#fff}
 .ap-approve:disabled{opacity:.5;cursor:not-allowed;background:var(--surface-2);border-color:var(--line);color:var(--ink-dim);filter:none}
 .ap-shotbox{background:var(--surface);border-radius:12px;padding:12px}
@@ -1171,5 +1097,6 @@ body:has(.cfg-save.dirty) #totop{bottom:84px}
 .fl-row:first-child{border-top:0}
 .fl-name{background:none;border:0;padding:0;font:inherit;font-weight:650;color:var(--ink);text-decoration:underline;cursor:pointer;text-align:left}
 .fl-st{color:var(--ink-dim);flex:1;min-width:8em}
-.fl-bad .fl-st,.fl-wait .fl-st,.fl-gone .fl-st{color:var(--warn)}
+.fl-bad .fl-st,.fl-wait .fl-st,.fl-gone .fl-st,.fl-unsure .fl-st{color:var(--warn)}
+.fl-unsure .fl-name{font-weight:600}
 .fl-sum{margin-left:8px;font-size:12px;font-weight:600;color:var(--ink-dim)}

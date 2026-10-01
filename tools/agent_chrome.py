@@ -16,7 +16,7 @@ agent_chrome —— agent 專用的 Chrome:自己一個資料夾(browser.data_di
 
 用法:python3 tools/agent_chrome.py [--status | --setup | --show | --close]
 """
-import os, sys, json, uuid, time, shutil, argparse, subprocess
+import os, sys, json, uuid, time, shutil, argparse, subprocess, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -37,11 +37,11 @@ def _profile():
 
 
 # Codex 外掛自己的儲存區:裡面放它的固定身分。複製設定檔時不帶過去,外掛會自己產生一個新的(見 prepare)。
-CODEX_STORE = os.path.join('Local Extension Settings', 'hehggadaopoacecdllhhajmbjkdcmajg')
+CODEX_STORE = os.path.join('Local Extension Settings', chrome_bin.EXTENSIONS['codex'][0])
 # Claude 擴充功能的儲存區:裡面有 Claude Code 認的瀏覽器編號(bridgeDeviceId)。帶過去的話兩邊編號一樣,
 # 原本的設定檔一開著,Claude 就可能去操作使用者自己的 Chrome;帶過去的登入也會失效(2026-09-29 實測 identity 是空的),
 # 所以不帶,在 agent 的 Chrome 裡登入、按 Connect 一次。
-CLAUDE_EXT_STORE = os.path.join('Local Extension Settings', 'fcoeoabgfenejglbffodgkkbkcdhcgfn')
+CLAUDE_EXT_STORE = os.path.join('Local Extension Settings', chrome_bin.EXTENSIONS['claude'][0])
 # Sync Data:Chrome 存「關掉的分頁群組」的地方(沒登入 Google 也存;這個設定檔裡只有分頁群組和幾筆網頁 App 紀錄)。
 # 每一輪 agent 都開一個群組,不清就一直累積;Chrome 沒有「不要存」的開關(Google 社群多串都說沒有)。
 COPY_SKIP = ('Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'Singleton*', 'LOCK', '*.lock', 'Sync Data')
@@ -96,12 +96,10 @@ def codex_sites_needed(board=None):
     """這個人要讓 Codex 上傳、下載的網站,從他自己的看板推:待你決定、可以投了的卡(填表時上傳履歷)、
     登記過的平台履歷(核對附件時下載)。開源給每個人用:不寫死任何一家求職網站。"""
     import board_doc as bd, profile_sync
-    ups = set()
     try:
-        with open(board or os.environ.get('AGENT_BOARD') or bd.LIVE, encoding='utf-8') as f:
-            fb = json.loads(bd.parse(f.read())['fb'])
+        fb = json.loads(bd.load(board)['fb'])
         ups = {_host(u) for u, m in fb.items() if isinstance(m, dict) and m.get('app') in ('ready', 'ship') and not m.get('rm')}
-    except (OSError, ValueError, KeyError):  # 讀不到看板:沒有卡可推,環境檢查照實講
+    except (OSError, ValueError, KeyError, bd.Tampered):  # 讀不到、或被偷改過:沒有卡可推,環境檢查照實講
         ups = set()
     downs = {_host(e.get('read')) for k, v in profile_sync.registry().items() if not k.startswith('_') and isinstance(v, dict)
              for e in v.values() if isinstance(e, dict)}
@@ -280,10 +278,8 @@ def quit_chrome(wait=10):
         if not pid():
             return True
         time.sleep(0.2)
-    try:
+    with contextlib.suppress(ProcessLookupError):   # 剛好在這之間自己結束了
         os.kill(p, signal.SIGKILL)
-    except ProcessLookupError:
-        pass                                 # 剛好在這之間自己結束了
     time.sleep(1)
     return not pid()
 
@@ -304,18 +300,13 @@ def _mine(c=None):
     return bool(c.get('instance')) and c.get('dir') == data_dir()
 
 
-def configured(runtime=None):
+def configured():
     """代投、查應徵進度開跑前的檢查:用 Chrome 的那一家(設定裡勾「用它操作 Chrome」的那一個)連接設定過了沒。
-    不要求 Chrome 正在跑:每批做完都會把它關掉,下一輪由流程裡的 ensure / wait_claude 自己開(以前這裡用 connected(),
+    不要求 Chrome 正在跑:每批做完都會把它關掉,下一輪由流程裡的門路自己開(以前這裡用 connected(),
     Chrome 一關就再也開不了跑;只裝 Claude 的人因為只認 Codex,永遠開不了)。"""
-    if runtime is None:
-        import agent_run as ar
-        runtime = ar.browser_runtime()
-    if runtime == 'claude-code':
-        return bool(conf().get('claude_device'))
-    if runtime == 'codex':
-        return bool(_mine() and _codex_ready())
-    return False
+    import chrome_door
+    door = chrome_door.current()
+    return bool(door and door.configured())
 
 
 def connected():
@@ -325,31 +316,38 @@ def connected():
     try:
         import apply_tab
         t = apply_tab.Session(str(uuid.uuid4()))
-    except Exception:
+    except Exception:  # noqa: BLE001 — 只是問「連上了沒」:接不上 Codex 的元件就是沒連上,畫面會叫他按連接
         return False
     try:
         return bool(browser_id(t, conf()['instance']))
-    except Exception:
+    except Exception:  # noqa: BLE001 — 同上:外掛問不到就是沒連上
         return False
     finally:
         t.close()
 
 
-def protected_tabs(board=None, runtime=None):
-    """看板上記著的 agent 分頁(填好等他核准、要改、要送的那幾頁),一律不准關。runtime 給了只算那一家開的。"""
+def protected_tabs(board=None):
+    """看板上記著的 agent 分頁(填好等他核准、要改、要送的那幾頁),一律不准關。"""
+    held = held_tabs(board)
+    return None if held is None else {t for tabs in held.values() for t in tabs}
+
+
+def held_tabs(board=None):
+    """看板上停著的頁,照開它的那一家分:{那一家(卡上沒記到是 None): {分頁…}};讀不到(或被偷改過)看板回 None。"""
     import board_doc as bd
     try:
-        with open(board or os.environ.get('AGENT_BOARD') or bd.LIVE, encoding='utf-8') as f:
-            fb = json.loads(bd.parse(f.read())['fb'])
-    except Exception:
-        return None                      # 讀不到看板就當全部都要保護(見 close_if_idle)
-    # 跟自動流程算「停著等他」的那幾張(autopilot 的 held)同一個條件:還在「可以投了」、沒移除、沒送出、
-    # 填過或改過留著分頁的。退回、移除的卡留下的舊 tab_id 不算,不然 Chrome 永遠關不掉
-    return {str(m['apply']['tab_id']) for m in fb.values()
-            if isinstance(m, dict) and m.get('app') == 'ship' and not m.get('rm')
-            and (m.get('apply') or {}).get('tab_id') and (m['apply'].get('stage') in ('fill', 'fix'))
-            and not (m.get('form') or {}).get('lock') and not m['apply'].get('sent')   # 送出過的頁是「已收到申請」,不是等他的
-            and (runtime is None or (m['apply'].get('runtime') or 'codex') == runtime)}
+        p = bd.load(board)
+        fb = json.loads(p['fb'])
+    except Exception:  # noqa: BLE001 — 讀不到(或被偷改過)看板就當全部都要保護,往不關 Chrome 那邊錯(見 close_if_idle)
+        return None
+    # 只保護停著的頁(投遞狀態是綠底那五種;自動流程的上限、看板同一條)。退回、移除、封鎖的卡留下的舊 tab_id 不算,
+    # 不然 Chrome 永遠關不掉。封鎖公司要看公司名,所以要職缺資料。
+    jobs = {j['id']: j for j in p['data'].get('jobs') or [] if isinstance(j, dict) and j.get('id')}
+    out = {}
+    for u, m in fb.items():
+        if isinstance(m, dict) and (m.get('apply') or {}).get('tab_id') and ds.held(fb, u, jobs.get(u, {'id': u})):
+            out.setdefault(m['apply'].get('runtime'), set()).add(str(m['apply']['tab_id']))
+    return out
 
 
 def ensure(board=None, wait=30):
@@ -381,20 +379,26 @@ def tabs(t, bid):
 
 
 def waiting_pages(board=None):
-    """agent 的 Chrome 裡還在等他的頁(看板上還沒送出的卡記著的分頁)。沒在跑回 [];讀不到當成有。"""
-    import apply_tab
-    c = conf()
+    """agent 的 Chrome 裡還在等他的頁(看板上停著的頁,各家用各家的門路確認還在不在)。沒在跑回 [];讀不到當成有。"""
+    import chrome_door
     if not pid():
         return []
-    # Claude 開的那幾頁在它的分頁群組,程式沒有便宜的門路逐一確認(要接回那段對話、跑一次模型):
-    # 看板上記著、還沒送出的就當成還在等他,寧可留著 Chrome,也不要把他要核對的那一頁關掉
-    claude = protected_tabs(board, 'claude-code')
-    if claude is None:
-        return ['?']                         # 讀不到看板:當成有頁面在等他(只用 Claude 時也沒有外掛可以問)
-    if claude:
-        return sorted(claude)
-    keep = protected_tabs(board)
-    if keep == set():
+    held = held_tabs(board)
+    if held is None:
+        return ['?']                         # 讀不到看板:當成有頁面在等他
+    out = []
+    for runtime, tabs in held.items():
+        door = chrome_door.of(runtime)
+        # 卡上沒記是哪一家開的:接不回來、也沒門路問,當成還在等他(寧可留著 Chrome)
+        out += door.waiting(tabs, board) if door else sorted(tabs)
+    return out
+
+
+def codex_waiting(keep):
+    """Codex 開的這幾頁現在還在不在:問外掛 agent 的 Chrome 裡現在有哪些分頁;問不到當成都在(['?'])。"""
+    import apply_tab
+    c = conf()
+    if not keep:
         return []
     if not _mine(c):
         return ['?']                         # 看板記著 Codex 開的頁,卻沒有可以問的外掛身分:不確定就當成還在等他
@@ -403,9 +407,9 @@ def waiting_pages(board=None):
         bid = browser_id(t, c['instance'])
         if not bid:
             return ['?']                     # 外掛跟這個 Chrome 斷線、問不到分頁:當成有頁面在等他(2026-09-29 就是這樣把等他的頁關掉)
-        return [x for x in tabs(t, bid) if keep is None or x in keep]
-    except Exception:
-        return ['?']                         # 讀不到分頁清單:當成有頁面在等他
+        return [x for x in tabs(t, bid) if x in keep]
+    except Exception:  # noqa: BLE001 — 讀不到分頁清單就當成有頁面在等他,往不關 Chrome 那邊錯
+        return ['?']
     finally:
         t.close()
 
@@ -423,7 +427,7 @@ def started_at(p=None):
         for x in hms.split(':'):
             secs = secs * 60 + int(x)
         return time.time() - (int(days or 0) * 86400 + secs)
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):   # ps 跑不了、逾時、印出來的看不懂
         return None
 
 
@@ -435,22 +439,26 @@ def chrome_id():
     return {'pid': p, 'start': st} if st else {}
 
 
-GONE = '填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填'
+import delivery_state as ds  # noqa: E402
+from delivery_state import GONE  # noqa: E402  (卡上寫的那一句,狀態表那邊也用)
 
 
-def gone_pages(fb, running_url=''):
+def gone_pages(fb, running_url='', proc=None):
     """看板上記著分頁、但那一頁一定已經不在的卡:agent 的 Chrome 沒在跑,或不是開那一頁的那個程序了。
-    只看程序,不問外掛:外掛一時連不上不代表頁面不在。正在跑的那張不算(那一輪會自己寫)。"""
+    只看程序,不問外掛:外掛一時連不上不代表頁面不在。正在跑的那張不算(那一輪會自己寫)。
+    proc=(程序編號, 開始時間):先問好的現在這個 agent Chrome(sweep_gone 在鎖外問,鎖內照現在的看板算);沒給就現在問。"""
     import datetime
-    p = pid()
-    st = started_at(p) if p else None
+    if proc is None:
+        p = pid()
+        st = started_at(p) if p else None
+    else:
+        p, st = proc
     if p and not st:
         return []                            # 問不到什麼時候開的:不確定,不動
     out = []
     for u, m in fb.items():
         a = (m.get('apply') or {}) if isinstance(m, dict) else {}
-        if (u == running_url or not a.get('tab_id') or a.get('stage') not in ('fill', 'fix')
-                or (m.get('form') or {}).get('lock')):
+        if u == running_url or not ds.page_up(m):
             continue
         c = a.get('chrome') or {}
         if c.get('pid'):
@@ -467,12 +475,49 @@ def gone_pages(fb, running_url=''):
     return out
 
 
-def mark_gone(fb, urls):
-    """把這幾張改成「頁面不見了,要重填」:分頁編號清掉(不再有 👀、不能叫 agent 在那頁改),核准也擋下(ok=False)。
-    他按過的「確認送出」一起拿掉:那一頁不在了,這個確認送不出去;留著的話自動流程看到有確認就跳過,永遠不會重填。"""
+def unreachable_pages(fb, running_url=''):
+    """看板上記著頁、開它的那一家卻確定接不回來的卡:{網址: 卡上要寫的原因}(chrome_door.for_card 說的:
+    卡上沒記是哪一家、那一家停用或移除)。判斷不了的(設定檔讀不懂)不算。正在跑的那張不算(那一輪會自己寫)。"""
+    import chrome_door
+    out = {}
+    for u, m in fb.items():
+        if u == running_url or not isinstance(m, dict) or not ds.page_up(m):
+            continue
+        try:
+            chrome_door.for_card(m.get('apply'))
+        except chrome_door.Unreachable as e:
+            if e.sure:
+                out[u] = str(e)
+    return out
+
+
+def sweep_gone(live, running_url='', only=None, by='agent_chrome', unreachable=False):
+    """掃「頁面不見了」並標上(自動流程每分鐘、👀 截不到時):Chrome 是哪個程序在鎖外先問好(ps 要時間,不佔看板鎖),
+    哪幾張不見了在看板鎖內照現在的看板重算再標。以前拿鎖外的舊快照算好清單才寫,這之間剛填好的新頁會被誤標成不見(#308)。
+    unreachable=True 也標開那一頁的那一家確定接不回來的(unreachable_pages)。
+    only 給了就只看那一張。回傳 {標了哪一張: 原因};沒有就不寫看板。"""
+    import board_doc as bd
+    p = pid()
+    proc = (p, started_at(p) if p else None)
+
+    def put(d):
+        got = dict.fromkeys(gone_pages(d['fb'], running_url, proc), GONE)
+        if unreachable:
+            got = dict(unreachable_pages(d['fb'], running_url), **got)
+        got = {u: why for u, why in got.items() if only is None or u == only}
+        if not got:
+            return bd.SKIP
+        for u, why in got.items():
+            mark_gone(d['fb'], [u], why)
+        return got
+    got = bd.rewrite(put, bd.target(live), by)
+    return {} if got is bd.SKIP else got
+
+
+def mark_gone(fb, urls, why=GONE):
+    """這幾張的頁不在了:送「Chrome 關過、agent 接不回來」事件(停著的頁 → 頁面不見了、確認作廢;送出結果不明的只是頁不在了)。"""
     for u in urls:
-        fb[u].pop('approve', None)
-        fb[u]['apply'].update(ok=False, tab_id='', gone=True, issues=[GONE])
+        ds.try_fire(fb, u, 'page_lost', issues=[why])
 
 
 def user_has_it_open(p=None):
@@ -491,8 +536,8 @@ def user_has_it_open(p=None):
     try:
         out = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script], capture_output=True, text=True, timeout=10).stdout
         return int(out.strip() or 0) > 0
-    except Exception:
-        return True                          # 問不到:當成他還在用,寧可不關
+    except (OSError, subprocess.SubprocessError, ValueError):   # 問不到:當成他還在用,寧可不關
+        return True
 
 
 def quit_if_safe(board=None, *, ask_extension=True, his_window_blocks=True, force=False):
@@ -606,8 +651,8 @@ def open_for_agent(url, old_tab=None, wait=20):
                 t.js(f'globalThis.__t = await cua.getTab({json.dumps(str(old_tab))}, {{browser: "{bid}"}}); '
                      f'await __t.goto({json.dumps(url)}); nodeRepl.write("ok")')
                 reused = True
-            except Exception:  # noqa: S110
-                pass                          # 已經不在了或接不回來:另開一頁
+            except Exception:  # noqa: BLE001, S110 — 舊分頁已經不在了或接不回來:下面另開一頁
+                pass
         if not reused:
             t.js(f'globalThis.__t = await cua.createBrowserTab("{bid}", {json.dumps(url)}, {{emit: false}}); nodeRepl.write("ok")')
         tab_id = t.js('nodeRepl.write("@@" + String(__t.id))').split('@@')[-1].strip()
@@ -617,12 +662,12 @@ def open_for_agent(url, old_tab=None, wait=20):
             time.sleep(1)
             try:
                 page = json.loads(t.js(read, timeout_ms=READ_TIMEOUT_MS)) or page
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 — 還在載入、外掛讀頁面逾時:下一秒再讀,讀滿 wait 次照樣交給 agent
                 continue
             if page.get('fields') or len(page.get('lines') or []) > 20:
                 break
         return {'tab_id': tab_id, 'page': page}
-    except Exception:
+    except Exception:  # noqa: BLE001 — 程式先開好只是省 agent 的步數:開不起來回 None,agent 照舊自己開
         return None
     finally:
         try:
@@ -631,20 +676,13 @@ def open_for_agent(url, old_tab=None, wait=20):
             t.close()
 
 
-CLAUDE_CANT_READ = '用 Claude 時程式不自己開頁讀:平台履歷由 Claude 在填表、送出前核對那一輪讀給程式'
-
-
 def read_pages(urls, board=None, ready=None, wait=25, settle=0):
     """程式自己在 agent 的 Chrome 打開這些網址、等載好、抄下文字和連結、關掉(只讀,不點任何東西)。
     回 {網址: {url, title, text, emailThreadPrintView, emailMessageCount, emailBodies, links, anchors, fields, _ready}};打不開的給空的。
     ready(r) 回 True 代表載好了;settle 要求條件成立後再看到幾次相同頁面。"""
     import time
     import apply_tab
-    import agent_run as ar
-    if ar.browser_runtime() == 'claude-code':
-        # 程式自己讀頁只有 Codex 的外掛做得到;Claude 那一套要它在自己那一輪裡讀(代投的平台履歷見 apply_run.claude_profile_reader)。
-        # 照實講,不叫他按畫面上沒有的「連接 Codex」。profile_sync 只留前 80 字放在卡上,所以要短
-        raise RuntimeError(CLAUDE_CANT_READ)
+    # 程式自己讀頁只有 Codex 的外掛做得到:只從 chrome_door 的 Codex 那一條叫到這裡(Claude 那一條照實回做不到)
     up, msg = ensure(board)
     if not up:
         raise RuntimeError(msg)
@@ -671,8 +709,8 @@ def read_pages(urls, board=None, ready=None, wait=25, settle=0):
                 time.sleep(0.5)
                 try:
                     r = json.loads(t.js(PAGE_JS, timeout_ms=READ_TIMEOUT_MS).split('@@')[-1]) or r
-                except Exception:
-                    continue               # 還在載入,外掛讀頁面逾時:下一輪再讀
+                except Exception:  # noqa: BLE001, S112 — 還在載入,外掛讀頁面逾時:下一輪再讀
+                    continue
                 signature = (r.get('url'), r.get('title'), r.get('text'),
                              r.get('emailThreadPrintView'), r.get('emailMessageCount'),
                              tuple(r.get('emailBodies') or ()),
@@ -688,9 +726,9 @@ def read_pages(urls, board=None, ready=None, wait=25, settle=0):
     finally:
         keep = []
         if opened:
-            try:
+            try:  # noqa: SIM105 — 理由同下一行
                 t.js('await __g.goto("about:blank"); nodeRepl.write("ok")')
-            except Exception:  # noqa: S110
+            except Exception:  # noqa: BLE001, S110 — 讀完把共用分頁換回空白頁只是收尾,換不回去下一次讀會直接蓋過
                 pass
             keep = ['__g']
         t.end_turn(keep=keep)
@@ -707,6 +745,11 @@ def list_browsers(t):
 
 # ChatGPT 擴充功能(Codex 用它操作 Chrome)的商店頁;編號跟 chrome_bin 認擴充功能用的同一個
 CODEX_STORE_URL = 'https://chromewebstore.google.com/detail/' + chrome_bin.EXTENSIONS['codex'][0]
+
+
+def codex_configured():
+    """Codex 那一家設定好了沒:連接過這個 agent 資料夾的外掛,外掛的程式也裝了。"""
+    return bool(_mine() and _codex_ready())
 
 
 def _codex_ready():
@@ -743,7 +786,7 @@ def setup(board=None, wait=90, force=False):
     c = conf()
     try:
         t = apply_tab.Session(str(uuid.uuid4()))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 原因照實回給看板的連接鈕
         return False, f'接不上 Codex 的 Chrome 元件({str(e)[:80]})'
     try:
         if _mine(c) and pid() and browser_id(t, c['instance']):
@@ -774,9 +817,8 @@ def setup(board=None, wait=90, force=False):
         t.close()
 
 
-CLAUDE_STORE = 'https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn'
+CLAUDE_STORE = 'https://chromewebstore.google.com/detail/claude/' + chrome_bin.EXTENSIONS['claude'][0]
 CLAUDE_LOGIN = 'https://claude.ai/login'
-CLAUDE_EXT = 'fcoeoabgfenejglbffodgkkbkcdhcgfn'
 
 
 def claude_state():

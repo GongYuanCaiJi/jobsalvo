@@ -193,7 +193,8 @@ def main(argv):
         return 2
     try:
         convert(argv[0], argv[1] or None, argv[2], argv[3] if len(argv) == 4 else '')
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — 子程式最外層:原因印到 stderr(呼叫的 markdown_pdf 放進錯誤訊息),回 1
+        print(f'{type(e).__name__}: {str(e)[:200]}', file=sys.stderr)
         return 1
     return 0
 

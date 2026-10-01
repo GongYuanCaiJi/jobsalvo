@@ -2,19 +2,17 @@
 import copy
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import pypdf
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
 from _env import read_board, read_fb  # noqa: E402
-sys.path.insert(0, TOOLS)
 import agent_report  # noqa: E402
 import board_doc as bd  # noqa: E402
 import config as cf  # noqa: E402
@@ -28,31 +26,17 @@ class Customization(unittest.TestCase):
     other_url = 'test://jobs/13'
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='customize-test-')
-        self.home = os.path.join(self.tmp, 'home')
-        os.makedirs(self.home)
-        self.old_home_env = os.environ.get('JOBSALVO_HOME')
-        self.old_home = cf.HOME
-        self.settings = copy.deepcopy(cf.DEFAULTS)
-        self.settings['board']['file'] = 'board.html'
-        self.settings['resume']['base'] = 'resume'
-        self.settings['resume']['ship_dir'] = 'ship'
-        self.settings['resume']['langs'] = ['zh']
-        self.settings['resume']['resumes'] = [{
-            'id': 'general', 'name': '通用履歷', 'files': {'zh': 'resume/base.pdf'},
-            'enabled': True, 'when': '', 'skill': '',
-        }]
-        self.settings['resume']['attachments'] = [{
-            'id': 'portfolio', 'name': '作品集', 'files': {'zh': 'resume/portfolio.pdf'},
-            'enabled': True, 'skill': 'custom/skills/portfolio.md',
-        }]
-        self._write_settings()
-        os.environ['JOBSALVO_HOME'] = self.home
-        cf.reload(self.home)
+        _env.use_home(self, board={'file': 'board.html'}, resume={
+            'base': 'resume', 'ship_dir': 'ship', 'langs': ['zh'],
+            'resumes': [{'id': 'general', 'name': '通用履歷', 'files': {'zh': 'resume/base.pdf'},
+                         'enabled': True, 'when': '', 'skill': ''}],
+            'attachments': [{'id': 'portfolio', 'name': '作品集', 'files': {'zh': 'resume/portfolio.pdf'},
+                             'enabled': True, 'skill': 'custom/skills/portfolio.md'}],
+        })
         self.board = os.path.join(self.home, 'board.html')
         os.makedirs(os.path.join(self.home, 'resume'), exist_ok=True)
         for name in ('base.pdf', 'portfolio.pdf'):
-            self._write_pdf(os.path.join(self.home, 'resume', name), 2)
+            _env.tiny_pdf(os.path.join(self.home, 'resume', name), pages=2)
         skill_path = os.path.join(self.home, 'custom', 'skills', 'portfolio.md')
         os.makedirs(os.path.dirname(skill_path), exist_ok=True)
         with open(skill_path, 'w', encoding='utf-8') as f:
@@ -63,24 +47,13 @@ class Customization(unittest.TestCase):
         ]
         fb = {url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'}
               for url in (self.url, self.other_url)}
-        data = bd.assemble(':root{}', '<b id="stat-first">0</b>', '', {'jobs': jobs},
-                           json.dumps(fb, ensure_ascii=False), '/*app v1*/')
-        with open(self.board, 'w', encoding='utf-8') as f:
-            f.write(data)
+        _env.make_board(self.board, fb, jobs=jobs)
         # 職缺頁由程式先抓好給 agent(#287);測試不連網、不開無頭 Chrome
         import page_fetch
         self.page = page_fetch.PageResult(self.url, 'ok', text='JD-TEXT: build secure systems', via='direct')
         fetch = mock.patch.object(page_fetch, 'fetch', side_effect=lambda _url: self.page)
         self.fetch = fetch.start()
         self.addCleanup(fetch.stop)
-
-    def tearDown(self):
-        if self.old_home_env is None:
-            os.environ.pop('JOBSALVO_HOME', None)
-        else:
-            os.environ['JOBSALVO_HOME'] = self.old_home_env
-        cf.reload(self.old_home)
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _write_settings(self):
         with open(os.path.join(self.home, cf.NAME), 'w', encoding='utf-8') as f:
@@ -96,15 +69,7 @@ class Customization(unittest.TestCase):
 
     @staticmethod
     def _pages(path):
-        return len(sa.pdf._pypdf().PdfReader(path).pages)
-
-    @staticmethod
-    def _write_pdf(path, pages):
-        writer = sa.pdf._pypdf().PdfWriter()
-        for _ in range(pages):
-            writer.add_blank_page(width=612, height=792)
-        with open(path, 'wb') as f:
-            writer.write(f)
+        return len(pypdf.PdfReader(path).pages)
 
     def _agent(self, captured, output_pages=None):
         output_pages = output_pages or {}
@@ -115,7 +80,7 @@ class Customization(unittest.TestCase):
             payload = prompt.split(marker, 1)[1].split('\n\n其他卡片尚未處理', 1)[0]
             for item in json.loads(payload):
                 count = output_pages.get(item['id'], 1)
-                self._write_pdf(item['output_pdf'], count)
+                _env.tiny_pdf(item['output_pdf'], pages=count)
             report_path = prompt.split('整理到 ', 1)[1].split('，格式', 1)[0]
             with open(report_path, 'w', encoding='utf-8') as f:
                 json.dump({'reports': []}, f)
@@ -135,6 +100,16 @@ class Customization(unittest.TestCase):
                 launcher=self._agent(captured, output_pages), waiter=self._waiter,
             )
         return result, captured
+
+    def test_the_round_leaves_its_evidence_in_the_cards_folder(self):
+        # #315:客製版這一輪的指示、動作紀錄、交件單,跟幫你填表同一種放法,放在那張卡的證據夾
+        result, _prompts = self._run(['attachment:portfolio:zh'])
+        self.assertTrue(result['ok'], result)
+        [rnd] = _env.evidence_rounds(self.url, self.board)
+        kinds = [e['kind'] for e in _env.evidence_events(rnd)]
+        self.assertEqual([k for k in kinds if k in ('instruction', 'agent_log', 'handoff')],
+                         ['instruction', 'agent_log', 'handoff'])
+        self.assertEqual(_env.evidence_rounds(self.other_url, self.board), [])
 
     def test_one_agent_customizes_selected_files_and_accepted_files_enter_package(self):
         files = customize.list_files(self.url, board=self.board)
@@ -170,6 +145,16 @@ class Customization(unittest.TestCase):
         _folder, problems = ship.build_default(self._job(), fb)
         self.assertEqual(problems, [])
         self.assertEqual(len(ship.info(self.url)['files']), 2)
+
+    def test_diff_says_which_file_could_not_be_read(self):
+        # 以前讀不出文字就當成空的:差異變成「整份都刪掉了」,他看不出其實是檔案讀不了
+        result, _prompts = self._run(['resume:general:zh'])
+        self.assertTrue(result['ok'], result)
+        with mock.patch.object(sa, 'pdf_text', side_effect=ValueError('PDF 壞掉了')):
+            with self.assertRaises(ValueError) as e:
+                customize.diff_for(self.url, 'resume:general:zh', board=self.board)
+        self.assertIn('抽不出文字', str(e.exception))
+        self.assertIn('PDF 壞掉了', str(e.exception))
 
     def test_page_limit_failure_is_recorded_and_reported(self):
         result, _prompts = self._run(['resume:general:zh'], output_pages={'resume:general:zh': 3})
@@ -249,6 +234,28 @@ class Customization(unittest.TestCase):
         self.assertTrue(result['ok'], result)
         self.assertIn('把技能年資放回摘要', prompts[0])
         self.assertEqual(self._fb()[self.url]['custom_docs']['resume:general:zh']['status'], 'review')
+
+    def test_accept_and_reject_at_the_same_time_keep_one_of_them(self):
+        # 兩台裝置同時對同一份客製版按收下、退回(#308):以前兩邊都在鎖外讀「在等你看」,後寫的整份蓋掉先寫的,
+        # 收下的那一份不見了、兩邊都說成功。現在在看板鎖內讀:先寫的算數,後到的照現在的狀態回原因
+        import threading
+        self._run(['resume:general:zh'])
+        real, got = bd.assemble, {}
+
+        def hooked(*a, **k):
+            if 'reject' not in got:
+                got['reject'] = None
+                t = threading.Thread(target=lambda: got.__setitem__(
+                    'reject', customize.reject(self.url, 'resume:general:zh', '重寫', board=self.board)))
+                t.start()
+                t.join(0.5)
+                got['thread'] = t
+            return real(*a, **k)
+        with mock.patch.object(bd, 'assemble', hooked):
+            self.assertEqual(customize.accept(self.url, 'resume:general:zh', board=self.board), (True, ''))
+        got['thread'].join(5)
+        self.assertEqual(self._fb()[self.url]['custom_docs']['resume:general:zh']['status'], 'accepted')
+        self.assertEqual(got['reject'], (False, '這份客製版目前不在等你看'))
 
     def test_failed_rerun_of_an_accepted_file_keeps_the_filled_page_and_approval(self):
         # 已收下的客製版再客製一次,agent 沒完成:檔案沒換(退回原本收下的那份),填好的頁和他的確認送出都不動。
@@ -339,11 +346,29 @@ class Customization(unittest.TestCase):
         self.assertNotIn(saved, sa._files())
         self.assertEqual(ship.customization_problem(self._job(), fb), '')
 
+    def test_files_cannot_change_while_sending(self):
+        # #338 正在送出時換檔:卡上換了、狀態沒標「上傳的是舊檔」,之後送出去的是頁上的舊檔。
+        # 狀態表在正在送出不收「換檔」:上傳、改回原始檔都不准,卡一點都不動
+        def sending(fb):
+            fb[self.url].update(app='ship', ds='sending', custom_file='custom/old.pdf',
+                                approve={'at': '2026-01-01T00:00:00', 'snap': {}},
+                                apply={'stage': 'submit', 'session': 's1', 'tab_id': '5'})
+        bd.set_fb(sending, live=self.board, by='test')
+        before = self._fb()[self.url]
+        saved, error = customize.upload_custom(
+            self.url, 'resume:general:zh', 'mine.pdf', b'%PDF-1.4\nmine', board=self.board)
+        self.assertIsNone(saved)
+        self.assertIn('正在送出', error)
+        ok, why = customize.clear(self.url, 'resume:legacy', board=self.board)
+        self.assertFalse(ok)
+        self.assertIn('正在送出', why)
+        self.assertEqual(self._fb()[self.url], before)
+
     def test_accepted_custom_is_kept_per_language(self):
         # 中文那份收下了客製版,換成英文:寄英文原始檔、卡上那份不算英文的客製版;換回中文,中文的客製版還在
         self.settings['resume']['langs'] = ['zh', 'en']
         self.settings['resume']['resumes'][0]['files']['en'] = 'resume/base-en.pdf'
-        self._write_pdf(os.path.join(self.home, 'resume', 'base-en.pdf'), 1)
+        _env.tiny_pdf(os.path.join(self.home, 'resume', 'base-en.pdf'), pages=1)
         self._write_settings()
         cf.reload(self.home)
         saved, error = customize.upload_custom(
@@ -374,7 +399,7 @@ class Customization(unittest.TestCase):
             json.dump({'reports': [{
                 'issue': '多張卡都需要更明確的成果描述',
                 'recommendation': '檢查通用履歷的成果段落 skill', 'occurrences': 2,
-                'feedback_ids': feedback_ids + ['not-in-this-run'],
+                'feedback_ids': feedback_ids,
             }]}, f, ensure_ascii=False)
 
         self.assertTrue(customize.process_feedback_reports(self.board, report_path, feedback_ids + ['only-once']))
@@ -390,6 +415,39 @@ class Customization(unittest.TestCase):
         once = fb[self.url]['custom_docs']['attachment:portfolio:zh']['feedbacks'][0]
         self.assertFalse(once.get('processed_at'))
         self.assertEqual([x['id'] for x in customize.feedback_records(fb)], ['only-once'])
+
+    def test_a_report_that_cites_feedback_it_was_not_given_is_not_taken(self):
+        """安檢門(#317):整理裡列了這一輪沒給它的回饋:這一則不收、照實回報,回饋也不標成處理過。"""
+        def add_feedback(fb):
+            for url, feedback_id in zip((self.url, self.other_url), ('first', 'second')):
+                fb[url]['custom_docs'] = {'resume:general:zh': {
+                    'name': '通用履歷', 'feedbacks': [{'id': feedback_id, 'text': '成果要更明確'}]}}
+        bd.set_fb(add_feedback, live=self.board, by='test')
+        report_path = os.path.join(self.tmp, 'reports.json')
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump({'reports': [{'issue': '成果不明確', 'recommendation': '改 skill',
+                                    'feedback_ids': ['first', 'made-up']}]}, f, ensure_ascii=False)
+        self.assertTrue(customize.process_feedback_reports(self.board, report_path, ['first', 'second']))
+        fb = self._fb()
+        said = ' '.join(x['msg'] for x in agent_report.open_items(fb))
+        self.assertIn('made-up', said)
+        self.assertIn('這一輪沒給它', said)
+        self.assertEqual(sorted(x['id'] for x in customize.feedback_records(fb)), ['first', 'second'])
+
+    def test_a_grouped_report_is_marked_as_the_agents_judgment_with_the_feedback_text(self):
+        def add_feedback(fb):
+            for url, feedback_id in zip((self.url, self.other_url), ('first', 'second')):
+                fb[url]['custom_docs'] = {'resume:general:zh': {
+                    'name': '通用履歷', 'feedbacks': [{'id': feedback_id, 'text': '成果要更明確'}]}}
+        bd.set_fb(add_feedback, live=self.board, by='test')
+        report_path = os.path.join(self.tmp, 'reports.json')
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump({'reports': [{'issue': '成果不明確', 'recommendation': '改 skill',
+                                    'feedback_ids': ['first', 'second']}]}, f, ensure_ascii=False)
+        self.assertTrue(customize.process_feedback_reports(self.board, report_path, ['first', 'second']))
+        said = agent_report.open_items(self._fb())[0]['msg']
+        self.assertIn('agent 判斷', said)
+        self.assertIn('成果要更明確', said)
 
     def test_prompt_asks_which_feedback_each_report_covers(self):
         prompt = customize.build_prompt('test://jobs/12', '工程師', [], [], '/tmp/r.json')

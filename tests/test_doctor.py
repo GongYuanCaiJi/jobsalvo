@@ -8,7 +8,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
 TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
-sys.path.insert(0, TOOLS)
 import doctor  # noqa: E402
 
 
@@ -109,6 +108,50 @@ class AgentCapability(unittest.TestCase):
                     mock.patch('agent_chrome.conf', return_value={}):
                 checks = {c['key']: c for c in doctor.check_environment(ags)['checks']}
             self.assertEqual(checks['browser_agent']['ok'], want, installed)
+
+
+class FolderHistoryRow(unittest.TestCase):
+    """資料夾不自動存版、或舊資料因為沒有退回點沒轉:環境檢查照實寫原因和怎麼處理(以前只寫在設定頁最底下一行)。"""
+
+    def history_row(self, home):
+        import config as cf
+        with mock.patch.object(cf, 'HOME', home):
+            result = doctor.check_environment([])
+        return result, next((c for c in result['checks'] if c['key'] == 'folder_history'), None)
+
+    def test_repository_with_a_remote_is_reported_with_how_to_fix(self):
+        import subprocess, tempfile, folder_history
+        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        with tempfile.TemporaryDirectory(prefix='doctor-history-') as home:
+            for args in (('init', '--initial-branch=main'), ('remote', 'add', 'origin', 'https://example.invalid/x.git')):
+                subprocess.run([folder_history._git(), *args], cwd=home, env=env, check=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _, row = self.history_row(home)
+        self.assertFalse(row['ok'])
+        self.assertIn('remote', row['detail'])
+        self.assertTrue(row['fix'])
+
+    def test_conversion_without_a_restore_point_is_reported(self):
+        import tempfile, folder_history
+        with tempfile.TemporaryDirectory(prefix='doctor-history-') as home:
+            with open(os.path.join(home, folder_history.BACKUP_DIR), 'w') as f:
+                f.write('x')
+            with open(os.path.join(home, 'board.html'), 'w') as f:
+                f.write('old')
+            with mock.patch.object(folder_history, '_git', return_value=None):
+                folder_history.convert(home, [os.path.join(home, 'board.html')], '投遞狀態轉換', lambda: None)
+                _, row = self.history_row(home)
+        self.assertFalse(row['ok'])
+        self.assertIn('沒有退回點', row['detail'])
+        self.assertTrue(row['fix'])
+
+    def test_saving_folder_or_missing_folder_is_not_a_warning(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='doctor-history-') as home:
+            result, row = self.history_row(home)
+            self.assertTrue(row is None or row['ok'])
+            _, row = self.history_row(os.path.join(home, 'not-created-yet'))
+            self.assertTrue(row is None or row['ok'])
 
 
 class Coverage(unittest.TestCase):

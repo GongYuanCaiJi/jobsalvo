@@ -6,7 +6,6 @@ from unittest.mock import patch
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import config as cf  # noqa: E402
 import init  # noqa: E402
 
@@ -87,8 +86,7 @@ class InstalledAgents(unittest.TestCase):
 
     def test_new_home_writes_the_detected_list(self):
         from unittest.mock import patch
-        root = tempfile.mkdtemp(prefix='init-agents-')
-        self.addCleanup(shutil.rmtree, root, True)
+        root = self.enterContext(tempfile.TemporaryDirectory(prefix='init-agents-'))
         home0 = cf.HOME
         self.addCleanup(lambda: cf.reload(home0))
         claude_only = [{'id': 'primary', 'runtime': 'claude-code', 'model': '', 'effort': 'max',
@@ -113,8 +111,7 @@ class InstalledAgents(unittest.TestCase):
     def test_rerun_after_installing_an_agent_passes_the_environment_check(self):
         # 先跑安裝(還沒裝任何 agent)→ 只裝 Claude Code → 重跑安裝:環境檢查要過,不能卡在預設的 Codex
         import doctor
-        root = tempfile.mkdtemp(prefix='init-rerun-')
-        self.addCleanup(shutil.rmtree, root, True)
+        root = self.enterContext(tempfile.TemporaryDirectory(prefix='init-rerun-'))
         home0 = cf.HOME
         self.addCleanup(lambda: cf.reload(home0))
         home = os.path.join(root, 'h')
@@ -131,8 +128,7 @@ class InstalledAgents(unittest.TestCase):
         self.assertTrue(row['ok'], row)
 
     def test_rerun_keeps_an_agent_list_he_saved(self):
-        root = tempfile.mkdtemp(prefix='init-keep-')
-        self.addCleanup(shutil.rmtree, root, True)
+        root = self.enterContext(tempfile.TemporaryDirectory(prefix='init-keep-'))
         home0 = cf.HOME
         self.addCleanup(lambda: cf.reload(home0))
         home = os.path.join(root, 'h')
@@ -151,8 +147,7 @@ class PrivateTmp(unittest.TestCase):
     """暫存資料夾裡有給 agent 的指示、履歷片段、Email;/tmp 全機器共用,只能自己讀得到。"""
 
     def test_tmp_is_created_or_fixed_to_owner_only(self):
-        root = tempfile.mkdtemp(prefix='init-private-')
-        self.addCleanup(shutil.rmtree, root, True)
+        root = self.enterContext(tempfile.TemporaryDirectory(prefix='init-private-'))
         fresh, old = os.path.join(root, 'fresh'), os.path.join(root, 'old')
         os.makedirs(old)
         os.chmod(old, 0o755)                                    # 以前建出來的樣子
@@ -166,8 +161,7 @@ class BrokenSettings(unittest.TestCase):
 
     def test_saving_over_a_broken_file_keeps_the_original_and_doctor_says_so(self):
         import glob, doctor
-        home = tempfile.mkdtemp(prefix='init-broken-')
-        self.addCleanup(shutil.rmtree, home, True)
+        home = self.enterContext(tempfile.TemporaryDirectory(prefix='init-broken-'))
         f = os.path.join(home, cf.NAME)
         broken = '{"agent": {"agents": []} "board": {}}'
         with open(f, 'w', encoding='utf-8') as fh:

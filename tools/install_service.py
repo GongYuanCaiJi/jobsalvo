@@ -13,8 +13,7 @@ install_service —— 讓看板開機自己起、被殺自己回來(macOS launc
 
 查狀態:grep -c 起動 <紀錄檔>(數字一直長 = 在無限重啟);launchctl list | grep jobsalvo(第二欄是上次的結束碼)。
 """
-import os, sys, time, signal, argparse, subprocess
-from xml.sax.saxutils import escape
+import os, sys, time, signal, argparse, subprocess, contextlib, plistlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -42,32 +41,17 @@ PLIST = plist_path()
 
 
 def plist():
-    e = lambda s: escape(str(s))
-    return f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>{LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string>
-    <string>{e(os.path.join(HERE, 'board_serve.sh'))}</string>
-  </array>
-  <key>WorkingDirectory</key><string>{e(cf.HOME)}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>JOBSALVO_HOME</key><string>{e(cf.HOME)}</string>
-    <key>JOBSALVO_LAUNCHD</key><string>1</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <!-- 起來就崩的話至少隔 30 秒再試,不要變成每秒重開的迴圈 -->
-  <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>{e(cf.LOG)}</string>
-  <key>StandardErrorPath</key><string>{e(cf.LOG)}</string>
-</dict>
-</plist>
-'''
+    return plistlib.dumps({
+        'Label': LABEL,
+        'ProgramArguments': ['/bin/sh', os.path.join(HERE, 'board_serve.sh')],
+        'WorkingDirectory': cf.HOME,
+        'EnvironmentVariables': {'JOBSALVO_HOME': cf.HOME, 'JOBSALVO_LAUNCHD': '1'},
+        'RunAtLoad': True,
+        'KeepAlive': True,
+        'ThrottleInterval': 30,   # 起來就崩的話至少隔 30 秒再試,不要變成每秒重開的迴圈
+        'StandardOutPath': cf.LOG,
+        'StandardErrorPath': cf.LOG,
+    }).decode('utf-8')
 
 
 def stop_manual_board(home=None):
@@ -93,10 +77,8 @@ def stop_manual_board(home=None):
             os.kill(pid, 0)
     except ProcessLookupError:
         pass
-    try:
+    with contextlib.suppress(OSError):   # 已經不在了
         os.remove(pidfile)
-    except OSError:
-        pass
     return pid
 
 

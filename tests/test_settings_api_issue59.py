@@ -1,9 +1,7 @@
 import copy
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
@@ -11,41 +9,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
 from _env import read_fb  # noqa: E402
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import agent_report  # noqa: E402
-import board_doc as bd  # noqa: E402
 import config as cf  # noqa: E402
 import settings_api as sa  # noqa: E402
 
 
 class SettingsApiIssue59(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='settings-api-')
-        self.home = os.path.join(self.tmp, 'home')
-        os.makedirs(os.path.join(self.home, 'resume'))
-        self.old_home = cf.HOME
-        self.old_env_home = os.environ.get('JOBSALVO_HOME')
-        self.settings = copy.deepcopy(cf.DEFAULTS)
-        self.settings['board']['file'] = 'board.html'
-        self.settings['resume']['langs'] = ['zh']
-        self.settings['resume']['resumes'] = [
-            {'id': 'general', 'name': '通用', 'files': {'zh': 'resume/main.md'}}]
-        with open(os.path.join(self.home, cf.NAME), 'w', encoding='utf-8') as target:
-            json.dump(self.settings, target, ensure_ascii=False)
-        os.environ['JOBSALVO_HOME'] = self.home
-        cf.reload(self.home)
+        _env.use_home(self, board={'file': 'board.html'}, resume={
+            'langs': ['zh'], 'resumes': [{'id': 'general', 'name': '通用', 'files': {'zh': 'resume/main.md'}}]})
         with open(os.path.join(self.home, 'resume', 'main.md'), 'w', encoding='utf-8') as target:
             target.write('# Source\n')
-        with open(os.path.join(self.home, 'board.html'), 'w', encoding='utf-8') as target:
-            target.write(bd.assemble(':root{}', '<b id="stat-first">0</b>', '', {'jobs': []}, '{}', '/*app*/'))
+        _env.make_board(os.path.join(self.home, 'board.html'))
 
-    def tearDown(self):
-        if self.old_env_home is None:
-            os.environ.pop('JOBSALVO_HOME', None)
-        else:
-            os.environ['JOBSALVO_HOME'] = self.old_env_home
-        cf.reload(self.old_home)
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_legacy_builder_is_removed_and_reported_once_without_execution(self):
         sentinel = os.path.join(self.tmp, 'command-ran')
@@ -139,7 +115,6 @@ class SettingsApiIssue59(unittest.TestCase):
 
     def test_settings_page_lists_multi_page_markdown_source(self):
         import source_sync
-        import board_server
         entry = next(source_sync.files())
         manifest = {source_sync.page_key(entry): 2}
         with open(os.path.join(self.home, '.reconcile-manifest.json'), 'w', encoding='utf-8') as target:
@@ -147,8 +122,9 @@ class SettingsApiIssue59(unittest.TestCase):
         self.assertEqual(sa.markdown_warnings(), [{
             'kind': 'resume', 'id': 'general', 'lang': 'zh', 'name': 'main.md', 'pages': 2,
         }])
-        page = board_server.page_cfg()
-        self.assertEqual(page['resumes'][0]['preview_langs'], ['zh'])
+        import ship
+        got = ship.card_files({'id': 'test://jobs/md', 'resume': {'recommend': 'general', 'lang': 'zh'}}, {})
+        self.assertTrue(got['files'][0]['preview'])      # markdown 原始檔照樣有預覽
 
 
 if __name__ == '__main__':

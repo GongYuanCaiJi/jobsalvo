@@ -21,7 +21,7 @@ repos:
     rev: v8.30.0
     hooks:
       - id: gitleaks
-  # 出錯就吞掉(except 裡只有 pass)、沒用到的 import 和變數。真的該忽略的在那行寫 # noqa: S110 和原因
+  # 不准默默失敗(抓所有例外、吞錯)、沒用到的 import 和變數。規則在 pyproject.toml;真的無害的在那行寫 # noqa: <規則> — <理由>
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.9
     hooks:

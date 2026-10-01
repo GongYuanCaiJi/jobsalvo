@@ -81,7 +81,7 @@ def main():
             import agent_report
             agent_report.report('找新職缺',f'這輪沒跑完:{type(e).__name__}: {e}',
                                 need='可以再按一次;一直失敗就在「🔎 找新職缺」按「看紀錄」',live=a.live)
-        except Exception: pass  # noqa: S110
+        except Exception: pass  # noqa: BLE001, S110 — 原因上面已經寫進進度,下一行照樣丟出去;看板回報只是再提醒一次
         raise
 
 def _main(a,direction,st,finishing=lambda:False,time_up=lambda:False):

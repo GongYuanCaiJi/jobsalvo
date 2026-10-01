@@ -5,20 +5,24 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 
 
 GENERATED = (
     'ship/', 'prepare/', '.rendered/', '.previews/', '.preview-cache/',
     'card-summaries/', 'company-cache/', '.research/', 'posted-cache.json',
     '.reconcile-manifest.json', '.reconcile.lock', '.reconcile.lock.*',
-    'board-server.log', 'agent-runs.jsonl', '*.tmp',
+    'board-server.log', 'agent-runs.jsonl', '*.tmp', 'before-conversion-backups/',
+    'evidence/',                                   # 每一輪的證據(截圖、動作紀錄):大、而且只給查錯用(#315)
 )
+BACKUP_DIR = 'before-conversion-backups'   # 存不了版時,轉換前的備份放資料夾裡這一格
 _REPOSITORY_MARKER = 'jobsalvo-data-repository'
 _REPOSITORY_MARKER_CONTENT = 'jobsalvo local data repository\n'
 _lock = threading.Lock()
 _timers = {}
 _pending = set()
 _last_errors = {}
+_conversion_problems = {}
 _git_override = None
 _REPOSITORY_ENV = {
     'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
@@ -45,7 +49,7 @@ def _run(git, home, *args, check=True):
 
 def _repository_root(git, home):
     root = _run(git, home, 'rev-parse', '--show-toplevel', check=False)
-    return os.path.realpath(root.stdout.strip()) if root.returncode == 0 else None
+    return os.path.realpath(root.stdout.strip()) if root.returncode == 0 and root.stdout.strip() else None
 
 
 def _is_home_repository(git, home):
@@ -72,15 +76,25 @@ def _has_remote(git, home):
     return bool(result.stdout.strip())
 
 
-def _repository_block_reason(git, home):
-    if _repository_root(git, home) != os.path.realpath(home):
-        return ''
-    if not _is_jobsalvo_repository(git, home):
-        return ('資料夾已是既有 Git repo，不是 jobsalvo 建立；為避免把求職資料提交到程式碼 repo，'
-                'jobsalvo 不會 commit。')
+def _repository_problem(git, home):
+    """不自動存版的原因和怎麼處理 (reason, fix);能存版回 ('', '')。
+    資料夾本身就是 repo 根目錄、沒有 remote、裡面有 jobsalvo.json(從舊系統搬來的資料夾)就接手照常存版。"""
+    root = _repository_root(git, home)
+    if root is None:
+        return '', ''
+    if root != os.path.realpath(home):
+        return (f'資料夾在另一個 Git repo（{root}）裡面，是它的子資料夾；為避免把求職資料提交到那個 repo，'
+                'jobsalvo 不自動存版。',
+                '把資料夾搬到那個 repo 外面（再到設定頁改資料夾位置）；搬好後下一次存檔就會自動存版。')
     if _has_remote(git, home):
-        return 'jobsalvo 資料 repo 已設定 remote；為避免求職資料被推送，版本紀錄已停用。'
-    return ''
+        return ('資料夾的 Git repo 設了 remote（會推到別處）；為避免求職資料被推送，jobsalvo 不自動存版。',
+                '確定這個 repo 只放求職資料的話，在資料夾裡跑 git remote -v 看是哪一個，再用 git remote remove <名稱> 拿掉；'
+                '不確定就把求職資料搬到另一個資料夾。拿掉後下一次存檔就會自動存版。')
+    if _is_jobsalvo_repository(git, home) or os.path.isfile(os.path.join(home, 'jobsalvo.json')):
+        return '', ''
+    return ('資料夾已是既有 Git repo，裡面沒有 jobsalvo.json，不像 jobsalvo 的資料夾；為避免把別的東西提交進去，'
+            'jobsalvo 不自動存版。',
+            '確認資料夾位置對不對（設定頁）；jobsalvo 的資料夾裡會有 jobsalvo.json。')
 
 
 def _generated_patterns(home):
@@ -135,23 +149,29 @@ def _exclude_generated(git, home):
             target.write('# jobsalvo generated files\n' + '\n'.join(missing) + '\n')
 
 
+def _write_marker(git, home):
+    marker = _marker_path(git, home)
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    with open(marker, 'w', encoding='utf-8') as target:
+        target.write(_REPOSITORY_MARKER_CONTENT)
+
+
 def _ensure_repository(git, home):
     os.makedirs(home, exist_ok=True)
     root = _repository_root(git, home)
+    reason = _repository_problem(git, home)[0]
+    if reason:
+        raise RuntimeError(reason)
     if root == os.path.realpath(home):
-        reason = _repository_block_reason(git, home)
-        if reason:
-            raise RuntimeError(reason)
+        if not _is_jobsalvo_repository(git, home):
+            _write_marker(git, home)   # 從舊系統搬來的資料夾:接手成 jobsalvo 的資料 repo
     else:
         _run(git, home, 'init', '--initial-branch=data')
-        marker = _marker_path(git, home)
-        os.makedirs(os.path.dirname(marker), exist_ok=True)
-        with open(marker, 'w', encoding='utf-8') as target:
-            target.write(_REPOSITORY_MARKER_CONTENT)
+        _write_marker(git, home)
     _exclude_generated(git, home)
 
 
-def _commit(git, home):
+def _commit(git, home, message='jobsalvo save'):
     _ensure_repository(git, home)
     _run(git, home, 'add', '-A')
     changed = _run(git, home, 'diff', '--cached', '--quiet', check=False)
@@ -165,7 +185,7 @@ def _commit(git, home):
         configured = _run(git, home, 'config', key, check=False)
         if not configured.stdout.strip():
             identity.extend(('-c', f'{key}={fallback}'))
-    _run(git, home, *identity, 'commit', '-m', 'jobsalvo save')
+    _run(git, home, *identity, 'commit', '-m', message)
     return True
 
 
@@ -221,17 +241,104 @@ def flush_now(home):
     return _flush(home)
 
 
-def status(home):
-    git = _git()
+def _save_version(git, home, files, why):
+    """同步存一版,確認每個檔案都在這一版裡、跟磁碟上一模一樣;回傳版本代碼。"""
+    relatives = []
+    for path in files:
+        real = os.path.realpath(path)
+        try:
+            inside = os.path.commonpath((home, real)) == home
+        except ValueError:
+            inside = False
+        if not inside:
+            raise RuntimeError(f'{os.path.basename(path)} 不在資料夾裡，版本紀錄收不到它')
+        relatives.append(os.path.relpath(real, home))
+    with _lock:
+        timer = _timers.pop(home, None)
+        if timer:
+            timer.cancel()
+        _pending.discard(home)
+    _commit(git, home, message='jobsalvo 轉換前：' + why)
+    for relative in relatives:
+        _run(git, home, 'ls-files', '--error-unmatch', '--', relative)
+        if _run(git, home, 'status', '--porcelain', '--', relative).stdout.strip():
+            raise RuntimeError(f'{relative} 沒有完整存進這一版')
+    return _run(git, home, 'rev-parse', '--short', 'HEAD').stdout.strip()
+
+
+def _back_up(home, files, why):
+    if not files:
+        raise OSError('沒有檔案可以備份')
+    folder = os.path.join(home, BACKUP_DIR)
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    label = ''.join('-' if char in '/\\:' else char for char in why)
+    copies = []
+    for path in files:
+        target = os.path.join(folder, f'{stamp}-{label}-{os.path.basename(path)}')
+        number = 1
+        while os.path.exists(target):
+            number += 1
+            target = os.path.join(folder, f'{stamp}-{label}-{number}-{os.path.basename(path)}')
+        shutil.copy2(path, target)
+        if os.path.getsize(target) != os.path.getsize(path):
+            raise OSError(f'{target} 沒有完整複製')
+        copies.append(target)
+    return copies
+
+
+def convert(home, files, why, do):
+    """回不了頭的資料轉換一律走這裡:先留退回點,有退回點才呼叫 do() 轉。
+    退回點:先存一版(轉換前那一版就是舊格式);存不了版,就把 files 備份到資料夾內 BACKUP_DIR。
+    兩樣都做不到就不轉,原因留給設定頁和環境檢查看。回傳 {'done', 'restore', 'reason'}。"""
     home = os.path.realpath(home)
+    files = [path for path in files if os.path.isfile(path)]
+    restore, reasons = '', []
+    git = _git()
+    if git:
+        try:
+            restore = '轉換前的版本 ' + _save_version(git, home, files, why)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            reasons.append('存版失敗：' + str(exc)[:160])
+    else:
+        reasons.append('找不到 git，存不了版')
+    if not restore:
+        try:
+            restore = '轉換前的備份 ' + '、'.join(_back_up(home, files, why))
+        except OSError as exc:
+            reasons.append('備份失敗：' + str(exc)[:160])
+    if not restore:
+        reason = '；'.join(reasons)
+        with _lock:
+            _conversion_problems.setdefault(home, {})[why] = f'{why}還沒轉換（沒有退回點）：{reason}'
+        return {'done': False, 'restore': '', 'reason': reason}
+    with _lock:
+        _conversion_problems.get(home, {}).pop(why, None)
+    do()
+    note_saved(home)   # 轉完的新格式也留一版
+    return {'done': True, 'restore': restore, 'reason': ''}
+
+
+def status(home):
+    home = os.path.realpath(home)
+    with _lock:
+        conversion = '；'.join(_conversion_problems.get(home, {}).values())
+    result = _status(home)
+    if conversion:
+        result['conversion'] = conversion
+    return result
+
+
+def _status(home):
+    git = _git()
     with _lock:
         pending = home in _pending
         last_error = _last_errors.get(home, '')
     if not git:
         return {'available': False, 'message': '沒有版本紀錄，因為找不到 git', 'pending': False}
-    blocked = _repository_block_reason(git, home)
+    blocked, fix = _repository_problem(git, home)
     if blocked:
-        return {'available': True, 'message': '版本紀錄未啟用：' + blocked, 'pending': pending}
+        return {'available': True, 'message': '版本紀錄未啟用：' + blocked, 'fix': fix, 'pending': pending}
     if not _is_home_repository(git, home):
         return {'available': True, 'message': '版本紀錄失敗：' + last_error if last_error else
                 '第一次儲存後會建立本機版本紀錄', 'pending': pending}
