@@ -460,8 +460,10 @@ class Http(HttpBase):
         那一格不准的不做事、回原因。以前看板整張卡寫回,自動流程剛寫的「正在送出」被舊分頁蓋回「你已確認」。"""
         import delivery_state as ds
         a, b = JOBS[0]['id'], JOBS[1]['id']
-        filled = {'app': 'ship', 'form': {'plat': 'x', 'f': []}, 'apply': {'stage': 'fill', 'tab_id': '7'}}
-        make_board(self.path, {a: dict(filled, ds='sending', approve={'snap': {}}), b: dict(filled, ds='parked')})
+        filled = {'app': 'ship', 'form': {'plat': 'x', 'f': []},
+                  'apply': {'stage': 'fill', 'tab_id': '7', 'delivery': {'method': 'direct_upload'}}}
+        make_board(self.path, {a: dict(filled, ds='sending', approve={'snap': {}}), b: dict(filled, ds='parked')},
+                   data={'jobs': JOBS, 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}})   # 驗收跑完、沒擋:能確認
         stale_tab = dict(filled, ds='confirmed', approve={'snap': {}}, n='我的筆記')
         code, raw, _ = self.req('/api/save', {'__rev__': 1, a: stale_tab, '__events__': [
             {'u': a, 'ev': 'unconfirm'},                                    # 8 秒計時器已經開始送:取消確認撞上
@@ -476,10 +478,13 @@ class Http(HttpBase):
     def test_undo_only_when_nothing_else_moved_the_card(self):
         import delivery_state as ds
         a = JOBS[0]['id']
-        make_board(self.path, {a: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '7'}}})
+        make_board(self.path, {a: {'app': 'ship', 'ds': 'parked', 'form': {'plat': 'x', 'f': []},
+                                   'apply': {'stage': 'fill', 'tab_id': '7', 'delivery': {'method': 'direct_upload'}}}},
+                   data={'jobs': JOBS, 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}})
         before = ds.part(read_fb(self.path)[a])
         self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'confirm', 'data': {'approve': {'snap': {}}}}]})
         after = ds.part(read_fb(self.path)[a])
+        self.assertEqual(ds.state(read_fb(self.path)[a]), 'confirmed')
         code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'undo': {'prev': before, 'after': after}}]})
         self.assertEqual(ds.state(read_fb(self.path)[a]), 'parked')
         self.assertEqual(json.loads(raw)['rejected'], [])
@@ -488,12 +493,13 @@ class Http(HttpBase):
         code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'undo': {'prev': before, 'after': after}}]})
         self.assertEqual(json.loads(raw)['rejected'][0]['u'], a)
         self.assertEqual(ds.state(read_fb(self.path)[a]), 'stale')
-        # 正在填的時候按「復原」換回履歷:也算換檔,填完到「上傳的是舊檔」(修正 12)
+        # 正在填的時候按「復原」換回履歷:也算換檔,正在填不准換檔(#341),原因照卡上那一句
         bs.bd.set_fb(lambda f: ds.fire(f, a, 'fill_start', apply={'stage': 'fill', 'at': 'x', 'issues': []}), live=self.path)
         code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [
             {'u': a, 'undo': {'prev': before, 'after': after}, 'else': {'ev': 'files_changed', 'data': {'why': '履歷換回來了'}}}]})
         m = read_fb(self.path)[a]
-        self.assertEqual((ds.state(m), m['apply']['stale']), ('running', '履歷換回來了'))
+        self.assertEqual((ds.state(m), m['apply'].get('stale')), ('running', None))
+        self.assertEqual(json.loads(raw)['rejected'][0]['msg'], 'Agent 正在做,等它做完')
 
     def test_undo_actually_sent_although_the_server_noted_the_sent_version(self):
         """送出結果不明 → 其實送出了 → 復原:後台套完事件會補記寄出的是哪一份(sent_v),看板照狀態表算的 after 沒有它。

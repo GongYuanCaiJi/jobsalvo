@@ -86,8 +86,14 @@ class Walks(unittest.TestCase):
         self.assertGreater(n, 500)
 
     def test_the_same_walk_twice_is_the_same(self):
-        a, b = dw.walks(3, 20), dw.walks(3, 20)
-        self.assertEqual(a, b)
+        """失敗訊息印的種子重跑得出同一串。"""
+        def run(seed):
+            w = dw.Walk(seed)
+            for _ in range(20):
+                w.step()
+            return w.log, w.ops, w.fb
+        for i in range(3):
+            self.assertEqual(run(dw.SEED * 100000 + i), run(dw.SEED * 100000 + i))
 
 
 if __name__ == '__main__':

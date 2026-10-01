@@ -358,10 +358,10 @@ class Customization(unittest.TestCase):
         saved, error = customize.upload_custom(
             self.url, 'resume:general:zh', 'mine.pdf', b'%PDF-1.4\nmine', board=self.board)
         self.assertIsNone(saved)
-        self.assertIn('正在送出', error)
+        self.assertEqual(error, 'Agent 正在做,等它做完')
         ok, why = customize.clear(self.url, 'resume:legacy', board=self.board)
         self.assertFalse(ok)
-        self.assertIn('正在送出', why)
+        self.assertEqual(why, 'Agent 正在做,等它做完')
         self.assertEqual(self._fb()[self.url], before)
 
     def test_accepted_custom_is_kept_per_language(self):

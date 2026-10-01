@@ -10,6 +10,7 @@ import autopilot as ap
 import board_doc as bd
 import delivery_state as ds
 import demo
+import next_step
 
 CFG = {'auto_prep': True, 'auto_advance': True, 'auto_fill': True, 'replies_at': '09:00'}
 NOW = datetime.datetime(2026, 1, 5, 10, 0)
@@ -233,14 +234,14 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(p2['fix']); self.assertIn('a', p2['rf'])
         fb['__auto__']['rf'] = p2['rf']
         p3 = run(data('a'), fb, now=NOW + datetime.timedelta(seconds=151))
-        self.assertEqual(p3['fix'], 'a'); self.assertEqual(p3['tried'], ['fix:a:' + ap.fix_sig(fb, 'a')])
+        self.assertEqual(p3['fix'], 'a'); self.assertEqual(p3['tried'], ['fix:a:' + next_step.fix_sig(fb, 'a')])
         fb['__auto__']['tried'] = p3['tried']
         self.assertIsNone(run(data('a'), fb, now=NOW + datetime.timedelta(seconds=300))['fix'])
 
     def test_refix_that_leaves_the_mark_is_not_repeated(self):
         # 重打完 apply.at 換新,但還標著(agent 沒打好):不能再派,不然同一張一直重打、後面的排不到
         fb = self._filled()
-        fb['__auto__']['rf'] = {'a': {'sig': ap.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
+        fb['__auto__']['rf'] = {'a': {'sig': next_step.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
         p = run(data('a'), fb)
         self.assertEqual(p['fix'], 'a')
         fb['__auto__']['tried'] = p['tried']
@@ -265,7 +266,7 @@ class PlanTest(unittest.TestCase):
 
     def test_refix_goes_before_fill_and_blocks_it(self):
         fb = self._filled()
-        fb['__auto__']['rf'] = {'a': {'sig': ap.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
+        fb['__auto__']['rf'] = {'a': {'sig': next_step.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
         fb['b'] = {'app': 'ship'}
         p = run(data('a', 'b'), fb)
         self.assertEqual(p['fix'], 'a'); self.assertIsNone(p['fill'])
@@ -274,7 +275,7 @@ class PlanTest(unittest.TestCase):
         # 送出沒確認成功(可能其實送出去了):自動流程不替它重打、也不重填,等他先確認到底送出沒有
         sf = {'at': 't1', 'problems': ['沒看到成功頁面']}
         fb = self._filled('unsure', submit_fail=sf)
-        fb['__auto__']['rf'] = {'a': {'sig': ap.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
+        fb['__auto__']['rf'] = {'a': {'sig': next_step.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
         self.assertIsNone(run(data('a'), fb)['fix'])
         ds.fire(fb, 'a', 'page_lost', issues=[ds.GONE])                    # Chrome 關過:仍是送出結果不明
         self.assertIsNone(run(data('a'), fb)['fill'])
@@ -306,14 +307,6 @@ class PlanTest(unittest.TestCase):
         self.assertFalse(run(data('a'), fb, last=last('failed', 61))['replies'])
         fb['__auto__']['replies_retry'] = {'day': '2026-01-04', 'n': 3}                   # 昨天的次數不算
         self.assertTrue(run(data('a'), fb, last=last('failed', 61))['replies'])
-
-    def test_board_uses_the_same_retry_numbers(self):
-        """已投出最上面那一列寫的「幾點自動再試、第幾次」跟這裡的規則同一組數字。"""
-        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'board', 'board.js'),
-                  encoding='utf-8') as f:
-            js = f.read()
-        want = f'var REPLY_RETRY={{max:{ap.REPLY_RETRY_MAX},gap:{ap.REPLY_RETRY_GAP}}};'
-        self.assertTrue(want in js, f'board.js 沒有 {want}')
 
     def test_invalid_saved_replies_time_never_wraps_to_another_hour(self):
         fb = {'__auto__': auto(), 'a': {'app': 'sent'}}
@@ -517,7 +510,8 @@ class PilotStepTest(unittest.TestCase):
         p.step()
         self.assertEqual(applies(), [('apply', {'stage': 'fix', 'url': new})])
         self.assertTrue([k for k in self.fb()['__auto__']['tried'] if k.startswith('fix:' + new + ':')])
-        self.assertTrue(self.fb()['__auto__']['rf'][new].get('done'))
+        doc = _read(self.board)                        # 派過了:卡上不再寫會自動重打
+        self.assertIsNone(next_step.of(self.fb(), doc['data']['jobs'], doc['data'].get('status'), flow=ap.flow())[new]['auto'])
 
         # 重打好了(標記清掉)→ 記號跟著清掉;他之後把答案改回同一個值,還是會再重打一次
         def done(fb):

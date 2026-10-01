@@ -1167,7 +1167,7 @@ def settle(fb, busy):
     n = 0
     for u, m in list(fb.items()):
         s = ds.state(m) if isinstance(m, dict) and not u.startswith('__') else None
-        if s not in ('running', 'sending') or busy == '*' or busy == u:
+        if s not in ds.WORKING or busy == '*' or busy == u:
             continue
         if s == 'running':
             stage = apply_of(fb, u).get('stage') if apply_of(fb, u).get('stage') in UNFINISHED else 'fill'

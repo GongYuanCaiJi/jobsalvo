@@ -58,15 +58,13 @@ def with_name(value, replacement):
 
 
 # ── 公司名(卡片分組、封鎖名單、指名要找的都用它)──────────────────────
-# 看板 board/board.js 的 companyOf 是同一條規則的另一份(頁面離線、改別名要當場重畫,不能等伺服器)。
-# 兩邊用 tests/fixtures/board-rule-cases.json 的 companies / company_same 鎖住:
-# 這裡由 tests/test_card.py 跑,頁面那份由 board_check 的「共用規則案例表」跑。
+# 只有這一份:看板拿的是 label_jobs 算好跟著職缺送去的公司名,不自己算(#343)。
 _CO_URL = [re.compile(p, re.I) for p in (
     r'lever\.co/([^/?#]+)', r'greenhouse\.io/([^/?#]+)', r'ashbyhq\.com/([^/?#]+)',
     r'cake(?:resume)?\.(?:me|com)/companies/([^/?#]+)', r'join\.com/companies/([^/?#]+)',
     r'workable\.com/[^/]*/?([^/?#]+)')]
-# 標題有「職稱 · 公司」也有「公司 · 職稱」:哪一段像職稱,另一段就是公司。看板(board.js)、
-# 偏好筆記(prefs)、自動流程都用這一份;頁面從設定拿到同一張清單(board_server.page_cfg)。
+# 標題有「職稱 · 公司」也有「公司 · 職稱」:哪一段像職稱,另一段就是公司。看板(label_jobs)、
+# 你的喜好(prefs)、自動流程都用這一份。
 # 各行各業常見的職稱字都放;使用者在設定 board.title_words 再加自己領域的字(當一般文字比對,不是正規表示式)。
 # 短的英文字前後要有字界,不然會吃到公司名(例:Agent 會中 AgentOps);常出現在公司名裡的中文字(律師、護理、會計)不放。
 TITLE_WORDS = [
@@ -135,7 +133,7 @@ def company(job, alias=None, extra_titles=None):
         if low in alias:
             return alias[low]
         s = re.sub(r'\s+', ' ', re.sub(r'[-_]', ' ', s)).strip()
-        s = re.sub(r'\b\w', lambda m: m.group(0).upper(), s, flags=re.A)
+        s = re.sub(r'\b\w', lambda m: m.group(0).upper(), s)   # 字邊界照 Unicode:Straße 不會變 StraßE
         stripped = company_norm(s)
         return alias.get(stripped.lower(), stripped)
 
@@ -161,3 +159,46 @@ def company(job, alias=None, extra_titles=None):
     if t and not title_rx.search(t):
         return company_norm(re.sub(r'^[\[（(]+', '', t))[:22]
     return '其他'
+
+
+def platform(job):
+    """這張卡是從哪個平台來的(已投遞成效的「來源平台」):找缺時存的平台網域,沒有就看職缺網址;都沒有是「不明」。
+    posted_src 是刊登日期欄位名稱,不能當平台。"""
+    j = job if isinstance(job, dict) else {}
+    src = j.get('src') if isinstance(j.get('src'), dict) else {}
+    s = str(j.get('source_platform') or src.get('platform') or src.get('site') or j.get('platform') or '').strip()
+    if not s and re.match(r'^https?://[^/?#]+', str(j.get('id') or '').strip(), re.I):
+        s = str(j.get('id')).strip()
+    if not s:
+        return '不明'
+    host = re.split(r'[/?#]', re.sub(r'^https?://', '', s, flags=re.I))[0].lower()
+    host = host[4:] if host.startswith('www.') else host
+    for pat, label in ((r'(^|\.)104\.com\.tw$', '104'), (r'(^|\.)linkedin\.com$', 'LinkedIn'),
+                       (r'(^|\.)cakeresume\.(com|me)$', 'CakeResume'), (r'greenhouse\.io$', 'Greenhouse'),
+                       (r'lever\.co$', 'Lever'), (r'workday|myworkdayjobs', 'Workday'), (r'ashbyhq\.com$', 'Ashby')):
+        if re.search(pat, host):
+            return label
+    return host if '.' in host else s
+
+
+def label_jobs(jobs, alias=None, extra_titles=None):
+    """送給看板的卡:每張帶上卡名(name)、公司名(co)、來源平台(src_plat)、死線那一天(dl),看板直接用,不自己算(#343)。
+    同一家(same_company:大小寫、德文的雙 s、法律字尾不同也算)整份看板只用一個寫法(先看到的那張),
+    看板拿 co 分組、比同一家就是比字串。不改原本的 list。"""
+    seen, out = {}, []
+    for j in jobs or []:
+        if not isinstance(j, dict):
+            out.append(j)
+            continue
+        co = company(j, alias, extra_titles)
+        co = seen.setdefault(company_norm(co).casefold(), co)
+        out.append(dict(j, name=name(j), co=co, src_plat=platform(j), dl=deadline(j)))
+    return out
+
+
+def deadline(job):
+    """死線是哪一天(YYYY-MM-DD,認不出是 ''):摘要裡的截止日可能寫在一句話裡(2026.9.26 前)。
+    看板拿它比今天(當地時間):那一天整天都還來得及。"""
+    s = job.get('sum')
+    m = re.search(r'(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})', str((s.get('deadline') if isinstance(s, dict) else '') or ''))
+    return '%s-%02d-%02d' % (m[1], int(m[2]), int(m[3])) if m else ''

@@ -23,18 +23,14 @@ Chrome 沒連的檢查都一樣)。
     不拿舊的驗收結果放行。
 狀態記在標記的 __auto__(跟看板同一份檔,手機電腦都看得到,流水帳查得到)。
 """
-import copy, datetime, hashlib, json, re, threading, time
+import copy, datetime, json, re, threading, time
 
 import board_doc as bd
 import delivery_state as ds
 import config as cf
-import form_record as fr
-import ship
+import next_step
 
 KEY = '__auto__'
-# 答案改完多久沒再動才叫 agent 重打:他常常一次改好幾條(或同一條改兩次),
-# 改一條就派一次,agent 會在頁面上重打好幾輪。副本沒有真的 agent,等短一點。
-QUIET = {True: 60, False: 3}
 # 排程的查應徵進度沒跑成:隔多久再試、當天最多再試幾次(#289 決定)。看板那一列用同一組數字寫「幾點再試」
 REPLY_RETRY_MAX = 3
 REPLY_RETRY_GAP = 3600
@@ -48,36 +44,6 @@ def flow():
 
 def flow_modes(cfg):
     return {key: bool(cfg.get(key)) for key in ('auto_prep', 'auto_advance', 'auto_fill')}
-
-
-def ship_blocked(fb, job, status):
-    """這張能不能進可投遞:不能就回原因。跟看板 board.js 的 shipBlocked 同一條規則。"""
-    # 客製只看這張現在會寄的那幾份:換了履歷留下的舊紀錄不擋(以前每一筆都看,卡永遠卡在待你決定)
-    waiting = ship.customization_problem(job, fb)
-    if waiting:
-        return waiting
-    st = status or {}
-    # 字跟看板一字不差:核准規則(form_record.approval_problem)也用這一支,卡上顯示的就是這句
-    if st.get('schema_version') != 2:
-        return '投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)'
-    if st.get('checked_links') is False:
-        return '職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)'
-    bad = [x.get('msg') for x in st.get('issues') or [] if x.get('jid') == job['id'] and not x.get('soft')]
-    return ('驗收未通過：' + '；'.join(bad)) if bad else ''
-
-
-def fix_sig(fb, i):
-    """這張等著照新答案重打的是哪幾條、答案庫現在寫什麼。空字串 = 沒有要重打的。
-    值也算進去:同一條又改一次,要重新等他停手。"""
-    import apply_run                                 # 要重翻的判斷只有一份,在 apply_run
-    bank = {e.get('k'): [e.get('v'), e.get('zh')] for e in fb.get('__ans__') or [] if isinstance(e, dict)}
-    f = ((fb.get(i) or {}).get('form') or {}).get('f') or []
-    ks = sorted(set(str(x.get('k') or x.get('q')) for x in f if x.get('refill'))
-                | set('tr:' + str(t['k']) for t in apply_run.to_translate(fb, i)))
-    if not ks:
-        return ''
-    raw = json.dumps([[k, bank.get(k[3:] if k.startswith('tr:') else k)] for k in ks], ensure_ascii=False)
-    return hashlib.blake2b(raw.encode('utf-8'), digest_size=8).hexdigest()   # 只是「有沒有又改過」的指紋,不是卡片 ID
 
 
 def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, real=True, replies_last=None):
@@ -109,30 +75,27 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
         out['init'] = {'since': now.isoformat(timespec='seconds'), 'skip': backlog, 'tried': [],
                        'seen': {}, 'flow': flow_modes(cfg)}
         return out
-    skip, tried, seen = set(auto.get('skip') or []), set(auto.get('tried') or []), auto.get('seen') or {}
+    tried, seen = set(auto.get('tried') or []), auto.get('seen') or {}
+    nexts = next_step.of(fb, data.get('jobs'), data.get('status'), flow=cfg, now=now, real=real,
+                         gen=verified_gen, building=build_running)
 
-    def mine(i):
-        # 封鎖的公司:畫面上看不到,也不該在背景替它準備、填表
-        return live(i) and i not in skip and not ds.company_blocked(fb, jobs[i])
+    def does(i):
+        return (nexts[i]['auto'] or {}).get('do') if i in nexts else None
 
     if cfg.get('auto_advance'):
         for i in jobs:
-            if stage(i) != 'ready' or not mine(i) or ('adv:' + i) in tried:
-                continue                     # 推過一次、他又手動退回來的,留在原地
-            if i not in seen:
-                # 等這張進來之後才開始(或正在跑)的那一輪建置跑完
+            # 新進待你決定的卡:記下要等到第幾輪建置(這張進來之後才開始、或正在跑的那一輪);被把關擋住的也記,
+            # 有新的才補建一輪。推過一次、他又手動退回來的,留在原地
+            if stage(i) == 'ready' and i not in seen and next_step.mine(fb, jobs[i]) and ('adv:' + i) not in tried:
                 out['seen'][i] = verified_gen + (1 if build_running else 0)
-                if real:
-                    continue
-            elif real and (build_running or verified_gen <= int(seen[i])):
-                continue
-            if not ds.company_blocked(fb, jobs[i]) and not ship_blocked(fb, jobs[i], data.get('status')):
+        # 推哪幾張、等不等驗收跑完只照下一步(被投遞前把關擋住的留著,原因寫在卡上)
+        for i, x in nexts.items():
+            if does(i) == 'advance' and not x['auto']['wait']:
                 out['advance'].append(i)
-                out['tried'].append('adv:' + i)
+                out['tried'].append(x['auto']['mark'])
 
     if cfg.get('auto_prep') and not running.get('prep'):
-        todo = [i for i in jobs if stage(i) == 'prep' and mine(i) and not jobs[i].get('prep_note')
-                and ('prep:' + i) not in tried]
+        todo = [i for i in jobs if does(i) == 'prep']
         if todo:
             others = [i for i in jobs if stage(i) == 'prep' and live(i) and i not in todo]
             # 準備區只有這幾張:一輪跑完(cut_tailor 一次判一批最省);混著 backlog 或失敗過的:一次只跑一張
@@ -140,7 +103,7 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
             out['prep'] = 'all' if not others else batch
             out['tried'] += ['prep:' + i for i in batch]
 
-    # 代投和查應徵進度都用 agent 的 Chrome,一邊收尾會把 Chrome 關掉:一次只排一件
+    # 幫你填表和查應徵進度都用 agent 的 Chrome,一邊收尾會把 Chrome 關掉:一次只排一件
     chrome_busy = running.get('apply') or running.get('replies')
 
     if cfg.get('auto_fill') and not chrome_busy:
@@ -149,62 +112,26 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
         # 重打完還標著(agent 沒翻、沒打好)就停在卡上等他。不能用 apply.at 當記號——
         # 每重打一次 at 就換新,會變成同一張一直重打、後面的永遠排不到(副本上真的發生過)。
         rfs = auto.get('rf') or {}
-        for i in jobs:
-            m = fb.get(i) or {}
-            if (stage(i) != 'ship' or not mine(i) or ds.state(m) != 'parked'
-                    or not (m.get('apply') or {}).get('session')):
+        for i, x in nexts.items():
+            x = x['auto'] or {}
+            if x.get('do') != 'fix':
                 continue
-            if fr.answers_pending(fb, i):
-                continue                     # 還有答案等他確認:確認完再一次重打,不然確認一條就要再打一輪
-            sig = fix_sig(fb, i)
-            k = 'fix:' + i + ':' + sig
-            if not sig or k in tried:
-                continue
-            r = rfs.get(i) or {}
-            if r.get('sig') != sig:
-                out['rf'][i] = {'sig': sig, 'since': now.isoformat(timespec='seconds')}
-                left = QUIET[bool(real)]
-            else:
-                try:
-                    since = datetime.datetime.fromisoformat(r.get('since'))
-                except (TypeError, ValueError):
-                    since = now
-                left = QUIET[bool(real)] - (now - since).total_seconds()
-            if left > 0:
-                out['wait'] = left if out['wait'] is None else min(out['wait'], left)
+            if (rfs.get(i) or {}).get('sig') != x['sig']:
+                out['rf'][i] = {'sig': x['sig'], 'since': now.isoformat(timespec='seconds')}   # 新的改動:從現在開始等他停手
+            if x['wait'] > 0:
+                out['wait'] = x['wait'] if out['wait'] is None else min(out['wait'], x['wait'])
                 continue
             out['fix'] = i
-            out['tried'].append(k)
+            out['tried'].append(x['mark'])
             break
 
-    def held(i):
-        # 停著的頁(投遞狀態是綠底那五種;看板的 held 同一條)
-        return i in jobs and ds.held(fb, i, jobs[i])
-
-    try:
-        cap = max(0, int(cfg.get('fill_max') if cfg.get('fill_max') is not None else 5))
-    except (TypeError, ValueError):
-        cap = 5
-    # 停著等他的已經到上限:先不填新的(每張佔一個開著的分頁,他也看不完)。他核准、退掉一張就接著填。
-    # 已經停著的那張要重填(履歷換過)不算新的,照樣做
-    full = bool(cap) and sum(1 for i in jobs if held(i)) >= cap
     if cfg.get('auto_fill') and not chrome_busy and not out['fix']:
-        for i in jobs:
-            m = fb.get(i) or {}
-            if stage(i) != 'ship' or not mine(i) or ds.state(m) not in ds.AUTO_FILL:
-                continue                     # 只替還沒填、上傳的是舊檔、頁面不見了的填;沒填成、卡住的原因在卡上,等他
-            a = m.get('apply') or {}
-            if full and not held(i):
-                continue
-            # 「🔁 再投一次」把上一次的表單和填表紀錄收進 tries:第幾次投要算進記號,
-            # 不然跟第一次一樣是 fill:<id>:new,卡上寫排隊中,卻永遠不再填
-            n = len(m.get('tries') or []) + len(m.get('history') or [])
-            k = 'fill:' + i + ':' + str(a.get('at') or 'new') + (':' + str(n) if n else '')
-            if k in tried:
-                continue
-            out['fill'] = i
-            out['tried'].append(k)
-            break
+        # 填哪一張只照下一步(next_step 的 auto):卡上寫「排隊中、會自動重填」的就是這幾張,停著的頁上限也在那裡算
+        for i, x in nexts.items():
+            if (x['auto'] or {}).get('do') == 'fill':
+                out['fill'] = i
+                out['tried'].append(x['auto']['mark'])
+                break
 
     at = str(cfg.get('replies_at') or '').strip()
     mt = re.fullmatch(r'([0-9]{1,2}):([0-9]{2})', at)
@@ -319,7 +246,7 @@ class Pilot:
         """卡停在正在填、正在送出,那一輪卻已經不在跑(被停止、當掉):照狀態表收尾(apply_run.settle)。
         在看板鎖裡再看一次有沒有在跑:剛開跑的那一輪先寫了進度才動卡,不會被當成停掉的。"""
         import apply_run
-        if not any(ds.state(m) in ('running', 'sending') for k, m in fb.items() if isinstance(m, dict) and not k.startswith('__')):
+        if not any(ds.state(m) in ds.WORKING for k, m in fb.items() if isinstance(m, dict) and not k.startswith('__')):
             return
 
         def mut(d):
@@ -392,13 +319,11 @@ class Pilot:
             done = [k for k in pl['tried'] if k.startswith('adv:') or ok.get(k.split(':', 1)[0])]
             rf = dict(a.get('rf') or {})
             rf.update(pl['rf'])
-            if ok.get('fix'):
-                rf[pl['fix']] = dict(rf.get(pl['fix']) or {}, done=True)     # 看板據此不再寫「會自動重打」
             # 標記清掉了(重打好了,或他自己按了改)就把這張的記號一起清掉:記號只在還標著的時候算數。
             # 不清的話,他之後把答案改回重打過的值,伺服器認得那組值不再派,卡上卻一直寫「會自動重打」。
             # 重打完還標著的(agent 沒打好)記號留著,不會一直重來。
             marks = set(rf) | {k[4:].rsplit(':', 1)[0] for k in a.get('tried') or [] if k.startswith('fix:')}
-            clear = {i for i in marks if not fix_sig(f, i)}
+            clear = {i for i in marks if not next_step.fix_sig(f, i)}
             a['tried'] = [k for k in a.get('tried') or [] if not (k.startswith('fix:') and k[4:].rsplit(':', 1)[0] in clear)]
             a['rf'] = {i: v for i, v in rf.items() if (f.get(i) or {}).get('app') == 'ship' and i not in clear}
             a['tried'] = (list(a.get('tried') or []) + done)[-500:]
@@ -418,7 +343,7 @@ class Pilot:
             f[KEY] = a
         A = fb.get(KEY) if isinstance(fb.get(KEY), dict) else {}
         marked = set(A.get('rf') or {}) | {k[4:].rsplit(':', 1)[0] for k in A.get('tried') or [] if k.startswith('fix:')}
-        expire = any(not fix_sig(fb, i) for i in marked)      # 有張卡的待重打清掉了,記號要跟著清
+        expire = any(not next_step.fix_sig(fb, i) for i in marked)      # 有張卡的待重打清掉了,記號要跟著清
         if pl['init'] or pl['seen'] or pl['advance'] or pl['rf'] or started or expire:
             bd.set_fb(mut, live=self.state, by='autopilot')
         if was_blocked and not need_browser and (ok.get('fill') or ok.get('fix') or ok.get('replies')):

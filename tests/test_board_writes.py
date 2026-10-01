@@ -416,3 +416,35 @@ class SandboxPageLost(Tmp):
         with mock.patch.multiple(bs, STATE=self.path, is_real=lambda: False), \
              mock.patch.object(bd, 'set_fb', side_effect=AssertionError('副本不該改')):
             self.assertEqual(bs.agent_swapped(U, '換掉了'), '')
+
+
+with open(os.path.join(HERE, 'fixtures', 'merge-cases.json'), encoding='utf-8') as _f:
+    MERGES = json.load(_f)['cases']
+
+
+class MergeEdits(unittest.TestCase):
+    """存檔撞到別的裝置(或 agent、程式)先改了同一筆:兩邊改的格子都留下,同一格撞到先留這台的並回報撞到哪一格。
+    合併只在後台算一份(docs/adr/0005),看板拿結果畫。"""
+
+    def test_each_case(self):
+        import board_server as bs
+        for c in MERGES:
+            with self.subTest(c['name']):
+                got = bs.merge_edit(c['base'], c['mine'], c['theirs'], c.get('key'))
+                self.assertEqual((got['value'], got['clash']), (c['value'], c['clash']))
+
+
+from test_board import HttpBase  # noqa: E402  真的看板伺服器(臨時看板)
+
+
+class MergeOnTheServer(HttpBase):
+    def test_the_page_gets_the_merge_against_what_the_server_has_now(self):
+        """常用答案照 k 一條一條合:這台改了一條、agent 同時新開一條,兩條都留(照哪一欄合由後台決定)。"""
+        bd.set_fb(lambda fb: fb.update({'__ans__': [{'k': 'nat', 'v': 'Taiwan'}, {'k': 'new', 'v': '新答案'}]}), live=self.path)
+        code, raw, _ = self.req('/api/merge', {'base': {'__ans__': [{'k': 'nat', 'v': 'Taiwan'}]},
+                                                'mine': {'__ans__': [{'k': 'nat', 'v': 'Taiwan (R.O.C.)'}]}})
+        self.assertEqual(code, 200, raw)
+        got = json.loads(raw)
+        self.assertEqual(got['merged']['__ans__'], {'value': [{'k': 'nat', 'v': 'Taiwan (R.O.C.)'}, {'k': 'new', 'v': '新答案'}],
+                                                    'clash': [], 'key': 'k'})
+        self.assertEqual(got['fb']['__ans__'], [{'k': 'nat', 'v': 'Taiwan'}, {'k': 'new', 'v': '新答案'}])

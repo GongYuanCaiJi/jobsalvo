@@ -5,7 +5,7 @@ delivery_state —— 一張卡的投遞狀態(docs/adr/0004、GLOSSARY「投遞
 
 一張卡從「可以投了」到「已投出」同一時間只在一種狀態,存在卡上的 ds(還沒填不存)。狀態之間怎麼走由
 delivery_state.json 那張「狀態 × 事件」表定義:所有會改動卡片投遞的地方都送事件(fire),不直接改記號;
-沒列的格子就是不准(Forbidden)。看板 board/board.js 的 dsFire 解譯同一份表(伺服器送頁面時附上),兩邊一樣。
+沒列的格子就是不准(Forbidden)。只有後台套表:看板只送事件,照後台存好的卡和下一步畫(docs/adr/0005)。
 
 「停著的頁」「下一步能做什麼」「自動流程會不會接手」「關 Chrome 時保護哪幾頁」都先看狀態;
 能不能確認送出另外看一張固定的檢查清單(form_record.approval_problem),那些不是狀態。
@@ -22,8 +22,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(HERE, 'delivery_state.json'), encoding='utf-8') as _f:
     TABLE = json.load(_f)
 
-HELD_STATES = frozenset(s for s, x in TABLE['states'].items() if x['held'])
-AUTO_FILL = frozenset(TABLE['auto_fill'])        # 自動流程會自己(重)填的
+
+def _marked(flag):
+    """表上標了這一項的狀態(每種狀態都要標:沒標 import 不起來)。"""
+    return frozenset(s for s, x in TABLE['states'].items() if x[flag])
+
+
+HELD_STATES = _marked('held')
+BUSY = {s: x['busy'] or None for s, x in TABLE['states'].items()}   # 忙的原因(不忙是 None)
+SWAP = _marked('swap')              # 能換檔(換履歷、語言、自己的檔、客製版)
+LEAVE = _marked('leave')            # 能離開流程(移除、退回、出錯了、👎)
+FILLED = _marked('filled')          # 算填好(頁上有他要看的東西)
+WORKING = _marked('working')        # agent 正在做
+AUTO_FILL = {s: x['auto_fill'] for s, x in TABLE['states'].items() if x.get('auto_fill')}   # 自動流程會自己(重)填的:卡上那一句
+SWAP_FIELDS = ('resume_id', 'lang', 'custom_file')     # 卡上換檔的那幾欄:換了就是換檔
+# 換檔會動到的狀態(表上 files_changed 那一格不只是原地不動):頁上傳的會變成舊檔,或先記下來
+FILES_MATTER = frozenset(s for s, c in TABLE['cells'].items() if c.get('files_changed') not in (None, {'to': s}))
 GONE = '填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填'
 NO_FORM = '填好了,卻沒有留下表單紀錄(看不到填了哪些欄),要再填一次'
 
@@ -44,8 +58,20 @@ def label(s):
 
 def allowed(m, event):
     """這張卡現在能不能發生這個事件(表上有那一格、守門條件也過)。"""
-    cell = TABLE['cells'][state(m)].get(event)
-    return cell is not None and _guard_ok(m, cell)
+    return why_not(m, event) is None
+
+
+def why_not(m, event):
+    """這張卡現在不准發生這個事件的原因(表上沒有那一格、守門條件沒過);准就回 None。fire 擋的就是這一句。"""
+    if event not in TABLE['events']:
+        return f'表上沒有這個事件:{event}'
+    s = state(m)
+    cell = TABLE['cells'][s].get(event)
+    if cell is None:
+        return f'「{label(s)}」時不能「{TABLE["events"][event]}」'
+    if not _guard_ok(m, cell):
+        return f'「{label(s)}」這張不能「{TABLE["events"][event]}」'
+    return None
 
 
 def _guard_ok(m, cell):
@@ -167,12 +193,11 @@ def fire(fb, url, event, **data):
     m = fb.get(url)
     if not isinstance(m, dict):
         m = {}
+    why = why_not(m, event)
+    if why:
+        raise Forbidden(why)
     s = state(m)
-    cell = TABLE['cells'][s].get(event)
-    if cell is None:
-        raise Forbidden(f'「{label(s)}」時不能「{TABLE["events"][event]}」')
-    if not _guard_ok(m, cell):
-        raise Forbidden(f'「{label(s)}」這張不能「{TABLE["events"][event]}」')
+    cell = TABLE['cells'][s][event]
     prev = copy.deepcopy(fb.get(url))
     to = s
     steps = _steps(cell)
@@ -329,7 +354,7 @@ OWNED = tuple(TABLE['owned'])
 
 
 def lean(v):
-    """空字串、空陣列、空物件、None 都算「沒有」(看板 lean 同一套;board_server 比對標記也用這一個)。"""
+    """空字串、空陣列、空物件、None 都算「沒有」(board_server 比對標記也用這一個)。"""
     if v is None or v == '':
         return None
     if isinstance(v, list):
@@ -373,8 +398,9 @@ def plain(m):
     return out
 
 
-# 跟離開流程那一類按鈕(退回、移除、出錯了、👎、放回來)一起改的欄位:卡在哪一階、移除、心情、出錯了之前在哪
-FLOW_FIELDS = ('app', 'rm', 's', 's0', 'app0', 'live_ok')
+# 跟離開流程那一類按鈕(退回、移除、出錯了、👎、放回來)一起改的欄位:卡在哪一階、移除、心情、出錯了之前在哪;
+# 和換檔那一類(換履歷、語言、自己的檔)
+FLOW_FIELDS = ('app', 'rm', 's', 's0', 'app0', 'live_ok') + SWAP_FIELDS
 
 
 def keep_flow(cur, new):
@@ -454,19 +480,25 @@ def undo(fb, url, prev, after, fallback=None):
 
 
 def company_blocked(fb, job):
-    """這張卡的公司被封鎖了沒(看板的 blockedCo 同一條)。"""
+    """這張卡的公司被封鎖了沒。"""
+    return company_block(fb, job) is not None
+
+
+def company_block(fb, job):
+    """這張卡落在封鎖名單的哪一條(同一家:大小寫、特殊字元、法律字尾不同也算);沒被封鎖回 None。
+    看板照它畫、解除封鎖照它拿掉,不自己比公司名(#343)。"""
     blocked = fb.get('__block__')
     if not isinstance(blocked, list) or not job:
-        return False
+        return None
     import card, config as cf
     board = cf.C.get('board') or {}
     name = card.company(job, board.get('company_alias'), board.get('title_words'))
-    return any(card.same_company(x, name) for x in blocked)
+    return next((x for x in blocked if card.same_company(x, name)), None)
 
 
 def held(fb, url, job=None):
     """停著的頁:這張的頁還開在 agent 的 Chrome 等他(停著等你、填了卡住、上傳的是舊檔、你已確認、送出結果不明),
-    而且卡還在「可以投了」、沒移除、公司沒被封鎖。看板的 held 同一條;自動流程的上限、關 Chrome 時保護的分頁都看它。"""
+    而且卡還在「可以投了」、沒移除、公司沒被封鎖。下一步、自動流程的上限、關 Chrome 時保護的分頁都看它。"""
     m = fb.get(url)
     if not isinstance(m, dict) or m.get('app') != 'ship' or m.get('rm') or state(m) not in HELD_STATES:
         return False

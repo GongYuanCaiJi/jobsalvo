@@ -26,6 +26,9 @@ KEY = '__inbox__'
 REPORT_FROM_ENV = 'JOBSALVO_REPORT_FROM'
 # 幫你填表那個流程的來源代號。存在資料裡的是舊叫法「代投」(舊回報也這樣存,改掉要搬資料);看板照 GLOSSARY 顯示「幫你填表」
 FROM_APPLY = '代投'
+# 回報來源是存在資料裡的代號(舊的回報也是這樣存的):畫面上照 GLOSSARY 現在的叫法,和「去看」跳到哪一頁(看板照這份畫)
+FROM = {'找新職缺': ['找新職缺', 'discover'], '逐張判斷': ['逐張判斷', 'discover'], '跑準備區': ['跑準備區', 'prep'],
+        '查回音': ['查應徵進度', 'sent'], FROM_APPLY: ['幫你填表', 'ship']}
 NO_SHOT = '這一輪沒有程式自己截的那一頁'
 KEEP_DONE = 200        # 處理好的只留最近這麼多則:看板每次都整份讀寫這一格,永遠不清會越來越肥
 
@@ -134,7 +137,7 @@ def open_items(fb):
 
 def todo(fb):
     """要他處理的:還開著的回報,除了 agent 自己寫、又沒有程式自己截的那一頁的(缺證據,不叫他照做,#315)。
-    看板的「要你處理」照同一條(board.js inboxTodo)。"""
+    看板的「要你處理」照它(下一步的 __inbox__)。"""
     return [it for it in open_items(fb) if not (it.get('agent') and it.get('noev'))]
 
 

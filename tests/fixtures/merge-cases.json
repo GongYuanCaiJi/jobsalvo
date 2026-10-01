@@ -1,0 +1,429 @@
+{
+ "_": "存檔撞到別的裝置時逐格合併的案例(board_server.merge_edit;以前只在看板跑,搬到後台後由 tests/test_board_writes.py 跑)。base 是這個分頁以為伺服器上的、mine 是這個分頁手上的、theirs 是伺服器現在的;key 是照哪一欄一條一條合(常用答案 k、回報 id)。",
+ "cases": [
+  {
+   "name": "兩邊改不同格,兩邊都留下",
+   "base": {
+    "s": "meh"
+   },
+   "mine": {
+    "s": "grow",
+    "n": "我打的心得"
+   },
+   "theirs": {
+    "s": "meh",
+    "stage": "hr"
+   },
+   "value": {
+    "s": "grow",
+    "n": "我打的心得",
+    "stage": "hr"
+   },
+   "clash": []
+  },
+  {
+   "name": "同一格兩邊改成不一樣,留這台的並回報",
+   "base": {
+    "n": "舊的"
+   },
+   "mine": {
+    "n": "我這台"
+   },
+   "theirs": {
+    "n": "別台"
+   },
+   "value": {
+    "n": "我這台"
+   },
+   "clash": [
+    "n"
+   ]
+  },
+  {
+   "name": "兩邊改成一樣不算撞到",
+   "base": {
+    "s": "meh"
+   },
+   "mine": {
+    "s": "grow"
+   },
+   "theirs": {
+    "s": "grow"
+   },
+   "value": {
+    "s": "grow"
+   },
+   "clash": []
+  },
+  {
+   "name": "別台清掉的格子,這台沒動就跟著清",
+   "base": {
+    "s": "meh",
+    "n": "要刪的"
+   },
+   "mine": {
+    "s": "grow",
+    "n": "要刪的"
+   },
+   "theirs": {
+    "s": "meh"
+   },
+   "value": {
+    "s": "grow"
+   },
+   "clash": []
+  },
+  {
+   "name": "這台清掉的格子不會被別台的舊值補回來",
+   "base": {
+    "s": "meh",
+    "n": "要刪的"
+   },
+   "mine": {
+    "s": "meh"
+   },
+   "theirs": {
+    "s": "grow",
+    "n": "要刪的"
+   },
+   "value": {
+    "s": "grow"
+   },
+   "clash": []
+  },
+  {
+   "name": "伺服器上本來沒有這筆(別台新建的)",
+   "base": null,
+   "mine": {
+    "s": "grow"
+   },
+   "theirs": {
+    "n": "別台新建"
+   },
+   "value": {
+    "s": "grow",
+    "n": "別台新建"
+   },
+   "clash": []
+  },
+  {
+   "name": "陣列(想法)整個當一格:只有這台改就用這台的",
+   "base": [
+    {
+     "t": "a"
+    }
+   ],
+   "mine": [
+    {
+     "t": "a"
+    },
+    {
+     "t": "b"
+    }
+   ],
+   "theirs": [
+    {
+     "t": "a"
+    }
+   ],
+   "value": [
+    {
+     "t": "a"
+    },
+    {
+     "t": "b"
+    }
+   ],
+   "clash": []
+  },
+  {
+   "name": "陣列兩邊都改,留這台的並回報",
+   "base": [
+    {
+     "t": "a"
+    }
+   ],
+   "mine": [
+    {
+     "t": "b"
+    }
+   ],
+   "theirs": [
+    {
+     "t": "c"
+    }
+   ],
+   "value": [
+    {
+     "t": "b"
+    }
+   ],
+   "clash": [
+    "*"
+   ]
+  },
+  {
+   "name": "答案庫照 k 一條一條合:這台改了一條、agent 同時新開一條,兩條都留",
+   "key": "k",
+   "base": [
+    {
+     "k": "nat",
+     "v": "Taiwan"
+    }
+   ],
+   "mine": [
+    {
+     "k": "nat",
+     "v": "Taiwan (R.O.C.)"
+    }
+   ],
+   "theirs": [
+    {
+     "k": "nat",
+     "v": "Taiwan"
+    },
+    {
+     "k": "a1b2c3d4",
+     "v": "新答案"
+    }
+   ],
+   "value": [
+    {
+     "k": "nat",
+     "v": "Taiwan (R.O.C.)"
+    },
+    {
+     "k": "a1b2c3d4",
+     "v": "新答案"
+    }
+   ],
+   "clash": []
+  },
+  {
+   "name": "回報照 id 一則一則合:這台收掉一則、程式同時寫了一則新的,兩則都留",
+   "key": "id",
+   "base": [
+    {
+     "id": "r1",
+     "msg": "舊的"
+    }
+   ],
+   "mine": [
+    {
+     "id": "r1",
+     "msg": "舊的",
+     "done": "2026-01-01"
+    }
+   ],
+   "theirs": [
+    {
+     "id": "r1",
+     "msg": "舊的"
+    },
+    {
+     "id": "r2",
+     "msg": "新的"
+    }
+   ],
+   "value": [
+    {
+     "id": "r1",
+     "msg": "舊的",
+     "done": "2026-01-01"
+    },
+    {
+     "id": "r2",
+     "msg": "新的"
+    }
+   ],
+   "clash": []
+  },
+  {
+   "name": "答案庫同一條兩邊改成不一樣:留這台的,只回報那一條",
+   "key": "k",
+   "base": [
+    {
+     "k": "a",
+     "v": "1"
+    },
+    {
+     "k": "b",
+     "v": "x"
+    }
+   ],
+   "mine": [
+    {
+     "k": "a",
+     "v": "2"
+    },
+    {
+     "k": "b",
+     "v": "x"
+    }
+   ],
+   "theirs": [
+    {
+     "k": "a",
+     "v": "3"
+    },
+    {
+     "k": "b",
+     "v": "y"
+    }
+   ],
+   "value": [
+    {
+     "k": "a",
+     "v": "2"
+    },
+    {
+     "k": "b",
+     "v": "y"
+    }
+   ],
+   "clash": [
+    "a"
+   ]
+  },
+  {
+   "name": "答案庫別台刪掉的那條,這台沒動就跟著刪;這台新加的留著",
+   "key": "k",
+   "base": [
+    {
+     "k": "a",
+     "v": "1"
+    },
+    {
+     "k": "b",
+     "v": "2"
+    }
+   ],
+   "mine": [
+    {
+     "k": "a",
+     "v": "1"
+    },
+    {
+     "k": "b",
+     "v": "2"
+    },
+    {
+     "k": "c",
+     "v": "3"
+    }
+   ],
+   "theirs": [
+    {
+     "k": "a",
+     "v": "1"
+    }
+   ],
+   "value": [
+    {
+     "k": "a",
+     "v": "1"
+    },
+    {
+     "k": "c",
+     "v": "3"
+    }
+   ],
+   "clash": []
+  },
+  {
+   "name": "填表紀錄裡各改各的欄位:這台標履歷換過、程式同時記送出結果不明,兩邊都留下(以前整筆被這台蓋掉,擋重送的記號不見)",
+   "base": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "7"
+    }
+   },
+   "mine": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "7",
+     "stale": "履歷換過了"
+    }
+   },
+   "theirs": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "7",
+     "submit_fail": {
+      "at": "2026-01-01T00:00:00",
+      "pending": true,
+      "problems": [
+       "送出途中停掉了"
+      ]
+     }
+    }
+   },
+   "value": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "7",
+     "stale": "履歷換過了",
+     "submit_fail": {
+      "at": "2026-01-01T00:00:00",
+      "pending": true,
+      "problems": [
+       "送出途中停掉了"
+      ]
+     }
+    }
+   },
+   "clash": []
+  },
+  {
+   "name": "填表紀錄裡兩邊改了同一欄:只記那一欄撞到,別的欄照合",
+   "base": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "7"
+    }
+   },
+   "mine": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "7",
+     "stale": "換成中文版"
+    }
+   },
+   "theirs": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "",
+     "gone": true,
+     "stale": "換成英文版"
+    }
+   },
+   "value": {
+    "app": "ship",
+    "apply": {
+     "stage": "fill",
+     "ok": true,
+     "tab_id": "",
+     "gone": true,
+     "stale": "換成中文版"
+    }
+   },
+   "clash": [
+    "apply.stale"
+   ]
+  }
+ ]
+}

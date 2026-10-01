@@ -1,5 +1,5 @@
 """舊資料轉成投遞狀態(伺服器起來時做一次):各種舊記號組合轉完狀態都對,再轉一次不變。
-畫出來跟轉之前一樣,由看板檢查拿 fixtures/legacy-render.json 比(要真的瀏覽器)。"""
+轉完之後看板照後台的下一步畫(看板不自己判斷,docs/adr/0005)。"""
 import copy
 import os
 import sys

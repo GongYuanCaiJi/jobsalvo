@@ -83,8 +83,9 @@ def mark_refill(fb, k):
 def redo(fb, k, today=None):
     """這一條答案作廢、改由 agent 重新代填(他在看板上清掉,或它過時了,見 stale.py)。
     還沒送出的表單在用的:題目留著、答案和依據清掉,標 redo(等 agent,不在要他處理的清單);
-    頁面還在的表單標 refill,agent 在那一頁上照規矩代填(apply_run 的指示寫明哪幾題)。
-    只剩已送出的表單在用、或沒人用:整條拿掉(送出時的原字在流水帳)。看板的「清掉答案」同一條(board.js ansRedo)。"""
+    頁面還在的表單標 refill,agent 在那一頁上照規矩代填(apply_run 的指示寫明哪幾題);你已確認的,確認時的答案變了就作廢。
+    只剩已送出的表單在用、或沒人用:整條拿掉(送出時的原字在流水帳)。在用的表單看整份看板,不只畫得出來的卡;
+    看板的「清掉答案」送 {redo: k} 走這一支。"""
     e = _entry(fb, k)
     if e is None:
         return
@@ -95,7 +96,17 @@ def redo(fb, k, today=None):
         e.pop(kk, None)
     e['v'] = ''
     e['redo'] = today or _today()
+    changed(fb, k)
+
+
+def changed(fb, k):
+    """答案 k 改了(他在看板改值、清掉):停著的頁上用到它的欄位標重打;你已確認的,確認時的答案變了就作廢。
+    看板只送 {refill: k},這裡在後台照整份看板標,不在看板上畫得出來的卡也算(#343)。"""
     mark_refill(fb, k)
+    for url in users(fb, k):
+        m = fb[url]
+        if ds.state(m) == 'confirmed' and (m.get('approve') or {}).get('snap') != snapshot(fb, url):
+            ds.try_fire(fb, url, 'answers_changed')
 
 
 def _forms(fb):
@@ -399,10 +410,10 @@ def answers_pending(fb, url):
     """這張表單用到的答案還有沒有在等他(推論的、空的、或答案庫裡沒有那一條;看板 approvalProblem 的 ansNeed)。
     缺證據的那幾條(noev)不叫他確認,可是也還沒人確認過:照樣算沒好,這張不能確認送出。"""
     ks = {x.get('k') for x in ((fb.get(url) or {}).get('form') or {}).get('f', []) if x.get('src') == 'bank'}
-    return any(e['k'] in ks for e, _ in _waiting(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
+    return any(e['k'] in ks for e, _ in waiting(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
 
 
-def _waiting(fb):
+def waiting(fb):
     """答案庫裡還沒好的:我推論的(inf),或答案還空著、而且有還沒送出的表單在用(或沒有表單在用)。
     等 agent 重新代填的(redo)不算。"""
     out = []
@@ -419,12 +430,12 @@ def find_pending(fb):
     """答案庫裡等他的(跟看板的 ⚠ 同一個算法):我推論的(inf),或答案還空著、而且有還沒送出的表單
     在用(或沒有表單在用)。等 agent 重新代填的(redo)不算。[(那一條, 在用它的職缺網址)]。
     缺證據的(noev:沒有程式自己截的那一頁、或那一頁上沒有這一題)不列:沒有截圖就不叫他確認(#315),改回報缺證據。"""
-    return [(e, us) for e, us in _waiting(fb) if not e.get('noev')]
+    return [(e, us) for e, us in waiting(fb) if not e.get('noev')]
 
 
 def snapshot(fb, url):
     """核准時的答案快照:這張表單每一題 → 會送出去的值(答案庫那一條的英文 v;履歷直接對上的用表單上的 v)。
-    看板的「✅ 核准送出」存的是同一個算法算出來的東西(board.js ansSnap),兩邊要一起改。"""
+    按「✅ 確認送出」時後台存的就是這一份(approval),看板不自己算。"""
     bank = {e.get('k'): e for e in _bank(fb)}
     out = {}
     for x in ((fb.get(url) or {}).get('form') or {}).get('f', []):
@@ -442,8 +453,38 @@ def board_status(board):
         return None
 
 
+def ship_blocked(fb, job, status):
+    """投遞前把關:這張能不能進可以投了、確認了能不能送:不能就回原因。看板照下一步的 gate 畫(同一句)。"""
+    # 客製只看這張現在會寄的那幾份:換了履歷留下的舊紀錄不擋(以前每一筆都看,卡永遠卡在待你決定)
+    import ship
+    waiting = ship.customization_problem(job, fb)
+    if waiting:
+        return waiting
+    st = status or {}
+    # 字跟看板一字不差:確認送出的檢查清單(approval_problem)也用這一支,卡上顯示的就是這句
+    if st.get('schema_version') != 2:
+        return '投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)'
+    if st.get('checked_links') is False:
+        return '職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)'
+    bad = [x.get('msg') for x in holding(fb, job, st)]
+    return ('驗收未通過：' + '；'.join(bad)) if bad else ''
+
+
+def holding(fb, job, st):
+    """驗收裡還擋著這張的那幾條:soft 不擋;agent 判斷的(judged),你在卡上按了「不對,職缺還在」就當下不擋
+    (讀現在的卡,不等驗收重跑,#341)。"""
+    overruled = ((fb.get(job['id']) or {}).get('judged_no') or {}).get('closed')
+    return [x for x in (st or {}).get('issues') or []
+            if x.get('jid') == job['id'] and not x.get('soft') and not ('judged' in x and overruled)]
+
+
+def judged_closed(fb, job, status):
+    """擋住這張的是 agent 判斷職缺關了(卡上給「不對,職缺還在」那顆)。"""
+    return any('judged' in x for x in holding(fb, job, status))
+
+
 def approval_problem(fb, url, status=None):
-    """這張的確認還能不能拿去送出。None = 可以;不行就回原因(看板顯示同一句,board.js 的 approvalProblem)。
+    """這張的確認還能不能拿去送出。None = 可以;不行就回原因(看板照下一步顯示同一句)。
     先看投遞狀態:只有「你已確認」能送;再看檢查清單(投遞前驗收、這次上傳方式、常用答案、重翻、重打、確認時的答案)。
     status:看板資料的 status(投遞前驗收的結果,board_status 讀);沒給就當成還沒驗收過,擋。"""
     m = fb.get(url) or {}
@@ -456,13 +497,11 @@ def approval_problem(fb, url, status=None):
     if s == 'unsure':
         return '上次送出沒確認成功,先確認到底送出沒有'     # 不確定就重送,可能變成投兩次
     # 投遞前驗收(職缺下架、要寄的檔案有問題、客製檔還沒處理完):確認之後才驗收失敗也要擋送出。
-    # 跟看板 shipBlocked 同一支規則(autopilot.ship_blocked)
-    import autopilot
-    gate = autopilot.ship_blocked(fb, {'id': url}, status)
+    gate = ship_blocked(fb, {'id': url}, status)
     if gate:
         return gate
     apply = m.get('apply') or {}
-    if s in ('running', 'nopage', 'stuck', 'gone'):
+    if s != 'todo' and s not in ds.FILLED:          # 正在填、沒填成、卡住、頁不見了(已送出、送出結果不明上面回過了)
         return (apply.get('issues') or [''])[0] or '填表檢查還有問題,先讓 agent 改好'     # 空字串也用預設句(跟看板一樣)
     if s == 'stale':
         return '履歷換過了,網頁上傳的還是舊的,先讓 agent 重填'
@@ -507,7 +546,7 @@ def start_submit(fb, url, status=None):
 
 def approval(fb, url, at=None):
     """按確認送出存下的:當下每一題會送出去的值(快照),和確認的是哪一輪填表(那一輪的時間)、哪一頁(分頁)。
-    看板 dsApproval 同一個。"""
+    後台收到確認事件時當下算(看板只送按下去的時間)。"""
     apply = (fb.get(url) or {}).get('apply') or {}
     out = {'snap': snapshot(fb, url), 'round': apply.get('at'), 'tab': apply.get('tab_id')}
     if at:
@@ -517,21 +556,22 @@ def approval(fb, url, at=None):
 
 def confirm_problem(fb, url, status=None):
     """按「✅ 確認送出」之前:狀態要是停著等你,再拿現在的答案當確認快照跑一次檢查清單。None = 可以確認。
-    看板的 approveBlocker 同一條(按鈕灰掉、卡上寫的原因就是這一句)。"""
-    import autopilot
+    卡上「✅ 確認送出」灰掉寫的原因就是這一句(下一步的 confirm)。"""
     import copy
     m = fb.get(url) or {}
     if not m.get('form'):
         return '這張還沒有表單紀錄'
-    gate = autopilot.ship_blocked(fb, {'id': url}, status)
+    gate = ship_blocked(fb, {'id': url}, status)
     if gate:
         return gate
     s = ds.state(m)
     if s == 'todo':
-        return 'agent 還沒填這張,先讓它填好、你看過頁面再確認送出'
+        import config as cf
+        return f'{cf.AGENT} 還沒填這張,先讓它填好、你看過頁面再確認送出'
     if s != 'parked':
         return approval_problem(fb, url, status) or f'「{ds.label(s)}」時不能確認送出'
-    trial = copy.deepcopy(fb)
+    trial = dict(fb)                    # 只複製這一張:每張卡都算一次時,整份複製會跟卡數平方一起變慢
+    trial[url] = copy.deepcopy(m)
     ds.fire(trial, url, 'confirm', approve=approval(trial, url))
     return approval_problem(trial, url, status)
 

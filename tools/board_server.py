@@ -6,6 +6,7 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
 
   GET  /            → 服務現行看板(送出前注入設定裡的類別、標籤、可用履歷與附件及各自有哪些語言的檔與預覽、agent 名字)
   POST /api/save    → body 是 data-fb 的 JSON(使用者的標記);逐筆併回看板的 data-fb,存檔
+  POST /api/merge   → 存檔撞到別處(409)之後:{keys, base, mine} 照現在的 data-fb 合併(merge_edit),只算不寫
   GET  /api/state   → 回傳目前 data-fb(給 agent/loop 讀狀態用)
   GET  /api/rev     → 小包:標記版本、職缺資料版本、背景建包中、兩個「跑」的進度(頁面輪詢用)
   POST /api/run/prep      → 跑準備區(cut_tailor)
@@ -17,7 +18,7 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
 (自己的 tailnet 裝置才連得到,手機走這條)。抓不到 Tailscale IP 就只剩 localhost。
 絕不綁 0.0.0.0:那會連同 Wi-Fi/LAN 的陌生人都能讀到你的履歷和求職資料。
 """
-import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal,html,contextlib
+import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal,html,contextlib,copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _HTTPServer
 import socketserver
 
@@ -111,6 +112,7 @@ def read_doc():
 
 def page_cfg():
     """頁面要知道、但屬於設定不屬於資料的東西。每次送出時從設定現讀,不存進看板檔。"""
+    import agent_report, autopilot, card
     C = cf.C
     # 每張卡寄哪幾份、有沒有預覽、客製版還用不用,後台算好放在 ship_files(ship_files_of),頁面不自己判斷;
     # 這裡只給名字(統計表、設定頁摘要用)
@@ -120,10 +122,13 @@ def page_cfg():
             'resumes': resume_rows,
             'categories': C['board']['categories'], 'tags': C['board']['tags'],
             'company_alias': {str(k).lower(): v for k, v in (C['board'].get('company_alias') or {}).items()},
-            'title_words': __import__('card').title_words(C['board'].get('title_words')),
+            'title_words': card.title_words(C['board'].get('title_words')),
             'read_lang': C['resume'].get('read_lang') or 'zh',
-            'flow': __import__('autopilot').flow(),
-            'find_minutes': (C.get('search') or {}).get('find_minutes') or 0}
+            'flow': autopilot.flow(),
+            'find_minutes': (C.get('search') or {}).get('find_minutes') or 0,
+            # 查應徵進度沒跑成當天自動再試幾次、隔多久(autopilot 照這組跑,看板照這組寫);回報來源怎麼叫、去哪一頁
+            'reply_retry': {'max': autopilot.REPLY_RETRY_MAX, 'gap': autopilot.REPLY_RETRY_GAP},
+            'inbox_from': agent_report.FROM}
 
 def ship_files_of(jobs, fb, only=None):
     """每張卡的要寄的檔案(ship.card_files):頁面載入、輪詢、按了按鈕問的都是這一份,看板不自己挑。
@@ -138,6 +143,23 @@ def ship_files_of(jobs, fb, only=None):
         except Exception as e:  # noqa: BLE001 — 算不出來的原因照實放進這張卡的 problem,看板卡上顯示
             out[j['id']] = {'resume_id': '', 'lang': '', 'problem': f'這張卡的要寄的檔案算不出來:{str(e)[:120]}',
                             'files': [], 'choices': [], 'langs': list(cf.LANGS), 'pending': '', 'stale_ids': []}
+    return out
+
+
+def next_steps(doc, only=None):
+    """每張卡的下一步(next_step.of),加上常用答案的(__ans__,next_step.answers):頁面載入、輪詢、存檔回來的都是這一份,
+    看板照它畫。only:只要這幾張。
+    設定跟自動流程同一份(autopilot.flow);停著的頁上限要數整份看板,所以先算全部再挑。"""
+    import autopilot, next_step
+    fb=json.loads(doc['fb'] or '{}')
+    with _BUILD_LOCK: gen,building=_build_state['gen'],_build_state['running']
+    out=next_step.of(fb,doc['data'].get('jobs') or [],doc['data'].get('status'),flow=autopilot.flow(),real=is_real(),
+                     gen=gen,building=building)
+    if only is not None:
+        out={k:v for k,v in out.items() if k in only}
+    out['__ans__']=next_step.answers(fb)     # 常用答案的:哪幾條按刪除是清掉(還沒送出的表單在用)、等不等你
+    import agent_report
+    out['__inbox__']={'todo':[it.get('id') for it in agent_report.todo(fb)]}   # 回報裡要你處理的(缺證據的不算)
     return out
 
 
@@ -174,6 +196,12 @@ def lean_jobs(jobs):
     return out
 
 
+def page_jobs(jobs):
+    """送給頁面的職缺:履歷預覽抽掉(lean_jobs),帶上後台算的卡名、公司名、來源平台(card.label_jobs),看板不自己算。"""
+    board=cf.C.get('board') or {}
+    return card.label_jobs(lean_jobs(jobs),board.get('company_alias'),board.get('title_words'))
+
+
 def serve_doc(doc):
     """送出去的那份:注入設定(cfg),並把 masters(大張的預覽圖)與履歷預覽抽掉,
     改成真的展開那一區/點開那份履歷時才另外抓。檔案本身不動,只有這條 HTTP 回應不同。
@@ -181,15 +209,14 @@ def serve_doc(doc):
     try:
         d=bd.parse(doc)
         data=dict(d['data']); data['cfg']=page_cfg()
-        import delivery_state
-        data['delivery']=delivery_state.TABLE   # 投遞狀態 × 事件表:看板按下去當場照同一張表改
         import zhconv
         if zhconv.simplified(data['cfg'].get('read_lang')):
             data['cfg']['zh_tables']=zhconv.page_tables()   # 簡體:字典跟著頁面走,頁面自己把畫面上的字轉掉
         if data.get('masters'):
             data['masters_n']=len(data['masters']); data['masters']=[]
         data['ship_files']=ship_files_of(data.get('jobs'),json.loads(d['fb'] or '{}'))
-        data['jobs']=lean_jobs(data.get('jobs'))
+        data['next']=next_steps(d)   # 每張卡的下一步:看板照它畫按鈕能不能按、為什麼不能
+        data['jobs']=page_jobs(data.get('jobs'))
         # 頁面程式用程式碼裡現在的那份。看板檔裡存的外殼要等下一次重建材料才會換新:
         # 以前按「更新」、伺服器也重啟了,畫面卻一直是上次重建時的舊版(連「⬆ 更新」鈕都沒有)。
         shell=current_shell()
@@ -255,7 +282,7 @@ def _record_sent_version(fb, url, jobs):
         agent_report.apply_report(fb,'看板',f'記不下寄出的是哪一份:{str(e)[:120]}',
                                   need='這張照樣算已送出;要留紀錄就到可投遞夾看寄出的那一份',job=url)
 
-def write_fb(fb_obj, base=None, events=None, rejected=None):
+def write_fb(fb_obj, base=None, events=None, rejected=None, out=None):
     """把新的 data-fb 併進 STATE 檔,其餘(jobs/sty/app)不動。單寫者鎖。
 
     逐筆合併,不是整包覆蓋。以前是整包蓋:任何一個停在舊狀態的分頁(手機擱著沒關、
@@ -265,8 +292,11 @@ def write_fb(fb_obj, base=None, events=None, rejected=None):
     投遞狀態不跟著卡片存:卡上歸狀態表管的那幾欄(delivery_state.OWNED、表單鎖、進出已送出)看板送來的不算數,
     看板只送事件(events:[{u, ev, data}] 或復原 [{u, undo:{prev, after}, else?}]),這裡照磁碟上現在的狀態套表;
     那一格不准的不做事(跟著那一下改的階段、心情也不收),原因放進 rejected 回給看板(狀態表修正 9)。
-    表單只有後台寫:看板改答案要標重打就送 {refill: 答案鍵},在鎖內標在現在那份表單上(#308)。"""
-    import delivery_state
+    表單只有後台寫:看板改答案要標重打就送 {refill: 答案鍵},在鎖內標在現在那份表單上(#308);
+    清掉一條答案送 {redo: 答案鍵},清掉還是刪掉照整份看板算(form_record.redo)。
+    out:收這一包動到的卡存好的樣子(cards)和復原用的(undo:{卡: {prev, after}},投遞那一部分前後,
+    送回來 {u, undo} 就放回去):看板按下去不自己套狀態表,等這裡回話才照存好的畫(#343)。"""
+    import delivery_state, next_step
     bad=[]
     # 按「✅ 確認送出」之前:程式自己讀那一頁,跟驗收時核對過的樣子比;變了就不讓他確認,卡上寫哪一格從什麼變成什麼和下一步(#316)。
     # 讀頁很慢(Codex 幾秒),在拿鎖之前做。副本(沙箱、測試、看板檢查)沒有真的 agent 的 Chrome,不讀
@@ -289,24 +319,50 @@ def write_fb(fb_obj, base=None, events=None, rejected=None):
                                                                _same(delivery_state.plain(cur.get(k)),delivery_state.plain(want))))
             if bad: return bd.SKIP
         refused=set()
+        redo=[]
+        evented={str(e.get('u') or '') for e in events or [] if isinstance(e,dict)}
+        mine=[k for k in evented|set(fb_obj) if k and not k.startswith('__')]
+        was={k:delivery_state.part(cur.get(k)) for k in mine}
+        jobs={j.get('id'):j for j in d['data'].get('jobs') or [] if isinstance(j,dict)}
         for e in events or []:
             u=str((e or {}).get('u') or '')
             if isinstance(e,dict) and 'refill' in e and not u:
-                # 答案改了:在現在那份表單上標重打(頁還在的才標;form_record.mark_refill)。看板不送整份表單
-                import form_record
-                form_record.mark_refill(cur,str(e['refill']))
+                redo.append((False,str(e['refill'])))   # 答案改了:等這一包的常用答案收完再標(見下面)。看板不送整份表單
+                continue
+            if isinstance(e,dict) and 'redo' in e and not u:
+                redo.append((True,str(e['redo'])))     # 清掉一條答案:等這一包的常用答案收完再清(見下面)
                 continue
             try:
                 if not u or u.startswith('__'):
                     raise ValueError('沒有指定是哪一張')
+                ev=str(e.get('ev') or '')
+                data=e.get('data') if isinstance(e.get('data'),dict) else {}
+                # 收不收照這張卡的下一步(#341):擋的原因就是卡上灰掉的按鈕寫的那一句,繞過畫面直接送也一樣
+                # 復原只看它帶的退路(換檔的復原 = 又換了一次檔);復原本身准不准由 delivery_state.undo 判
+                fallback=e.get('else') if isinstance(e.get('else'),dict) else {}
+                fev=str(fallback.get('ev') or '')
+                why=((next_step.refuse(cur,u,fev) if fev else None) if 'undo' in e
+                     else next_step.refuse(cur,u,ev,d['data'].get('status')))
+                if why:
+                    raise ValueError(why)
                 if 'undo' in e:
                     delivery_state.undo(cur,u,(e['undo'] or {}).get('prev'),(e['undo'] or {}).get('after'),e.get('else'))
-                elif e.get('ev')=='confirm' and u in changed:
+                elif ev=='confirm' and u in changed:
                     import apply_run
                     apply_run.page_changed(cur,u,changed[u],'確認前')     # 停著等你 → 填了卡住,原因和下一步寫在卡上
                     raise ValueError('確認前'+apply_run.PAGE_CHANGED+changed[u][0])
                 else:
-                    delivery_state.fire(cur,u,str(e.get('ev') or ''),**(e.get('data') if isinstance(e.get('data'),dict) else {}))
+                    if ev=='confirm':
+                        # 確認時記下的答案由後台當下算(#340 user story 9):頁面送來的快照不算數,只拿它按下去的時間
+                        import form_record
+                        data={'approve':form_record.approval(cur,u,(data.get('approve') or {}).get('at'))}
+                    if ev=='not_sent':
+                        data=dict(data,issues=[delivery_state.GONE])   # 頁已經不在的話卡上寫這一句(看板不抄)
+                    if ev=='actually_sent' and 'evidence' not in data:
+                        # 他查到其實送出了:證據就是 agent 當時那一份(狀態表這一格先清掉它,所以先抄)
+                        data=dict(data,evidence=dict(((cur.get(u) or {}).get('apply') or {}).get('submit_fail') or {},
+                                                     you_sent=data.get('at')))
+                    delivery_state.fire(cur,u,ev,**data)
                     if e.get('ev')=='not_sent':
                         # 他查過了、確認沒送出:這張跟送出有關的回報(送出沒確認成功、去信箱查)一起收掉(#316)
                         import agent_report, apply_run
@@ -320,17 +376,102 @@ def write_fb(fb_obj, base=None, events=None, rejected=None):
         # 不然會拼出「正在送出卻在待你決定」這種狀態表不准存在的組合;同一包裡的筆記照收
         for k,v in fb_obj.items():
             if not k.startswith('__'):
+                # 沒帶事件、直接存:忙的卡也不准跟著存檔換檔或離開流程(#341,繞過畫面一樣擋)
+                why=None if k in refused else next_step.refuse_save(cur.get(k),v)
+                if why:
+                    refused.add(k)
+                    if rejected is not None: rejected.append({'u':k,'ev':'save','msg':why})
                 if k in refused:
                     if v is None: continue          # 整張清掉也是跟著那一下的:不做
                     v=delivery_state.keep_flow(cur.get(k),v)
                 v=delivery_state.merge_saved(cur.get(k),v)
+            # 換了履歷、語言、自己的檔,這一包又沒帶這張的事件:後台自己看要寄的檔案真的變了沒,變了就送「換檔」
+            # (填好的頁上傳的是舊檔,#341)。看板自己送的事件照收,它寫的原因比較清楚
+            job=jobs.get(k) if k not in refused and k not in evented and isinstance(v,dict) and any(
+                (cur.get(k) or {}).get(f)!=v.get(f) for f in delivery_state.SWAP_FIELDS) else None
+            before=_doc_sig(job,cur) if job else None
+            old=cur.get(k) if isinstance(cur.get(k),dict) else {}
             if v is None: cur.pop(k,None)
             else: cur[k]=v
+            if job and _doc_sig(job,cur)!=before:
+                delivery_state.try_fire(cur,k,'files_changed',why=_swap_why(old,v))
+        # 改了、清掉答案:清掉還是刪掉、哪幾張表單要重打、哪幾張確認作廢,照整份看板算(form_record.redo、changed):
+        # 不在看板上畫得出來的卡也算。放在最後:同一包帶來的常用答案(這個分頁手上的)不會把清掉蓋回去,確認快照比的是新答案
+        import form_record
+        hit=set()
+        for clear,k in redo:
+            hit|=set(form_record.users(cur,k))
+            (form_record.redo if clear else form_record.changed)(cur,k)
+        if out is not None:
+            out['cards']={k:copy.deepcopy(cur.get(k)) for k in set(mine)|hit}   # 改答案動到的表單也一起回
+            out['undo']={k:{'prev':was[k],'after':delivery_state.part(cur.get(k))} for k in mine
+                         if not _same(was[k],delivery_state.part(cur.get(k)))}
     with LOCK:
         if bd.rewrite(put,STATE,by='看板') is bd.SKIP:
             return bad
     note_saved()
     return []
+
+
+# 陣列裡每一條有穩定 id 的,照 id 一條一條合:常用答案的 k、回報的 id
+MERGE_BY={'__ans__':'k','__inbox__':'id'}
+
+def merge_edit(base, mine, theirs, key=None):
+    """存檔撞到別的裝置(或 agent、程式)先改了同一筆(/api/save 回 409):兩邊都從 base 改起,各改各的格子都留下。
+    同一格兩邊改成不一樣才算撞到,留這台的(他剛打的),撞到的格子放進 clash 讓看板給他換回那邊的。
+    想法這種陣列整個當一格('*');key:照那一欄一條一條合,agent 新開的答案、程式剛寫的回報不會被這台整份蓋掉。
+    兩邊都改了同一格、而且是物件(卡上的 judged_no 這種):再往下一層一欄一欄合,撞到的記成 a.b 這種路徑。
+    「一樣」照 delivery_state.same(空的各種寫法都算一樣)。回 {value, clash}。"""
+    def keyed(a):
+        return a is None or (isinstance(a, list) and all(isinstance(x, dict) and x.get(key) is not None for x in a))
+    if key and keyed(base) and keyed(mine) and keyed(theirs):
+        B, M, T = ({x[key]: x for x in a or []} for a in (base, mine, theirs))
+        out, hit = [], []
+        for i in dict.fromkeys(x[key] for x in (theirs or []) + (mine or [])):
+            if _same(M.get(i), B.get(i)):
+                if i in T: out.append(T[i])
+                continue
+            if i in M: out.append(M[i])
+            if not _same(T.get(i), B.get(i)) and not _same(T.get(i), M.get(i)): hit.append(i)
+        return {'value': out, 'clash': hit}
+    if not all(v is None or isinstance(v, dict) for v in (base, mine, theirs)):
+        if _same(mine, base): return {'value': theirs, 'clash': []}
+        return {'value': mine, 'clash': [] if _same(theirs, base) or _same(theirs, mine) else ['*']}
+    b, m, t = base or {}, mine or {}, theirs or {}
+    out, clash = {}, []
+    for k in dict.fromkeys([*b, *m, *t]):
+        if _same(m.get(k), b.get(k)):
+            if k in t: out[k] = t[k]
+        elif (isinstance(m.get(k), dict) and isinstance(t.get(k), dict) and (k not in b or isinstance(b[k], dict))
+              and not _same(t.get(k), b.get(k)) and not _same(t.get(k), m.get(k))):
+            sub = merge_edit(b.get(k) or {}, m[k], t[k])
+            out[k] = sub['value']
+            clash += [k if c == '*' else k + '.' + c for c in sub['clash']]
+        else:
+            if k in m: out[k] = m[k]
+            if not _same(t.get(k), b.get(k)) and not _same(t.get(k), m.get(k)): clash.append(k)
+    return {'value': out, 'clash': clash}
+
+
+def _swap_why(old, new):
+    """換檔的原因(卡上「上傳的是舊檔」那一句):換了哪一份履歷、哪個語言、自己的檔。"""
+    if new.get('custom_file')!=old.get('custom_file'):
+        return '換成你自己的檔' if new.get('custom_file') else '改回原始檔'
+    if new.get('resume_id')!=old.get('resume_id') and new.get('resume_id'):
+        return f'履歷換成「{cf.resume_name(new["resume_id"]) or new["resume_id"]}」'
+    if new.get('lang')!=old.get('lang') and new.get('lang'):
+        import profile_sync
+        return f'語言換成「{profile_sync.LANG_WORDS.get(new["lang"],new["lang"])}」'
+    return '要寄的檔案換過了'
+
+
+def _doc_sig(job, fb):
+    """這張卡現在要寄的是哪幾份(哪一份、實際寄的檔):換檔前後比一次。算不出來也是一種樣子,照樣比得出有沒有變。"""
+    import ship
+    try:
+        return [(x.get('id'),x.get('effective_path')) for x in ship.documents(job,fb)]
+    except Exception as e:  # noqa: BLE001 — 舊資料格式壞了:記成錯誤樣子,前後照樣比
+        return 'err:'+type(e).__name__
 
 
 def note_saved():
@@ -555,15 +696,12 @@ def _apply_busy():
     st=run_status('apply')
     return (st.get('url') or '*') if st.get('running') else None
 
-# 這幾種狀態換檔才有意義:頁上傳的會變成舊檔(停著等你、填了卡住、你已確認),或先記下來(正在填、送出結果不明)
-_FILE_STATES=('parked','stuck','confirmed','running','unsure')
-
 def sent_files():
     """已經填過、還在等的卡,現在要寄的檔案(哪一份、檔案內容的指紋):換檔之前先記,換完再比。"""
     import delivery_state, ship
     doc=bd.parse(read_doc()); fb=json.loads(doc['fb']); out={}
     for j in doc['data'].get('jobs') or []:
-        if delivery_state.state(fb.get(j.get('id'))) not in _FILE_STATES: continue
+        if delivery_state.state(fb.get(j.get('id'))) not in delivery_state.FILES_MATTER: continue   # 換檔才有意義的狀態
         try:
             docs=ship.documents(j,fb)
         except Exception as e:  # noqa: BLE001 — 算不出來記成錯誤指紋:換檔前後照樣比得出有沒有變,變了卡上會標檔案換了
@@ -922,6 +1060,8 @@ class H(BaseHTTPRequestHandler):
             self._json(200,d['data'].get('masters') or [])
         elif self.path=='/api/jobs':
             self.do_GET_jobs()
+        elif self.path=='/api/next':
+            self._json(200,next_steps(bd.parse(read_doc())))
         elif self.path.startswith('/api/live?'):
             # 代投那張分頁「現在」的整頁畫面:agent 的視窗開在螢幕外(不搶他的畫面),他要看真的頁面就看這張。
             # apply_tab 用填這張的那段對話的身分當場截,不經過 agent、不動那一頁。
@@ -1341,7 +1481,7 @@ class H(BaseHTTPRequestHandler):
         # 驗收結果(status)也在職缺資料裡,要一起給:以前只給 jobs,重驗過之後頁面上的
         # 「⛔ 驗收未通過」還是舊的那一批,要他自己重整。
         jobs=d['data'].get('jobs',[])
-        self._json(200,{'building':building,'gen':cur_gen(),'jobs':lean_jobs(jobs),
+        self._json(200,{'building':building,'gen':cur_gen(),'jobs':page_jobs(jobs),
                                    'ship_files':ship_files_of(jobs,json.loads(d['fb'] or '{}')),
                                    'status':d['data'].get('status'),'research':d['data'].get('research')})
 
@@ -1357,6 +1497,14 @@ class H(BaseHTTPRequestHandler):
             return self._json(200 if r.get('ok') else 400,r)
         if self.path=='/api/bank':
             return self.do_POST_bank()
+        if self.path=='/api/merge':
+            # 存檔撞到之後(409):照伺服器現在的版本,把這個分頁手上的改動疊上去。只算不寫,看板拿結果再存一次
+            body=self._json_body()
+            if body is None: return
+            fb=json.loads(bd.parse(read_doc())['fb'] or '{}')
+            base,mine=(x if isinstance(x,dict) else {} for x in (body.get('base'),body.get('mine')))
+            return self._json(200,{'fb':fb,'merged':{k:dict(merge_edit(base.get(k),mine.get(k),fb.get(k),MERGE_BY.get(k)),
+                                                             key=MERGE_BY.get(k)) for k in map(str,body.get('keys') or mine.keys()|base.keys())}})
         if self.path=='/api/customize':
             if self._agent_blocked():return
             body=self._json_body()
@@ -1408,8 +1556,9 @@ class H(BaseHTTPRequestHandler):
             base=fb.pop('__base__',None)
             events=fb.pop('__events__',None)
             rejected=[]
+            got={}
             bad=write_fb(fb, base if isinstance(base,dict) else None,
-                         events if isinstance(events,list) else None, rejected)
+                         events if isinstance(events,list) else None, rejected, got)
             if bad:
                 self._json(409,{'ok':False,'err':'conflict','keys':bad,
                     'msg':'這幾筆在別的地方改過了,先拿最新的再存'}); return
@@ -1419,7 +1568,11 @@ class H(BaseHTTPRequestHandler):
             if PILOT and (events or '__auto__' in fb or any(isinstance(v,dict) and v.get('app') in ('prep','ready','ship') for v in fb.values())):
                 PILOT.kick()
             with _BUILD_LOCK: building=_build_state['running']
-            self._json(200,{'ok':True,'building':building,'rejected':rejected})
+            # 有變動的卡的新下一步:這一包動到的卡;動到常用答案、封鎖這類整份的資料(或改答案的事件)就每一張都重算
+            whole=any(k.startswith('__') for k in fb) or any(isinstance(e,dict) and not e.get('u') for e in events or [])
+            touched=None if whole else {k for k in fb}|{str(e.get('u') or '') for e in events or [] if isinstance(e,dict)}
+            self._json(200,{'ok':True,'building':building,'rejected':rejected,'cards':got.get('cards',{}),
+                            'undo':got.get('undo',{}),'next':next_steps(bd.parse(read_doc()),touched)})
         except bd.Tampered:
             raise
         except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)

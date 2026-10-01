@@ -48,7 +48,7 @@ def sandbox_api(base, path, body=None, method=None, headers=None, timeout=10, ra
 
 
 # 這一輪開的副本看板網址:board_check 開好副本後填進來。放這裡(不放 board_check):board_check 是 __main__,
-# board_check_apply 另外 import 它會拿到沒填網址的第二份
+# 別的地方另外 import 它會拿到沒填網址的第二份
 SB_URL = ['']
 FLOW_OFF = {'like_to_prep': False, 'auto_prep': False, 'auto_advance': False, 'auto_fill': False, 'replies_at': ''}
 

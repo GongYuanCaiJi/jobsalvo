@@ -19,7 +19,7 @@ class CardName(unittest.TestCase):
                 self.assertEqual(card.name(case['target']), case['expected'])
 
     def test_shared_company_cases(self):
-        """跟看板 companyOf 同一張案例表(board_check 的「共用規則案例表」跑頁面那份)。"""
+        """公司名只有後台這一份(看板拿 label_jobs 算好的 co)。"""
         path = os.path.join(HERE, 'fixtures', 'board-rule-cases.json')
         with open(path, encoding='utf-8') as f:
             cases = json.load(f)
@@ -47,6 +47,30 @@ class CardName(unittest.TestCase):
         self.assertEqual(card.name_key(target), card.name_key('Engineer, Acme'))
         self.assertEqual(card.with_name(target, 'Senior Engineer · Acme'),
                          'Senior Engineer · Acme（[LinkedIn](https://example.test/job)）')
+
+    def test_the_board_gets_one_company_name_for_the_same_company_whatever_its_letters(self):
+        """看板直接用後台給的卡名和公司名(#343、#339 第五條):大小寫、德文的雙 s、法律字尾不同還是同一家,分在同一組。"""
+        got = card.label_jobs([{'id': 'a', 'target': 'Engineer · Straße GmbH'}, {'id': 'b', 'target': 'Designer · STRASSE'}])
+        self.assertEqual([(j['name'], j['co']) for j in got],
+                         [('Engineer · Straße GmbH', 'Straße'), ('Designer · STRASSE', 'Straße')])
+
+    def test_the_board_gets_the_deadline_day_and_it_is_still_in_time_all_that_day(self):
+        """死線由後台認出是哪一天(dl),看板只比今天過了沒:那一天整天都還來得及(以前用 UTC 零點,台灣早上 8 點就算過了)。"""
+        def dl(text):
+            return card.label_jobs([{'id': 'a', 'target': 'x', 'sum': {'deadline': text}}])[0]['dl']
+        self.assertEqual([dl('2026-09-27'), dl('2026/9/27'), dl('截止日期:2026.9.26 前'), dl('盡快'), dl('')],
+                         ['2026-09-27', '2026-09-27', '2026-09-26', '', ''])
+        self.assertEqual(card.label_jobs([{'id': 'a', 'target': 'x'}])[0]['dl'], '')
+
+    def test_a_long_company_name_with_emoji_is_cut_by_characters(self):
+        name = '🚀🚀🚀 星際旅行社 Galactic Tours Taipei'
+        self.assertEqual(card.label_jobs([{'id': 'a', 'target': name}])[0]['co'], name[:22])
+
+    def test_the_board_gets_the_source_platform(self):
+        jobs = [{'id': 'https://www.104.com.tw/job/8bbbb'}, {'id': 'https://jobs.lever.co/northwind/1'},
+                {'id': 'https://job-boards.greenhouse.io/northwind/jobs/1'}, {'id': 'old-card-id'},
+                {'id': 'x', 'src': {'site': 'www.linkedin.com'}}]
+        self.assertEqual([j['src_plat'] for j in card.label_jobs(jobs)], ['104', 'Lever', 'Greenhouse', '不明', 'LinkedIn'])
 
     def test_url_identifier_is_shared_twelve_character_prefix(self):
         url = 'https://example.test/jobs/123'

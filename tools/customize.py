@@ -163,6 +163,10 @@ def swap_files(fb, url, why):
     """這張要寄的檔換了:照狀態表送「換檔」(填好的頁上傳的是舊檔,要重填)。表上不准(正在送出)回原因,
     呼叫的在看板鎖內就不寫(#338:以前換了檔卻默默擋掉事件,送出去的是頁上的舊檔)。"""
     import delivery_state as ds
+    import next_step
+    busy = next_step.refuse(fb, url, 'files_changed')     # 正在填、正在送出、送出結果不明:不准換檔(#341)
+    if busy:
+        return busy
     try:
         ds.fire(fb, url, 'files_changed', why=why)
     except ds.Forbidden as e:

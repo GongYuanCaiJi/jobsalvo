@@ -312,8 +312,9 @@ def customization_problem(j, fb):
     items = documents(j, fb)
     if not items:
         # 算不出這張會寄哪幾份(跟看板 custCurrent 回 null 一樣):每一筆客製紀錄都算,寧可多擋,不要放行
+        docs = (fb.get(j['id']) or {}).get('custom_docs')
         items = [{'name': (e or {}).get('name') or '有一份檔案', 'entry': e}
-                 for e in (((fb.get(j['id']) or {}).get('custom_docs')) or {}).values() if isinstance(e, dict)]
+                 for e in (docs if isinstance(docs, dict) else {}).values() if isinstance(e, dict)]   # 舊資料格式壞了:當成沒有
     for item in items:
         why = WAITING.get((item.get('entry') or {}).get('status'))
         if why:
@@ -728,7 +729,7 @@ def _busy(fb):
     """agent 正在用可投遞夾的卡:正在填或改、正在送出,和幫你填表那一輪正在跑的那一張(送出前的附件核對時還是你已確認)。"""
     import delivery_state as ds
     import jobrun
-    out = {u for u, m in fb.items() if isinstance(m, dict) and ds.state(m) in ('running', 'sending')}
+    out = {u for u, m in fb.items() if isinstance(m, dict) and ds.state(m) in ds.WORKING}
     st = jobrun.read(os.path.join(os.environ.get('APPLY_TMP') or cf.TMP, 'apply_status.json'), ('apply_run.py', 'job_fake.py'))
     if st.get('running') and st.get('url'):
         out.add(st['url'])

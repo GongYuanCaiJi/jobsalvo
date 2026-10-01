@@ -158,7 +158,6 @@ class AcceptanceIsolation(unittest.TestCase):
         self.assertEqual(shell['data'], {'jobs': []})
         self.assertEqual(json.loads(shell['fb']), {})
         self.assertIn('.ap-approve:disabled', shell['sty'])
-        self.assertIn('function dsFire(', shell['app'])       # 現在的外殼照投遞狀態表判斷能不能確認送出
 
 
 if __name__ == '__main__':

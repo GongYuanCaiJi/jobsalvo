@@ -613,7 +613,7 @@ class WebOnly(tb.HttpBase):
         before = read_fb(self.path)[u]
         code, d = self.put('/api/card-file?u=' + urllib.parse.quote(u) + '&name=mine.pdf', b'%PDF-1.4 mine')
         self.assertEqual(code, 409, d)
-        self.assertIn('正在送出', d['msg'])
+        self.assertEqual(d['msg'], 'Agent 正在做,等它做完')
         self.assertEqual(read_fb(self.path)[u], before)
 
     def test_customize_settings_files_dispatch_and_run_status(self):

@@ -1,8 +1,8 @@
 """連續很多步的隨機走法(#302 補充驗收):照固定亂數種子產生一串一串的動作,每一步都經過正式的入口
 (看板按鈕的規則、apply_run 的關卡、自動流程、平台對帳、Chrome 關過),記下每一步照狀態表送了哪些事件、改了哪些欄位。
 
-後台測試(tests/test_delivery_sequences.py)每一步驗「永遠要成立的事」;看板檢查拿同一串記錄在看板上重放,
-每一步比卡片和停著的頁數量。種子、張數、步數不准亂改:失敗訊息印的是種子和第幾串,重跑得出同一串。"""
+後台測試(tests/test_delivery_sequences.py)每一步驗「永遠要成立的事」。
+種子、張數、步數不准亂改:失敗訊息印的是種子和第幾串,重跑得出同一串。"""
 import copy
 import os
 import random
@@ -34,7 +34,7 @@ def start():
 
 
 class Walk:
-    """一串動作的世界:三張卡(兩張同一家公司),停著的頁上限 CAP。ops 是看板重放用的低階紀錄。"""
+    """一串動作的世界:三張卡(兩張同一家公司),停著的頁上限 CAP。ops 是每一步的低階紀錄(哪一張、送了什麼)。"""
 
     def __init__(self, seed):
         self.rnd = random.Random(seed)
@@ -137,7 +137,7 @@ class Walk:
         fr.apply_translate(self.fb, 'k1', en=v)
         self.ops += [{'op': 'bank', 'v': v}] + ([{'op': 'refill'}] if changed else [])   # 英文沒變就不標重打
 
-    # ---- 看板那一邊(照 board.js 的按鈕規則)----
+    # ---- 他按的按鈕(看板送的事件,後台照下一步收或擋)----
     def busy(self, u):
         return ds.state(self.fb[u]) in ('running', 'sending', 'unsure')
 
@@ -154,7 +154,7 @@ class Walk:
             self.user(u, b)
 
     def user_answer(self):
-        """他在常用答案改了一條:用到它的「你已確認」確認作廢,頁還在的表單標重打(board.js 的 ansRefill)。"""
+        """他在常用答案改了一條:用到它的「你已確認」確認作廢,頁還在的表單標重打(後台 form_record.changed)。"""
         v = 'Because %d.' % self.n
         if any(ds.state(self.fb[u]) == 'unsure' for u in URLS):
             return                                              # 送出結果不明的卡在用:答案先不給改
@@ -290,16 +290,3 @@ class Walk:
 
 SEED, WALKS, STEPS = 302, 1500, 30
 
-
-def walks(n=WALKS, steps=STEPS, seed=SEED):
-    """看板檢查用:每一串的動作紀錄(ops)和每一步之後的卡片、停著的頁。"""
-    out = []
-    for i in range(n):
-        w = Walk(seed * 100000 + i)
-        rows = []
-        for _ in range(steps):
-            _name, _u, _before, _res, ops = w.step()
-            rows.append({'ops': ops, 'cards': {u: copy.deepcopy(w.fb[u]) for u in URLS}, 'held': w.held(),
-                         'block': copy.deepcopy(w.fb.get('__block__') or []), 'ans': copy.deepcopy(w.fb['__ans__'])})
-        out.append({'i': i, 'start': start(), 'rows': rows, 'log': w.log})
-    return out

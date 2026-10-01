@@ -1,8 +1,7 @@
 """舊記號組合(投遞狀態上線前,一張「可以投了」的卡靠十幾個記號拼出來):轉換測試的輸入。
 
 以前的 tools/state_matrix.py(#293)照固定亂數種子抽這些組合;改成一張卡只存一個投遞狀態(docs/adr/0004)之後,
-它只剩一個用途:舊資料轉成投遞狀態時,畫出來要跟轉換前一樣。轉換前的畫面存在 fixtures/legacy-render.json
-(main dc17bf5 的 board.js 畫的),組合要跟當時一模一樣,所以種子、維度、順序都不准改。"""
+它只剩一個用途:舊資料轉成投遞狀態的測試(tests/test_delivery_migrate.py)拿它當輸入。"""
 import copy
 import random
 

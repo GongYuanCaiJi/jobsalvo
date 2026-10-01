@@ -473,7 +473,7 @@
    }
   }
  },
- "checklist_": "能不能確認送出:先看投遞狀態,再看檢查清單(投遞前驗收、這次上傳方式、常用答案、重翻、重打、確認時的答案)。problem 是確認之後能不能送(form_record.approval_problem / 看板 approvalProblem);confirm 是現在按確認送出會被什麼擋(form_record.confirm_problem / 看板 approveBlocker)。原本 board-rule-cases.json 的 approvals、approve_blockers 併進來。",
+ "checklist_": "能不能確認送出:先看投遞狀態,再看檢查清單(投遞前驗收、這次上傳方式、常用答案、重翻、重打、確認時的答案)。problem 是確認之後能不能送(form_record.approval_problem);confirm 是現在按確認送出會被什麼擋(form_record.confirm_problem)。原本 board-rule-cases.json 的 approvals、approve_blockers 併進來。",
  "checklist": [
   {
    "name": "missing form",
@@ -500,7 +500,7 @@
     }
    },
    "problem": "還沒確認送出",
-   "confirm": "agent 還沒填這張,先讓它填好、你看過頁面再確認送出"
+   "confirm": "Agent 還沒填這張,先讓它填好、你看過頁面再確認送出"
   },
   {
    "name": "pending answer",
@@ -1458,7 +1458,7 @@
     }
    },
    "problem": "還沒確認送出",
-   "confirm": "agent 還沒填這張,先讓它填好、你看過頁面再確認送出",
+   "confirm": "Agent 還沒填這張,先讓它填好、你看過頁面再確認送出",
    "status": {
     "schema_version": 2,
     "checked_links": true,
@@ -1490,7 +1490,7 @@
     }
    },
    "problem": "還沒確認送出",
-   "confirm": "agent 還沒填這張,先讓它填好、你看過頁面再確認送出"
+   "confirm": "Agent 還沒填這張,先讓它填好、你看過頁面再確認送出"
   },
   {
    "name": "filled and confirmed can be approved",
