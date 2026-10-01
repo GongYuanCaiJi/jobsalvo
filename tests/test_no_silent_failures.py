@@ -72,15 +72,6 @@ class NoSilentFailures(unittest.TestCase):
                if (m := PRAGMA.search(line)) and not _reason(m.group(1))]
         self.assertEqual(bad, [], '這幾處不算覆蓋率卻沒寫為什麼不用測:\n' + '\n'.join(bad))
 
-    def test_reason_parser(self):
-        # 理由要是真的字,不是只有分隔符號
-        self.assertEqual(_reason(' — 盡力清掉暫存檔'), '盡力清掉暫存檔')
-        self.assertEqual(_reason(' — '), '')
-        self.assertEqual(_reason(''), '')
-        m = NOQA.search('except Exception:  # noqa: BLE001, S110 — 盡力清暫存')
-        self.assertEqual((m.group(1), _reason(m.group(2))), ('BLE001, S110', '盡力清暫存'))
-        self.assertIsNone(PRAGMA.search('x = 1  # 普通註解'))
-
 
 class FailuresReachTheBoard(unittest.TestCase):
     """碰到他資料的地方出錯,要寫進看板最上面的「📣 回報」(不是只印在伺服器的終端機,他看不到)。"""

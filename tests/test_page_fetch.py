@@ -20,7 +20,6 @@ class ChromeFallbackLimit(unittest.TestCase):
     def test_at_most_two_chromes_at_once(self):
         import page_fetch, time as _time
         from concurrent.futures import ThreadPoolExecutor
-        from unittest.mock import patch
         live, peak, lock = [0], [0], threading.Lock()
 
         def fake_now(url, pinned_ip=''):
@@ -71,104 +70,54 @@ class PageFetchRoutes(unittest.TestCase):
         cls.requests = []
         cls.chrome_requests = 0
 
+        JSON, HTML, TEXT = 'application/json; charset=utf-8', 'text/html; charset=utf-8', 'text/plain; charset=utf-8'
+        greenhouse = json.dumps({'title': 'Platform Engineer', 'content': '<p>Build platform systems.</p>',
+                                 'first_published': '2026-09-03T10:00:00-07:00',
+                                 'updated_at': '2026-09-04T10:00:00-07:00'}).encode()
+        routes = {   # 路徑 → (狀態碼, 內容類型, 內容);內容類型 None = 只回狀態碼
+            '/api/acme/fake-id?mode=json': (200, JSON, b'{"text":"Security Work","descriptionPlain":'
+                                                       b'"Build controls for active internet services."}'),
+            '/api/104/ABC1': (200, JSON, json.dumps({'data': {
+                'switch': 'on', 'header': {'jobName': 'Platform Engineer', 'custName': 'Example', 'appearDate': '20260901'},
+                'jobDetail': {'jobDescription': '<p>Build secure services.</p>'}}}).encode()),
+            '/api/104/CLOSED': (200, JSON, json.dumps({'data': {'switch': 'off', 'header': {'jobName': 'Platform Engineer'}}}).encode()),
+            '/api/ashby/acme': (200, JSON, json.dumps({'jobs': [{
+                'title': 'Security Engineer', 'jobUrl': 'https://jobs.ashbyhq.com/acme/posting-1',
+                'publishedAt': '2026-09-02T12:00:00.000Z', 'descriptionPlain': 'Investigate product security.'}]}).encode()),
+            '/api/greenhouse/acme/jobs/123': (200, JSON, greenhouse),
+            '/api/104/GONE': (404, JSON, b'{"error":{"code":11201}}'),
+            '/blocked': (403, None, b''),
+            '/gone404': (404, None, b''),
+            '/gone410': (410, None, b''),
+            '/script': (200, HTML, b'<html><head><script>setTimeout(function(){'
+                                   b"document.body.innerText='Dynamic job content';},200);"
+                                   b'</script></head><body></body></html>'),
+        }
+
         class Handler(BaseHTTPRequestHandler):
+            def send(self, code, kind=None, body=b'', headers=()):
+                self.send_response(code)
+                for k, v in ((('Content-Type', kind), ('Content-Length', str(len(body)))) if kind else ()) + tuple(headers):
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 PageFetchRoutes.requests.append(self.path)
-                if self.path == '/api/acme/fake-id?mode=json':
-                    body = (b'{"text":"Security Work","descriptionPlain":'
-                            b'"Build controls for active internet services."}')
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json; charset=utf-8')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                api_payloads = {
-                    '/api/104/ABC1': {
-                        'data': {'switch': 'on',
-                                 'header': {'jobName': 'Platform Engineer', 'custName': 'Example',
-                                            'appearDate': '20260901'},
-                                 'jobDetail': {'jobDescription': '<p>Build secure services.</p>'}}},
-                    '/api/104/CLOSED': {
-                        'data': {'switch': 'off', 'header': {'jobName': 'Platform Engineer'}}},
-                    '/api/ashby/acme': {
-                        'jobs': [{'title': 'Security Engineer',
-                                  'jobUrl': 'https://jobs.ashbyhq.com/acme/posting-1',
-                                  'publishedAt': '2026-09-02T12:00:00.000Z',
-                                  'descriptionPlain': 'Investigate product security.'}]},
-                    '/api/greenhouse/acme/jobs/123': {
-                        'title': 'Platform Engineer', 'content': '<p>Build platform systems.</p>',
-                        'first_published': '2026-09-03T10:00:00-07:00',
-                        'updated_at': '2026-09-04T10:00:00-07:00'},
-                }
-                if self.path.startswith('/api/greenhouse/acme/jobs/123?'):
-                    api_payloads[self.path] = api_payloads['/api/greenhouse/acme/jobs/123']
-                if self.path in api_payloads:
-                    import json
-                    body = json.dumps(api_payloads[self.path]).encode()
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json; charset=utf-8')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                if self.path == '/api/104/GONE':
-                    body = b'{"error":{"code":11201}}'
-                    self.send_response(404)
-                    self.send_header('Content-Type', 'application/json; charset=utf-8')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                if self.path == '/blocked':
-                    self.send_response(403)
-                    self.end_headers()
-                    return
-                if self.path == '/retry':
-                    user_agent = self.headers.get('User-Agent', '')
-                    if 'jobsalvo/' in user_agent:
-                        self.send_response(503)
-                        self.end_headers()
-                        return
+                path = self.path
+                if path.startswith('/api/greenhouse/acme/jobs/123?'):
+                    path = '/api/greenhouse/acme/jobs/123'
+                if path.startswith('/reader/'):
+                    return self.send(200, TEXT, b'Title: Security Engineer\nJob Description: This active role handles expired credentials.')
+                if path == '/redirect-internal':
+                    return self.send(302, headers=[('Location', 'http://10.0.0.9/admin')])
+                if path == '/retry':
+                    if 'jobsalvo/' in self.headers.get('User-Agent', ''):
+                        return self.send(503)
                     PageFetchRoutes.chrome_requests += 1
-                    body = (b'<html><body>Retry recovered</body></html>'
-                            if PageFetchRoutes.chrome_requests == 2 else
-                            b'<html><body></body></html>')
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/html; charset=utf-8')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                if self.path in ('/gone404', '/gone410'):
-                    self.send_response(404 if self.path.endswith('404') else 410)
-                    self.end_headers()
-                    return
-                if self.path == '/redirect-internal':
-                    self.send_response(302)
-                    self.send_header('Location', 'http://10.0.0.9/admin')
-                    self.end_headers()
-                    return
-                if self.path == '/script':
-                    body = (b'<html><head><script>setTimeout(function(){'
-                            b"document.body.innerText='Dynamic job content';},200);"
-                            b'</script></head><body></body></html>')
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/html; charset=utf-8')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                if self.path.startswith('/reader/'):
-                    body = b'Title: Security Engineer\nJob Description: This active role handles expired credentials.'
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                    self.send_header('Content-Length', str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                    return
-                self.send_response(404)
-                self.end_headers()
+                    return self.send(200, HTML, b'<html><body>Retry recovered</body></html>'
+                                     if PageFetchRoutes.chrome_requests == 2 else b'<html><body></body></html>')
+                self.send(*routes.get(path, (404,)))
 
             def log_message(self, *_args):
                 pass
@@ -445,15 +394,12 @@ class PageFetchRoutes(unittest.TestCase):
 class PostedAgeCache(unittest.TestCase):
     def setUp(self):
         import tempfile
-        self.directory = tempfile.mkdtemp(prefix='posted-age-test-')
+        self.directory = self.enterContext(tempfile.TemporaryDirectory(prefix='posted-age-test-'))
         self.board = os.path.join(self.directory, 'board.html')
         self.url = 'https://jobs.lever.co/acme/cache-test'
         import test_board
         test_board.make_board(self.board, {}, jobs=[{'id': self.url, 'target': 'Platform Engineer'}])
 
-    def tearDown(self):
-        import shutil
-        shutil.rmtree(self.directory, ignore_errors=True)
 
     def _patch_paths(self, posted_age):
         return patch.multiple(
@@ -630,6 +576,50 @@ class PostedAgeCache(unittest.TestCase):
         said = [c.args[1] for c in report.call_args_list if c.kwargs.get('job') == self.url]
         self.assertTrue(any('刊登日期' in m and '2026-08-01' in m and '2026-09-07' in m for m in said), said)
 
+    # 一輪最多交 20 頁給 agent、只給跟日期有關的那幾行;連一行日期都沒有的頁不問 agent。
+    def test_agent_gets_small_prompt(self):
+        import config as cf, page_fetch, posted_age
+        import test_board
+        from types import SimpleNamespace
+        urls = [f'https://example.invalid/jobs/{i}' for i in range(25)] + ['https://example.invalid/jobs/nodate']
+        test_board.make_board(self.board, {}, jobs=[{'id': u, 'target': 'Engineer'} for u in urls])
+        filler = '\n'.join(f'Responsibility line {k}' for k in range(200))
+        pages = {u: page_fetch.PageResult(u, 'ok', text=f'{filler}\nPosted on 2026-09-0{i % 9 + 1}', via='direct')
+                 for i, u in enumerate(urls[:-1])}
+        pages[urls[-1]] = page_fetch.PageResult(urls[-1], 'ok', text=filler, via='direct')
+        seen = {}
+
+        def agent(prompt, *a, **k):
+            seen['prompt'] = prompt
+            return SimpleNamespace(ok=False, message=lambda: 'stop here')
+        with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
+             patch.object(page_fetch, 'fetch', side_effect=lambda url: pages[url]), \
+             patch.object(posted_age.ar, 'run', side_effect=agent), \
+             patch('agent_report.report'):
+            posted_age.main(['--board', self.board])
+        prompt = seen['prompt']
+        self.assertEqual(prompt.count('Posted on'), posted_age.AGENT_BATCH)
+        self.assertNotIn('Responsibility line', prompt)
+        self.assertNotIn(urls[-1], prompt)
+        self.assertLess(len(prompt), 20000)
+
+
+    # 程式猜「這頁沒有日期」只是省得問 agent,不能把卡上原本的日期刪掉(#235 在副本上刪掉 128 張)。
+    def test_page_without_date_lines_keeps_existing_date(self):
+        import config as cf, page_fetch, posted_age, board_doc
+        import test_board
+        test_board.make_board(self.board, {}, jobs=[{
+            'id': self.url, 'target': 'Platform Engineer', 'posted_at': '2026-08-01', 'posted_src': 'lever'}])
+        page = page_fetch.PageResult(self.url, 'ok', text='Platform Engineer\nBuild platforms', via='direct')
+        with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
+             patch.object(page_fetch, 'fetch', return_value=page), \
+             patch.object(posted_age.ar, 'run', side_effect=AssertionError('沒有日期行不用問 agent')):
+            self.assertEqual(posted_age.main(['--board', self.board]), 0)
+            self.assertEqual(posted_age.main(['--board', self.board]), 0)   # 第二輪也不會再排隊、不會刪
+        with open(self.board, encoding='utf-8') as f:
+            job = board_doc.parse(f.read())['data']['jobs'][0]
+        self.assertEqual(job.get('posted_at'), '2026-08-01')
+
 
 class FetchMany(unittest.TestCase):
     """好幾個缺一起抓:一個慢或壞的頁不卡住整批,順序照原本的。"""
@@ -664,55 +654,6 @@ class JobPostingDate(unittest.TestCase):
         self.assertEqual(page_fetch._job_posting_date(html), '2026-09-20')
         self.assertEqual(page_fetch._job_posting_date('<script type="application/ld+json">{bad</script>'), '')
         self.assertEqual(page_fetch._job_posting_date('<p>no data</p>'), '')
-
-
-class PostedAgeBatch(PostedAgeCache):
-    """一輪最多交 20 頁給 agent、只給跟日期有關的那幾行;連一行日期都沒有的頁不問 agent。"""
-
-    def test_agent_gets_small_prompt(self):
-        import config as cf, page_fetch, posted_age
-        import test_board
-        from types import SimpleNamespace
-        urls = [f'https://example.invalid/jobs/{i}' for i in range(25)] + ['https://example.invalid/jobs/nodate']
-        test_board.make_board(self.board, {}, jobs=[{'id': u, 'target': 'Engineer'} for u in urls])
-        filler = '\n'.join(f'Responsibility line {k}' for k in range(200))
-        pages = {u: page_fetch.PageResult(u, 'ok', text=f'{filler}\nPosted on 2026-09-0{i % 9 + 1}', via='direct')
-                 for i, u in enumerate(urls[:-1])}
-        pages[urls[-1]] = page_fetch.PageResult(urls[-1], 'ok', text=filler, via='direct')
-        seen = {}
-
-        def agent(prompt, *a, **k):
-            seen['prompt'] = prompt
-            return SimpleNamespace(ok=False, message=lambda: 'stop here')
-        with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
-             patch.object(page_fetch, 'fetch', side_effect=lambda url: pages[url]), \
-             patch.object(posted_age.ar, 'run', side_effect=agent), \
-             patch('agent_report.report'):
-            posted_age.main(['--board', self.board])
-        prompt = seen['prompt']
-        self.assertEqual(prompt.count('Posted on'), posted_age.AGENT_BATCH)
-        self.assertNotIn('Responsibility line', prompt)
-        self.assertNotIn(urls[-1], prompt)
-        self.assertLess(len(prompt), 20000)
-
-
-class PostedAgeKeepsDates(PostedAgeCache):
-    """程式猜「這頁沒有日期」只是省得問 agent,不能把卡上原本的日期刪掉(#235 在副本上刪掉 128 張)。"""
-
-    def test_page_without_date_lines_keeps_existing_date(self):
-        import config as cf, page_fetch, posted_age, board_doc
-        import test_board
-        test_board.make_board(self.board, {}, jobs=[{
-            'id': self.url, 'target': 'Platform Engineer', 'posted_at': '2026-08-01', 'posted_src': 'lever'}])
-        page = page_fetch.PageResult(self.url, 'ok', text='Platform Engineer\nBuild platforms', via='direct')
-        with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
-             patch.object(page_fetch, 'fetch', return_value=page), \
-             patch.object(posted_age.ar, 'run', side_effect=AssertionError('沒有日期行不用問 agent')):
-            self.assertEqual(posted_age.main(['--board', self.board]), 0)
-            self.assertEqual(posted_age.main(['--board', self.board]), 0)   # 第二輪也不會再排隊、不會刪
-        with open(self.board, encoding='utf-8') as f:
-            job = board_doc.parse(f.read())['data']['jobs'][0]
-        self.assertEqual(job.get('posted_at'), '2026-08-01')
 
 
 if __name__ == '__main__':

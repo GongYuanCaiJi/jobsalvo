@@ -115,12 +115,6 @@ body.scrolled #tabs{border-bottom:1px solid var(--line);box-shadow:0 6px 14px -1
 body.scrolled .tab .tlbl{display:none}
 body.scrolled .tab{padding:6px 10px}
 
-/* ---------- 類別 / 標籤篩選 ---------- */
-.cats{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 12px}
-.catchip{font-size:12px;padding:5px 10px;border-radius:16px;border:1px solid var(--line);
-  background:var(--surface);color:var(--ink-dim);cursor:pointer}
-.catchip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
-
 /* ---------- 標籤 ---------- */
 .tags{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 8px}
 .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;border:1px solid var(--line);

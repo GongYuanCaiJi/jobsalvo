@@ -12,7 +12,7 @@ import init  # noqa: E402
 
 class OwnPaths(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix='init-test-')
+        self.root = self.enterContext(tempfile.TemporaryDirectory(prefix='init-test-'))
         home0 = cf.HOME
         self.addCleanup(lambda: cf.reload(home0))
         self.addCleanup(shutil.rmtree, self.root, True)
@@ -73,7 +73,6 @@ class InstalledAgents(unittest.TestCase):
     """新資料夾的 agent 清單照這台電腦裝了什麼:只裝 Claude Code 的人以前連安裝都過不了(檢查要 codex)。"""
 
     def test_first_installed_runtime_becomes_the_agent(self):
-        from unittest.mock import patch
         import agent_run as ar
         for have, want in (({'codex', 'claude'}, 'codex'), ({'claude'}, 'claude-code'),
                            ({'command-code'}, 'command-code'), (set(), None)):
@@ -85,7 +84,6 @@ class InstalledAgents(unittest.TestCase):
                 self.assertFalse(agents[0]['browser'])          # Command Code 不能開瀏覽器
 
     def test_new_home_writes_the_detected_list(self):
-        from unittest.mock import patch
         root = self.enterContext(tempfile.TemporaryDirectory(prefix='init-agents-'))
         home0 = cf.HOME
         self.addCleanup(lambda: cf.reload(home0))

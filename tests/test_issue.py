@@ -53,7 +53,7 @@ class WordListInWorktree(unittest.TestCase):
     """在 git worktree 裡也要找得到主 repo 的字詞清單(以前會找錯地方、安靜跳過)。"""
     def test_found_from_worktree(self):
         import tempfile, subprocess
-        d = tempfile.mkdtemp()
+        d = self.enterContext(tempfile.TemporaryDirectory())
         # pre-commit 跑測試時 git 會帶 GIT_DIR/GIT_INDEX_FILE 進來;不清掉,下面的 git 會動到真正的 repo
         env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
         run = lambda *a, cwd=d: subprocess.run(a, cwd=cwd, env=env, check=True, capture_output=True)

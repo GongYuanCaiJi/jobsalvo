@@ -4,7 +4,6 @@ import subprocess
 import tempfile
 import time
 import unittest
-from contextlib import contextmanager
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -13,15 +12,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 import folder_history
 
 
-@contextmanager
 def _without_git_environment():
-    inherited = {key: value for key, value in os.environ.items() if key.startswith('GIT_')}
-    for key in inherited:
-        os.environ.pop(key, None)
-    try:
-        yield
-    finally:
-        os.environ.update(inherited)
+    return mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}, clear=True)
 
 
 class FolderHistory(unittest.TestCase):
@@ -36,33 +28,15 @@ class FolderHistory(unittest.TestCase):
         self.assertNotIn('GIT_WORK_TREE', child_env)
 
     def test_saves_coalesce_into_local_commits_and_ignore_generated_outputs(self):
-        class ManualTimer:
-            def __init__(self, _delay, callback, args=(), kwargs=None):
-                self.callback = callback
-                self.args = args
-                self.kwargs = kwargs or {}
-                self.cancelled = False
-
-            def start(self):
-                pass
-
-            def cancel(self):
-                self.cancelled = True
-
-            def fire(self):
-                if not self.cancelled:
-                    self.callback(*self.args, **self.kwargs)
-
         with tempfile.TemporaryDirectory(prefix='folder-history-') as home:
             env = {'GIT_AUTHOR_NAME': 'Test User', 'GIT_AUTHOR_EMAIL': 'test@example.invalid',
                    'GIT_COMMITTER_NAME': 'Test User', 'GIT_COMMITTER_EMAIL': 'test@example.invalid'}
             with _without_git_environment(), mock.patch.dict(os.environ, env):
                 timers = []
 
-                def create_timer(delay, callback, args=(), kwargs=None):
-                    timer = ManualTimer(delay, callback, args, kwargs)
-                    timers.append(timer)
-                    return timer
+                def create_timer(_delay, callback, args=(), kwargs=None):   # 計時器不真的計時,測試自己叫它響
+                    timers.append(mock.Mock(fire=lambda: callback(*args, **(kwargs or {}))))
+                    return timers[-1]
 
                 with mock.patch.object(folder_history.threading, 'Timer', side_effect=create_timer):
                     with open(os.path.join(home, 'first.md'), 'w', encoding='utf-8') as f:
@@ -85,8 +59,8 @@ class FolderHistory(unittest.TestCase):
                         f.write('{}')
                     folder_history.note_saved(home, delay=0.2)
                     self.assertEqual(len(timers), 2)
-                    self.assertTrue(timers[0].cancelled)
-                    self.assertFalse(timers[1].cancelled)
+                    self.assertTrue(timers[0].cancel.called)
+                    self.assertFalse(timers[1].cancel.called)
                     self.assertFalse(os.path.exists(os.path.join(home, '.git')))
                     timers[1].fire()
 

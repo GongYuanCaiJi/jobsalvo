@@ -9,7 +9,6 @@ import copy
 import functools
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -93,12 +92,10 @@ class SameLockSameWrite(Tmp):
 
 
     def test_irreversible_conversions_go_through_the_restore_point_entry(self):
-        """舊資料轉換(投遞狀態、客製紀錄語言…)回不了頭:只准在 board_server.migrate_marks 裡做,
-        而且它寫回看板只准透過 folder_history.convert(先留退回點,沒有就不轉)。
-        看板檢查拿記憶體裡的副本轉來組測試資料,不寫檔,不算。新增的轉換照樣要掛進 migrate_marks。
-        (設定檔的舊格式寫回在 config.user_settings,也走同一個入口,由 test_settings_save 的 LegacySettingsConversion 看著。)"""
+        """伺服器起來時的轉換(清過時的回報與答案)回不了頭:只准在 board_server.migrate_marks 裡做,
+        而且它寫回看板只准透過 folder_history.convert(先留退回點,沒有就不轉)。新增的轉換照樣要掛進 migrate_marks。"""
         import ast
-        conversions = {'migrate', 'migrate_custom_keys', 'from_legacy'}
+        conversions = {'sweep'}
         found = set()
         for name in sorted(os.listdir(TOOLS)):
             if not name.endswith('.py') or name == 'board_check.py':
@@ -148,14 +145,13 @@ class TwoDevices(unittest.TestCase):
     def setUp(self):
         import board_server as bs
         self.bs = bs
-        self.dir = tempfile.mkdtemp(prefix='twodevices-')
+        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='twodevices-'))
         self.path = os.path.join(self.dir, 'board.html')
         self._state, self._tb = bs.STATE, bs.trigger_build
         bs.STATE, bs.trigger_build = self.path, (lambda: None)
 
     def tearDown(self):
         self.bs.STATE, self.bs.trigger_build = self._state, self._tb
-        shutil.rmtree(self.dir, ignore_errors=True)
 
     def board(self, state):
         _env.make_board(self.path, {CARD: copy.deepcopy(FIX['cards'][state]), '__ans__': copy.deepcopy(FIX['ans'])},

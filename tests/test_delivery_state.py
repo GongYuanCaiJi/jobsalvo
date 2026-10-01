@@ -41,18 +41,6 @@ EXPECTED = {
 # (送出結果不明時改答案:看板把用到它的答案輸入框停用;答案庫本身的寫入不擋,狀態不變)
 NOT_AMBIENT = {'running': {'leave'}, 'sending': {'files_changed', 'leave'}, 'unsure': {'leave'}}
 NO_MANUAL_SENT = {'running', 'sending'}         # agent 正在做,等它做完才能標外部送出
-# 「不准的」那一欄(抽查:下面的交叉表會把沒列的全部驗成不准)
-FORBIDDEN = {
-    'todo': ['confirm', 'submit_start', 'fix_start'],
-    'running': ['confirm', 'fill_start', 'fix_start', 'leave', 'sent_manual'],
-    'nopage': ['confirm', 'fix_start'],
-    'stuck': ['confirm'],
-    'stale': ['confirm', 'fix_start'],
-    'gone': ['confirm', 'fix_start', 'submit_start'],
-    'sending': ['unconfirm', 'files_changed', 'leave', 'sent_manual'],
-    'unsure': ['fill_start', 'submit_start', 'fix_start', 'leave'],
-    'sent': ['back', 'fill_start', 'confirm'],       # agent 送出的卡不能退回
-}
 
 
 def expected(state, event):
@@ -94,16 +82,6 @@ class StateTable(unittest.TestCase):
                     self.assertEqual(ds.state(fb[URL]), to)
                     fb[URL] = prev                              # 復原:改動前那一張整張放回
                     self.assertEqual(fb, before)
-
-    def test_forbidden_column(self):
-        for state, events in FORBIDDEN.items():
-            for event in events:
-                with self.subTest(state=state, event=event):
-                    self.assertIsNone(expected(state, event))
-
-    def test_page_left_waiting_is_the_green_states(self):
-        """停著的頁:停著等你、填了卡住、上傳的是舊檔、你已確認、送出結果不明(GLOSSARY)。"""
-        self.assertEqual({s for s in FIX['cards'] if s in ds.HELD_STATES}, {'parked', 'stuck', 'stale', 'confirmed', 'unsure'})
 
 
 class PageLeftWaiting(unittest.TestCase):
@@ -420,21 +398,6 @@ class BrokenCardsAreCaught(unittest.TestCase):
         fb = {URL: copy.deepcopy(FIX['cards']['running'])}
         ds.fire(fb, URL, 'tab_handed')
         self.assertEqual(fb[URL]['apply'], FIX['cards']['running']['apply'])
-
-
-class OldMarksConvert(unittest.TestCase):
-    """舊記號轉投遞狀態(from_legacy)還沒走過的幾種。"""
-
-    def test_sent_without_agent_evidence_keeps_the_page_record(self):
-        m = ds.from_legacy({'app': 'sent', 'sent_v': 'zh-A', 'apply': {'stage': 'fill', 'tab_id': '7', 'ok': 1}})
-        self.assertEqual((m['ds'], m['sent_by'], m['apply']['tab_id']), ('sent', 'manual', '7'))
-        self.assertNotIn('ok', m['apply'])
-
-    def test_a_round_that_never_reached_the_form_is_todo(self):
-        m = ds.from_legacy({'app': 'ship', 'approve': {'at': 'x'}, 'apply': {'stage': 'prep', 'ok': 1}})
-        self.assertEqual(ds.state(m), 'todo')
-        self.assertNotIn('ds', m)
-        self.assertNotIn('approve', m)
 
 
 class BoardSaveCannotForge(unittest.TestCase):

@@ -12,7 +12,7 @@ fill.json 裡 worker 只擁有 WORKER_KEYS 那幾欄;其他欄位(例如自己�
 是別人寫的,跑之前備份、跑完原封不動放回去。這一輪 agent 交的那份(交件單)只經安檢門:存回正式位置的
 只有收下的格子,所以正式那份裡 worker 以外的欄位都不是 agent 寫的。
 
-用法:python3 tools/cut_tailor.py --board <看板檔> [--limit N] [--scope prep|all]
+用法:python3 tools/cut_tailor.py --board <看板檔> [--limit N] [--jids a,b]
 """
 import sys,os,json,argparse,subprocess,uuid,contextlib
 HERE=os.path.dirname(os.path.abspath(__file__))
@@ -287,11 +287,9 @@ def progress(sp=None):
     return st
 
 
-_CHECK=[False]   # --check 只是驗上一輪,不動進度狀態
-
 def _stop(msg):
     """沒東西可跑:寫進狀態再結束,看板上按了鈕的人看得到為什麼沒跑。"""
-    if not _CHECK[0]: _status({'phase':'nothing','msg':msg})
+    _status({'phase':'nothing','msg':msg})
     sys.exit(msg)
 
 
@@ -551,9 +549,7 @@ def skip_approved(rows, out_dir=None):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--board',required=True); ap.add_argument('--limit',type=int,default=0)
-    ap.add_argument('--scope',choices=['prep','all'],default='prep')
-    ap.add_argument('--jids',default='',help='只跑這些 jid(逗號分隔),無視 scope/status——重生用')
-    ap.add_argument('--check',action='store_true',help='不跑,只驗上一輪指定的 jid 是不是每個都真的重寫過')
+    ap.add_argument('--jids',default='',help='只跑這些 jid(逗號分隔),無視 status——重生用')
     ap.add_argument('--finish',action='store_true',help='(內部)收尾 supervisor:等 worker 跑完→驗→跑 reconcile,不用手動下')
     ap.add_argument('--out-dir',default='',help=argparse.SUPPRESS)
     a=ap.parse_args()
@@ -567,9 +563,7 @@ def main():
                 _report(f'跑準備區沒跑完:{e}', '可以再按一次;一直失敗就在「正在準備」按「看紀錄」', a.board)
             raise
         return 1 if progress().get('phase') in ('failed','incomplete') else 0
-    _CHECK[0]=a.check
-    if not a.check:
-        _status({'phase':'start','pid':os.getpid()})
+    _status({'phase':'start','pid':os.getpid()})
     d=bd.load(a.board); FB=json.loads(d['fb'])
     only=set(x.strip() for x in a.jids.split(',') if x.strip())
     def keep(j):
@@ -578,24 +572,15 @@ def main():
         e=FB.get(j['id']) if isinstance(FB.get(j['id']),dict) else {}
         # 按了 🗑 移除的(app 還在、多一個 rm)不跑:跟看板上的張數、代投、建置同一條(以前照樣派 agent 判、推進待你決定)
         if e.get('rm'): return False
-        return a.scope=='all' or e.get('app')=='prep'
+        return e.get('app')=='prep'
     def title(j): return card.name(j)
     rows=[(j['id'],title(j)) for j in d['data']['jobs'] if keep(j)]
     if a.limit: rows=rows[:a.limit]
-    if not rows and not a.check:
+    if not rows:
         _stop('「正在準備」沒有卡' if not only else '指定的 jid 一個都不在看板上')
     # 不覆寫使用者已核准的內容。
     rows=skip_approved(rows)
     if not rows: _stop('要跑的都被標成他認可過了,沒有東西要跑。要重跑就先把 fill.json 的 approved 拿掉。')
-    if a.check:
-        try: t0=float(open(os.path.join(SP,'cut_tailor_t0')).read())
-        except (OSError,ValueError): sys.exit('找不到上一輪的啟動時間,沒得驗')
-        bad=check_written(rows,t0)
-        if bad:
-            print(f'❌ {len(bad)} 個沒重寫(檔案是上一輪留下的):')
-            for k,t in bad: print(f'   {k} {t[:46]}')
-            sys.exit(1)
-        print(f'✅ {len(rows)} 個都是這一輪寫出來的'); return
     stop_previous()
     _status({'phase':'fetching_pages','pid':os.getpid(),'n':len(rows)})
     # 直連 404/410 由程式收掉;其他關閉語意由 agent 依附上的頁面原文判斷。

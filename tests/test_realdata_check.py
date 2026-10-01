@@ -4,93 +4,48 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import _env  # noqa: F401  (載入就設好測試環境)
+import _env  # 載入就設好測試環境
 import realdata_check
 
 
 class TemporaryCopy(unittest.TestCase):
-    def test_status_summary_counts_kinds_without_card_names(self):
-        import board_doc as bd
+    def test_status_summary(self):
+        issues = [{'jid': 'https://ex.test/1', 't': 'Secret Title', 'kind': 'closed', 'msg': 'x'},
+                  {'jid': 'https://ex.test/2', 't': 'Other Title', 'kind': 'unverified', 'soft': True, 'msg': 'x'},
+                  {'jid': 'https://ex.test/3', 't': 'Third Title', 'kind': 'files', 'msg': 'x'}]
+        for status, has, hasnt in (
+                ({'schema_version': 2, 'issues': issues}, ['已下架 1', '還沒確認 1', '檔案 1'], ['Secret']),   # 只數種類,不帶卡名
+                (None, ['沒有驗收結果'], []),                                                        # 沒驗收不能說成通過
+                ({'schema_version': 2, 'checked_links': False, 'issues': []}, ['連結尚未檢查'], [])):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                path = os.path.join(directory, 'board.html')
+                _env.make_board(path, data={'jobs': [], **({'status': status} if status else {})})
+                line = realdata_check.status_summary(path)
+                for x in has:
+                    self.assertIn(x, line)
+                for x in hasnt:
+                    self.assertNotIn(x, line)
 
-        with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, 'board.html')
-            status = {'schema_version': 2, 'issues': [
-                {'jid': 'https://ex.test/1', 't': 'Secret Title', 'kind': 'closed', 'msg': 'x'},
-                {'jid': 'https://ex.test/2', 't': 'Other Title', 'kind': 'unverified', 'soft': True, 'msg': 'x'},
-                {'jid': 'https://ex.test/3', 't': 'Third Title', 'kind': 'files', 'msg': 'x'},
-            ]}
-            with open(path, 'w', encoding='utf-8') as target:
-                target.write(bd.assemble('', '', '', {'jobs': [], 'status': status}, '{}', ''))
-            line = realdata_check.status_summary(path)
-
-        self.assertIn('已下架 1', line)
-        self.assertIn('還沒確認 1', line)
-        self.assertIn('檔案 1', line)
-        self.assertNotIn('Secret', line)
-
-    def test_status_summary_does_not_call_a_missing_check_passed(self):
-        import board_doc as bd
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, 'board.html')
-            with open(path, 'w', encoding='utf-8') as target:
-                target.write(bd.assemble('', '', '', {'jobs': []}, '{}', ''))
-            line = realdata_check.status_summary(path)
-
-        self.assertIn('沒有驗收結果', line)
-
-    def test_status_summary_says_when_links_were_not_checked(self):
-        import board_doc as bd
-
-        with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, 'board.html')
-            status = {'schema_version': 2, 'checked_links': False, 'issues': []}
-            with open(path, 'w', encoding='utf-8') as target:
-                target.write(bd.assemble('', '', '', {'jobs': [], 'status': status}, '{}', ''))
-            line = realdata_check.status_summary(path)
-
-        self.assertIn('連結尚未檢查', line)
-
-    def test_reconcile_diagnostics_uses_source_count_when_child_output_is_reordered(self):
-        output = ('reconcile:比對來源,只重建變了的\n'
-                  '來源警告數:0\n'
-                  '看板:1 個職缺\n⚠ 1 個問題:\n'
-                  '· 看板外殼\n· 可投遞夾\n—— 收尾 ——')
-
-        summary = realdata_check.reconcile_diagnostics(output)
-
-        self.assertIn('來源警告 0', summary)
-        self.assertIn('來源警告類型 無', summary)
-
-    def test_reconcile_diagnostics_counts_status_output_before_buffered_stage_headers(self):
-        output = ('看板:1 個職缺\n'
-                  '⚠ 1 個問題:\n'
-                  'reconcile:比對來源,只重建變了的\n'
-                  '來源警告數:0\n'
-                  '· 看板外殼\n· 可投遞夾\n'
-                  '✓ 可投遞夾:job\n'
-                  '階段結果:套件失敗 0、看板驗收結束碼 1\n—— 收尾 ——')
-
-        summary = realdata_check.reconcile_diagnostics(output)
-
-        self.assertIn('來源警告 0', summary)
-        self.assertIn('看板驗收問題 1', summary)
-        self.assertIn('可投遞夾成功 1', summary)
-        self.assertIn('看板驗收結束碼 1', summary)
-
-    def test_reconcile_diagnostics_ignores_warning_glyph_inside_changed_filename(self):
-        output = ('reconcile:比對來源,只重建變了的\n'
-                  '  來源檔變更:resume ⚠ draft.pdf\n'
-                  '· 看板外殼\n· 可投遞夾\n'
-                  '  ✓ 可投遞夾:resume ⚠ draft\n'
-                  '看板:0 個職缺\n—— 收尾 ——')
-
-        summary = realdata_check.reconcile_diagnostics(output)
-
-        self.assertIn('來源警告 0', summary)
-        self.assertIn('來源警告類型 無', summary)
-        self.assertIn('可投遞夾警告 0', summary)
-        self.assertIn('可投遞夾成功 1', summary)
+    def test_reconcile_diagnostics(self):
+        cases = (
+            # 子程序的輸出順序亂掉:照「來源警告數」那行數
+            ('reconcile:比對來源,只重建變了的\n來源警告數:0\n看板:1 個職缺\n⚠ 1 個問題:\n'
+             '· 看板外殼\n· 可投遞夾\n—— 收尾 ——',
+             ['來源警告 0', '來源警告類型 無']),
+            # 狀態行在階段標題之前就印出來
+            ('看板:1 個職缺\n⚠ 1 個問題:\nreconcile:比對來源,只重建變了的\n來源警告數:0\n'
+             '· 看板外殼\n· 可投遞夾\n✓ 可投遞夾:job\n階段結果:套件失敗 0、看板驗收結束碼 1\n—— 收尾 ——',
+             ['來源警告 0', '看板驗收問題 1', '可投遞夾成功 1', '看板驗收結束碼 1']),
+            # 檔名裡的 ⚠ 不算警告
+            ('reconcile:比對來源,只重建變了的\n  來源檔變更:resume ⚠ draft.pdf\n· 看板外殼\n· 可投遞夾\n'
+             '  ✓ 可投遞夾:resume ⚠ draft\n看板:0 個職缺\n—— 收尾 ——',
+             ['來源警告 0', '來源警告類型 無', '可投遞夾警告 0', '可投遞夾成功 1']),
+        )
+        for output, has in cases:
+            with self.subTest(output=output[:30]):
+                summary = realdata_check.reconcile_diagnostics(output)
+                for x in has:
+                    self.assertIn(x, summary)
 
     def test_source_sync_failure_categories_use_manifest_state_only(self):
         import sys
@@ -234,8 +189,6 @@ class TemporaryCopy(unittest.TestCase):
 class PreviewDiagnostics(unittest.TestCase):
     def test_missing_preview_names_which_source_without_its_filename(self):
         """預覽沒產生時,診斷要寫出是第幾份來源、錯在哪一步,但不寫檔名(副本會被刪,之後才查得到)。"""
-        import tempfile
-        from unittest.mock import patch
         import source_sync
         with tempfile.TemporaryDirectory() as home:
             broken = os.path.join(home, 'secret-name.pdf')

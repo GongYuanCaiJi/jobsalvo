@@ -2989,7 +2989,6 @@
       renderApp(); return;}
     var ctl=e.target.closest('[data-ctl]');
     if(ctl){ if(_menuFor===ctl.getAttribute('data-ctl'))closeMenu(); else openMenu(ctl); return;}
-    var cc=e.target.closest('.catchip'); if(cc){activeCat=cc.getAttribute('data-cat'); userFiltered=true; renderApp(); saveView(); return;}
     var _fg=e.target.closest('[data-f]'); if(_fg){var fv=_fg.getAttribute('data-f'); activeFacet=(activeFacet===fv?'':fv); userFiltered=true; if($('facetf'))renderFacetInd(); renderApp(); saveView(); return;}
     var _ra=e.target.closest('[data-readyall]');
     if(_ra&&!_ra.disabled){readyAllToShip(); return;}
@@ -2998,10 +2997,6 @@
       seedAdd('job',sid,(sj.target||sid)); return;}
     var _cs=e.target.closest('[data-coseed]');
     if(_cs){e.preventDefault(); var sco=_cs.getAttribute('data-coseed'); seedAdd('co',sco,sco); return;}
-    var _ub=e.target.closest('[data-unblock]');
-    if(_ub){e.preventDefault(); toggleBlock(_ub.getAttribute('data-unblock')); return;}
-    var _bd=e.target.closest('[data-blockdel]');
-    if(_bd){e.preventDefault(); blockDelete(_bd.getAttribute('data-blockdel')); return;}
     var _cp=e.target.closest('[data-coprep]');
     if(_cp){e.preventDefault(); coPrepAll(_cp.getAttribute('data-coprep')); return;}
     var _cr=e.target.closest('[data-corm]');
@@ -3800,11 +3795,6 @@
     return '<div class="cfg-check"><div class="cfg-ch-h">🩺 環境檢查：'+summary+'</div>'+bad.map(cfgDoctorRow).join('')+
       (good.length?fold('cfg:doctor-ok','其他 '+good.length+' 項通過',good.map(cfgDoctorRow).join(''),{cls:'cfg-d'}):'')+'</div>';
   }
-  function cfgMigrationHTML(){
-    var messages=CFGD.migration_notices||[];
-    return messages.length?'<div class="cfg-check"><div class="cfg-ch-h">已更新舊設定</div>'+messages.map(function(m){
-      return '<div class="cfg-row"><span class="cfg-file">'+esc(m)+'</span></div>';}).join('')+'</div>':'';
-  }
   function cfgHistoryHTML(){      // 放在「⚙ 其他」:第一次用的人用不到,不佔設定頁最上面
     var h=CFGD.git_history||{};
     return '<div class="cfg-row"><label class="cfg-k">版本紀錄</label><span class="cfg-file">'+
@@ -3975,7 +3965,7 @@
     CFGAWAY=false;
     var resumes=CFGW.resume.resumes||[], attachments=CFGW.resume.attachments||[];
     var a=CFGW.agent||{}, agents=a.agents||[], b=CFGW.browser||{}, s=CFGW.search||{};
-    var h=cfgMigrationHTML()+cfgChecklist()+cfgDoctorHTML();
+    var h=cfgChecklist()+cfgDoctorHTML();
     var RES=fold('cfg:resumes','📄 你的履歷 <span class="n">'+resumes.length+'</span>',
       '<p class="cfg-help">勾選要使用的履歷,寫一句「什麼時候用」幫 '+esc(AGENT)+' 挑選;卡片上也能改用哪一份。每份履歷可放各語言的檔案。</p>'+
       resumes.map(function(r,i){return cfgResumeHTML(r,i);}).join('')+

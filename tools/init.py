@@ -75,7 +75,7 @@ def fill_unset(config_path):
         return
     changed = False
     agent = data.get('agent') or {}
-    if not ('agents' in agent or any(k in agent for k in ('runtime', 'model', 'effort', 'alt_runtime', 'alt_model'))):
+    if 'agents' not in agent:
         agents = installed_agents()
         if agents:
             data.setdefault('agent', {})['agents'] = agents

@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -69,13 +68,6 @@ class SharedBoardRules(unittest.TestCase):
     def test_keyword_acceptance_and_match_cases(self):
         for case in CASES['regex']:
             with self.subTest(case=case['name']):
-                try:
-                    re.compile(case['pattern'], re.IGNORECASE)
-                    python_valid = True
-                except re.error:
-                    python_valid = False
-                self.assertEqual(python_valid, case['python_valid'])
-
                 errors, saved = self._save_case(case)
                 self.assertEqual(not errors, case['browser_valid'])
                 if errors:

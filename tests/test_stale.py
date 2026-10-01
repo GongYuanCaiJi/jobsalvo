@@ -34,7 +34,6 @@ HIS = [
 
 def seed():
     return {
-        '__ds__': 1,
         '__ans__': copy.deepcopy(HIS) + [
             # 「每一題都要代填」那條規則之前,agent 留空不代寫(規則改了 → 過時)
             {'k': 'refused', 'q': '你為什麼想轉職?', 'v': '', 'why': '這是你的看法,我不代寫', 'inf': '2026-09-21'},
@@ -63,7 +62,7 @@ def seed():
 
 class StaleIsCleared(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='stale-')
+        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='stale-'))
         self.path = os.path.join(self.dir, 'board.html')
         with open(os.path.join(self.dir, cf.NAME), 'w', encoding='utf-8') as f:
             f.write('{}')

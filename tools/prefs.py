@@ -37,18 +37,6 @@ def _note_section(text, heading):
     return '\n'.join(lines[start:end]).strip('\n')
 
 
-def _legacy_rules(text):
-    lines = text.splitlines()
-    heading = next((i for i, line in enumerate(lines)
-                    if re.match(r'^##\s+硬規則.*$', line.strip())), None)
-    if heading is None:
-        return None
-    start = heading + 1
-    end = next((i for i in range(start, len(lines))
-                if re.match(r'^##(?!#)\s+', lines[i]) or '<!-- 以下由' in lines[i]), len(lines))
-    return '\n'.join(lines[start:end]).strip('\n')
-
-
 def _render_note(custom, agent):
     custom = str(custom or '').strip('\n')
     agent = str(agent or '').strip('\n')
@@ -64,8 +52,8 @@ def _write_note(custom, agent, path=None):
     os.replace(tmp, path)
 
 
-def ensure_note(path=None, legacy_path=None):
-    """第一次使用時把舊硬規則搬進使用者自訂區,保留逐張表態匯出。"""
+def ensure_note(path=None):
+    """偏好筆記沒有兩個區塊時補上空的區塊,已有的內容照留。"""
     path = path or PREF
     try:
         with open(path, encoding='utf-8') as f:
@@ -76,23 +64,6 @@ def ensure_note(path=None, legacy_path=None):
     agent = _note_section(current, NOTE_AGENT)
     if custom is not None and agent is not None:
         return current
-    if custom is None:
-        custom = _legacy_rules(current)
-        if custom is None and current and NOTE_AGENT not in current:
-            custom = current.strip('\n')
-    if agent is None:
-        agent = ''
-    if not current:
-        source = legacy_path or cf.PREFS
-        if source != path:
-            try:
-                with open(source, encoding='utf-8') as f:
-                    legacy = f.read()
-            except OSError:
-                legacy = ''
-            migrated = _legacy_rules(legacy)
-            if migrated is not None:
-                custom = migrated
     _write_note(custom or '', agent or '', path)
     return _render_note(custom or '', agent or '')
 

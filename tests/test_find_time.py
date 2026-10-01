@@ -13,7 +13,7 @@ import settings_api  # noqa: E402
 
 class FindTime(unittest.TestCase):
     def test_paused_time_is_not_counted(self):
-        d = tempfile.mkdtemp(prefix='find-time-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='find-time-'))
         path = os.path.join(d, 'converge_status.json')
         self.assertEqual(jobrun.paused_seconds(path), 0)
         mark = path + '.paused'

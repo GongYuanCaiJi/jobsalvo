@@ -68,6 +68,33 @@
         "s": "like"
       },
       "same": false
+    },
+    {
+      "name": "empty field beside a real one",
+      "value": {
+        "s": "like",
+        "n": ""
+      },
+      "base": {
+        "s": "like"
+      },
+      "normalized": {
+        "s": "like"
+      },
+      "same": true
+    },
+    {
+      "name": "different value",
+      "value": {
+        "s": "like"
+      },
+      "base": {
+        "s": "meh"
+      },
+      "normalized": {
+        "s": "like"
+      },
+      "same": false
     }
   ],
   "card_names": [
@@ -90,7 +117,6 @@
       "kind": "category",
       "setting_name": "Technology",
       "pattern": "engineer|developer",
-      "python_valid": true,
       "browser_valid": true,
       "expected_match": true,
       "target": "Senior ENGINEER",
@@ -103,7 +129,6 @@
       "kind": "tag",
       "setting_name": "Remote work",
       "pattern": "remote|hybrid",
-      "python_valid": true,
       "browser_valid": true,
       "expected_match": true,
       "target": "Product Analyst",
@@ -118,7 +143,6 @@
       "kind": "category",
       "setting_name": "Python group",
       "pattern": "(?P<role>engineer)",
-      "python_valid": true,
       "browser_valid": false,
       "expected_match": false,
       "target": "Engineer",
@@ -131,7 +155,6 @@
       "kind": "category",
       "setting_name": "JavaScript group",
       "pattern": "(?<role>engineer)",
-      "python_valid": false,
       "browser_valid": true,
       "expected_match": true,
       "target": "Engineer",
@@ -144,7 +167,6 @@
       "kind": "tag",
       "setting_name": "Broken tag",
       "pattern": "(",
-      "python_valid": false,
       "browser_valid": false,
       "expected_match": false,
       "target": "Engineer",

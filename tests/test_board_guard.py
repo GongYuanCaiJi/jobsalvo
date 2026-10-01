@@ -13,7 +13,6 @@ import functools
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,7 +68,7 @@ FAKE_AGENT = textwrap.dedent('''
 
 class AgentHasNoBoardLocation(unittest.TestCase):
     def setUp(self):
-        self.d = tempfile.mkdtemp(prefix='board-guard-')
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='board-guard-'))
         self.copy = make_board(os.path.join(self.d, 'copy', 'board.html'), filling_fb())
         self.work = os.path.join(self.d, 'work')
         os.makedirs(self.work)
@@ -88,7 +87,6 @@ class AgentHasNoBoardLocation(unittest.TestCase):
             for p in (cf.LIVE, cf.LIVE + '.sha256', cf.LIVE + '.lock'):
                 if os.path.exists(p):
                     os.remove(p)
-        shutil.rmtree(self.d, ignore_errors=True)
 
     def launch(self, prompt='填這張'):
         argv = [sys.executable, self.script, TOOLS, self.work, U, K]
@@ -119,14 +117,6 @@ class AgentHasNoBoardLocation(unittest.TestCase):
     def test_a_prompt_that_names_the_board_file_is_not_sent(self):
         with self.assertRaises(ValueError):
             self.launch(prompt=f'改完寫回 {self.copy}')
-
-    def test_the_small_tools_read_the_board_they_were_given(self):
-        """--shared 這類只讀的也要讀這一輪的那一份,不是現行看板。"""
-        env = ar.agent_env(self.copy)
-        r = subprocess.run([sys.executable, os.path.join(TOOLS, 'form_record.py'), '--refills'],
-                           env=env, capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(K, r.stdout)                         # 副本上那條待重翻的答案
 
     def test_fill_and_fix_prompts_do_not_name_the_board_file(self):
         import apply_run
@@ -205,11 +195,8 @@ class SneakedEditsAreCaught(unittest.TestCase):
         self.assertNotIn(self.d, str(caught.exception))        # 回報不帶看板檔的位置(agent 也會看到這句)
         with open(self.board, encoding='utf-8') as f:
             self.assertEqual(f.read(), sneaked)                # 也沒被蓋成「正常」的樣子
-        for write in (lambda: bd.set_data(lambda data, fb: None, live=self.board),
-                      lambda: bd.add_jobs(self.board, live=self.board, quiet=True),
-                      lambda: bd.install(self.board, live=self.board, quiet=True)):
-            with self.assertRaises(bd.Tampered):
-                write()
+        with self.assertRaises(bd.Tampered):
+            bd.set_data(lambda data, fb: None, live=self.board)
 
     def test_the_dispatcher_does_not_act_on_a_sneaked_board(self):
         import apply_run
@@ -265,8 +252,6 @@ class NormalWritesAreNotMistakenForSneaking(unittest.TestCase):
         import apply_shell
         bd.set_fb(lambda fb: fb[U].__setitem__('s', 'like'), live=self.board)
         bd.set_data(lambda data, fb: data['jobs'].append({'id': U + '2'}), live=self.board)
-        bd.add_jobs(self.board, live=self.board, quiet=True)
-        bd.install(self.board, live=self.board, quiet=True)
         with contextlib.redirect_stdout(io.StringIO()):
             apply_shell.apply_to(self.board, ':root{--b:2}', '/*app2*/', '<b id="stat-first">0</b>')
         bd.set_fb(lambda fb: fb[U].__setitem__('s', 'meh'), live=self.board)
@@ -337,36 +322,6 @@ class BoardPage(HttpBase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
-class InstallRefusesBadProducts(unittest.TestCase):
-    """管線產物裝成現行看板之前先看一眼:沒有職缺、樣式區不是 CSS 就不裝(以前這兩條擋的路一次都沒走過)。"""
-
-    def setUp(self):
-        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='board-install-'))
-        self.live = os.path.join(self.d, 'live.html')
-
-    def product(self, jobs=({'id': U},), sty=':root{--a:1}', name='out.html'):
-        return _env.make_board(os.path.join(self.d, name), jobs=jobs, sty=sty)
-
-    def test_no_jobs_or_no_css_is_not_installed(self):
-        for why, src in (('沒有職缺', self.product(jobs=(), name='empty.html')),
-                         ('不是 CSS', self.product(sty='<b>oops</b>', name='nocss.html'))):
-            with self.subTest(why):
-                with self.assertRaises(SystemExit) as e:
-                    bd.install(src, live=self.live, quiet=True)
-                self.assertIn(why, str(e.exception))
-                self.assertFalse(os.path.exists(self.live))
-
-    def test_first_install_takes_the_whole_product_and_says_where(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            n, marks = bd.install(self.product(), live=self.live)
-        self.assertEqual((n, marks), (1, 0))
-        self.assertIn('已裝成現行看板', out.getvalue())
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(bd.add_jobs(self.product(jobs=({'id': U}, {'id': U + '/2'})), live=self.live), 1)
-        self.assertIn('新增 1 筆', out.getvalue())
 
 
 class BoardIdentity(unittest.TestCase):

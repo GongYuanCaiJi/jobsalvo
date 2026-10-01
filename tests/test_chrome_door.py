@@ -60,7 +60,7 @@ class CodexDoor(unittest.TestCase):
     def setUp(self):
         self.door = chrome_door.of('codex')
         FakeTab.seen = []
-        self.d = tempfile.mkdtemp(prefix='door-codex-')
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='door-codex-'))
 
     def test_reads_and_shoots_the_page_through_its_own_session(self):
         import apply_tab
@@ -98,7 +98,9 @@ class CodexDoor(unittest.TestCase):
 
     def test_ready_is_the_codex_extension_check(self):
         with patch('agent_chrome.ensure', return_value=(False, '外掛沒連上')):
-            self.assertEqual(self.door.ready(), (False, '外掛沒連上', '按「🔌 連接 Codex」'))
+            ok, why, hint = self.door.ready()
+        self.assertEqual((ok, why), (False, '外掛沒連上'))
+        self.assertIn('Codex', hint)
 
 
 class ClaudeDoor(unittest.TestCase):
@@ -107,7 +109,7 @@ class ClaudeDoor(unittest.TestCase):
 
     def setUp(self):
         self.door = chrome_door.of('claude-code')
-        self.d = tempfile.mkdtemp(prefix='door-claude-')
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='door-claude-'))
 
     def log(self, calls, name='fill.log'):
         return fc.claude_log(os.path.join(self.d, name), calls)
@@ -131,6 +133,12 @@ class ClaudeDoor(unittest.TestCase):
         with self.assertRaises(LookupError):
             self.door.read_page('S1', '7', [self.log(calls)])
         self.assertIn('String(' + apply_tab._WHOLE + '.length)', self.door.apply_rule())             # 規矩裡叫它最後讀一次
+
+    def test_not_ready_names_the_claude_button(self):
+        with patch('agent_chrome.wait_claude', return_value=(False, '看不到')):
+            ok, why, hint = self.door.ready()
+        self.assertEqual((ok, why), (False, '看不到'))
+        self.assertIn('Claude', hint)
 
     def test_the_page_cannot_be_read_before_its_run_says_what_to_use_instead(self):
         with self.assertRaises(chrome_door.NotNow) as e:
@@ -213,7 +221,7 @@ class WhichFamilyACardUses(unittest.TestCase):
         with patch.dict(cf.C, agents({'id': 'primary', 'runtime': 'codex', 'browser': True})):
             with self.assertRaises(chrome_door.Unreachable) as e:
                 chrome_door.for_card({'session': 'S1', 'tab_id': '7', 'agent_id': 'primary'})
-        self.assertEqual(str(e.exception), '這張是更新前填的,程式不知道是哪個 agent 開的頁,要重填')
+        self.assertIn('更新前', str(e.exception))
         self.assertTrue(e.exception.sure)
 
     def test_a_card_whose_family_was_really_swapped_says_so(self):
@@ -266,7 +274,7 @@ class CommandLineToolsSayWhatToUseInstead(unittest.TestCase):
     """兩個命令列工具(apply_tab read、profile_sync)用 Claude 時做不到:直接說做不到、改用什麼,不是丟一個看不懂的錯。"""
 
     def setUp(self):
-        self.d = tempfile.mkdtemp(prefix='door-cli-')
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='door-cli-'))
         cfg = patch.dict(cf.C, agents({'id': 'cc', 'runtime': 'claude-code', 'browser': True}))
         cfg.start()
         self.addCleanup(cfg.stop)

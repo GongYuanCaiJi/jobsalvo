@@ -8,7 +8,7 @@ config —— 資料放哪、agent 叫什麼、用哪個模型,全部只從這�
 home 裡的 jobsalvo.json 蓋過下面 DEFAULTS;沒寫的用預設。相對路徑都相對於 home。
 jobsalvo.json 由看板的「⚙ 設定」頁寫(save),不用手改;要手改也行,它就是一般的 JSON。
 """
-import os, copy, json, hashlib
+import os, copy, json
 
 NAME = 'jobsalvo.json'
 
@@ -130,26 +130,6 @@ def _merge(base, over):
     return base
 
 
-def _paths(value):
-    if isinstance(value, str):
-        return [value] if value else []
-    if isinstance(value, (list, tuple)):
-        return [str(p) for p in value if isinstance(p, str) and p]
-    return []
-
-
-_PENDING_NOTICES = []
-LEGACY_BUILD_CMD_REMOVAL_NOTICE = (
-    '舊版 resume.build_cmd 已停用，已從設定移除；現在由內建流程處理 Markdown 與 PDF。'
-)
-PROFILE_CMD_REMOVAL_NOTICE = '已移除舊版平台履歷指令設定;平台欄位現在由 jobsalvo 通用欄位對照驗證。'
-
-
-def queue_notice(notice):
-    if notice not in _PENDING_NOTICES:
-        _PENDING_NOTICES.append(notice)
-
-
 def _abs(p, home):
     """設定裡的路徑 → 絕對路徑(~ 展開,相對的接在 home 後面)。"""
     p = os.path.expanduser(p or '')
@@ -164,39 +144,10 @@ def _dump(f, settings):
     os.replace(tmp, f)
 
 
-def _file_digest(path, home):
-    try:
-        with open(_abs(path, home), 'rb') as source:
-            return hashlib.file_digest(source, 'sha256').hexdigest()
-    except OSError:
-        return ''
-
-
-def _legacy_merged_name(path):
-    name = os.path.basename(os.path.expanduser(path)).casefold()
-    return name.endswith((
-        ' + technical write-ups.pdf', '-combined.pdf', '_combined.pdf', ' combined.pdf',
-    ))
-
-
-
-
 def migrate_settings(settings, home=None):
-    """Convert the old resume-variant settings once, in memory, to the two file lists."""
+    """補上新設定該有的欄位、守住只准一個 agent 開 Chrome。"""
     settings = copy.deepcopy(settings) if isinstance(settings, dict) else {}
-    # Page fetching is built into the app; old copies of this setting are obsolete.
-    settings.pop('fetch', None)
-    # 看板標題、agent 的名字不再讓人改(改名字沒幫到找工作,只多一個要想的設定):舊設定檔裡的一律拿掉
-    board = settings.get('board')
-    if isinstance(board, dict):
-        board.pop('title', None)
-    if isinstance(settings.get('agent'), dict):
-        settings['agent'].pop('name', None)
-    # agent 的 Chrome 只有一種開法(正常 Chrome、背景),也不再有「叫到我面前」:舊設定檔裡的拿掉
-    if isinstance(settings.get('browser'), dict):
-        for k in ('tool', 'show_window'):
-            settings['browser'].pop(k, None)
-    # 同一時間只准一個 agent 用 agent 的 Chrome(兩個 AI 搶同一個瀏覽器會互相干擾):舊設定勾了好幾個的,只留最上面那個
+    # 同一時間只准一個 agent 用 agent 的 Chrome(兩個 AI 搶同一個瀏覽器會互相干擾):勾了好幾個的,只留最上面那個
     agents = (settings.get('agent') or {}).get('agents') if isinstance(settings.get('agent'), dict) else None
     if isinstance(agents, list):
         first = True
@@ -207,125 +158,13 @@ def migrate_settings(settings, home=None):
     resume = settings.get('resume')
     if not isinstance(resume, dict):
         return settings
-    resume.pop('profile_cmd', None)
-    # Per-user build commands are retired; Markdown conversion is built in.
-    resume.pop('build_cmd', None)
-    # Retire the old free-text field; settings_api still reads resume.md as a fallback.
-    resume.pop('base', None)
-
-    # Keep the new per-file customization field present on both fresh and old
-    # settings. An empty skill means the product's general skill is used when
-    # the user chooses to customize that file.
+    # 空的 skill = 用產品內建的通用 skill
     for key in ('resumes', 'attachments'):
-        items = resume.get(key)
+        items = resume.setdefault(key, [])
         if isinstance(items, list):
             for item in items:
                 if isinstance(item, dict):
                     item.setdefault('skill', '')
-
-    legacy = resume.pop('variants', None)
-    if legacy is None:
-        resume.setdefault('resumes', [])
-        resume.setdefault('attachments', [])
-        return settings
-    if 'resumes' in resume and (resume.get('resumes') or not legacy):
-        # A partially migrated file's explicit new lists win over its old copy.
-        resume.setdefault('attachments', [])
-        return settings
-
-    legacy = legacy if isinstance(legacy, dict) else {}
-    langs = resume.get('langs') or DEFAULTS['resume']['langs']
-    home = home or HOME
-    ids = list(legacy)
-    resumes = []
-    files_by_content = {}
-    legacy_merged_paths = set()
-    page_cache = {}
-    for rid, old in legacy.items():
-        old = old if isinstance(old, dict) else {}
-        files = {lang: old[lang] for lang in langs if isinstance(old.get(lang), str) and old[lang]}
-        resumes.append({
-            'id': str(rid),
-            'name': str(old.get('label') or rid),
-            'files': files,
-            'enabled': bool(old.get('enabled', True)),
-            'when': str(old.get('when') or ''),
-            'skill': str(old.get('skill') or ''),
-        })
-
-        attachments = old.get('attachments') or []
-        if isinstance(attachments, dict):
-            ordered_langs = list(dict.fromkeys(list(langs) + sorted(set(attachments) - set(langs))))
-            by_lang = {lang: _paths(attachments.get(lang)) for lang in ordered_langs}
-        else:
-            shared = _paths(attachments)
-            by_lang = {lang: shared for lang in langs}
-
-        # Drop named legacy packages cheaply. The page-content fallback preserves migration
-        # for older packages that did not use one of those names.
-        merged_paths = set()
-        try:
-            import pdf_tools as pdf
-            for lang, paths in by_lang.items():
-                named = {candidate for candidate in paths
-                         if candidate in legacy_merged_paths or _legacy_merged_name(candidate)}
-                if named:
-                    merged_paths.update(named)
-                    continue
-                master = files.get(lang)
-                if not master or not master.lower().endswith('.pdf'):
-                    continue
-                for candidate in paths:
-                    if candidate in legacy_merged_paths:
-                        merged_paths.add(candidate)
-                        continue
-                    if candidate == master or not candidate.lower().endswith('.pdf'):
-                        continue
-                    others = [p for p in paths if p != candidate]
-                    if not others:
-                        continue
-                    part_paths = [_abs(part, home) for part in [master] + others]
-                    candidate_path = _abs(candidate, home)
-                    if all(os.path.isfile(p) for p in [candidate_path] + part_paths) and \
-                            pdf.same_pages(candidate_path, part_paths, page_cache):
-                        merged_paths.add(candidate)
-        except Exception:  # noqa: BLE001, S110 — PDF 讀不了就照舊當附件留著,不冒險丟掉他的檔(往不刪那邊錯)
-            pass
-        if merged_paths:
-            legacy_merged_paths.update(merged_paths)
-            by_lang = {lang: [p for p in paths if p not in merged_paths]
-                       for lang, paths in by_lang.items()}
-
-        for lang, paths in by_lang.items():
-            for path in paths:
-                digest = _file_digest(path, home)
-                identity = ('content', digest) if digest else ('path', path)
-                item = files_by_content.setdefault(
-                    identity, {'files': {}, 'resume_ids': [], 'digest': digest})
-                item['files'].setdefault(lang, path)
-                if rid not in item['resume_ids']:
-                    item['resume_ids'].append(rid)
-
-    attachments = []
-    for identity, old in files_by_content.items():
-        digest = old['digest'] or hashlib.sha256(identity[1].encode('utf-8')).hexdigest()
-        allowed = old['resume_ids']
-        attachments.append({
-            'id': 'att-' + digest[:24],
-            'name': os.path.basename(next(iter(old['files'].values())).rstrip('/')) or identity[1],
-            'files': old['files'],
-            'enabled': True,
-            'resume_ids': [] if set(allowed) == set(ids) else allowed,
-            'skill': '',
-        })
-
-    resume['resumes'] = resumes
-    # Preserve an already authored attachments list if a migration was interrupted.
-    current = resume.get('attachments')
-    if isinstance(current, list):
-        known = {item.get('id') for item in current if isinstance(item, dict)}
-        attachments = current + [item for item in attachments if item['id'] not in known]
-    resume['attachments'] = attachments
     return settings
 
 
@@ -344,59 +183,13 @@ def find_home(start=None):
 
 
 def user_settings(home=None):
-    """使用者設定(不含預設);舊的履歷格式只在記憶體中轉成新格式。"""
-    home = home or HOME
-    f = os.path.join(home, NAME)
+    """使用者設定(不含預設)。"""
+    f = os.path.join(home or HOME, NAME)
     try:
         with open(f, encoding='utf-8') as fh:
-            raw = json.load(fh)
-            legacy_profile_cmd = isinstance(raw, dict) and isinstance(raw.get('resume'), dict) \
-                and 'profile_cmd' in raw['resume']
-            legacy_build_cmd = isinstance(raw, dict) and isinstance(raw.get('resume'), dict) \
-                and 'build_cmd' in raw['resume']
-            settings = migrate_settings(raw, home=home)
+            return migrate_settings(json.load(fh))
     except (OSError, ValueError):
         return {}
-    settings, migrated = _migrate_agents(settings)
-    if migrated or legacy_profile_cmd or legacy_build_cmd:
-        # 舊格式寫回成新格式回不了頭:走 folder_history.convert 先留退回點(存一版或備份設定檔),
-        # 沒有退回點就不寫回,這一次照樣用記憶體裡轉好的跑。只有真的要轉才進來,平常讀設定不碰 git。
-        import folder_history
-
-        folder_history.convert(home, [f], '舊設定格式轉換', lambda: _dump(f, settings))
-    if legacy_profile_cmd and os.path.realpath(home) == os.path.realpath(HOME):
-        queue_notice(PROFILE_CMD_REMOVAL_NOTICE)
-    if legacy_build_cmd and os.path.realpath(home) == os.path.realpath(HOME):
-        queue_notice(LEGACY_BUILD_CMD_REMOVAL_NOTICE)
-    return settings
-
-
-def _migrate_agents(settings):
-    """Convert the old primary/secondary fields once; new agent lists are already canonical."""
-    agent = settings.get('agent') if isinstance(settings, dict) else None
-    legacy = ('runtime', 'model', 'effort', 'alt_runtime', 'alt_model')
-    if not isinstance(agent, dict) or isinstance(agent.get('agents'), list):
-        return settings, False
-    if not any(key in agent for key in legacy):
-        return settings, False
-
-    import chrome_door
-    runtime = agent.get('runtime') or 'codex'
-    effort = agent.get('effort') or 'max'
-    agents = [{
-        'id': 'primary', 'runtime': runtime, 'model': agent.get('model') or '',
-        # 能開 agent 的 Chrome 的那幾家照實勾(以前只勾 Codex,舊的 Claude Code 主 agent 遷移後就用不了 Chrome)
-        'effort': effort, 'speed': 'standard', 'browser': runtime in chrome_door.DOORS,
-    }]
-    if 'alt_runtime' in agent or 'alt_model' in agent:
-        agents.append({
-            'id': 'secondary', 'runtime': agent.get('alt_runtime') or 'command-code',
-            'model': agent.get('alt_model') or '', 'effort': effort, 'speed': 'standard', 'browser': False,
-        })
-    for key in legacy:
-        agent.pop(key, None)
-    agent['agents'] = agents
-    return settings, True
 
 
 def load(home=None):
@@ -426,7 +219,6 @@ def settings_problem(home=None):
 def save(settings):
     """寫回 jobsalvo.json(整份,就是使用者設定的那些),再讓這個行程的設定跟上。"""
     settings = copy.deepcopy(settings)
-    settings, _ = _migrate_agents(settings)
     f = os.path.join(HOME, NAME)
     # 原本那份讀不懂:這時畫面上的設定是預設值加這次改的,直接寫會把他手寫、只差一個逗號的整份設定蓋掉。
     # 先原封不動留一份,他還拿得回來。
@@ -468,14 +260,6 @@ def _apply(cfg):
     g['RESUMES'] = {item['id']: item for item in cfg['resume'].get('resumes', [])
                     if isinstance(item, dict) and item.get('id')}
     g['ATTACHMENTS'] = cfg['resume'].get('attachments', [])
-    if _PENDING_NOTICES:
-        try:
-            import agent_report
-            for notice in _PENDING_NOTICES:
-                agent_report.report('設定', notice, need='無需本人處理', live=g['LIVE'])
-        except Exception:  # noqa: BLE001 — 寫不進看板就先留著這幾則,下一次讀設定再寫(不清掉)
-            return
-        _PENDING_NOTICES.clear()
 
 
 def _private_dir(d):

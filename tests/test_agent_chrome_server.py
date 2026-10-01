@@ -140,7 +140,7 @@ class EyeGivesTheTabBackWhenItTimesOut(tb.HttpBase):
         import chrome_door
         bd.set_fb(lambda fb: fb.__setitem__(U, {'app': 'ship', 'ds': 'parked', 'apply': {
             'stage': 'fill', 'session': 's', 'tab_id': '5', 'runtime': 'codex'}}), live=self.path, by='test')
-        d = tempfile.mkdtemp(prefix='fake-tools-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='fake-tools-'))
         mark = os.path.join(d, 'handed-off')
         with open(os.path.join(d, 'apply_tab.py'), 'w', encoding='utf-8') as f:
             f.write(textwrap.dedent(f"""
@@ -199,7 +199,7 @@ class EyeGivesTheTabBackWhenItTimesOut(tb.HttpBase):
 
     def test_apply_tab_turns_a_stop_request_into_a_normal_exit(self):
         import subprocess, tempfile
-        d = tempfile.mkdtemp(prefix='apply-tab-term-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-tab-term-'))
         mark = os.path.join(d, 'finally-ran')
         tools = os.path.abspath(os.path.join(HERE, '..', 'tools'))
         code = (f'import sys, time; sys.path.insert(0, {tools!r}); import apply_tab; apply_tab._stop_on_term()\n'

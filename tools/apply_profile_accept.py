@@ -182,8 +182,6 @@ def _sanitize_acceptance_home(runtime_home):
     with open(config_path, encoding='utf-8') as source:
         settings = json.load(source)
     resume = settings.setdefault('resume', {})
-    resume.pop('build_cmd', None)
-    resume.pop('profile_cmd', None)
     old_paths = [resume.get('base'), resume.get('prepare_dir'), resume.get('ship_dir')]
     for item in resume.get('resumes') or []:
         old_paths.extend((item.get('files') or {}).values())
@@ -277,8 +275,6 @@ def _clone_home(source_home, runtime_home):
 
     board = settings.setdefault('board', {})
     resume = settings.setdefault('resume', {})
-    resume.pop('profile_cmd', None)
-    resume.pop('build_cmd', None)
     paths = settings.setdefault('paths', {})
     browser = settings.setdefault('browser', {})
     original_board = _setting_path(source_home, board.get('file'), 'board.html')

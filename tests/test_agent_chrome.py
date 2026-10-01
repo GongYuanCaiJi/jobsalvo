@@ -641,49 +641,46 @@ class WhichChromeOpenedThePage(unittest.TestCase):
 
 
 class SetupSaysWhy(unittest.TestCase):
-    """連接失敗要直接講是哪個原因,不是等 30 秒後列三件事叫使用者自己猜(#159)。"""
+    """連接的每一種結果都講清楚是哪個原因、下一步按什麼,不是等 30 秒後列三件事叫使用者自己猜(#159)。
+    全部 mock,不開不關任何 Chrome。"""
 
-    def _setup(self, has_ext=True, new=(('b2', 'new-id'),), before=()):
+    def run_setup(self, seen=((),), **over):
+        """seen:每次問「現在有哪幾個 Chrome 連著」的回答(最後一個一直重複);over 換掉 agent_chrome 的某幾個。
+        換掉的 mock 留在 self.mocks,agent 的 Chrome 資料夾在 self.dir。"""
         import tempfile
-        d = tempfile.mkdtemp()
-        if has_ext:
-            os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
+        self.dir = d = self.enterContext(tempfile.TemporaryDirectory())
+        os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
 
-        seen = iter([list(before)] + [list(before) + list(new)] * 5)
-        with mock.patch('agent_chrome._codex_ready', return_value=True), \
-             mock.patch('agent_chrome.data_dir', return_value=d), \
-             mock.patch('agent_chrome.prepare', return_value=''), \
-             mock.patch('agent_chrome.conf', return_value={}), \
-             mock.patch('agent_chrome.save') as save, \
-             mock.patch('agent_chrome.quit_chrome', return_value=True), \
-             mock.patch('agent_chrome.launch', return_value=5), \
-             mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])), \
-             mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)), \
-             mock.patch('agent_chrome.close_if_idle', return_value='') as close, \
-             mock.patch('time.sleep'):
-            ok, msg = agent_chrome.setup('/tmp/board.html', wait=2)
-        self.close = close
-        return ok, msg, save, d
+        seen = iter([list(x) for x in seen] + [list(seen[-1])] * 10)
+        patches = {'_codex_ready': True, 'data_dir': d, 'prepare': '', 'conf': {}, 'save': None,
+                   'quit_if_safe': (True, ''), 'launch': 5, 'close_if_idle': '', 'pid': None}
+        patches.update(over)
+        self.mocks = {}
+        with contextlib.ExitStack() as stack:
+            for name, value in patches.items():
+                kw = {'side_effect': value} if isinstance(value, BaseException) or callable(value) else {'return_value': value}
+                self.mocks[name] = stack.enter_context(mock.patch('agent_chrome.' + name, **kw))
+            stack.enter_context(mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])))
+            stack.enter_context(mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)))
+            stack.enter_context(mock.patch('time.sleep'))
+            return agent_chrome.setup('/tmp/board.html', wait=2)
 
-    def test_extension_missing(self):
-        ok, msg, _, _ = self._setup(has_ext=False)
-        self.assertFalse(ok)
-        self.assertIn('還沒裝 Codex', msg)
 
     def test_connects_and_remembers_the_folder(self):
-        ok, msg, save, d = self._setup()
+        ok, msg = self.run_setup(seen=((), (('b2', 'new-id'),)))
         self.assertTrue(ok)
         self.assertIn('不會出現在你的畫面上', msg)
+        save = self.mocks['save']
         save.assert_called_once()
         saved = save.call_args[0][0]
-        self.assertEqual((saved['instance'], saved['dir']), ('new-id', d))
+        self.assertEqual((saved['instance'], saved['dir']), ('new-id', self.dir))
         self.assertTrue(saved['codex_checked'])                    # 設定頁講「什麼時候確認連得上」
-        self.close.assert_called_once_with('/tmp/board.html')    # 連上了就收掉,要用時再在背景開
+        self.mocks['close_if_idle'].assert_called_once_with('/tmp/board.html')    # 連上了就收掉,要用時再在背景開
 
     def test_reconnecting_never_silently_closes_pages_waiting_for_him(self):
         # 外掛斷線時他按「🔌 連接 Codex」(代投失敗的訊息就叫他這樣按):以前不看有沒有填好的頁在等他,整個 Chrome 直接關掉重開
         import tempfile
-        d = tempfile.mkdtemp()
+        d = self.enterContext(tempfile.TemporaryDirectory())
         os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
 
         for keep in ({'655', '656'}, None):          # None:讀不到看板,當成有
@@ -719,32 +716,11 @@ class SetupSaysWhy(unittest.TestCase):
         q.assert_called_once()
 
     def test_refuses_to_guess_when_several_chromes_appear(self):
-        ok, msg, save, _ = self._setup(new=(('b2', 'a'), ('b3', 'b')))
+        ok, msg = self.run_setup(seen=((), (('b2', 'a'), ('b3', 'b'))))
         self.assertFalse(ok)
         self.assertIn('認不出哪個是 agent 的', msg)
-        save.assert_not_called()
+        self.mocks['save'].assert_not_called()
 
-
-class SetupOtherOutcomes(unittest.TestCase):
-    """連接的其他結果,每一種都講清楚是哪裡、下一步按什麼;全部 mock,不開不關任何 Chrome。"""
-
-    def run_setup(self, seen=((),), **over):
-        import tempfile
-        d = self.enterContext(tempfile.TemporaryDirectory())
-        os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
-
-        seen = iter([list(x) for x in seen] + [list(seen[-1])] * 10)
-        patches = {'_codex_ready': True, 'data_dir': d, 'prepare': '', 'conf': {}, 'save': None,
-                   'quit_if_safe': (True, ''), 'launch': 5, 'close_if_idle': '', 'pid': None}
-        patches.update(over)
-        with contextlib.ExitStack() as stack:
-            for name, value in patches.items():
-                kw = {'side_effect': value} if isinstance(value, BaseException) or callable(value) else {'return_value': value}
-                stack.enter_context(mock.patch('agent_chrome.' + name, **kw))
-            stack.enter_context(mock.patch('apply_tab.Session', return_value=mock.Mock(spec=['close'])))
-            stack.enter_context(mock.patch('agent_chrome.list_browsers', side_effect=lambda _t: next(seen)))
-            stack.enter_context(mock.patch('time.sleep'))
-            return agent_chrome.setup('/tmp/board.html', wait=2)
 
     def test_codex_not_installed(self):
         ok, msg = self.run_setup(_codex_ready=False)
@@ -883,29 +859,6 @@ class ClaudeConnect(unittest.TestCase):
 class ErrorsSayWhyAndWhichButton(unittest.TestCase):
     """錯誤訊息要講對原因、給他畫面上真的有的那顆鈕。"""
 
-    def test_replies_tell_him_the_button_he_actually_has(self):
-        # 查應徵進度連不上時,以前叫他「打開 Chrome 的「agent」設定檔並完成登入」(已經淘汰的做法),不管用哪一家
-        import sys
-        import tempfile
-        import config as cf
-        import reply_run as rr
-        u = 'https://job.example/1'
-        for runtime, button in (('codex', '連接 Codex'), ('claude-code', '連接 Claude')):
-            agents = [{'id': 'a', 'runtime': runtime, 'model': '', 'effort': 'max', 'browser': True}]
-            with tempfile.TemporaryDirectory() as d, \
-                 mock.patch.dict(cf.C, {'agent': {'agents': agents}}), \
-                 mock.patch('agent_chrome.ensure', return_value=(False, '連不上')), \
-                 mock.patch('agent_chrome.wait_claude', return_value=(False, '看不到')), \
-                 mock.patch('agent_chrome.close_if_idle'), \
-                 mock.patch.object(rr, 'SP', d), mock.patch.object(rr, 'load', return_value=({u: {'id': u}}, {})), \
-                 mock.patch.object(rr, 'waiting', return_value=[u]), mock.patch.object(rr.jobrun, 'write'), \
-                 mock.patch.object(rr.agent_report, 'report') as report, \
-                 mock.patch.object(sys, 'argv', ['reply_run.py', '--board', os.path.join(d, 'board.html')]):
-                self.assertEqual(rr.main(), 1)
-            need = report.call_args.kwargs['need']
-            self.assertIn(button, need)
-            self.assertNotIn('設定檔', need)
-
     def test_claude_users_are_not_told_the_platform_profile_cannot_be_read_back(self):
         # 只用 Claude:程式自己開頁讀走 Codex 的外掛,Claude 沒有這條路;平台履歷改由 Claude 在那一輪讀給程式(#288)。
         # 以前叫他按畫面上根本沒有的「🔌 連接 Codex」,後來寫「讀不回,改用 Codex」:都不對
@@ -958,7 +911,6 @@ class ChromeIsPutAwayAfterUse(unittest.TestCase):
 
     def test_claude_replies_also_put_the_chrome_away(self):
         # 以前只有程式自己讀(Codex)的那條會收;用 Claude 查應徵進度,做完 Chrome 一直開著
-        import sys
         import tempfile
         import agent_run as ar
         import reply_run as rr
@@ -1078,7 +1030,7 @@ class CodexSiteAllowList(unittest.TestCase):
 
     def test_connect_message_mentions_it_until_it_is_set(self):
         import tempfile
-        d = tempfile.mkdtemp()
+        d = self.enterContext(tempfile.TemporaryDirectory())
         os.makedirs(os.path.join(d, 'Default', 'Extensions', 'hehggadaopoacecdllhhajmbjkdcmajg'))
 
         seen = iter([[], [('b2', 'new-id')]])
@@ -1096,11 +1048,12 @@ class CodexSiteAllowList(unittest.TestCase):
     def test_codex_connect_without_the_extension_gives_the_store_url(self):
         # 連接 Codex 時 agent 的 Chrome 還沒裝 ChatGPT 擴充功能:訊息直接附商店網址,不要他自己去商店找
         import tempfile
-        d = tempfile.mkdtemp()
+        d = self.enterContext(tempfile.TemporaryDirectory())
         with mock.patch('agent_chrome._codex_ready', return_value=True), mock.patch('agent_chrome.data_dir', return_value=d), \
              mock.patch('agent_chrome.prepare', return_value=''):
             ok, msg = agent_chrome.setup(wait=2)
         self.assertFalse(ok)
+        self.assertIn('還沒裝 Codex', msg)
         self.assertIn('https://chromewebstore.google.com/detail/hehggadaopoacecdllhhajmbjkdcmajg', msg)
 
     def test_a_blocked_download_on_the_card_says_which_file_to_edit(self):

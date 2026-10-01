@@ -9,7 +9,6 @@ import ast
 import copy
 import os
 import re
-import shutil
 import sys
 import tempfile
 import unittest
@@ -246,7 +245,7 @@ def _set(sheet, name, value):
 
 class LyingAgent(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='gate-')
+        self.tmp = self.enterContext(tempfile.TemporaryDirectory(prefix='gate-'))
         self.old_reg = ps.REG
         ps.REG = os.path.join(self.tmp, 'profiles.json')
         ps.remember('104', 'zh', 'general', MINE)
@@ -259,7 +258,6 @@ class LyingAgent(unittest.TestCase):
 
     def tearDown(self):
         ps.REG = self.old_reg
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def truth(self, page=PAGE):
         # 下載回來逐位元組比檔的那一段(job 給了才做)在 test_apply_profile_attachments 測

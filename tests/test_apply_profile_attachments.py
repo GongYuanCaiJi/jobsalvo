@@ -16,6 +16,7 @@ import form_record as fr      # noqa: E402
 
 
 URL = 'https://new-platform.example/jobs/1'
+FIXED = {'method': 'platform_profile', 'profile_url': 'https://profiles.example/1', 'profile_kind': 'fixed'}
 MINE, OTHER = 'https://new-platform.example/profile/1', 'https://new-platform.example/profile/2'   # 同一個平台上的中文、英文那份
 U104 = 'https://www.104.com.tw/job/abc'
 MINE104 = 'https://pda.104.com.tw/profile/preview?vno=1'
@@ -71,26 +72,29 @@ class ProfileAttachments(unittest.TestCase):
     def tearDown(self):
         self.ps.REG = self.old_reg
 
-    def _put(self, relative, contents):
-        path = os.path.join(self.tmp, relative)
+    @staticmethod
+    def _write(base, relative, contents):
+        path = os.path.join(base, relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'wb') as f:
             f.write(contents)
         return path
+
+    def _put(self, relative, contents):
+        return self._write(self.tmp, relative, contents)
 
     def _put_home(self, relative, contents):
-        path = os.path.join(self.home, relative)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'wb') as f:
-            f.write(contents)
-        return path
+        return self._write(self.home, relative, contents)
 
     def _download(self, name, contents):
-        os.makedirs(self.downloads, exist_ok=True)
-        path = os.path.join(self.downloads, name)
-        with open(path, 'wb') as f:
-            f.write(contents)
-        return path
+        return self._write(self.downloads, name, contents)
+
+    def _accept(self, *docs, absolute=False):
+        """這張卡收下的客製檔:docs = (key, 資料夾裡的路徑, 內容);卡上記相對路徑,absolute 記完整路徑。回完整路徑。"""
+        paths = [self._put_home(rel, data) for _key, rel, data in docs]
+        self.fb[URL]['custom_docs'] = {key: {'status': 'accepted', 'path': path if absolute else rel}
+                                       for (key, rel, _data), path in zip(docs, paths)}
+        return paths
 
     def _check(self, delivery=None, attachments=None, include_attachments=True,
                include_delivery=True, uploaded_files=None, fixed_profile=None, extra=None):
@@ -100,10 +104,7 @@ class ProfileAttachments(unittest.TestCase):
             'tab_url': URL + '/apply', 'handoff': True,
         }
         if include_delivery:
-            report['delivery'] = delivery or {
-                'method': 'platform_profile', 'profile_url': 'https://profiles.example/1',
-                'profile_kind': 'fixed',
-            }
+            report['delivery'] = delivery or dict(FIXED)
         if include_attachments:
             report['profile_attachments'] = attachments or []
         if uploaded_files is not None:
@@ -551,11 +552,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_extra_platform_attachments_require_problem_and_user_report(self):
         import profile_sync as ps
 
-        delivery = {
-            'method': 'platform_profile',
-            'profile_url': 'https://profiles.example/1',
-            'profile_kind': 'fixed',
-        }
+        delivery = dict(FIXED)
         self.fb[URL]['apply'] = {'delivery': delivery}
 
         prompt = ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX)
@@ -591,10 +588,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertIn('本輪不必下載附件', prompt)
 
     def test_submit_profile_mismatch_is_reported_before_the_send_call(self):
-        delivery = {
-            'method': 'platform_profile', 'profile_url': 'https://profiles.example/1',
-            'profile_kind': 'fixed',
-        }
+        delivery = dict(FIXED)
         self.fb[URL]['apply'] = {
             'stage': 'fill', 'issues': [], 'session': 'S1',
             'agent_id': 'primary', 'runtime': 'codex', 'delivery': delivery,
@@ -637,10 +631,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertTrue(any('內容不同' in p for p in self.fb[URL]['apply']['issues']))
 
     def test_submit_profile_match_is_rechecked_before_the_send_call(self):
-        delivery = {
-            'method': 'platform_profile', 'profile_url': 'https://profiles.example/1',
-            'profile_kind': 'fixed',
-        }
+        delivery = dict(FIXED)
         self.fb[URL]['apply'] = {
             'stage': 'fill', 'issues': [], 'session': 'S1',
             'agent_id': 'primary', 'runtime': 'codex', 'delivery': delivery,
@@ -698,8 +689,7 @@ class ProfileAttachments(unittest.TestCase):
         self._put_home('resume/cover.pdf', b'cover bytes')
 
     def test_fresh_profile_check_skips_the_download_agent_before_submit(self):
-        delivery = {'method': 'platform_profile', 'profile_url': 'https://profiles.example/1',
-                    'profile_kind': 'fixed'}
+        delivery = dict(FIXED)
         self.fb[URL]['apply'] = {'stage': 'fill', 'issues': [], 'session': 'S1',
                                  'agent_id': 'primary', 'runtime': 'codex', 'delivery': delivery}
         self.fb[URL]['ds'] = 'confirmed'
@@ -733,8 +723,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertEqual(prompts, ['actual send'])          # 沒有「送出前下載核對」那一輪
 
     def test_after_fill_check_runs_only_when_the_profile_is_not_checked_for_current_files(self):
-        delivery = {'method': 'platform_profile', 'profile_url': 'https://profiles.example/1',
-                    'profile_kind': 'fixed'}
+        delivery = dict(FIXED)
         self.fb[URL]['apply'] = {'stage': 'fill', 'session': 'S1', 'delivery': delivery}
         calls = []
 
@@ -766,10 +755,7 @@ class ProfileAttachments(unittest.TestCase):
 
 
     def test_direct_upload_of_custom_documents_is_checked_by_downloaded_bytes(self):
-        resume = self._put_home('custom/resume.pdf', b'accepted custom resume')
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
-        }
+        resume, = self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'))
         actual_resume = self._download('resume.pdf', b'accepted custom resume')
         actual_cover = self._download('cover.pdf', b'cover bytes')
 
@@ -787,10 +773,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertFalse(os.path.exists(self.downloads))
 
     def test_no_profile_upload_of_custom_documents_is_checked_too(self):
-        self._put_home('custom/resume.pdf', b'accepted custom resume')
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'))
         uploaded_resume = self._download('resume.pdf', b'wrong custom resume')
 
         problems = self._check(
@@ -802,12 +785,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertTrue(any('內容不同' in problem for problem in problems), problems)
 
     def test_direct_upload_with_a_different_custom_file_is_a_problem(self):
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {
-                'status': 'accepted',
-                'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
-            },
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'), absolute=True)
         wrong_resume = self._download('resume.pdf', b'another card resume')
         actual_cover = self._download('cover.pdf', b'cover bytes')
 
@@ -823,12 +801,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertTrue(any('內容不同' in problem for problem in problems), problems)
 
     def test_direct_upload_needs_a_downloaded_copy_inside_the_temp_folder(self):
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {
-                'status': 'accepted',
-                'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
-            },
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'), absolute=True)
 
         problems = self._check(
             delivery={'method': 'direct_upload'},
@@ -841,12 +814,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_direct_upload_accepts_the_generated_combined_card_file(self):
         import card
 
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {
-                'status': 'accepted',
-                'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
-            },
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'), absolute=True)
         os.makedirs(cf.SHIP_DIR, exist_ok=True)
         folder = os.path.join(
             cf.SHIP_DIR, 'job-' + card.card_id_from_url(URL),
@@ -872,12 +840,7 @@ class ProfileAttachments(unittest.TestCase):
 
     def _combined_card_file(self, contents=b'combined card documents'):
         import card
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {
-                'status': 'accepted',
-                'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
-            },
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'), absolute=True)
         folder = os.path.join(cf.SHIP_DIR, 'job-' + card.card_id_from_url(URL))
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, 'ship.json'), 'w', encoding='utf-8') as f:
@@ -959,12 +922,8 @@ class ProfileAttachments(unittest.TestCase):
         import profile_sync as ps
         fixed_url = 'https://profiles.example/fixed/1'
         ps.remember(ps.profile_key(URL), 'zh', 'general', fixed_url)
-        custom_resume = self._put_home('custom/resume.pdf', b'accepted custom resume')
-        custom_cover = self._put_home('custom/cover.pdf', b'accepted custom cover')
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
-            'attachment:cover:zh': {'status': 'accepted', 'path': 'custom/cover.pdf'},
-        }
+        custom_resume, custom_cover = self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'),
+                                                    ('attachment:cover:zh', 'custom/cover.pdf', b'accepted custom cover'))
         actual_resume = self._download('resume.pdf', b'accepted custom resume')
         actual_cover = self._download('cover.pdf', b'accepted custom cover')
 
@@ -993,12 +952,7 @@ class ProfileAttachments(unittest.TestCase):
 
         fixed_url = 'https://profiles.example/fixed/1'
         ps.remember(ps.profile_key(URL), 'zh', 'general', fixed_url)
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {
-                'status': 'accepted',
-                'path': self._put_home('custom/resume.pdf', b'accepted custom resume'),
-            },
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'), absolute=True)
         custom_resume = self._download('resume.pdf', b'accepted custom resume')
         custom_cover = self._download('cover.pdf', b'cover bytes')
         wrong_fixed_cover = self._download('fixed-cover.pdf', b'overwritten fixed cover')
@@ -1054,7 +1008,7 @@ class ProfileAttachments(unittest.TestCase):
         # 以前還沒記上看板就被關掉,填好的那一頁不見了
         import types
         import unittest.mock as mock
-        delivery = {'method': 'platform_profile', 'profile_url': 'https://profiles.example/1', 'profile_kind': 'fixed'}
+        delivery = dict(FIXED)
         report = {'delivery': delivery, 'fields': [], 'submitted': False,
                   'tab_id': '529692139', 'tab_url': URL + '/apply', 'handoff': True}
         self.fb[URL]['apply'] = {'tab_id': '111'}                       # 上一輪的舊分頁
@@ -1125,10 +1079,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_custom_resume_prompt_preserves_fixed_profiles_and_reports_blockers(self):
         import profile_sync as ps
 
-        custom = self._put_home('custom/resume.pdf', b'accepted custom resume')
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
-        }
+        custom, = self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'))
 
         custom_decision = {'platform': '104', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'custom'}
         profile = run.profile_step('https://www.104.com.tw/job/1', custom_decision, custom, None)
@@ -1169,11 +1120,7 @@ class ProfileAttachments(unittest.TestCase):
     def test_custom_resume_does_not_reuse_a_fixed_profile_attachment_skip(self):
         import profile_sync as ps
 
-        delivery = {
-            'method': 'platform_profile',
-            'profile_url': 'https://profiles.example/1',
-            'profile_kind': 'fixed',
-        }
+        delivery = dict(FIXED)
         old_fingerprint = ps.attachment_fingerprint(self.job, self.fb, delivery)
         self.fb[URL]['apply'] = {
             'delivery': delivery,
@@ -1184,10 +1131,7 @@ class ProfileAttachments(unittest.TestCase):
                 },
             },
         }
-        self._put_home('custom/resume.pdf', b'accepted custom resume')
-        self.fb[URL]['custom_docs'] = {
-            'resume:general:zh': {'status': 'accepted', 'path': 'custom/resume.pdf'},
-        }
+        self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'))
 
         prompt = ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX)
 
@@ -1373,8 +1317,7 @@ class ProfileAttachments(unittest.TestCase):
 
     def test_after_fill_check_does_not_refetch_unchanged_attachments(self):
         # 附件沒變時,填完後的核對不要再叫 agent 把平台上的附件全部下載一次
-        delivery = {'method': 'platform_profile', 'profile_url': 'https://profiles.example/1',
-                    'profile_kind': 'fixed'}
+        delivery = dict(FIXED)
         self.fb[URL]['apply'] = {'delivery': delivery}
         self.ps.remember_attachment_check(delivery['profile_url'],
                                           self.ps.attachment_fingerprint(self.job, self.fb, delivery), 'fixed', True)

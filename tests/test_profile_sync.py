@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """平台上的履歷(profile_sync):讀回來跟母稿比,只列對不上的;排版差異不算,內容差一個字要抓到。"""
 import os, sys, unittest
-import tempfile, shutil
+import tempfile
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -68,7 +68,7 @@ class Step(unittest.TestCase):
 class Equivalents(unittest.TestCase):
     """平台用自己說法寫的格子:agent 回報「母稿這一格 ＝ 頁面上這幾個字」,程式驗過才記,以後照記下的比。"""
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='profile-equivalents-')
+        self.tmp = self.enterContext(tempfile.TemporaryDirectory(prefix='profile-equivalents-'))
         self.old_reg = ps.REG
         ps.REG = os.path.join(self.tmp, 'profiles.json')
         self.master = os.path.join(self.tmp, 'resume.md')
@@ -80,7 +80,6 @@ class Equivalents(unittest.TestCase):
 
     def tearDown(self):
         ps.REG = self.old_reg
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _master(self, card):
         with open(self.master, 'w', encoding='utf-8') as f:

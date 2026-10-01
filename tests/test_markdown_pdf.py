@@ -7,9 +7,17 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
+import markdown_html  # noqa: E402
 import markdown_pdf  # noqa: E402
 import pdf_tools  # noqa: E402
 import settings_api  # noqa: E402
+
+
+def _html(source, output, lang=''):
+    """原稿排成 HTML,回排好的內容。"""
+    markdown_html.convert(source, None, output, lang)
+    with open(output, encoding='utf-8') as f:
+        return f.read()
 
 
 class MarkdownPdf(unittest.TestCase):
@@ -65,12 +73,7 @@ class MarkdownPdf(unittest.TestCase):
                         '<img src="inside.png" onerror="alert(1)">\n\n'
                         '[unsafe](javascript:alert(1))')
 
-            result = subprocess.run(
-                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
-                 source, '', output], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(output, encoding='utf-8') as f:
-                rendered = f.read()
+            rendered = _html(source, output)
             self.assertIn('data:image/png;base64,bG9jYWwgc3ludGhldGljIGltYWdl', rendered)
             self.assertNotIn('outside secret marker', rendered)
             self.assertNotIn('c2VjcmV0', rendered)
@@ -93,13 +96,7 @@ class MarkdownPdf(unittest.TestCase):
                              '```html\n<img class="headshot" src="portrait.png">\n```\n\n'
                              '<img src="portrait.png" onerror="alert(1)">\n')
 
-            result = subprocess.run(
-                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools',
-                                                                   'markdown_html.py')),
-                 source, '', output], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(output, encoding='utf-8') as rendered_file:
-                rendered = rendered_file.read()
+            rendered = _html(source, output)
             self.assertRegex(rendered, r'<img[^>]*class="headshot"[^>]*src="data:image/png;base64,')
             self.assertIn('&lt;img class=&quot;headshot&quot; src=&quot;portrait.png&quot;&gt;',
                           rendered)
@@ -109,15 +106,9 @@ class MarkdownPdf(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='markdown-leading-style-') as directory:
             source = os.path.join(directory, 'resume.md')
             output = os.path.join(directory, 'resume.html')
-            command = [sys.executable,
-                       os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
-                       source, '', output]
             with open(source, 'w', encoding='utf-8') as target:
                 target.write('<style>.headshot { float: right; }</style>\n\n# Synthetic resume\n')
-            result = subprocess.run(command, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(output, encoding='utf-8') as rendered_file:
-                rendered = rendered_file.read()
+            rendered = _html(source, output)
             self.assertIn('<head>', rendered)
             self.assertIn('<style>.headshot { float: right; }</style>', rendered)
             self.assertNotIn('&lt;style&gt;', rendered)
@@ -126,10 +117,7 @@ class MarkdownPdf(unittest.TestCase):
             with open(source, 'w', encoding='utf-8') as target:
                 target.write('<style>@import url(https://example.invalid/unsafe.css);</style>\n'
                              '# Synthetic resume\n')
-            result = subprocess.run(command, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(output, encoding='utf-8') as rendered_file:
-                rendered = rendered_file.read()
+            rendered = _html(source, output)
             self.assertNotIn('<style>@import', rendered)
             self.assertIn('&lt;style&gt;@import', rendered)
 
@@ -140,13 +128,7 @@ class MarkdownPdf(unittest.TestCase):
             with open(source, 'w', encoding='utf-8') as target:
                 target.write('<style>p{color:red}</style foo><script>alert(1)</script></style>\n'
                              '# Synthetic resume\n')
-            result = subprocess.run(
-                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools',
-                                                                   'markdown_html.py')),
-                 source, '', output], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(output, encoding='utf-8') as rendered_file:
-                rendered = rendered_file.read()
+            rendered = _html(source, output)
             self.assertNotIn('<script>', rendered)
             self.assertIn('Synthetic resume', rendered)
 
@@ -170,13 +152,7 @@ class MarkdownPdf(unittest.TestCase):
                              '<!-- hidden before list -->- **Bullet marker**\n\n'
                              '```html\n<!-- visible code example -->- still code\n```\n\n'
                              '    <!-- kept indented code -->- still code\n')
-            result = subprocess.run(
-                [sys.executable, os.path.abspath(os.path.join(HERE, '..', 'tools',
-                                                                   'markdown_html.py')),
-                 source, '', output], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(output, encoding='utf-8') as rendered_file:
-                rendered = rendered_file.read()
+            rendered = _html(source, output)
             self.assertNotIn('hidden inline', rendered)
             self.assertNotIn('hidden standalone', rendered)
             self.assertIn('visible code example', rendered)
@@ -187,8 +163,6 @@ class MarkdownPdf(unittest.TestCase):
 
     def test_browser_that_cannot_start_fails_fast(self):
         """開不了瀏覽器(例如沒裝 Playwright)時,排隊的工作馬上拿到錯誤,不乾等到逾時。"""
-        import subprocess
-        import sys
         code = ("import sys, time; sys.modules['playwright'] = None; import browser; t = time.time()\n"
                 "try:\n    browser.run(lambda b: 1, 60)\nexcept Exception as e:\n    print('ERR', round(time.time() - t))")
         done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=90,
@@ -236,13 +210,7 @@ class MarkdownPdf(unittest.TestCase):
             for lang, want in (('en', 'lang="en"'), ('ja', 'lang="ja"'), ('zh', 'lang="zh-Hant"'),
                                ('', 'lang="zh-Hant"'), ('file', 'lang="zh-Hant"')):
                 with self.subTest(lang=lang):
-                    command = [sys.executable,
-                               os.path.abspath(os.path.join(HERE, '..', 'tools', 'markdown_html.py')),
-                               source, '', output] + ([lang] if lang else [])
-                    result = subprocess.run(command, capture_output=True, text=True)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    with open(output, encoding='utf-8') as rendered_file:
-                        self.assertIn(want, rendered_file.read())
+                    self.assertIn(want, _html(source, output, lang))
 
 if __name__ == '__main__':
     unittest.main()

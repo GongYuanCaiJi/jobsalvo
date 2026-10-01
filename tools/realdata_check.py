@@ -305,7 +305,7 @@ def _redirect_absolute_inputs(copy, settings):
         return rel.replace(os.sep, '/')
 
     resume = settings.get('resume') or {}
-    for key in ('base', 'variants', 'resumes', 'attachments'):
+    for key in ('base', 'resumes', 'attachments'):
         if key in resume:
             resume[key] = redirect(resume[key])
     paths = settings.get('paths') or {}

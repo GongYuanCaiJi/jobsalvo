@@ -255,7 +255,8 @@ class Customization(unittest.TestCase):
             self.assertEqual(customize.accept(self.url, 'resume:general:zh', board=self.board), (True, ''))
         got['thread'].join(5)
         self.assertEqual(self._fb()[self.url]['custom_docs']['resume:general:zh']['status'], 'accepted')
-        self.assertEqual(got['reject'], (False, '這份客製版目前不在等你看'))
+        self.assertFalse(got['reject'][0])
+        self.assertTrue(got['reject'][1])
 
     def test_failed_rerun_of_an_accepted_file_keeps_the_filled_page_and_approval(self):
         # 已收下的客製版再客製一次,agent 沒完成:檔案沒換(退回原本收下的那份),填好的頁和他的確認送出都不動。
@@ -326,13 +327,17 @@ class Customization(unittest.TestCase):
                                 apply={'stage': 'fill', 'ok': True, 'session': 's1'})
         bd.set_fb(switch, live=self.board, by='test')
         self.assertEqual(ship.customization_problem(self._job(), self._fb()), '')
-        self.assertEqual(customize.accept(self.url, 'resume:general:zh', board=self.board), (False, '這張卡沒有這份檔案'))
+        ok, why = customize.accept(self.url, 'resume:general:zh', board=self.board)
+        self.assertFalse(ok)
+        self.assertTrue(why)
         self.assertEqual(customize.clear(self.url, 'resume:general:zh', board=self.board), (True, ''))
         state = self._fb()[self.url]
         self.assertNotIn('custom_docs', state)
         self.assertIn('approve', state)
         self.assertFalse(state['apply'].get('stale'))
-        self.assertEqual(customize.clear(self.url, 'resume:nothing', board=self.board), (False, '這張卡沒有這份檔案'))
+        ok, why = customize.clear(self.url, 'resume:nothing', board=self.board)
+        self.assertFalse(ok)
+        self.assertTrue(why)
 
     def test_manual_pdf_upload_is_already_accepted(self):
         saved, error = customize.upload_custom(

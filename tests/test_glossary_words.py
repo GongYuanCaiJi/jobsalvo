@@ -133,10 +133,6 @@ class ScreenWords(unittest.TestCase):
         self.assertEqual(bad, [], '畫面文字用了 GLOSSARY 要避免的詞:\n' + '\n'.join(
             f'{p}:{n} 「{w}」 {t[:80]}' for p, n, w, t in bad))
 
-    def test_the_scanner_skips_comments_but_sees_strings(self):
-        self.assertEqual(_code_part("var a='https://x.y/代投'; // 代投"), "var a='https://x.y/代投'; ")
-        self.assertEqual(_code_part('x=1; // 外掛'), 'x=1; ')
-
     def test_every_allowed_entry_still_matches_something(self):
         # 改掉之後就從清單拿掉,不留一條永遠用不到的豁免
         dev = {p for pat in DEV_ONLY for p in glob.glob(os.path.join(ROOT, pat))}

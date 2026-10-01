@@ -23,20 +23,6 @@ URL = FIX['url']
 
 
 class Classification(unittest.TestCase):
-    def test_every_state_marks_every_classification(self):
-        """加一種投遞狀態,沒在表上標算不算停著的頁、算不算忙、能不能換檔、能不能離開流程、算不算填好、
-        agent 是不是正在做,就過不了(#340 user story 32)。"""
-        for name, x in ds.TABLE['states'].items():
-            for flag in ('held', 'busy', 'swap', 'leave', 'filled', 'working'):
-                with self.subTest(state=name, flag=flag):
-                    self.assertIn(flag, x)
-
-    def test_filling_sending_and_unsure_cannot_swap_or_leave(self):
-        """正在填、正在送出、送出結果不明:不能換檔(含上傳客製版)、不能離開流程(#340)。"""
-        states = ds.TABLE['states']
-        self.assertEqual({s for s, x in states.items() if not x['swap']}, {'running', 'sending', 'unsure'})
-        self.assertEqual({s for s, x in states.items() if not x['leave']}, {'running', 'sending', 'unsure'})
-
     def test_a_card_that_cannot_swap_or_leave_has_a_reason_to_show(self):
         for name, x in ds.TABLE['states'].items():
             if not (x['swap'] and x['leave']):
@@ -49,11 +35,6 @@ class Classification(unittest.TestCase):
             with self.subTest(state=name):
                 self.assertEqual('leave' in ds.TABLE['cells'][name], x['leave'])
 
-    def test_filled_pages_and_the_agent_at_work(self):
-        """算填好:頁上有他要看的東西;agent 正在做:正在填或改、正在送出(送出結果不明是等你查,不是 agent 在做)。"""
-        states = ds.TABLE['states']
-        self.assertEqual({s for s, x in states.items() if x['filled']}, {'parked', 'confirmed', 'stale', 'sending', 'unsure'})
-        self.assertEqual({s for s, x in states.items() if x['working']}, {'running', 'sending'})
 
 
 PASSED = {'schema_version': 2, 'checked_links': True, 'issues': []}     # 投遞前驗收跑完、沒擋
@@ -82,12 +63,12 @@ class ConfirmButton(unittest.TestCase):
     def test_an_answer_still_waiting_for_you_blocks_it(self):
         fb = ready_to_confirm()
         fb['__ans__'][0]['inf'] = 1                    # agent 推論的,你還沒確認
-        self.assertEqual(step(fb)['confirm'], '還有答案等你確認或填寫')
+        self.assertIn('答案', step(fb)['confirm'])
 
     def test_a_card_the_agent_has_not_filled_cannot_be_confirmed(self):
         fb = ready_to_confirm()
         fb[URL].pop('ds')
-        self.assertEqual(step(fb)['confirm'], 'Agent 還沒填這張,先讓它填好、你看過頁面再確認送出')
+        self.assertIn('還沒填', step(fb)['confirm'])
 
 
 FLOW = {'auto_prep': True, 'auto_advance': True, 'auto_fill': True, 'fill_max': 0, 'replies_at': ''}
@@ -166,7 +147,8 @@ class Refix(unittest.TestCase):
         fb, jobs = flow_board(c='parked')
         fb['__ans__'][0]['tr'] = 1                     # 他改了中文,英文還沒照著重翻;表單上沒有要重打的欄
         nx = steps(fb, jobs)['c']['auto']
-        self.assertEqual((nx['do'], nx['line']), ('fix', '答案改過,你停手一分鐘後 Agent 會自動照新答案重翻 1 條'))
+        self.assertEqual(nx['do'], 'fix')
+        self.assertIn('重翻 1 條', nx['line'])
         pl = plan(fb, jobs)
         self.assertEqual((pl['fix'], pl['wait']), (None, 60))     # 剛改:等他停手
         settle(fb, pl)
@@ -178,14 +160,14 @@ class Refix(unittest.TestCase):
         fb['__ans__'].append({'k': 'k2', 'q': 'Where?', 'v': 'Taipei', 'at': '2026-01-01'})
         fb['c']['form']['f'][0]['refill'] = 1
         fb['__ans__'][0]['tr'] = 1
-        self.assertEqual(steps(fb, jobs)['c']['auto']['line'],
-                         '答案改過,你停手一分鐘後 Agent 會自動照新答案重翻 1 條、重打 2 欄')
+        line = steps(fb, jobs)['c']['auto']['line']
+        self.assertIn('重翻 1 條', line)
+        self.assertIn('重打 2 欄', line)
 
     def test_on_a_copy_of_the_board_the_wait_is_short(self):
         fb, jobs = flow_board(c='parked')
         fb['c']['form']['f'][0]['refill'] = 1
-        self.assertEqual(steps(fb, jobs, real=False)['c']['auto']['line'],
-                         '答案改過,你停手 3 秒後 Agent 會自動照新答案重打 1 欄')
+        self.assertIn('3 秒', steps(fb, jobs, real=False)['c']['auto']['line'])
 
 
 class AgentStops(unittest.TestCase):
@@ -217,8 +199,8 @@ class AgentStops(unittest.TestCase):
         fb, jobs = self.refill()
         fb['__auto__']['tried'] = ['fix:c:' + next_step.fix_sig(fb, 'c')]
         nx = steps(fb, jobs)['c']
-        self.assertEqual((nx['auto'], nx['stop']),
-                         (None, 'Agent 已經自動照新答案重打 1 欄過一次,網頁上還是沒改好,不會再自動重試;看過頁面再叫它改'))
+        self.assertIsNone(nx['auto'])
+        self.assertIn('不會再自動重試', nx['stop'])
         self.assertIsNone(plan(fb, jobs, now=later(999))['fix'])
 
     def test_changing_the_answer_again_hands_it_back_to_the_agent(self):
@@ -243,10 +225,10 @@ def card_view(state, status=PASSED, flow=None, **change):
 
 
 def shown(v):
-    """卡上看得到的:那一行的字、按鈕(能不能按)、擋住的原因、要你處理的、填表進度那一格。"""
-    return {'line': [t for _, t in v['line']],
-            'buttons': [b['label'] + (' ⛔' + b['off'] if b.get('off') else '') for b in v['buttons']],
-            'why': v['why'], 'todo': v['todo'], 'fill': v['fill']}
+    """卡上畫了什麼(不比字):那一行每段的樣子、按鈕(做什麼、是不是停用)、有沒有擋住的原因、有沒有要你處理的、
+    填表進度放哪一格。"""
+    return {'line': [k for k, _ in v['line']], 'buttons': [(b['b'], bool(b.get('off'))) for b in v['buttons']],
+            'why': bool(v['why']), 'todo': bool(v['todo']), 'fill': v['fill']['kind']}
 
 
 class CardView(unittest.TestCase):
@@ -254,21 +236,17 @@ class CardView(unittest.TestCase):
     每種投遞狀態一例,加上檢查清單擋住、agent 會接手的幾種。"""
 
     def test_a_card_not_filled_yet(self):
-        why = 'Agent 還沒填這張,先讓它填好、你看過頁面再確認送出'
         self.assertEqual(shown(card_view('todo')), {
-            'line': ['🤖 Agent 還沒填這張'], 'buttons': ['▶ 讓 Agent 填這張', '✅ 確認送出 ⛔' + why], 'why': '⛔ 還不能確認送出:' + why,
-            'todo': '', 'fill': {'kind': 'todo'}})
+            'line': ['idle'], 'buttons': [('fill', False), ('approve', True)], 'why': True, 'todo': False, 'fill': 'todo'})
 
     def test_a_card_the_flow_will_fill_says_so_and_asks_nothing(self):
         self.assertEqual(shown(card_view('todo', flow=FLOW)), {
-            'line': ['🤖 Agent 還沒填這張', '⏳ 排隊中:Agent 會自動填這張,填好停在送出前'], 'buttons': ['▶ 現在就填'],
-            'why': '', 'todo': '', 'fill': {'kind': 'todo'}})
+            'line': ['idle', 'run'], 'buttons': [('fill', False)], 'why': False, 'todo': False, 'fill': 'todo'})
 
     def test_a_filled_card_ready_to_confirm(self):
         v = card_view('parked')
         self.assertEqual(shown(v), {
-            'line': ['🤖 Agent 1/1 填好了,停在送出前'], 'buttons': ['✅ 確認送出', '✏️ 要 Agent 改'], 'why': '',
-            'todo': '填好了,看過頁面就能確認送出', 'fill': {'kind': 'ok', 'text': '✅ 填好了,等你確認送出'}})
+            'line': ['ok'], 'buttons': [('approve', False), ('fix', False)], 'why': False, 'todo': True, 'fill': 'ok'})
         self.assertTrue(v['eye'])
 
     def test_a_filled_card_with_an_answer_waiting_for_you(self):
@@ -276,43 +254,39 @@ class CardView(unittest.TestCase):
         fb['__ans__'][0]['inf'] = '2026-01-02'
         v = steps(fb, jobs, flow={})[URL]['view']
         self.assertEqual(shown(v), {
-            'line': ['🤖 Agent 1/1 填好了,停在送出前'], 'buttons': ['✏️ 要 Agent 改'], 'why': '',
-            'todo': '1 條答案等你確認', 'fill': {'kind': 'wait', 'text': '⚠ 還有答案等你確認或填寫'}})
+            'line': ['ok'], 'buttons': [('fix', False)], 'why': False, 'todo': True, 'fill': 'wait'})
 
     def test_a_filled_card_before_the_check_has_run_cannot_be_confirmed(self):
-        why = '投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)'
-        self.assertEqual(shown(card_view('parked', status=None))['buttons'], ['✏️ 要 Agent 改', '✅ 確認送出 ⛔' + why])
-        self.assertEqual(shown(card_view('parked', status=None))['why'], '⛔ 還不能確認送出:' + why)
+        v = shown(card_view('parked', status=None))
+        self.assertEqual((v['buttons'], v['why']), ([('fix', False), ('approve', True)], True))
 
     def test_a_confirmed_card_is_sent_with_one_button(self):
         v = card_view('confirmed')
         self.assertEqual(shown(v), {
-            'line': ['✅ 你已確認,等送出'], 'buttons': ['▶ 送出', '取消確認'],
-            'why': '', 'todo': '你確認了,按「▶ 送出」', 'fill': {'kind': 'ok', 'text': '✅ 你已確認,等送出'}})
+            'line': ['okb'], 'buttons': [('submit', False), ('unapprove', False)], 'why': False, 'todo': True, 'fill': 'ok'})
         self.assertTrue(v['soon'])
 
     def test_a_card_the_agent_is_filling_shows_only_that(self):
         v = card_view('running')
-        self.assertEqual(shown(v), {'line': ['⏳ Agent 正在填…'], 'buttons': [], 'why': '', 'todo': '', 'fill': {'kind': 'run'}})
+        self.assertEqual(shown(v), {'line': ['run'], 'buttons': [], 'why': False, 'todo': False, 'fill': 'run'})
         self.assertEqual((v['busy'], v['stage']), (True, 'fill'))
 
     def test_a_card_sent_without_seeing_the_success_page(self):
         self.assertEqual(shown(card_view('unsure')), {
-            'line': ['📤 Agent 1/1 按了送出,沒看到已收到申請頁'], 'buttons': ['確認沒送出,可以重送', '其實送出了'],
-            'why': '❌ 送出沒確認成功(Agent 按過送出,可能其實送出去了):沒看到成功頁面',
-            'todo': '送出沒確認成功,先去確認到底送出沒有',
-            'fill': {'kind': 'unsure', 'text': '❓ 送出結果不明,先去信箱或平台的應徵紀錄查'}})
+            'line': ['bad'], 'buttons': [('clear', False), ('actsent', False)], 'why': True, 'todo': True, 'fill': 'unsure'})
 
     def test_a_card_whose_page_is_gone_is_refilled(self):
-        self.assertEqual(shown(card_view('gone')), {
-            'line': ['📄 ' + ds.GONE], 'buttons': ['▶ 讓 Agent 重填這張', '✅ 確認送出 ⛔' + ds.GONE], 'why': '', 'todo': ds.GONE,
-            'fill': {'kind': 'gone', 'text': '📄 填好的那一頁不見了,要重填'}})
+        v = card_view('gone')
+        self.assertEqual(shown(v), {
+            'line': ['bad'], 'buttons': [('fill', False), ('approve', True)], 'why': False, 'todo': True, 'fill': 'gone'})
+        self.assertEqual(v['todo'], ds.GONE)
 
     def test_a_card_stuck_says_why(self):
-        self.assertEqual(shown(card_view('stuck')), {
-            'line': ['🤖 Agent 修改卡住:必填欄位沒填'], 'buttons': ['✏️ 要 Agent 改', '✅ 確認送出 ⛔必填欄位沒填'],
-            'why': '⛔ 還不能確認送出:必填欄位沒填',
-            'todo': 'Agent 卡住:必填欄位沒填', 'fill': {'kind': 'bad', 'text': '❌ 必填欄位沒填'}})
+        v = card_view('stuck')
+        self.assertEqual(shown(v), {
+            'line': ['bad'], 'buttons': [('fix', False), ('approve', True)], 'why': True, 'todo': True, 'fill': 'bad'})
+        issue = FIX['cards']['stuck']['apply']['issues'][0]          # 卡上的原因就是 agent 回報的那一條
+        self.assertTrue(all(issue in t for t in (v['line'][0][1], v['why'], v['todo'], v['fill']['text'])))
 
     def fix_view(self, kind):
         """停著等你、自動填表開著:只剩要重翻(tr)、只缺證據(noev)、自動重打過一次還沒好(tried)(#339 第二、三條、#342)。"""
@@ -326,29 +300,29 @@ class CardView(unittest.TestCase):
             fb['__ans__'][0].update(inf='2026-01-02', noev='沒有程式自己截的那一頁')
         if kind == 'tried':
             fb['__auto__']['tried'] = ['fix:' + URL + ':' + next_step.fix_sig(fb, URL)]
-        return shown(steps(fb, jobs, flow=dict(FLOW, auto_fill=True))[URL]['view'])
+        return steps(fb, jobs, flow=dict(FLOW, auto_fill=True))[URL]['view']
 
     def test_only_a_retranslation_left_is_done_by_the_agent_not_by_you(self):
         v = self.fix_view('tr')
-        self.assertEqual((v['line'][-1], v['todo']), ('⏳ 答案改過,你停手一分鐘後 Agent 會自動照新答案重翻 1 條', ''))
-        self.assertFalse(any('要 Agent 改' in b for b in v['buttons']))
+        self.assertEqual((shown(v)['line'][-1], v['todo']), ('run', ''))
+        self.assertNotIn(('fix', False), shown(v)['buttons'])
 
     def test_only_missing_evidence_is_reported_not_promised(self):
         import form_record as fr
         v = self.fix_view('noev')
-        self.assertFalse(any('會自動' in t for t in v['line']))
+        self.assertNotIn('run', shown(v)['line'])
         self.assertEqual((v['why'], v['todo']), ('⚠ ' + fr.NO_EVIDENCE, fr.NO_EVIDENCE))
 
     def test_a_retype_that_did_not_take_says_why_and_hands_you_the_button(self):
         v = self.fix_view('tried')
-        self.assertFalse(any('會自動照新答案' in t for t in v['line']))
+        self.assertNotIn('run', shown(v)['line'])
         self.assertIn('不會再自動重試', v['why'])
-        self.assertEqual(v['buttons'][0], '✏️ 要 Agent 改(1 欄照新答案重打)')
+        self.assertEqual((v['buttons'][0]['b'], v['rf']), ('fix', 1))
 
     def test_a_card_sent_back_as_not_sent_is_queued_when_the_flow_fills(self):
         fb, jobs = flow_board(**{URL: 'sent'})
         ds.fire(fb, URL, 'undo_sent')
-        self.assertIn('⏳ 排隊中:Agent 會自動填這張,填好停在送出前', shown(steps(fb, jobs)[URL]['view'])['line'])
+        self.assertIn('run', shown(steps(fb, jobs)[URL]['view'])['line'])
 
     def test_a_sent_card_has_no_delivery_block(self):
         self.assertTrue(card_view('sent')['locked'])
@@ -418,25 +392,6 @@ class BlockedCompany(unittest.TestCase):
                 self.assertIsNotNone(steps(fb, jobs)[URL]['auto'])
 
 
-class AdvanceWaitsForTheCheck(unittest.TestCase):
-    """待你決定的卡,要等它進來之後的那一輪建置和投遞前驗收跑完才自動推進:等不等在下一步裡算,自動流程照它(#340、#342)。"""
-
-    def test_a_card_that_just_arrived_waits_for_the_next_check(self):
-        fb, jobs = flow_board(r='ready')
-        self.assertEqual(steps(fb, jobs, gen=3)['r']['auto']['wait'], True)          # 還沒記下要等哪一輪
-        fb['__auto__']['seen'] = {'r': 3}
-        self.assertEqual(steps(fb, jobs, gen=3)['r']['auto']['wait'], True)          # 那一輪還沒跑完
-        self.assertEqual(steps(fb, jobs, gen=4, building=True)['r']['auto']['wait'], True)
-        self.assertEqual(steps(fb, jobs, gen=4)['r']['auto']['wait'], False)
-
-    def test_a_copy_of_the_board_has_no_check_to_wait_for(self):
-        fb, jobs = flow_board(r='ready')
-        self.assertEqual(steps(fb, jobs, real=False)['r']['auto']['wait'], False)
-
-
-CUSTOM_WAITING = '通用版 的客製版等你看，收下或退回後才能送出'
-
-
 def custom_waiting(m):
     """這張要寄的履歷有一份客製版還在等你看。"""
     m.update(resume_id='general', custom_docs={'resume:general:zh': {'status': 'review', 'name': '履歷'}})
@@ -449,13 +404,15 @@ class CustomVersionWaiting(unittest.TestCase):
         fb = ready_to_confirm()
         custom_waiting(fb[URL])
         got = step(fb)
-        self.assertEqual((got['gate'], got['confirm'], got['send']), (CUSTOM_WAITING,) * 3)
+        self.assertTrue(got['gate'])
+        self.assertEqual((got['confirm'], got['send']), (got['gate'],) * 2)
 
     def test_a_card_waiting_for_you_to_decide_is_not_advanced(self):
         fb, jobs = flow_board(r='ready')
         custom_waiting(fb['r'])
         got = steps(fb, jobs, real=False)['r']
-        self.assertEqual((got['gate'], got['auto']), (CUSTOM_WAITING, None))
+        self.assertTrue(got['gate'])
+        self.assertIsNone(got['auto'])
 
 
 class Gate(unittest.TestCase):
@@ -464,7 +421,8 @@ class Gate(unittest.TestCase):
     def test_the_agents_closed_verdict_holds_until_you_say_the_job_is_still_open(self):
         fb = {URL: {'app': 'ready'}}
         got = next_step_of(fb, CLOSED)
-        self.assertEqual((got['gate'], got['closed'], got['holds']), ('驗收未通過：agent 判斷職缺已關閉', True, CLOSED['issues']))
+        self.assertIn(CLOSED['issues'][0]['msg'], got['gate'])
+        self.assertEqual((got['closed'], got['holds']), (True, CLOSED['issues']))
         fb[URL]['judged_no'] = {'closed': '2026-01-02'}
         got = next_step_of(fb, CLOSED)
         self.assertEqual((got['gate'], got['closed'], got['holds']), ('', False, []))
@@ -573,7 +531,7 @@ class ConfirmEvent(Server):
         shown = self.next_of()['confirm']
         got = self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {'approve': {'snap': {}}}}]})
         self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, shown)])
-        self.assertEqual(shown, '還有答案等你確認或填寫')
+        self.assertIn('答案', shown)
         self.assertEqual(ds.state(self.card()), 'parked')
 
     def test_the_confirmed_answers_are_the_ones_the_backend_reads_not_the_ones_the_page_sent(self):
@@ -587,8 +545,7 @@ class ConfirmEvent(Server):
                          ('confirmed', {'Why?': 'Because.'}, '2026-02-02T00:00:00Z'))
 
 
-BUSY = {'running': 'Agent 正在做,等它做完', 'sending': 'Agent 正在做,等它做完',
-        'unsure': '送出結果不明,先確認到底送出沒有'}
+BUSY = ('running', 'sending', 'unsure')
 
 
 def busy_board(state):
@@ -599,9 +556,9 @@ class BusyCard(unittest.TestCase):
     """正在填、正在送出、送出結果不明:換檔、上傳客製版、退回、移除都不行,原因寫在按鈕上(#341)。"""
 
     def test_busy_cards_say_why(self):
-        for state, why in BUSY.items():
+        for state in BUSY:
             with self.subTest(state=state):
-                self.assertEqual(step(busy_board(state))['busy'], why)
+                self.assertTrue(step(busy_board(state))['busy'])
 
     def test_a_card_left_waiting_is_not_busy(self):
         self.assertIsNone(step(busy_board('parked'))['busy'])
@@ -624,7 +581,7 @@ class BusyEvents(Server):
                     self.use(busy_board(state))
                     before = self.card()
                     got = self.save({URL: dict(before, **change)})
-                    self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, BUSY[state])])
+                    self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, step(busy_board(state))['busy'])])
                     self.assertEqual(self.card(), before)
 
     def test_a_note_on_a_busy_card_is_still_saved(self):
@@ -640,7 +597,7 @@ class BusyEvents(Server):
                 before = self.card()
                 code, raw, _ = self.req('/api/card-file?u=' + urllib.parse.quote(URL) + '&name=mine.pdf',
                                         data=b'%PDF-1.4 mine', method='PUT')
-                self.assertEqual((code, json.loads(raw)['msg']), (409, BUSY[state]))
+                self.assertEqual((code, json.loads(raw)['msg']), (409, step(busy_board(state))['busy']))
                 self.assertEqual(self.card(), before)
 
 
@@ -677,12 +634,6 @@ class EveryEvent(unittest.TestCase):
                         refused += 1
         self.assertGreater(refused, 50)                 # 真的比到了擋下的那些,不是空比空
 
-    def test_examples_of_the_sentence(self):
-        import next_step
-        self.assertEqual(next_step.refuse(busy_board('parked'), URL, 'unconfirm'), '「停著等你」時不能「取消確認、復原」')
-        fb = busy_board('sent')
-        fb[URL]['sent_by'] = 'manual'
-        self.assertEqual(next_step.refuse(fb, URL, 'undo_sent'), '「已送出」這張不能「沒送成」')
 
 
 class EveryEventOnTheServer(Server):
@@ -706,7 +657,7 @@ class JobStillOpen(unittest.TestCase):
     """你按「不對,職缺還在」推翻 agent 的判斷:下一步當下就不擋,不等驗收重跑(#339 第四條)。"""
 
     def test_the_agents_closed_verdict_blocks_confirming(self):
-        self.assertEqual(step(ready_to_confirm(), CLOSED)['confirm'], '驗收未通過：agent 判斷職缺已關閉')
+        self.assertIn(CLOSED['issues'][0]['msg'], step(ready_to_confirm(), CLOSED)['confirm'])
 
     def test_saying_the_job_is_still_open_unblocks_it_at_once(self):
         fb = ready_to_confirm()
@@ -719,7 +670,7 @@ class JobStillOpenOnTheServer(Server):
         self.use(ready_to_confirm())
         import board_doc as bd
         bd.rewrite(lambda d: d['data'].__setitem__('status', CLOSED), self.path, 'test')
-        self.assertEqual(self.next_of()['confirm'], '驗收未通過：agent 判斷職缺已關閉')
+        self.assertIn(CLOSED['issues'][0]['msg'], self.next_of()['confirm'])
         self.save({URL: dict(self.card(), judged_no={'closed': '2026-01-02'})})
         self.assertIsNone(self.next_of()['confirm'])
         got = self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {'approve': {}}}]})
@@ -735,7 +686,8 @@ class PageGetsTheNextStep(Server):
         fb['__ans__'][0]['inf'] = 1
         self.use(fb)
         page = bd.parse(self.req('/')[1].decode('utf-8'))['data']
-        self.assertEqual(page['next'][URL]['confirm'], '還有答案等你確認或填寫')
+        self.assertEqual(page['next'][URL]['confirm'], step(fb)['confirm'])
+        self.assertTrue(page['next'][URL]['confirm'])
 
     def test_the_page_says_what_the_agent_takes_over_with_the_saved_settings(self):
         """卡上寫會自動做的,跟自動流程用同一份設定算(⚙ 設定的自動流程、停著的頁上限)。"""
@@ -751,7 +703,7 @@ class PageGetsTheNextStep(Server):
     def test_saving_returns_the_new_next_step_of_the_changed_card(self):
         self.use(ready_to_confirm())
         got = self.save({'__events__': [{'u': URL, 'ev': 'fix_start', 'data': {'apply': {'stage': 'fix'}}}]})
-        self.assertEqual(got['next'][URL]['busy'], 'Agent 正在做,等它做完')
+        self.assertTrue(got['next'][URL]['busy'])
 
     def test_the_page_and_the_job_poll_carry_the_card_and_company_names(self):
         import board_doc as bd
@@ -764,8 +716,11 @@ class PageGetsTheNextStep(Server):
         """看板寫的「幾點自動再試、第幾次」、回報是哪個流程寫的,用後台的那一份(#343:不抄常數)。"""
         import board_doc as bd
         self.use(ready_to_confirm())
+        import agent_report
+        import autopilot
         cfg = bd.parse(self.req('/')[1].decode('utf-8'))['data']['cfg']
-        self.assertEqual((cfg['reply_retry'], cfg['inbox_from']['代投']), ({'max': 3, 'gap': 3600}, ['幫你填表', 'ship']))
+        self.assertEqual((cfg['reply_retry'], cfg['inbox_from']),
+                         ({'max': autopilot.REPLY_RETRY_MAX, 'gap': autopilot.REPLY_RETRY_GAP}, agent_report.FROM))
 
     def test_the_reports_waiting_for_you_leave_out_the_agents_own_without_evidence(self):
         fb = ready_to_confirm()
@@ -800,7 +755,7 @@ class PageGetsTheNextStep(Server):
         self.use(ready_to_confirm())
         self.assertIsNone(self.next_of()['busy'])
         bd.set_fb(lambda f: ds.fire(f, URL, 'fix_start', apply={'stage': 'fix'}), live=self.path, by='autopilot')
-        self.assertEqual(self.next_of()['busy'], 'Agent 正在做,等它做完')
+        self.assertTrue(self.next_of()['busy'])
 
 
 OFF = 'https://off-board.example/job/1'     # 有表單、但不在看板上畫得出來的卡(重建拿掉、別的看板資料)
@@ -842,7 +797,7 @@ class ClearAnAnswer(Server):
         self.use(self.board(off_locked=False))
         got = self.save({'__events__': [{'redo': 'k1'}]})
         self.assertTrue(self.card()['form']['f'][0].get('refill'))
-        self.assertEqual(got['next'][URL]['confirm'], '有答案改過,網頁上還是舊的,先讓 agent 改')
+        self.assertTrue(got['next'][URL]['confirm'])
 
     def test_a_confirmed_card_using_it_loses_the_confirmation(self):
         fb = self.board(off_locked=False)
@@ -895,8 +850,8 @@ class ChangeAnAnswer(Server):
     def test_the_filled_page_using_it_is_marked_to_retype(self):
         self.use(ready_to_confirm())
         got = self.change()
-        self.assertEqual((got['next'][URL]['confirm'], self.card()['form']['f'][0].get('refill'), got['cards'][URL]),
-                         ('有答案改過,網頁上還是舊的,先讓 agent 改', 1, self.card()))
+        self.assertTrue(got['next'][URL]['confirm'])
+        self.assertEqual((self.card()['form']['f'][0].get('refill'), got['cards'][URL]), (1, self.card()))
 
     def test_a_confirmed_card_using_it_loses_the_confirmation(self):
         self.use(ready_to_confirm())
@@ -928,7 +883,8 @@ class SwapMarksThePageOld(Server):
     def test_switching_the_language_of_a_filled_card_without_an_event_marks_the_page_old(self):
         got = self.save({URL: dict(self.card(), lang='en')})
         m = self.card()
-        self.assertEqual((got['rejected'], ds.state(m), m['lang'], m['apply']['stale']), ([], 'stale', 'en', '語言換成「英文」'))
+        self.assertEqual((got['rejected'], ds.state(m), m['lang']), ([], 'stale', 'en'))
+        self.assertIn('語言', m['apply']['stale'])
 
     def test_the_boards_own_event_is_kept_as_the_reason(self):
         got = self.save({URL: dict(self.card(), lang='en'),

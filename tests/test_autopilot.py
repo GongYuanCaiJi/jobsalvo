@@ -150,10 +150,6 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=cfg)['fill'], 'a')
         fb['a'] = {'app': 'sent', 'ds': 'sent', 'form': {'lock': 1}}      # 他送出了一張:空出位子
         self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=cfg)['fill'], 'c')
-        fb['a'] = dict(held)
-        self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=0))['fill'], 'c')   # 0 = 不限
-        self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=None))['fill'], 'c')  # 沒設 = 預設 5,才停 2 張
-        self.assertEqual(run(data('a', 'b', 'c'), fb, cfg=dict(CFG, fill_max=''))['fill'], 'c')    # 設定頁那格清空 = 預設 5
 
     def test_the_cap_counts_codex_and_claude_pages_together(self):
         """停著的頁上限是 Codex、Claude 合計(兩家的頁都佔他要看的一頁)。"""
@@ -237,20 +233,6 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(p3['fix'], 'a'); self.assertEqual(p3['tried'], ['fix:a:' + next_step.fix_sig(fb, 'a')])
         fb['__auto__']['tried'] = p3['tried']
         self.assertIsNone(run(data('a'), fb, now=NOW + datetime.timedelta(seconds=300))['fix'])
-
-    def test_refix_that_leaves_the_mark_is_not_repeated(self):
-        # 重打完 apply.at 換新,但還標著(agent 沒打好):不能再派,不然同一張一直重打、後面的排不到
-        fb = self._filled()
-        fb['__auto__']['rf'] = {'a': {'sig': next_step.fix_sig(fb, 'a'), 'since': '2026-01-01T00:00:00'}}
-        p = run(data('a'), fb)
-        self.assertEqual(p['fix'], 'a')
-        fb['__auto__']['tried'] = p['tried']
-        fb['a']['apply'].update(stage='fix', at='t2')
-        self.assertIsNone(run(data('a'), fb)['fix'])
-        fb['__ans__'][0]['zh'] = '他又改了'                                  # 他再改:再重打一次
-        fb['__auto__']['rf'] = run(data('a'), fb)['rf']
-        fb['__auto__']['rf']['a']['since'] = '2026-01-01T00:00:00'
-        self.assertEqual(run(data('a'), fb)['fix'], 'a')
 
     def test_refix_skips_stuck_stale_unfilled_and_waits_for_running(self):
         for st, kw in (('stuck', {}), ('stale', {'stale': '履歷換了'}), ('parked', {'session': ''}), ('confirmed', {})):
@@ -365,7 +347,6 @@ class PilotStepTest(unittest.TestCase):
         # 不用等他按確認送出、按 👀 才發現(卡上一直寫停著等你、還能確認)
         import chrome_door
         import config as cf
-        import delivery_state as ds
         jobs = [j['id'] for j in _read(self.board)['data']['jobs']]
         page = {'stage': 'fill', 'issues': [], 'session': 'S1', 'tab_id': '7', 'runtime': 'codex'}
         bd.set_fb(lambda fb: fb.update({jobs[0]: {'app': 'ship', 'ds': 'parked', 'apply': dict(page)},

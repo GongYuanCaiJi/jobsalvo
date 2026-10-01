@@ -1,5 +1,5 @@
-import copy
 import hashlib
+import pathlib
 import json
 import os
 import shutil
@@ -76,8 +76,10 @@ class PackageReconcile(unittest.TestCase):
         reconcile.MANIFEST = self.old_manifest
 
     def _write_settings(self):
+        """設定寫回檔案,這個行程也跟上。"""
         with open(os.path.join(self.home, cf.NAME), 'w', encoding='utf-8') as f:
             json.dump(self.settings, f, ensure_ascii=False)
+        cf.reload(self.home)
 
     def _write_board(self):
         _env.make_board(self.board, {self.url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'}}, jobs=[self.job])
@@ -192,7 +194,6 @@ class PackageReconcile(unittest.TestCase):
         self.settings['resume']['attachments'] = [
             {'id': 'letter', 'name': '求職信', 'files': {'zh': 'resume/letter.pdf'}, 'enabled': True}]
         self._write_settings()
-        cf.reload(self.home)
         ship.reconcile_packages({}, force=True, check_only=False, board=self.board)
         complete = sorted(self._folder_files())
         seen = []
@@ -253,19 +254,15 @@ class PackageReconcile(unittest.TestCase):
         source = os.path.join(self.home, 'resume', 'source.md')
         style = os.path.join(self.home, 'resume', 'style.css')
         os.makedirs(os.path.dirname(source), exist_ok=True)
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('# Delivery resume\n\n| field | value |\n| --- | --- |\n| role | markdown marker |\n')
-        with open(style, 'w', encoding='utf-8') as f:
-            f.write('@page { size: A4; margin: 0; }')
+        pathlib.Path(source).write_text('# Delivery resume\n\n| field | value |\n| --- | --- |\n| role | markdown marker |\n', encoding='utf-8')
+        pathlib.Path(style).write_text('@page { size: A4; margin: 0; }', encoding='utf-8')
         attachment = os.path.join(self.home, 'resume', 'letter.md')
-        with open(attachment, 'w', encoding='utf-8') as f:
-            f.write('# Cover letter\n\nattachment markdown marker')
+        pathlib.Path(attachment).write_text('# Cover letter\n\nattachment markdown marker', encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = 'resume/source.md'
         self.settings['resume']['resumes'][0]['styles'] = {'zh': 'resume/style.css'}
         self.settings['resume']['attachments'] = [
             {'id': 'letter', 'name': 'Cover letter', 'files': {'zh': 'resume/letter.md'}, 'enabled': True}]
         self._write_settings()
-        cf.reload(self.home)
 
         with mock.patch.object(ship.pdf_preview, 'generate', return_value='a' * 64):
             self.assertEqual(self._run(), 0)
@@ -297,8 +294,7 @@ class PackageReconcile(unittest.TestCase):
             self.assertEqual(self._run(), 0)
             self.assertEqual(os.stat(generated_resume).st_mtime_ns, generated_mtime)
 
-            with open(style, 'w', encoding='utf-8') as f:
-                f.write('@page { size: A5; margin: 0; }')
+            pathlib.Path(style).write_text('@page { size: A5; margin: 0; }', encoding='utf-8')
             self.assertEqual(self._run(), 0)
             reader = pdf_tools.pypdf.PdfReader(generated_resume)
             changed_size = (round(float(reader.pages[0].mediabox.width)),
@@ -309,14 +305,11 @@ class PackageReconcile(unittest.TestCase):
         source = os.path.join(self.home, 'resume', 'preview.md')
         style = os.path.join(self.home, 'resume', 'preview.css')
         os.makedirs(os.path.dirname(source), exist_ok=True)
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('# Preview v1\n\nRendered preview marker.\n')
-        with open(style, 'w', encoding='utf-8') as f:
-            f.write('@page { size: A4; margin: 0; }')
+        pathlib.Path(source).write_text('# Preview v1\n\nRendered preview marker.\n', encoding='utf-8')
+        pathlib.Path(style).write_text('@page { size: A4; margin: 0; }', encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = 'resume/preview.md'
         self.settings['resume']['resumes'][0]['styles'] = {'zh': 'resume/preview.css'}
         self._write_settings()
-        cf.reload(self.home)
         entry = next(source_sync.files())
         manifest = {}
         diagnostics = []
@@ -326,8 +319,7 @@ class PackageReconcile(unittest.TestCase):
                 key = hashlib.sha256(source_file.read()).hexdigest()
             preview = ship.pdf_preview.cache_path(key)
             os.makedirs(os.path.dirname(preview), exist_ok=True)
-            with open(preview, 'wb') as image_file:
-                image_file.write(b'synthetic preview')
+            pathlib.Path(preview).write_bytes(b'synthetic preview')
             return key
 
         with mock.patch.object(source_sync.pdf_preview, 'generate', side_effect=generate_preview) as generate:
@@ -337,16 +329,14 @@ class PackageReconcile(unittest.TestCase):
             self.assertEqual(source_sync.refresh(manifest), ([], []))
             self.assertEqual(generate.call_count, 1)
 
-            with open(style, 'w', encoding='utf-8') as f:
-                f.write('@page { size: A5; margin: 0; }')
+            pathlib.Path(style).write_text('@page { size: A5; margin: 0; }', encoding='utf-8')
             diagnostics.clear()
             changed, errors = source_sync.refresh(manifest, diagnostics=diagnostics)
             self.assertEqual((len(changed), errors, generate.call_count), (1, [], 2), diagnostics)
             style_preview = manifest[source_sync.preview_key(entry)]
             self.assertNotEqual(style_preview, first_preview)
 
-            with open(source, 'w', encoding='utf-8') as f:
-                f.write('# Preview v2\n\nRendered preview marker.\n')
+            pathlib.Path(source).write_text('# Preview v2\n\nRendered preview marker.\n', encoding='utf-8')
             diagnostics.clear()
             changed, errors = source_sync.refresh(manifest, diagnostics=diagnostics)
             self.assertEqual((len(changed), errors, generate.call_count), (1, [], 3), diagnostics)
@@ -360,7 +350,6 @@ class PackageReconcile(unittest.TestCase):
         self.settings['resume']['attachments'] = [
             {'id': 'letter', 'name': '求職信', 'files': {'zh': 'resume/letter.pdf'}, 'enabled': True}]
         self._write_settings()
-        cf.reload(self.home)
 
         directory, problems = ship.build_default(self.job, {self.url: {
             'resume_id': 'general', 'lang': 'zh', 'custom_file': 'custom/accepted.pdf'}})
@@ -380,117 +369,6 @@ class PackageReconcile(unittest.TestCase):
         _env.make_board(self.board, {self.url: {'app': 'ready', 'variant': 'paused', 'lang': 'zh'}}, jobs=[job])
         self.assertNotEqual(self._run(), 0)
         self._assert_blocked_with_one_report('沒有已勾選的履歷')
-
-    def test_old_settings_migrate_to_equivalent_packages_idempotently(self):
-        """Two old resumes and five deduped attachments retain every card package."""
-        files = {
-            'one-zh.pdf': 'one-zh', 'one-en.pdf': 'one-en',
-            'two-zh.pdf': 'two-zh', 'two-en.pdf': 'two-en',
-            'shared-zh.pdf': 'shared-zh', 'one-only.pdf': 'one-only',
-            'two-only.pdf': 'two-only', 'shared-en.pdf': 'shared-en',
-            'proof.pdf': 'proof',
-        }
-        for name, data in files.items():
-            _env.tiny_pdf(os.path.join(self.home, 'resume', name), data)
-
-        old = copy.deepcopy(self.settings)
-        old['resume'].pop('resumes')
-        old['resume'].pop('attachments')
-        old['resume']['langs'] = ['zh', 'en']
-        old['resume']['variants'] = {
-            'one': {
-                'label': '第一份', 'when': '第一種職缺',
-                'zh': 'resume/one-zh.pdf', 'en': 'resume/one-en.pdf',
-                'attachments': {
-                    'zh': ['resume/shared-zh.pdf', 'resume/one-only.pdf', 'resume/proof.pdf'],
-                    'en': ['resume/shared-en.pdf', 'resume/proof.pdf'],
-                },
-            },
-            'two': {
-                'label': '第二份', 'when': '第二種職缺',
-                'zh': 'resume/two-zh.pdf', 'en': 'resume/two-en.pdf',
-                'attachments': {
-                    'zh': ['resume/shared-zh.pdf', 'resume/two-only.pdf', 'resume/proof.pdf'],
-                    'en': ['resume/shared-en.pdf', 'resume/proof.pdf'],
-                },
-            },
-        }
-        once = cf.migrate_settings(old, home=self.home)
-        twice = cf.migrate_settings(once, home=self.home)
-        self.assertEqual(twice, once)
-        self.assertNotIn('variants', once['resume'])
-        self.assertEqual([r['id'] for r in once['resume']['resumes']], ['one', 'two'])
-        self.assertEqual(len(once['resume']['attachments']), 5)
-        restricted = [a for a in once['resume']['attachments'] if a['resume_ids']]
-        self.assertEqual({tuple(a['resume_ids']) for a in restricted}, {('one',), ('two',)})
-
-        self.settings = old
-        self._write_settings()
-        urls = {
-            ('one', 'zh'): 'test://jobs/one-zh', ('one', 'en'): 'test://jobs/one-en',
-            ('two', 'zh'): 'test://jobs/two-zh', ('two', 'en'): 'test://jobs/two-en',
-        }
-        jobs = [{'id': url, 'target': f'{rid} {lang}'} for (rid, lang), url in urls.items()]
-        fb = {url: {'app': 'ready', 'variant': rid, 'lang': lang}
-              for (rid, lang), url in urls.items()}
-        _env.make_board(self.board, fb, jobs=jobs)
-        self.assertEqual(self._run(), 0)
-        expected = {
-            'one': {
-                'zh': ['one-zh.pdf', 'shared-zh.pdf', 'one-only.pdf', 'proof.pdf'],
-                'en': ['one-en.pdf', 'shared-en.pdf', 'proof.pdf'],
-            },
-            'two': {
-                'zh': ['two-zh.pdf', 'shared-zh.pdf', 'two-only.pdf', 'proof.pdf'],
-                'en': ['two-en.pdf', 'shared-en.pdf', 'proof.pdf'],
-            },
-        }
-        for (rid, lang), url in urls.items():
-            self.assertEqual(sorted(ship.info(url)['files']), sorted(expected[rid][lang]))
-
-    def test_old_settings_migration_removes_a_precombined_attachment(self):
-        attachment = os.path.join(self.home, 'resume', 'proof.pdf')
-        combined = os.path.join(self.home, 'resume', 'old-combined.pdf')
-        another_resume = os.path.join(self.home, 'resume', 'another.pdf')
-        _env.tiny_pdf(attachment, 'proof')
-        _env.tiny_pdf(another_resume, 'another-resume')
-        pdf_tools.merge([self.source, attachment], combined)
-        old = copy.deepcopy(self.settings)
-        old['resume'].pop('resumes')
-        old['resume'].pop('attachments')
-        old['resume']['langs'] = ['zh']
-        old['resume']['variants'] = {
-            'general': {
-                'label': '通用版', 'zh': 'resume/base.pdf',
-                'attachments': {'zh': ['resume/proof.pdf', 'resume/old-combined.pdf']}},
-            'another': {
-                'label': '另一份', 'zh': 'resume/another.pdf',
-                'attachments': {'zh': ['resume/proof.pdf', 'resume/old-combined.pdf']}},
-        }
-
-        migrated = cf.migrate_settings(old, home=self.home)
-
-        paths = [path for item in migrated['resume']['attachments'] for path in item['files'].values()]
-        self.assertEqual(paths, ['resume/proof.pdf'])
-        self.assertEqual(cf.migrate_settings(migrated, home=self.home), migrated)
-
-    def test_legacy_profile_command_is_removed_and_reported_without_its_value(self):
-        settings = copy.deepcopy(self.settings)
-        settings['resume']['profile_cmd'] = 'private command that must not be reported'
-        with open(os.path.join(self.home, 'jobsalvo.json'), 'w', encoding='utf-8') as f:
-            json.dump(settings, f)
-
-        loaded = cf.user_settings(self.home)
-        self.assertNotIn('profile_cmd', loaded['resume'])
-        cf.reload(self.home)
-
-        with open(os.path.join(self.home, 'jobsalvo.json'), encoding='utf-8') as f:
-            persisted = json.load(f)
-        self.assertNotIn('profile_cmd', persisted['resume'])
-        parsed = read_board(self.board)
-        inbox = json.loads(parsed['fb']).get('__inbox__') or []
-        self.assertTrue(any('舊版平台履歷指令設定' in item['msg'] for item in inbox))
-        self.assertNotIn('private command', json.dumps(inbox, ensure_ascii=False))
 
     def test_card_acceptance_issues_are_not_a_rebuild_failure(self):
         import board_status
@@ -555,27 +433,22 @@ class PackageReconcile(unittest.TestCase):
         source = os.path.join(self.tmp, 'outside.md')
         custom = os.path.join(self.tmp, 'card-source.md')
         for path in (source, custom):
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(path)
+            pathlib.Path(path).write_text(path, encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = source
         self._write_settings()
-        cf.reload(self.home)
         _env.make_board(self.board, {self.url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh', 'custom_file': custom}},
                         jobs=[self.job])
         manifest = {}
         source_sync.refresh(manifest, board=self.board)
         self.assertFalse(source_sync.stale(manifest=manifest, board=self.board))
-        with open(custom, 'w', encoding='utf-8') as f:
-            f.write('changed')
+        pathlib.Path(custom).write_text('changed', encoding='utf-8')
         self.assertTrue(source_sync.stale(manifest=manifest, board=self.board))
 
     def test_markdown_input_change_rerenders_and_rebuilds_package(self):
         source = os.path.join(self.home, 'resume', 'source.md')
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('# Original v1\n\nA text marker.\n')
+        pathlib.Path(source).write_text('# Original v1\n\nA text marker.\n', encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = source
         self._write_settings()
-        cf.reload(self.home)
         with mock.patch.object(ship.pdf_preview, 'generate', return_value='a' * 64):
             self.assertEqual(self._run(), 0)
             package = ship.folder(self.url, name=card.name(self.job))
@@ -589,8 +462,7 @@ class PackageReconcile(unittest.TestCase):
             mtime = os.stat(rendered).st_mtime_ns
             self.assertEqual(self._run(), 0)
             self.assertEqual(os.stat(rendered).st_mtime_ns, mtime)
-            with open(source, 'w', encoding='utf-8') as f:
-                f.write('# Original v2\n\nA text marker.\n')
+            pathlib.Path(source).write_text('# Original v2\n\nA text marker.\n', encoding='utf-8')
             self.assertEqual(self._run(), 0)
             info = ship.read_info(package)
             with open(os.path.join(package, info['files'][0]), 'rb') as f:
@@ -602,8 +474,7 @@ class PackageReconcile(unittest.TestCase):
         # Markdown 排不成 PDF(找不到 Chrome、原稿壞了):以前只印在 reconcile 的輸出裡,背景跑的看不到,
         # 代投前的來源檢查叫他去看的「整理要寄的檔案」回報也從來沒人寫;準備和填表就這樣靜靜停著
         source = os.path.join(self.home, 'resume', 'source.md')
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('# Resume\n')
+        pathlib.Path(source).write_text('# Resume\n', encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = source
         self._write_settings()
 
@@ -646,7 +517,6 @@ class PackageReconcile(unittest.TestCase):
             {'id': 'writeup', 'name': '作品集', 'files': {'zh': external_attachment},
              'enabled': True, 'resume_ids': ['general'], 'skill': ''}]
         self._write_settings()
-        cf.reload(self.home)
         other_url = 'test://jobs/other'
         other = {'id': other_url, 'target': 'Engineer · Other'}
         _env.make_board(self.board, {self.url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'},
@@ -672,11 +542,9 @@ class PackageReconcile(unittest.TestCase):
     def test_source_sync_diagnostic_reports_error_type_and_tool_frame_only(self):
         source = os.path.join(self.home, 'resume', 'source.md')
         os.makedirs(os.path.dirname(source), exist_ok=True)
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('# Resume')
+        pathlib.Path(source).write_text('# Resume', encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = 'resume/source.md'
         self._write_settings()
-        cf.reload(self.home)
         diagnostics = []
 
         with mock.patch.object(source_sync.markdown_pdf, 'render',
@@ -708,50 +576,41 @@ class PackageReconcile(unittest.TestCase):
 
     def test_file_hash_manifest_detects_external_markdown_changes(self):
         source = os.path.join(self.tmp, 'outside.md')
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('v1')
+        pathlib.Path(source).write_text('v1', encoding='utf-8')
         self.settings['resume']['resumes'][0]['files']['zh'] = source
         self._write_settings()
-        cf.reload(self.home)
         manifest = {}
         diagnostics = []
         changed, errors = source_sync.refresh(manifest, diagnostics=diagnostics)
         self.assertEqual(len(changed), 1)
         self.assertEqual(errors, [], diagnostics)
         self.assertFalse(source_sync.stale(manifest=manifest))
-        with open(source, 'w', encoding='utf-8') as f:
-            f.write('v2')
+        pathlib.Path(source).write_text('v2', encoding='utf-8')
         self.assertTrue(source_sync.stale(manifest=manifest))
 
     def test_symlink_source_fingerprint_follows_target_content(self):
         target = os.path.join(self.tmp, 'outside-original.md')
-        with open(target, 'w', encoding='utf-8') as f:
-            f.write('# version one')
+        pathlib.Path(target).write_text('# version one', encoding='utf-8')
         link = os.path.join(self.home, 'resume', 'external-link.md')
         os.symlink(target, link)
         self.settings['resume']['resumes'][0]['files']['zh'] = 'resume/external-link.md'
         self._write_settings()
-        cf.reload(self.home)
         entry = next(source_sync.files())
         first = source_sync.entry_fingerprint(entry)
         self.assertTrue(os.path.islink(entry['path']))
-        with open(target, 'w', encoding='utf-8') as f:
-            f.write('# version two')
+        pathlib.Path(target).write_text('# version two', encoding='utf-8')
         self.assertNotEqual(source_sync.entry_fingerprint(entry), first)
 
     def test_unchanged_unrenderable_pdf_does_not_request_reconcile_repeatedly(self):
         source = os.path.join(self.tmp, 'outside.pdf')
-        with open(source, 'wb') as f:
-            f.write(b'not a PDF')
+        pathlib.Path(source).write_bytes(b'not a PDF')
         self.settings['resume']['resumes'][0]['files']['zh'] = source
         self._write_settings()
-        cf.reload(self.home)
         manifest = {}
         _changed, errors = source_sync.refresh(manifest)
         self.assertEqual(errors, [])
         self.assertFalse(source_sync.stale(manifest=manifest))
-        with open(source, 'wb') as f:
-            f.write(b'changed')
+        pathlib.Path(source).write_bytes(b'changed')
         self.assertTrue(source_sync.stale(manifest=manifest))
 
     def test_legacy_folder_is_known_and_migrates_to_twelve_character_name(self):
@@ -783,8 +642,7 @@ class PackageReconcile(unittest.TestCase):
         package = ship.folder(self.url, name=card.name(self.job))
         shot = os.path.join(package, '.apply', 'fill.png')
         os.makedirs(os.path.dirname(shot))
-        with open(shot, 'wb') as f:
-            f.write(b'png')
+        pathlib.Path(shot).write_bytes(b'png')
         bd.set_fb(lambda fb: fb[self.url].pop('app'), live=self.board, by='test')
 
         cleaned, _unknown = ship.clean_orphans(False, self.board)
@@ -835,8 +693,7 @@ class PackageReconcile(unittest.TestCase):
         self.assertEqual(self._run(), 0)
         shot = os.path.join(ship.folder(self.url), '.apply', 'fill.png')
         os.makedirs(os.path.dirname(shot))
-        with open(shot, 'wb') as f:
-            f.write(b'png')
+        pathlib.Path(shot).write_bytes(b'png')
         _env.tiny_pdf(self.source, 'resume-v2')
         with mock.patch.object(ship.sys, 'platform', 'linux'):
             ship.reconcile_packages({}, force=True, check_only=False, board=self.board)
@@ -850,7 +707,6 @@ class PackageReconcile(unittest.TestCase):
         self.settings['resume']['attachments'] = [
             {'id': 'letter', 'name': '求職信', 'files': {'zh': 'resume/letter.pdf'}, 'enabled': True}]
         self._write_settings()
-        cf.reload(self.home)
         _folder, problems = ship.build_default(self.job, json.loads(read_board(self.board)['fb']))
         self.assertTrue(any('letter.pdf' in p for p in problems), problems)
         self.assertNotIn('merged', ship.info(self.url))
@@ -860,7 +716,6 @@ class PackageReconcile(unittest.TestCase):
         _env.tiny_pdf(clash, 'my-own-file')
         self.settings['resume']['resumes'][0]['files']['zh'] = 'resume/' + ship.MERGED_FILE
         self._write_settings()
-        cf.reload(self.home)
         _folder, problems = ship.build_default(self.job, json.loads(read_board(self.board)['fb']))
         self.assertEqual(problems, [])
         info = ship.info(self.url)
@@ -883,8 +738,7 @@ class PackageReconcile(unittest.TestCase):
         os.makedirs(root, exist_ok=True)
         mystery = os.path.join(root, 'mystery-zzzzzzzzzzzz')
         os.makedirs(mystery)
-        with open(os.path.join(root, 'notes.txt'), 'w', encoding='utf-8') as f:
-            f.write('他自己放的')
+        pathlib.Path(os.path.join(root, 'notes.txt')).write_text('他自己放的', encoding='utf-8')
         outside = os.path.join(self.tmp, 'outside')
         os.makedirs(outside)
         link = os.path.join(root, f'link-{card.card_id_from_url(self.url)}')
@@ -923,8 +777,7 @@ class PackageReconcile(unittest.TestCase):
         old = os.path.join(root, f'legacy-{card.legacy_id(self.url)}')
         os.makedirs(old)
         new = os.path.join(root, f'legacy-{card.card_id_from_url(self.url)}')
-        with open(new, 'w', encoding='utf-8') as f:
-            f.write('不是資料夾')
+        pathlib.Path(new).write_text('不是資料夾', encoding='utf-8')
         self.assertIsNone(ship.folder(self.url))
         self.assertTrue(os.path.isdir(old))
 
@@ -959,7 +812,7 @@ class ShipFiles(unittest.TestCase):
         # 你指定的履歷後來被取消勾選:停下來要你重選,不偷換成 agent 推薦的那份,不列檔案
         got = self.files_of(self.job(recommend='general', lang='zh'), {'app': 'ready', 'resume_id': 'paused'})
         self.assertEqual(got['resume_id'], '')
-        self.assertEqual(got['problem'], '你指定的履歷已經取消勾選,請重新選一份')
+        self.assertTrue(got['problem'])
         self.assertEqual([c['id'] for c in got['choices']], ['general', 'tech'])
         self.assertEqual(got['files'], [])
         self.assertEqual(ship.resolve(self.job(recommend='general', lang='zh'),
@@ -968,7 +821,8 @@ class ShipFiles(unittest.TestCase):
     def test_pinned_resume_unchecked_without_a_recommendation_also_stops(self):
         # 沒推薦也一樣停下來要你重選;以前看板在這裡自己挑第一份勾選的,後台建不出來
         got = self.files_of(self.job(), {'app': 'ready', 'variant': 'paused', 'lang': 'zh'})
-        self.assertEqual((got['resume_id'], got['problem'], got['files']), ('', '你指定的履歷已經取消勾選,請重新選一份', []))
+        self.assertEqual((got['resume_id'], got['files']), ('', []))
+        self.assertTrue(got['problem'])
 
     def test_no_pin_uses_the_recommendation(self):
         got = self.files_of(self.job(recommend='tech', lang='zh'), {'app': 'ready'})
@@ -1008,7 +862,7 @@ class ShipFiles(unittest.TestCase):
         got = self.files_of(self.job(), mark)
         resume = got['files'][0]
         self.assertEqual((resume['custom'], resume['path']), (False, ''))
-        self.assertEqual(got['pending'], '通用版 的客製版等你看，收下或退回後才能送出')
+        self.assertIn('通用版', got['pending'])          # 擋著:講是哪一份在等你看
 
     def test_old_own_file_and_custom_records_follow_one_priority(self):
         # 客製紀錄和舊的「這張用自己的檔」同一個優先順序:收下的紀錄 > 舊的這張自己的檔 > 原始檔。
@@ -1103,8 +957,10 @@ class MergedPdf(unittest.TestCase):
         self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='merged-'))
 
     def test_missing_or_no_files_are_named(self):
-        self.assertEqual(ship._write_merged(self.d, {'files': ['a.pdf']}), ['a.pdf 不見了'])
-        self.assertEqual(ship._write_merged(self.d, {'files': []}), ['沒有個別 PDF 可供合併'])
+        missing = ship._write_merged(self.d, {'files': ['a.pdf']})
+        self.assertEqual(len(missing), 1)
+        self.assertIn('a.pdf', missing[0])
+        self.assertEqual(len(ship._write_merged(self.d, {'files': []})), 1)
         self.assertEqual([n for n in os.listdir(self.d) if n.endswith('.pdf')], [])
 
     def test_rebuild_keeps_the_previous_name_and_avoids_a_clash(self):

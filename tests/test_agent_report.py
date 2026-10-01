@@ -92,7 +92,7 @@ class RunControl(unittest.TestCase):
 
     def test_pause_resume_stop_the_whole_tree(self):
         import subprocess, tempfile, time, jobrun
-        d = tempfile.mkdtemp(prefix='runctl-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='runctl-'))
         p = subprocess.Popen(['/bin/sh', '-c', 'sleep 60 & wait'], start_new_session=True)
         time.sleep(0.3)
         path = os.path.join(d, 'st.json')

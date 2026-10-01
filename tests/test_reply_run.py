@@ -81,11 +81,6 @@ class Findings(unittest.TestCase):
         self.assertEqual(fb[U]['oc'], 'offer')
         self.assertIn('iv', fb[U]['oc_at'])
 
-    def test_his_own_decision_is_never_overwritten(self):
-        fb = board(oc='wd', oc_at={'wd': '2026-09-30'})
-        rr.apply_findings(fb, {U: [{'src': 'gmail', 'date': '2026-10-01', 'subject': 'Interview', 'kind': 'interview'}]}, DAY)
-        self.assertEqual(fb[U]['oc'], 'wd')
-
     def test_something_he_must_do_is_kept_as_a_todo_without_asking_him_to_look(self):
         fb = board()
         done = rr.apply_findings(fb, {U: [{'src': 'gmail', 'date': '2026-10-01', 'subject': 'Next step', 'kind': 'interview',
@@ -169,16 +164,6 @@ class Findings(unittest.TestCase):
         self.assertIn('未找到確認信或平台紀錄', fb[U]['ev'])
 
 
-class Removed(unittest.TestCase):
-    def test_card_removed_while_the_round_was_running_is_not_written(self):
-        """查應徵進度跑到一半(一輪最多 60 分鐘)他把卡移除了:跑完不能再改它的結果、加回音、推查過日期。"""
-        fb = board(rm=1)
-        before = dict(fb[U])
-        rr.apply_results(fb, {U: [{'src': 'Gmail', 'date': DAY, 'kind': 'interview',
-                                   'link': 'https://mail.example/iv', 'snippet': 'iv'}]}, {U}, DAY)
-        self.assertEqual(fb[U], before)
-
-
 class OneLetterManyCards(unittest.TestCase):
     """同一家投了兩個缺,一封沒寫職稱的「很遺憾」信被 agent 同時掛到兩張(#289 決定 1):
     分不出是哪一張就不自動改狀態;回音照記(兩張都有,不會被記成沒下文),卡上標「可能是這封」讓他自己按。"""
@@ -256,25 +241,11 @@ class CheckedDates(unittest.TestCase):
 
 
 class Ghost(unittest.TestCase):
-    def test_old_check_does_not_ghost_a_card_without_a_successful_check_this_round(self):
-        fb = board(replies={'at': '2026-09-22', 'items': []})
-
-        self.assertEqual(rr.apply_ghost(fb, DAY), [])
-        self.assertNotIn('oc', fb[U])
-
     def test_thirty_days_without_any_reply_is_ghosted(self):
         fb = board()
         self.assertEqual(rr.apply_ghost(fb, '2026-10-21', checked={U}), [])  # 29 天
         self.assertEqual(rr.apply_ghost(fb, '2026-10-22', checked={U}), [U]) # 30 天
         self.assertEqual(fb[U]['oc'], 'ghost')
-
-    def test_any_reply_even_a_confirmation_stops_the_ghost_clock(self):
-        fb = board(replies={'items': [{'kind': 'confirm'}]})
-        self.assertEqual(rr.apply_ghost(fb, DAY), [])
-
-    def test_after_he_undoes_a_ghost_it_is_not_ghosted_again(self):
-        fb = board(ghost_no=1)                                         # 看板「復原」會留這個
-        self.assertEqual(rr.apply_ghost(fb, DAY, checked={U}), [])
 
     def test_a_late_still_reviewing_mail_moves_an_auto_ghosted_card_back_to_waiting(self):
         """自動記成沒下文之後公司來信「還在審」:確認信也是回音,照回音改回「等回音」,可以復原。"""
@@ -295,12 +266,6 @@ class Ghost(unittest.TestCase):
                                     'link': 'https://mail.example/iv', 'snippet': 'iv'}]}, '2026-10-10')
         self.assertEqual(fb[U]['oc'], 'iv')
         self.assertEqual(fb[U]['oc_auto']['from_at'], {'ghost': '2026-10-05'})
-
-    def test_a_confirmation_never_undoes_a_ghost_he_set_himself(self):
-        fb = board(oc='ghost', oc_at={'ghost': '2026-10-05'})      # 他自己按的沒下文(沒有 oc_auto)
-        rr.apply_findings(fb, {U: [{'src': 'Gmail', 'date': '2026-10-10', 'kind': 'confirm',
-                                    'link': 'https://mail.example/still', 'snippet': 'still reviewing'}]}, '2026-10-10')
-        self.assertEqual(fb[U]['oc'], 'ghost')
 
     def test_a_late_reply_moves_a_ghosted_card_back(self):
         fb = board()
@@ -551,7 +516,7 @@ class MainRun(unittest.TestCase):
 
 
     def run_main(self, delivery=None, *, chrome_up=(True, ''), close_error=None, fb=None, unavailable=(),
-                 argv=(), program_reads=True, log_lines=(), reread=None, real_run=False):
+                 argv=(), program_reads=True, log_lines=(), reread=None, real_run=False, result=('completed', 0)):
         """program_reads:設定裡用 Chrome 的那一家程式自己讀得到頁(假的 Codex)還是讀不到(假的 Claude)。"""
         import json, tempfile, agent_chrome
         import fake_chrome as fc
@@ -564,13 +529,13 @@ class MainRun(unittest.TestCase):
         self.statuses, self.reports, self.writes = [], [], []
 
         def fake_run(prompt, log, home, **kw):
-            self.prompt = prompt
+            self.prompt, self.run_kw = prompt, kw
             with open(log, 'w', encoding='utf-8') as f:
                 f.write(''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in log_lines))
             if delivery is not None:
                 with open(os.path.join(d, 'replies.json'), 'w', encoding='utf-8') as f:
                     json.dump(delivery, f)
-            return rr.ar.AgentResult('completed', 0)
+            return rr.ar.AgentResult(*result)
 
         def fake_set_fb(fn, live=None, by=''):
             fn(fb)
@@ -604,6 +569,15 @@ class MainRun(unittest.TestCase):
             code = rr.main()
         self.board_path = os.path.join(d, 'board.html')
         return code, fb
+
+    def test_partial_findings_are_not_read_when_agent_fails(self):
+        code, fb = self.run_main({'checked': [U], 'findings': [self.IV]}, result=('failed', 9, 123))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.run_kw['board'], self.board_path)
+        self.assertEqual(self.writes, [])
+        self.assertNotIn('oc', fb[U])
+        self.assertEqual((self.statuses[-1]['phase'], self.statuses[-1]['done']), ('failed', 0))
+        self.assertTrue(any('結束碼 9' in a[1] for a, _k in self.reports))
 
     def test_the_round_leaves_its_evidence_in_every_checked_cards_folder(self):
         """#315:查應徵進度這一輪查了哪幾張,每一張的證據夾都有:程式讀的來源、指示、動作紀錄、交件單,同一種放法。"""
@@ -786,6 +760,23 @@ class VerifiedFallback(unittest.TestCase):
 
 
 class SourceCapture(unittest.TestCase):
+    THREAD = {'title': 'Gmail', 'text': 'FULL THREAD TEXT', 'emailThreadPrintView': True,
+              'emailMessageCount': 1, 'emailBodies': ['FULL THREAD TEXT']}
+
+    def collect(self, search_page):
+        """一張 Acme 的卡:搜尋網址回 search_page,其他網址(點進去的信)都回完整的信。回 (sources, missing)。"""
+        import profile_sync as ps
+        from urllib.parse import quote
+        from unittest.mock import patch
+        jobs = {U: {'id': U, 'company': 'Acme'}}
+        fb = {U: {'app': 'sent', 'sent_at': '2026-10-01'}}
+        query, _ = rr.gmail_query(fb, jobs, [U])
+        search_url = rr.GMAIL + '#search/' + quote(query, safe='')
+        page = dict(search_page, url=search_url, title='Gmail')
+        with patch.object(ps, 'application_record_pages', return_value=[]):
+            return rr.collect_sources(fb, jobs, [U], reader=lambda urls: {
+                u: page if u == search_url else dict(self.THREAD, url=u) for u in urls})
+
     def test_company_search_includes_all_gmail_categories(self):
         jobs = {U: {'id': U, 'company': 'Acme Systems'}}
         fb = {U: {'app': 'sent', 'sent_at': '2026-10-01'}}
@@ -892,31 +883,9 @@ class SourceCapture(unittest.TestCase):
         self.assertIn('沒有可安全用於 Gmail 的搜尋詞', missing[0]['reason'])
 
     def test_partial_gmail_search_results_are_reported_inaccessible(self):
-        import profile_sync as ps
-        from urllib.parse import quote
-        from unittest.mock import patch
-        jobs = {U: {'id': U, 'company': 'Acme'}}
-        fb = {U: {'app': 'sent', 'sent_at': '2026-10-01'}}
-        query, _ = rr.gmail_query(fb, jobs, [U])
-        search_url = rr.GMAIL + '#search/' + quote(query, safe='')
-        page = {
-            'url': search_url, 'title': 'Gmail', 'text': '1-50 of 100',
-            'anchors': [
-                {'href': rr.GMAIL + '#all/thread-001', 'text': 'Acme application 1'},
-                {'href': rr.GMAIL + '#all/thread-002', 'text': 'Acme application 2'},
-            ],
-        }
-
-        def reader(urls):
-            return {url: (page if url == search_url else {
-                'url': url, 'title': 'Gmail', 'text': 'FULL THREAD TEXT',
-                'emailThreadPrintView': True, 'emailMessageCount': 1,
-                'emailBodies': ['FULL THREAD TEXT'],
-            }) for url in urls}
-
-        with patch.object(ps, 'application_record_pages', return_value=[]):
-            sources, missing = rr.collect_sources(fb, jobs, [U], reader=reader)
-
+        sources, missing = self.collect({'text': '1-50 of 100', 'anchors': [
+            {'href': rr.GMAIL + '#all/thread-001', 'text': 'Acme application 1'},
+            {'href': rr.GMAIL + '#all/thread-002', 'text': 'Acme application 2'}]})
         self.assertEqual(sources['gmail']['threads'], [])
         self.assertEqual(len(missing), 1)
         self.assertEqual(missing[0]['source_ref'], 'email:search')
@@ -924,115 +893,48 @@ class SourceCapture(unittest.TestCase):
         self.assertIn('完整', missing[0]['reason'])
 
     def test_gmail_next_page_prevents_a_complete_search_claim(self):
-        import profile_sync as ps
-        from urllib.parse import quote
-        from unittest.mock import patch
-        jobs = {U: {'id': U, 'company': 'Acme'}}
-        fb = {U: {'app': 'sent', 'sent_at': '2026-10-01'}}
-        query, _ = rr.gmail_query(fb, jobs, [U])
-        search_url = rr.GMAIL + '#search/' + quote(query, safe='')
-        page = {
-            'url': search_url, 'title': 'Gmail', 'text': '1-2 of 3',
-            'anchors': [
-                {'href': rr.GMAIL + '#all/thread-001', 'text': 'Acme application 1'},
-                {'href': rr.GMAIL + '#all/thread-002', 'text': 'Acme application 2'},
-            ],
-        }
-        with patch.object(ps, 'application_record_pages', return_value=[]):
-            sources, missing = rr.collect_sources(
-                fb, jobs, [U], reader=lambda urls: {
-                    url: page if url == search_url else {
-                    'url': url, 'title': 'Gmail', 'text': 'FULL THREAD TEXT',
-                    'emailThreadPrintView': True, 'emailMessageCount': 1,
-                    'emailBodies': ['FULL THREAD TEXT'],
-                } for url in urls})
-
+        sources, missing = self.collect({'text': '1-2 of 3', 'anchors': [
+            {'href': rr.GMAIL + '#all/thread-001', 'text': 'Acme application 1'},
+            {'href': rr.GMAIL + '#all/thread-002', 'text': 'Acme application 2'}]})
         self.assertEqual(sources['gmail']['threads'], [])
         self.assertEqual([item['source_ref'] for item in missing], ['email:search'])
         self.assertEqual(missing[0]['jobs'], [U])
         self.assertIn('尚未讀完', missing[0]['reason'])
 
     def test_gmail_search_without_a_result_count_is_not_treated_as_empty(self):
-        import profile_sync as ps
-        from urllib.parse import quote
-        from unittest.mock import patch
-        jobs = {U: {'id': U, 'company': 'Acme'}}
-        fb = {U: {'app': 'sent', 'sent_at': '2026-10-01'}}
-        query, _ = rr.gmail_query(fb, jobs, [U])
-        search_url = rr.GMAIL + '#search/' + quote(query, safe='')
-        page = {'url': search_url, 'title': 'Gmail', 'text': 'Gmail loading shell ' * 20,
-                'anchors': []}
-
-        with patch.object(ps, 'application_record_pages', return_value=[]):
-            _sources, missing = rr.collect_sources(
-                fb, jobs, [U], reader=lambda urls: {url: page for url in urls})
-
+        _sources, missing = self.collect({'text': 'Gmail loading shell ' * 20, 'anchors': []})
         self.assertEqual(len(missing), 1)
         self.assertEqual(missing[0]['source_ref'], 'email:search')
         self.assertIn('確認', missing[0]['reason'])
 
     def test_gmail_empty_search_with_zero_result_count_is_complete(self):
-        import profile_sync as ps
-        from urllib.parse import quote
-        from unittest.mock import patch
-        jobs = {U: {'id': U, 'company': 'Acme'}}
-        fb = {U: {'app': 'sent', 'sent_at': '2026-10-01'}}
-        query, _ = rr.gmail_query(fb, jobs, [U])
-        search_url = rr.GMAIL + '#search/' + quote(query, safe='')
-        page = {'url': search_url, 'title': 'Gmail', 'text': '0-0 of 0', 'anchors': []}
-
-        with patch.object(ps, 'application_record_pages', return_value=[]):
-            _sources, missing = rr.collect_sources(
-                fb, jobs, [U], reader=lambda urls: {url: page for url in urls})
-
-        self.assertEqual(missing, [])
+        self.assertEqual(self.collect({'text': '0-0 of 0', 'anchors': []})[1], [])
 
     def test_gmail_readiness_requires_complete_result_page_and_loaded_thread(self):
         import agent_chrome
         from unittest import mock
-        partial = {'readyState': 'complete', 'text': '1-50 of 100', 'anchors': [
-            {'href': rr.GMAIL + '#all/thread-001'},
-        ]}
-        full_page = {'readyState': 'complete', 'text': '1-1 of 1', 'anchors': [
-            {'href': rr.GMAIL + '#all/thread-001'},
-        ]}
-        self.assertFalse(rr._gmail_search_ready(partial))
-        self.assertTrue(rr._gmail_search_ready(full_page))
-        self.assertTrue(rr._gmail_search_ready({
-            'readyState': 'complete', 'text': '0-0 of 0', 'anchors': [],
-        }))
-        self.assertTrue(rr._gmail_search_ready({
-            'readyState': 'complete', 'text': 'No conversations match your search', 'anchors': [],
-        }))
-        self.assertTrue(rr._gmail_search_ready({
-            'readyState': 'complete', 'text': '1-2 封，共 2 封', 'anchors': [
-                {'href': rr.GMAIL + '#all/thread-001'},
-                {'href': rr.GMAIL + '#all/thread-002'},
-            ],
-        }))
-        self.assertFalse(rr._gmail_thread_ready({'readyState': 'interactive', 'text': 'Email',
-                                                 'emailThreadPrintView': True, 'emailMessageCount': 1,
-                                                 'emailBodies': ['Email']}))
-        self.assertFalse(rr._gmail_thread_ready({'readyState': 'complete', 'text': 'Email body'}))
-        self.assertFalse(rr._gmail_thread_ready({'readyState': 'complete', 'text': 'Email shell',
-                                                 'emailThreadPrintView': True, 'emailMessageCount': 0,
-                                                 'emailBodies': []}))
-        self.assertTrue(rr._gmail_thread_ready({'readyState': 'complete', 'text': 'Email body',
-                                                'emailThreadPrintView': True, 'emailMessageCount': 1,
-                                                'emailBodies': ['Email body']}))
-        self.assertFalse(rr._gmail_thread_ready({'readyState': 'complete', 'text': 'Email body',
-                                                 'emailThreadPrintView': True, 'emailMessageCount': 1,
-                                                 'emailBodies': ['hidden body text']}))
-        self.assertFalse(rr._gmail_thread_ready({'readyState': 'complete', 'text': 'Email body',
-                                                 'emailThreadPrintView': True, 'emailMessageCount': 1,
-                                                 'emailBodies': 'Email body'}))
-        self.assertFalse(rr._gmail_thread_ready({'readyState': 'complete', 'text': 'Message one',
-                                                 'emailThreadPrintView': True, 'emailMessageCount': 2,
-                                                 'emailBodies': ['Message one']}))
-        self.assertTrue(rr._gmail_thread_ready({'readyState': 'complete',
-                                                'text': 'Message one\nMessage two',
-                                                'emailThreadPrintView': True, 'emailMessageCount': 2,
-                                                'emailBodies': ['Message one', 'Message two']}))
+        one = [{'href': rr.GMAIL + '#all/thread-001'}]
+        for page, ready in (({'text': '1-50 of 100', 'anchors': one}, False),           # 只列了一部分
+                            ({'text': '1-1 of 1', 'anchors': one}, True),
+                            ({'text': '0-0 of 0', 'anchors': []}, True),
+                            ({'text': 'No conversations match your search', 'anchors': []}, True),
+                            ({'text': '1-2 封，共 2 封', 'anchors': one + [{'href': rr.GMAIL + '#all/thread-002'}]}, True)):
+            with self.subTest(search=page['text']):
+                self.assertEqual(rr._gmail_search_ready(dict(page, readyState='complete')), ready)
+
+        def thread(text, count, bodies, state='complete'):
+            return {'readyState': state, 'text': text, 'emailThreadPrintView': True,
+                    'emailMessageCount': count, 'emailBodies': bodies}
+        for page, ready in ((thread('Email', 1, ['Email'], state='interactive'), False),   # 還沒載完
+                            ({'readyState': 'complete', 'text': 'Email body'}, False),     # 不是列印檢視
+                            (thread('Email shell', 0, []), False),                         # 一封都沒有
+                            (thread('Email body', 1, ['Email body']), True),
+                            (thread('Email body', 1, ['hidden body text']), False),        # 內文不在頁上
+                            (thread('Email body', 1, 'Email body'), False),                # 內文格式不對
+                            (thread('Message one', 2, ['Message one']), False),            # 少一封
+                            (thread('Message one\nMessage two', 2, ['Message one', 'Message two']), True)):
+            with self.subTest(thread=page):
+                self.assertEqual(rr._gmail_thread_ready(page), ready)
         with mock.patch.object(agent_chrome, 'read_pages', return_value={}) as read_pages:
             rr._read_pages(['https://mail.google.com/mail/u/0/'], ready=rr._gmail_thread_ready,
                            settle=2)

@@ -22,7 +22,7 @@ def alive(pid):
 
 class GracefulStop(unittest.TestCase):
     def test_first_stop_only_stops_the_agent_second_stops_everything(self):
-        d = tempfile.mkdtemp(prefix='jobrun-test-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='jobrun-test-'))
         path = os.path.join(d, 'status.json')
         parent = subprocess.Popen([sys.executable, '-c', PARENT], stdout=subprocess.PIPE, text=True)
         self.addCleanup(lambda: parent.poll() is None and parent.kill())
@@ -45,7 +45,7 @@ class GracefulStop(unittest.TestCase):
         self.assertEqual(jobrun.read(path, (MARK,))['phase'], 'stopped')
 
     def test_flows_without_graceful_stop_at_once(self):
-        d = tempfile.mkdtemp(prefix='jobrun-test-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='jobrun-test-'))
         path = os.path.join(d, 'status.json')
         parent = subprocess.Popen([sys.executable, '-c', PARENT], stdout=subprocess.PIPE, text=True)
         self.addCleanup(lambda: parent.poll() is None and parent.kill())
@@ -68,7 +68,7 @@ class PauseKeepsTheBoardWritable(unittest.TestCase):
         # 它幾乎一直拿著看板的鎖(寫看板的半路上)。以前直接凍住:暫停多久,他在看板上的存檔就卡多久
         import fcntl
         from contextlib import contextmanager
-        d = tempfile.mkdtemp(prefix='jobrun-pause-')
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='jobrun-pause-'))
         path, lock = os.path.join(d, 'status.json'), os.path.join(d, 'board.html.lock')
         p = subprocess.Popen([sys.executable, '-c', LOCKER, lock], stdout=subprocess.PIPE, text=True)
         self.addCleanup(lambda: p.poll() is None and (os.kill(p.pid, 18), p.kill()))

@@ -11,7 +11,7 @@ settings_api —— 看板「⚙ 設定」頁背後的讀寫。使用者只碰�
 
 檔案一律照資料夾裡的相對路徑存,設定裡記的也是相對路徑:整個資料夾搬家也不會壞。
 """
-import os, re, sys, json, copy, subprocess, hashlib, contextlib
+import os, re, sys, copy, subprocess, hashlib, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -29,11 +29,6 @@ def _read(p):
             return f.read()
     except OSError:
         return ''
-
-
-def write_hard_rules(text):
-    import prefs
-    prefs.save_custom_text(str(text))
 
 
 def _write(p, data, mode='w'):
@@ -133,8 +128,7 @@ def get():
     import agent_chrome
     import doctor
     import prefs
-    migration_notices = _retire_legacy_builder()
-    prefs.ensure_note(legacy_path=cf.PREFS)
+    prefs.ensure_note()
     preferences_custom, preferences_agent = prefs.note_sections()
     C = cf.C
     render_warnings = markdown_warnings()
@@ -142,8 +136,7 @@ def get():
         'settings': cf.user_settings(),
         'effective': dict({k: C[k] for k in ('board', 'agent', 'browser', 'resume', 'search', 'research', 'replies')},
                           flow=dict(cf.DEFAULTS.get('flow') or {}, **(C.get('flow') or {}))),
-        'texts': {'rules': preferences_custom,
-                  'preferences_custom': preferences_custom, 'preferences_agent': preferences_agent,
+        'texts': {'preferences_custom': preferences_custom, 'preferences_agent': preferences_agent,
                   'apply_rules': _read(cf.APPLY_RULES)},
         'files': _files(),
         'skills': skill_files(),
@@ -161,7 +154,6 @@ def get():
         'claude_paired': agent_chrome.conf().get('claude_checked') or '',
         'doctor': doctor.check_environment(),
         'service': os.path.exists(__import__('install_service').plist_path()),
-        'migration_notices': migration_notices,
         'render_warnings': render_warnings,
         'git_history': _git_history_status(),
         'version': version(),          # 放最後:上面讀設定時可能順手把舊格式改寫進檔
@@ -180,29 +172,6 @@ def version():
             return hashlib.sha256(f.read()).hexdigest()[:16]
     except OSError:
         return ''
-
-
-def _retire_legacy_builder():
-    """Persist the one-time removal of resume.build_cmd and report why it disappeared."""
-    path = os.path.join(cf.HOME, cf.NAME)
-    try:
-        with open(path, encoding='utf-8') as source:
-            settings = json.load(source)
-    except (OSError, ValueError):
-        return []
-    resume = settings.get('resume') if isinstance(settings, dict) else None
-    if not isinstance(resume, dict) or 'build_cmd' not in resume:
-        return []
-    resume.pop('build_cmd', None)
-    cf.save(settings)
-    message = cf.LEGACY_BUILD_CMD_REMOVAL_NOTICE
-    if os.path.isfile(cf.LIVE):
-        try:
-            import agent_report
-            agent_report.report('設定遷移', message, live=cf.LIVE)
-        except Exception as exc:  # noqa: BLE001 — 寫不進看板就把失敗併進回給設定頁的訊息
-            message += f' 看板提醒寫入失敗({type(exc).__name__})。'
-    return [message]
 
 
 def _git_history_status():
@@ -463,7 +432,6 @@ def _check(settings):
     """擋掉會讓程式壞掉的設定;回問題清單。"""
     bad = []
     normalized = copy.deepcopy(settings)
-    normalized, _ = cf._migrate_agents(normalized)
     agent = normalized.get('agent')
     if agent is not None and not isinstance(agent, dict):
         bad.append('Agent 設定格式不對')
@@ -611,7 +579,7 @@ def find_minutes_problem(value):
 
 
 def save(body):
-    """body = {settings: 整份使用者設定, texts: {rules, apply_rules}, version: 設定頁打開時的版本}。回問題清單。
+    """body = {settings: 整份使用者設定, texts: {preferences_custom, preferences_agent, apply_rules}, version: 設定頁打開時的版本}。回問題清單。
     沒帶 version 的(讀了最新的檔才改的:「改用 X」、找缺分鐘數、檢查程式)不比對。"""
     if 'version' in body and body['version'] != version():
         return [CONFLICT]
@@ -620,7 +588,6 @@ def save(body):
         s = body['settings']
         if not isinstance(s, dict):
             return ['設定格式不對']
-        legacy_profile_cmd = isinstance(s.get('resume'), dict) and 'profile_cmd' in s['resume']
         s = cf.migrate_settings(s)
         bad = _check(s)
         if bad:
@@ -634,15 +601,11 @@ def save(body):
             old_custom, old_agent = prefs.note_sections()
             prefs.save_note_from_ui(t.get('preferences_custom', old_custom),
                                     t.get('preferences_agent', old_agent))
-        elif 'rules' in t:
-            write_hard_rules(str(t['rules']))
         if 'apply_rules' in t:
             _write(cf.APPLY_RULES, str(t['apply_rules']))
     except OSError as e:
         return [f'「你的喜好」或「填表做法」沒存成({e.strerror or e}),設定也還沒動;處理好再按一次']
     if s is not None:
-        if legacy_profile_cmd:
-            cf.queue_notice(cf.PROFILE_CMD_REMOVAL_NOTICE)
         try:
             cf.save(_without_untouched_defaults(s, cf.user_settings()))
         except OSError as e:

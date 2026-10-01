@@ -953,7 +953,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
     st = st or (lambda *a, **k: None)
     t0 = time.time()
     rd = os.path.join(DIR, 'rounds', time.strftime('%Y%m%d-%H%M%S')); os.makedirs(rd, exist_ok=True)
-    prefs.ensure_note(legacy_path=cf.PREFS)
+    prefs.ensure_note()
     fb, jobs = prefs.load(live)
     have = {j['id'] for j in jobs}
     cs = prefs.cards(fb, jobs)

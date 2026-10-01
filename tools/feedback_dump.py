@@ -161,7 +161,7 @@ def main():
     a=ap.parse_args()
     body='\n'.join((START, build(a.live, heading=False), END))
     if a.pr: print(body); return
-    prefs.ensure_note(legacy_path=cf.PREFS)
+    prefs.ensure_note()
     try: doc=open(OUT,encoding='utf-8').read()
     except FileNotFoundError: doc=TEMPLATE
     if START not in doc or END not in doc: doc=doc.rstrip()+'\n\n'+START+'\n'+END+'\n'

@@ -6,7 +6,7 @@
 
 跑法(repo 根目錄):python3 -m unittest discover -s tests
 """
-import os, sys, json, time, tempfile, shutil, unittest, contextlib, copy
+import os, sys, json, time, tempfile, unittest, contextlib, copy
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -62,6 +62,15 @@ def confirm(fb):
     m['apply'] = {**FILLED, 'at': run.now(), **(m.get('apply') or {})}
     m['ds'] = 'confirmed'
     m['approve'] = {'at': T, 'snap': fr.snapshot(fb, U)}
+
+
+@contextlib.contextmanager
+def loaded(jobs, fb, d):
+    """run_one 讀到的看板是 (jobs, fb)、指示寫在 d、寫回看板直接改 fb。"""
+    with patch.object(run, 'load', return_value=(jobs, fb)), \
+         patch.object(run, 'prompt_for', return_value=('prompt', d)), \
+         patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)):
+        yield
 
 
 class Approval(unittest.TestCase):
@@ -168,14 +177,12 @@ class TabRemembersItsChrome(unittest.TestCase):
         now = {'pid': 9, 'start': 1000.0}
         with tempfile.TemporaryDirectory(prefix='apply-stamp-') as directory, \
              fc.installed(fc.FakeChrome('claude-code', agent_id='a'), chrome_id=now), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='a')), \
              patch.object(ar, 'session_id', return_value='S9'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
              patch.object(run, '_profile_check_after_fill', return_value=[]), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
             run.run_one('fill', U, '/tmp/board.html')
         self.assertEqual((fb[U]['apply']['tab_id'], fb[U]['apply'].get('chrome')), ('7', now))
@@ -295,14 +302,13 @@ class Checks(unittest.TestCase):
         self.assertIn('不是這張卡的職缺', ' '.join(run.check_fill(board(), U, self.d, t0)[0]))
 
     def test_same_job_with_a_stale_card_name_is_renamed_keeping_the_link(self):
-        import board_doc as bd
         path = _env.make_board(os.path.join(self.d, 'b.html'), jobs=[
             {'id': U, 'target': f'Northwind Graduate · Risk Operations Specialist (SQL)（[Lever]({U})）'}])
         run.rename(U, 'Northwind Accelarator Program - Risk Analyst', 'Northwind', path)
-        t = bd.parse(bd._read(path))['data']['jobs'][0]['target']
+        t = _env.read_board(path)['data']['jobs'][0]['target']
         self.assertEqual(t, f'Northwind Accelarator Program - Risk Analyst（[Lever]({U})）')
         run.rename(U, 'Northwind Accelarator Program - Risk Analyst', 'Northwind', path)     # 已經對了就不動
-        self.assertEqual(bd.parse(bd._read(path))['data']['jobs'][0]['target'], t)
+        self.assertEqual(_env.read_board(path)['data']['jobs'][0]['target'], t)
 
     def test_the_page_itself_is_read_not_agents_report(self):
         """agent 說它填好了不算數:程式自己去讀那一頁。分頁不見、值不對、檔沒選上、那一頁已經換掉(可能被送出),都要擋。"""
@@ -457,9 +463,7 @@ class Dispatch(unittest.TestCase):
         outcome = ar.AgentResult('failed', 1, 42, agent_id='browser-two')
         with tempfile.TemporaryDirectory(prefix='apply-agent-pin-') as d, \
              fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', d)), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+             loaded(jobs, fb, d), \
              patch.object(run.agent_report, 'report'), \
              patch.object(ar, 'run', side_effect=lambda *args, **kwargs: calls.append(kwargs) or outcome):
             self.assertFalse(run.run_one('fix', U, '/tmp/board.html')[0])
@@ -489,13 +493,11 @@ class Dispatch(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix='apply-wrapup-') as directory, \
              fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'):
             ok, _message = run.run_one('fill', U, '/tmp/board.html')
@@ -571,14 +573,12 @@ class Dispatch(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix='apply-profile-fix-') as directory, \
              fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', return_value=outcome), \
              patch.object(ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], fix_result)), \
              patch.object(run, 'profile_after', return_value=['Summary still differs']) as verify, \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report') as report, \
              patch.object(run.agent_report, 'resolve') as resolve:
             ok, message = run.run_one('fix', U, '/tmp/board.html')
@@ -595,13 +595,6 @@ class Dispatch(unittest.TestCase):
         # 開跑時收掉這張的舊回報(作廢)是對的;沒改好就不能用「改好了」把問題收掉
         self.assertFalse([c for c in resolve.call_args_list if '已經解決' in str(c.args[1])])
         self.assertTrue([c for c in resolve.call_args_list if '作廢' in str(c.args[1])])   # 重跑時舊的回報收掉,不會越堆越多
-
-    def test_session_id_is_read_from_the_codex_output(self):
-        p = os.path.join(tempfile.mkdtemp(prefix='applyrun-'), 'fill.log')
-        with open(p, 'w') as f:
-            f.write('{"type":"thread.started","thread_id":"01a0c5e6-5a09-7601-b101-5725e37957fd"}\n{"type":"turn.started"}\n')
-        self.assertEqual(ar.session_id(p), '01a0c5e6-5a09-7601-b101-5725e37957fd')
-        self.assertIsNone(ar.session_id(p + '.missing'))
 
     def test_preview_is_exactly_what_agent_gets(self):
         """看板按鈕底下顯示的 prompt,跟真的派出去的一字不差。"""
@@ -670,7 +663,7 @@ class Dispatch(unittest.TestCase):
 
 class SubmitOutcomes(unittest.TestCase):
     def setUp(self):
-        self.d = tempfile.mkdtemp(prefix='apply-outcome-')
+        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-outcome-'))
         self.fb = board()
         self.fb[U]['apply'] = {'session': 'S1', 'tab_id': '7', 'runtime': 'codex'}
         confirm(self.fb)
@@ -681,14 +674,11 @@ class SubmitOutcomes(unittest.TestCase):
 
     def tearDown(self):
         self._chrome.__exit__(None, None, None)
-        shutil.rmtree(self.d, ignore_errors=True)
 
     def released(self):
         return [c[1:] for c in self.door.calls if c[0] == 'release']
 
     def test_confirmation_evidence_wins_over_answers_edited_during_send(self):
-        from types import SimpleNamespace
-        from unittest.mock import patch
 
         original = run.bd.set_fb
         calls = []
@@ -787,8 +777,6 @@ class SubmitOutcomes(unittest.TestCase):
 
     def test_the_checklist_is_run_again_the_moment_sending_starts(self):
         """你已確認 → 正在送出 那一刻再跑一次檢查清單(修正 5):按確認之後答案又改了,就不送、留在你已確認。"""
-        from types import SimpleNamespace
-        from unittest.mock import patch
         launched = []
 
         def edit_then(mut, live=None, by=''):
@@ -987,7 +975,7 @@ class TabRead(unittest.TestCase):
             def close(self):
                 pass
 
-        out = os.path.join(tempfile.mkdtemp(prefix='shot-'), 'fill.png')
+        out = os.path.join(self.enterContext(tempfile.TemporaryDirectory(prefix='shot-')), 'fill.png')
         with patch.object(apply_tab, 'Tab', FakeTab), patch.object(time, 'sleep', lambda _s: None):
             apply_tab.shot('S1', '7', out)
         with open(out, 'rb') as f:
@@ -1034,7 +1022,6 @@ class RoundInProgress(unittest.TestCase):
     卡上不能還是上一輪的「填好了」、還能確認送出:Codex 重填時那一頁已經被重新載入了。"""
 
     def _stopped(self, stage, fb, chrome=None):
-        import copy
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
         chrome = chrome or fc.FakeChrome()
         seen = {}
@@ -1046,11 +1033,9 @@ class RoundInProgress(unittest.TestCase):
             raise KeyboardInterrupt                   # 他按了停止:這之後程式什麼都寫不了
 
         with tempfile.TemporaryDirectory(prefix='apply-stop-') as directory, \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', side_effect=agent), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
              fc.installed(chrome):
@@ -1123,14 +1108,12 @@ class WriteBackKeepsWhatOthersMarked(unittest.TestCase):
 
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-writeback-') as directory, \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S1' if stage == 'fix' else 'S2'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], res)), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
              fc.installed(fc.FakeChrome()):
@@ -1170,14 +1153,12 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
         jobs = {U: {'id': U, 'target': 'X'}}
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-reports-') as directory, \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S2'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], res)), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              fc.installed(fc.FakeChrome()):
             self.assertTrue(run.run_one('fill', U, '/tmp/board.html')[0])
         still = sorted(it['msg'] for it in fb['__inbox__'] if not it.get('done'))
@@ -1189,7 +1170,6 @@ class RetypedMarksOnly(unittest.TestCase):
     核對要讀頁、比附件(可到一兩分鐘),這段期間他又改的答案,網頁上還是舊字,標記要留著。"""
 
     def test_an_answer_changed_while_the_page_is_being_checked_stays_marked(self):
-        import copy
         fb = filled('parked')
         fb[U]['form']['f'][1]['refill'] = 1
         jobs = {U: {'id': U, 'target': 'X'}}
@@ -1216,7 +1196,6 @@ class RetypedMarksOnly(unittest.TestCase):
         self.assertIn('網頁上還是舊的', fr.approval_problem(fb, U, OKST))
 
     def test_what_the_page_was_checked_against_is_cleared(self):
-        import copy
         fb = filled('parked')
         fb[U]['form']['f'][1]['refill'] = 1
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
@@ -1260,15 +1239,13 @@ class SubmittedWhileFilling(unittest.TestCase):
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
         res = {'tab_id': '7', 'handoff': True, 'submitted': True, 'confirm_text': 'Application received'}
         with tempfile.TemporaryDirectory(prefix='apply-violation-') as directory, \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S2'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=(['⚠ 填表階段回報「已送出」,要人看'], res)), \
              patch.object(run.ship, 'read_info', return_value={}), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report') as report, \
              patch.object(run.agent_report, 'resolve'), \
              fc.installed(fc.FakeChrome()):
@@ -1482,14 +1459,12 @@ class LateResult(unittest.TestCase):
             return SimpleNamespace(ok=True, status='completed', agent_id='a')
         with tempfile.TemporaryDirectory(prefix='apply-late-') as directory, \
              fc.installed(fc.FakeChrome('claude-code', agent_id='a')), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
              patch.object(run, '_profile_check_after_fill', return_value=[]), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
             run.run_one('fill', U, '/tmp/board.html')
         self.assertEqual(ds.state(fb[U]), 'sent')

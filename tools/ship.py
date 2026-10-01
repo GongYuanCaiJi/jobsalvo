@@ -14,9 +14,9 @@ jobsalvo 不管履歷怎麼寫、怎麼排版。它只認三件事:
      也可選多份檔交給同一個 agent,依各檔 skill 修改;等使用者收下或直接上傳 PDF 後,
      才替換可投遞夾中對應的檔案。
 
-用法:python3 tools/ship.py            # 對「待你決定」「可投遞」的卡建好可投遞夾(跟 reconcile 做的一樣)
+可投遞夾由 reconcile 建(uv run python tools/reconcile.py)。
 """
-import os, sys, re, json, glob, shutil, hashlib, argparse, time, tempfile, contextlib, functools
+import os, sys, re, json, glob, shutil, hashlib, time, tempfile, contextlib, functools
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -137,32 +137,6 @@ def _files_of(kind, item_id):
         return (cf.RESUMES.get(item_id) or {}).get('files') or {}
     item = next((a for a in cf.ATTACHMENTS if str(a.get('id') or '') == item_id), None)
     return (item or {}).get('files') or {}
-
-
-def migrate_custom_keys(fb):
-    """舊的客製紀錄 key 沒有語言(resume:<id>、attachment:<id>)。照紀錄裡原始檔的簽章認出是哪個語言的檔,
-    改成 <kind>:<id>:<語言>;認不出來的(原始檔後來換過)留著不動,看板上列成「這張現在不寄這份」,可以清掉。
-    resume:legacy(更早的 custom_file)不分語言,不動。回改了幾筆。"""
-    moved = 0
-    for state in fb.values():
-        docs = state.get('custom_docs') if isinstance(state, dict) else None
-        if not isinstance(docs, dict):
-            continue
-        for key in list(docs):
-            kind, _, item_id = key.partition(':')
-            entry = docs[key]
-            if kind not in ('resume', 'attachment') or not item_id or ':' in item_id or key == 'resume:legacy' \
-                    or not isinstance(entry, dict):
-                continue
-            want = {entry.get('source_sig'), entry.get('candidate_source_sig')} - {None, ''}
-            langs = [lang for lang, rel in _files_of(kind, item_id).items()
-                     if rel and source_sig(cf.path(rel)) in want]
-            new = item_key(kind, item_id, langs[0]) if len(langs) == 1 else ''
-            if not new or new in docs:
-                continue
-            docs[new] = dict(docs.pop(key), id=new) if 'id' in entry else docs.pop(key)
-            moved += 1
-    return moved
 
 
 def _custom_entry(fb, url, item_id):
@@ -851,18 +825,3 @@ def clean_orphans(check_only, board):
                 shutil.rmtree(full)
         cleaned.append(entry)
     return cleaned, unknown
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--board', default=cf.LIVE)
-    a = ap.parse_args()
-    _, bad = reconcile_packages({}, True, False, a.board)
-    for m in bad:
-        print('  ⚠', m)
-    print('可投遞夾建好了' + (f',{len(bad)} 個問題' if bad else ''))
-    return 1 if bad else 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())

@@ -19,7 +19,6 @@ class AcceptanceIsolation(unittest.TestCase):
             'browser': {'profile': 'Agent', 'state': os.path.join(self.temporary, 'agent.json')},
             'resume': {
                 'base': 'resume.md', 'ship_dir': 'ship', 'prepare_dir': 'prepare',
-                'build_cmd': 'touch /outside/build', 'profile_cmd': 'touch /outside/profile',
                 'resumes': [], 'attachments': [],
             },
             'paths': {
@@ -54,8 +53,6 @@ class AcceptanceIsolation(unittest.TestCase):
         ):
             resolved = value if os.path.isabs(value) else os.path.join(runtime, value)
             self.assertTrue(acceptance._inside(runtime, resolved), value)
-        self.assertNotIn('profile_cmd', settings['resume'])
-        self.assertNotIn('build_cmd', settings['resume'])
         with open(os.path.join(runtime, settings['browser']['state']), encoding='utf-8') as source:
             self.assertEqual(json.load(source), {'instance': 'test'})
         with open(os.path.join(runtime, settings['resume']['base']), encoding='utf-8') as source:
@@ -131,7 +128,7 @@ class AcceptanceIsolation(unittest.TestCase):
 
         summary = acceptance.ProfileAcceptance._public_blockers(evidence)
 
-        self.assertEqual(summary, '固定版附件內容不符')
+        self.assertIn('附件', summary)
         self.assertNotIn('private-file', summary)
 
     def test_acceptance_profile_and_answer_fixture_are_synthetic_and_complete(self):

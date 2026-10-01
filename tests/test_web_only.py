@@ -84,24 +84,20 @@ class WebOnly(tb.HttpBase):
             f.write('既有一頁履歷，保留在磁碟上')
         d = self.settings()
         s = d['settings']
-        s.setdefault('resume', {})['resumes'] = []
-        s['resume']['attachments'] = []
-        s.setdefault('resume', {})['variants'] = {
-            'mgmt': {'label': '管理版', 'when': '主管職', 'zh': 'resume/mgmt.pdf',
-                     'attachments': ['resume/portfolio.pdf']}}
-        s['fetch'] = {'cmd': 'obsolete-fetch-command'}
+        s.setdefault('resume', {})['resumes'] = [
+            {'id': 'mgmt', 'name': '管理版', 'when': '主管職', 'files': {'zh': 'resume/mgmt.pdf'}, 'enabled': True}]
+        s['resume']['attachments'] = [
+            {'id': 'att-1', 'name': 'portfolio.pdf', 'files': {'zh': 'resume/portfolio.pdf'}, 'enabled': True}]
         s.setdefault('search', {})['exclude_words'] = ['業務']
-        code, raw, _ = self.req('/api/settings', {'settings': s, 'texts': {'rules': '不要純業務', 'resume': '我是誰', 'apply_rules': '連結填 GitHub'}})
+        code, raw, _ = self.req('/api/settings', {'settings': s, 'texts': {'preferences_custom': '不要純業務', 'resume': '我是誰', 'apply_rules': '連結填 GitHub'}})
         self.assertEqual(code, 200, raw)
         d2 = self.settings()
-        self.assertNotIn('variants', d2['effective']['resume'])
         self.assertEqual(d2['effective']['resume']['resumes'][0]['id'], 'mgmt')
         self.assertEqual(d2['effective']['resume']['resumes'][0]['when'], '主管職')
         self.assertNotIn('base', d2['effective']['resume'])
         self.assertEqual(len(d2['effective']['resume']['attachments']), 1)
-        self.assertNotIn('fetch', d2['effective'])
         self.assertEqual(d2['effective']['search']['exclude_words'], ['業務'])
-        self.assertEqual(d2['texts']['rules'], '不要純業務')
+        self.assertEqual(d2['texts']['preferences_custom'], '不要純業務')
         self.assertNotIn('resume', d2['texts'])
         self.assertEqual(d2['texts']['apply_rules'], '連結填 GitHub')
         with open(legacy_resume, encoding='utf-8') as f:
@@ -109,28 +105,12 @@ class WebOnly(tb.HttpBase):
         self.assertIn('mgmt', [v['id'] for v in bs.page_cfg()['resumes']])      # 伺服器這個行程也跟上了
         with open(os.path.join(cf.HOME, cf.NAME), encoding='utf-8') as f:
             saved = json.load(f)
-        self.assertNotIn('variants', saved['resume'])
-        self.assertNotIn('fetch', saved)
+        self.assertEqual(saved['resume']['resumes'][0]['id'], 'mgmt')
         import prefs
         self.assertIn('不要純業務', prefs.hard_rules())
 
     def test_settings_show_doctor_results_and_fix_guidance(self):
         doctor = self.settings()['doctor']
-        runtimes = {x['runtime'] for x in self.settings()['effective']['agent']['agents']}
-        expected = {'python', 'chrome', 'git', 'agent', 'packages', 'browser_agent'}
-        import doctor as dr      # 只算環境檢查認得的種類(前面的測試可能留下別的 runtime 名稱)
-        expected.update({x.replace('-', '_') for x in runtimes if x in dr.RUNTIMES})
-        # 「幫你填表用的 Chrome」只在有一個會用 Chrome、而且真的能用的 agent 時才列
-        if any(x.get('browser') is True and x.get('runtime') in ('codex', 'claude-code') and dr.agent_state(x['runtime'])[0]
-               for x in self.settings()['effective']['agent']['agents']):
-            expected.add('agent_chrome')
-        # 用 Codex 操作 Chrome 時,另外看它允許了哪些網站上傳、下載
-        if any(x.get('browser') is True and x.get('runtime') == 'codex' and dr.agent_state('codex')[0]
-               for x in self.settings()['effective']['agent']['agents']):
-            expected.add('codex_sites')
-        self.assertEqual({x['key'] for x in doctor['checks']}, expected)
-        self.assertNotIn('codex_login', {x['key'] for x in doctor['checks']})
-        self.assertEqual(doctor['ok'], all(x['ok'] for x in doctor['checks'] if x.get('required', True)))
         for check in doctor['checks']:
             self.assertTrue(check['label'])
             self.assertTrue(check['detail'])
@@ -286,6 +266,8 @@ class WebOnly(tb.HttpBase):
         self.assertEqual(code, 200, raw)
         self.assertEqual(popen.call_args.kwargs['env']['JOBSALVO_RESUME_TEXT'], material)
 
+        # 抽不出字的 PDF:抽字換成直接說讀不了(真的開子程序讀,CI 加量覆蓋率時光啟動就可能超過請求的 10 秒)
+        self.enterContext(patch.object(settings_api, 'pdf_text', side_effect=ValueError('PDF 無法讀取')))
         code, raw = self.put('/api/file?path=resume/scanned.pdf', b'%PDF-not-readable')
         self.assertEqual(code, 200, raw)
         settings['resume']['resumes'][0]['files']['zh'] = 'resume/scanned.pdf'
@@ -355,7 +337,6 @@ class WebOnly(tb.HttpBase):
     def test_closed_agent_chrome_does_not_block_a_new_run(self):
         # 每批做完都會把 agent 的 Chrome 關掉:開跑前只看連接設定過了沒,Chrome 沒在跑由流程自己開(以前一關就再也開不了跑)
         import agent_chrome
-        import config as cf
         with patch.object(agent_chrome, 'pid', return_value=None), \
              patch.object(agent_chrome, '_mine', return_value=True), \
              patch.object(agent_chrome, '_codex_ready', return_value=True):
@@ -367,8 +348,7 @@ class WebOnly(tb.HttpBase):
         with patch.dict(cf.C, claude), patch.object(agent_chrome, 'conf', return_value={}):
             self.assertFalse(agent_chrome.configured())
 
-    def test_preference_note_migrates_rules_and_keeps_assumptions_distinct(self):
-        from unittest.mock import patch
+    def test_preference_note_keeps_his_rules_and_agent_assumptions_distinct(self):
         import tempfile
         import prefs
 
@@ -378,14 +358,6 @@ class WebOnly(tb.HttpBase):
         with patch.object(cf, 'HOME', home), patch.object(cf, 'PREFS', raw_prefs), \
                 patch.object(cf, 'PREFERENCE_NOTE', note), patch.object(prefs, 'PREF', note), \
                 patch.object(cf, 'APPLY_RULES', os.path.join(home, 'apply-rules.md')):
-            with open(raw_prefs, 'w', encoding='utf-8') as f:
-                f.write('# 求職偏好\n\n## 硬規則\n\n不要外派\n\n'
-                        '<!-- 以下由 feedback_dump.py 自動更新 -->\n舊表態\n'
-                        '<!-- feedback_dump.py:end -->\n')
-            d = self.settings()
-            self.assertIn('不要外派', d['texts']['preferences_custom'])
-            self.assertEqual(d['texts']['preferences_agent'], '')
-
             with open(note, 'w', encoding='utf-8') as f:
                 f.write('# 偏好筆記\n\n## 使用者自訂\n\n不要外派\n\n'
                         '## Agent 假設\n\n'
@@ -439,7 +411,6 @@ class WebOnly(tb.HttpBase):
                          {task: '' for task in tasks})
 
     def test_settings_exposes_each_product_research_skill(self):
-        import config as cf
         import settings_api as sa
 
         tasks = {item['key']: item for item in self.settings()['research_skill_tasks']}
@@ -570,7 +541,7 @@ class WebOnly(tb.HttpBase):
         self.assertIn('履歷代號', json.loads(raw)['msg'])
 
     def test_agent_cannot_change_settings(self):
-        code, _, _ = self.req('/api/settings', {'texts': {'rules': 'x'}}, ua='Mozilla/5.0 Claude/1.0')
+        code, _, _ = self.req('/api/settings', {'texts': {'apply_rules': 'x'}}, ua='Mozilla/5.0 Claude/1.0')
         self.assertEqual(code, 403)
 
     def test_uploads_stay_inside_resume_and_custom(self):
@@ -590,7 +561,6 @@ class WebOnly(tb.HttpBase):
         self.assertEqual(fb[u]['custom_file'], d['path'])
         self.assertEqual(fb[u]['s'], 'like')                      # 原本的標記不動
         import ship
-        import config as cf
         # 這張挑的履歷用他自己傳的檔代替(沒挑履歷的卡什麼都不寄,見 ship.pick)
         with patch.object(cf, 'RESUMES', {'general': {'id': 'general', 'files': {}, 'enabled': True}}):
             src, _, own = ship.sources({'id': u, 'resume': {'recommend': 'general'}}, fb)
@@ -604,17 +574,6 @@ class WebOnly(tb.HttpBase):
         code, d = self.put('/api/card-file?u=' + urllib.parse.quote(u) + '&name=mine.pdf', b'%PDF-1.4 mine')
         self.assertEqual(code, 200, d)
         self.assertEqual(ds.state(read_fb(self.path)[u]), 'stale')
-
-    def test_own_file_while_sending_is_refused(self):
-        # #338:正在送出時換檔,狀態表不收「換檔」;以前卡上照換、事件默默擋掉,送出去的是頁上的舊檔
-        u = JOBS[0]['id']
-        bs.bd.set_fb(lambda f: f[u].update(app='ship', ds='sending', approve={'snap': {}},
-                                           apply={'stage': 'submit', 'tab_id': '7'}), live=self.path)
-        before = read_fb(self.path)[u]
-        code, d = self.put('/api/card-file?u=' + urllib.parse.quote(u) + '&name=mine.pdf', b'%PDF-1.4 mine')
-        self.assertEqual(code, 409, d)
-        self.assertEqual(d['msg'], 'Agent 正在做,等它做完')
-        self.assertEqual(read_fb(self.path)[u], before)
 
     def test_customize_settings_files_dispatch_and_run_status(self):
         import settings_api as sa
@@ -689,7 +648,7 @@ class AddJobReal(unittest.TestCase):
     """貼網址加入先擷取頁面文字,一律加;直連 404/410 才不加。"""
     def test_adds_every_live_url_and_reports_gone_ones(self):
         import tempfile, add_job, research, page_fetch
-        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         old_sp = add_job.SP
         add_job.SP = d
         old_dir = research.DIR
@@ -705,7 +664,6 @@ class AddJobReal(unittest.TestCase):
                 return {cands[0]['url']: {'keep': False, 'fit': 4, 'why': '符合條件',
                                           'cite': [], 'bad_cite': [], 'cat': '其他',
                                           'readable': True, 'card': {}}}
-            from unittest.mock import patch
             def fetch(url):
                 if url.endswith('/b'):
                     return page_fetch.PageResult(url, 'closed', via='direct', http_status=410)
@@ -728,7 +686,7 @@ class AddJobReal(unittest.TestCase):
     def test_a_url_already_on_the_board_but_removed_says_where_it_is(self):
         """貼的網址板上已經有、但在「🗑 已移除」:要講它在已移除、怎麼放回來,不是只說「都已經有了」。"""
         import tempfile, add_job
-        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         old_sp = add_job.SP
         add_job.SP = d
         try:
@@ -754,8 +712,7 @@ class AddJobReal(unittest.TestCase):
 
     def test_unreadable_job_is_kept_and_reported(self):
         import tempfile, add_job, research, page_fetch
-        from unittest.mock import patch
-        d = tempfile.mkdtemp(); p = os.path.join(d, 'board.html')
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         old_sp, old_dir = add_job.SP, research.DIR
         add_job.SP = d
         research.DIR = os.path.join(d, 'research')

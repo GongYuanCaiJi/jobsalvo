@@ -27,7 +27,7 @@ form_record —— agent 填雇主表單時,把每一欄記進看板的唯一入
 一律用 translate(k, en=...) 記回來,不要手改。
 
 看板上他改了某條答案,還沒送出的表單裡用到它的欄位會標 refill:雇主網頁上還是舊字。
-送出前先把標 tr 的翻掉,再照答案庫重打網頁,用 `--clear-refill` 清掉。
+送出前先把標 tr 的翻掉,再照答案庫重打網頁。
 
 用法(agent 呼叫):
   uv run python tools/form_record.py --from-fill <out>/fill.json --url URL --board B
@@ -35,14 +35,8 @@ form_record —— agent 填雇主表單時,把每一欄記進看板的唯一入
   import form_record as fr
   fr.record(url, plat, fields)     # 寫入/覆蓋這張卡的 form;回傳這次新開的 k(英文答案要給 zh)
   fr.translate(k, en=..., zh=...)  # 照他改的中文重翻英文 / 替英文答案補中文
-CLI:
-  uv run python tools/form_record.py --shared               # 填新表單前先讀:他確認過的共用答案
-  uv run python tools/form_record.py --pending              # 答案庫裡等他確認的(連同哪幾張表單在用)
-  uv run python tools/form_record.py --refills              # 送出前:英文待重翻的、雇主網頁還沒重打的
-  uv run python tools/form_record.py --clear-refill URL [--q 片段]   # 我重打完網頁後清掉標記
-  uv run python tools/form_record.py --check                # 檢查「答案只在答案庫」這條有沒有被破壞
 """
-import os, sys, json, re, datetime, argparse, unicodedata, hashlib
+import os, sys, re, datetime, argparse, unicodedata, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -372,12 +366,6 @@ def translate(k, en=None, zh=None, live=None):
     bd.set_fb(lambda fb: apply_translate(fb, k, en, zh), live=live)
 
 
-def find_translate(fb):
-    """要我翻的:他改了中文、英文待重翻的(tr),和還沒附中文的英文答案。"""
-    return [e for e in _bank(fb)
-            if e.get('tr') or (needs_translation(e.get('v')) and not str(e.get('zh') or '').strip())]
-
-
 def find_refills(fb):
     """答案改了、雇主網頁還沒跟著改的欄位:[(職缺網址, 問題)]。"""
     return [(url, x.get('q')) for url, f in _forms(fb) if not f.get('lock')
@@ -589,50 +577,19 @@ def shared_text(fb):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--pending', action='store_true', help='答案庫裡等他確認的')
-    ap.add_argument('--refills', action='store_true', help='答案改了、雇主網頁還沒重打的欄位')
-    ap.add_argument('--clear-refill', metavar='URL', help='我重打完那張的網頁後,清掉標記')
-    ap.add_argument('--q', help='只清問題文字含這段的欄位')
-    ap.add_argument('--check', action='store_true', help='檢查答案有沒有跑到答案庫外面')
-    ap.add_argument('--shared', action='store_true', help='填新表單前先讀:他確認過的共用答案')
-    ap.add_argument('--from-fill', metavar='FILL_JSON', help='代投:把 fill.json 的 fields 記成 --url 那張的表單')
+    ap.add_argument('--from-fill', metavar='FILL_JSON', required=True, help='代投:把 fill.json 的 fields 記成 --url 那張的表單')
     ap.add_argument('--url', help='--from-fill 記到哪一張')
     ap.add_argument('--board', help='哪一份看板(預設:派 agent 的程式指定的那一份,沒有就是現行看板;測試給副本)')
     a = ap.parse_args()
-    bd_live = bd.target(a.board)
-    if a.from_fill:
-        if not a.url:
-            sys.exit('--from-fill 要給 --url')
-        try:
-            made = record_fill(a.from_fill, a.url, live=bd_live)
-        except ds.Forbidden as e:
-            sys.exit(f'沒記進去:{e}。這張現在不是交給你填或改的,不要再跑、也不要改看板檔;照實寫進 problems 停下。')
-        except (ValueError, OSError) as e:
-            sys.exit(f'沒記進去:{e}\n照訊息改 fill.json 的 fields,再跑一次同一個指令。')
-        print('記好了' + (f',新開的答案:{", ".join(made)}' if made else ''))
-        return
-    fb = json.loads(bd.load(bd_live)['fb'])
-    if a.clear_refill:
-        n = []
-        bd.set_fb(lambda d: n.append(apply_clear_refill(d, a.clear_refill, a.q)), live=bd_live)
-        print(f'清掉 {n[0]} 欄')
-    elif a.refills:
-        ts, rs = find_translate(fb), find_refills(fb)
-        if ts:
-            print('先翻(他改了中文,英文照著重翻;或英文答案還沒附中文):用 translate(k, en=..., zh=...)')
-            print('\n'.join(f"  {e['k']}: 中文 {e.get('zh')!r} / 英文 {e.get('v')!r}" for e in ts))
-        print('\n'.join(f'{u}\n   {q}' for u, q in rs) if rs else '沒有需要重打的欄位')
-    elif a.check:
-        bad = validate(fb)
-        print('\n'.join(bad) if bad else '沒問題:表單只有指標,答案都在答案庫')
-        sys.exit(1 if bad else 0)
-    elif a.shared:
-        print(shared_text(fb))
-    else:
-        ps = find_pending(fb)
-        print('\n'.join(f"{e['k']}: {e.get('q')} = {e.get('zh') or e.get('v')!r}"
-                        f"({'推論於 ' + e['inf'] if e.get('inf') else '空白,等他寫'};{'這缺專用' if e.get('pj') else '共用'})\n   " + '\n   '.join(us)
-                        for e, us in ps) if ps else '答案庫裡沒有待確認的')
+    if not a.url:
+        sys.exit('--from-fill 要給 --url')
+    try:
+        made = record_fill(a.from_fill, a.url, live=bd.target(a.board))
+    except ds.Forbidden as e:
+        sys.exit(f'沒記進去:{e}。這張現在不是交給你填或改的,不要再跑、也不要改看板檔;照實寫進 problems 停下。')
+    except (ValueError, OSError) as e:
+        sys.exit(f'沒記進去:{e}\n照訊息改 fill.json 的 fields,再跑一次同一個指令。')
+    print('記好了' + (f',新開的答案:{", ".join(made)}' if made else ''))
 
 
 if __name__ == '__main__':

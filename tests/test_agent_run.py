@@ -1,3 +1,4 @@
+import contextlib
 import os
 import json
 import sys
@@ -154,30 +155,35 @@ class OrderedDispatch(unittest.TestCase):
                 'browser': browser, 'speed': speed}
 
     @staticmethod
-    def fake_launch(seen):
+    def fake_launch(seen, write=None):
+        """假的派工:記下派了誰(和是不是接續寫同一份紀錄),write={agent id: 寫進紀錄的字}。"""
         def launch(_prompt, outfile, _repo, agent, **kwargs):
             seen.append((agent['id'], kwargs.get('append', False)))
-            with open(outfile, 'a' if kwargs.get('append') else 'w', encoding='utf-8'):
-                pass
+            with open(outfile, 'a' if kwargs.get('append') else 'w', encoding='utf-8') as f:
+                f.write((write or {}).get(agent['id'], ''))
             return FakeProcess(pid=100 + len(seen))
         return launch
 
-    def test_known_command_code_unavailability_hands_off_once(self):
-        entries = [self.entry('first', 'command-code'), self.entry('second')]
-        seen = []
-        with (
-            tempfile.TemporaryDirectory(prefix='agent-handoff-') as d,
-            self.settings(entries),
-            patch.object(ar, 'launch', side_effect=self.fake_launch(seen)),
-            patch.object(ar, 'wait_done', side_effect=[
-                [ar.AgentResult('failed', 10, 101)], [ar.AgentResult('completed', 0, 102)],
-            ]),
-        ):
+    def dispatch(self, entries, waits, launch, prompt='task', **run_kw):
+        """照 entries 的設定跑一次 ar.run;waits:每一輪 wait_done 回的(單一個 AgentResult = 每輪都一樣)。
+        回 (結果, 紀錄檔文字)。"""
+        if isinstance(waits, ar.AgentResult):
+            waits = [[waits]] * len(entries)
+        with contextlib.ExitStack() as stack:
+            d = stack.enter_context(tempfile.TemporaryDirectory(prefix='agent-run-'))
+            stack.enter_context(self.settings(entries))
+            stack.enter_context(patch.object(ar, 'launch', side_effect=launch))
+            stack.enter_context(patch.object(ar, 'wait_done', side_effect=waits))
             log = os.path.join(d, 'task.log')
-            result = ar.run('task', log, d)
+            result = ar.run(prompt, log, d, **run_kw)
             with open(log, encoding='utf-8') as f:
-                text = f.read()
+                return result, f.read()
 
+    def test_known_command_code_unavailability_hands_off_once(self):
+        seen = []
+        result, text = self.dispatch(
+            [self.entry('first', 'command-code'), self.entry('second')],
+            [[ar.AgentResult('failed', 10, 101)], [ar.AgentResult('completed', 0, 102)]], self.fake_launch(seen))
         self.assertEqual(result.status, 'completed')
         self.assertEqual(result.agent_id, 'second')
         self.assertEqual([agent_id for agent_id, _ in seen], ['first', 'second'])
@@ -187,78 +193,37 @@ class OrderedDispatch(unittest.TestCase):
         self.assertIn('額度用完', text)
 
     def test_browser_task_skips_agents_without_browser_capability(self):
-        entries = [self.entry('text-only', 'command-code'), self.entry('browser-first', browser=True),
-                   self.entry('browser-next', browser=True)]
         seen = []
-
-        def launch(_prompt, outfile, _repo, agent, **kwargs):
-            seen.append(agent['id'])
-            with open(outfile, 'a' if kwargs.get('append') else 'w', encoding='utf-8') as f:
-                if agent['id'] == 'browser-first':
-                    f.write('quota exceeded')
-            return FakeProcess(pid=100 + len(seen))
-
-        with (
-            tempfile.TemporaryDirectory(prefix='agent-browser-') as d,
-            self.settings(entries),
-            patch.object(ar, 'launch', side_effect=launch),
-            patch.object(ar, 'wait_done', side_effect=[
-                [ar.AgentResult('failed', 1, 101)], [ar.AgentResult('completed', 0, 102)],
-            ]),
-        ):
-            log = os.path.join(d, 'task.log')
-            result = ar.run('task', log, d, browser_required=True)
-            with open(log, encoding='utf-8') as f:
-                text = f.read()
-
+        result, text = self.dispatch(
+            [self.entry('text-only', 'command-code'), self.entry('browser-first', browser=True),
+             self.entry('browser-next', browser=True)],
+            [[ar.AgentResult('failed', 1, 101)], [ar.AgentResult('completed', 0, 102)]],
+            self.fake_launch(seen, write={'browser-first': 'quota exceeded'}), browser_required=True)
         self.assertEqual(result.agent_id, 'browser-next')
-        self.assertEqual(seen, ['browser-first', 'browser-next'])
+        self.assertEqual([agent_id for agent_id, _ in seen], ['browser-first', 'browser-next'])
         self.assertIn('Beacon 清單第 3 個', text)
 
     def test_timeout_and_unknown_failure_do_not_handoff(self):
         for outcome in (ar.AgentResult('timeout', pid=101), ar.AgentResult('failed', 9, 101)):
             with self.subTest(status=outcome.status, returncode=outcome.returncode):
-                entries = [self.entry('first'), self.entry('second')]
                 seen = []
-                with (
-                    tempfile.TemporaryDirectory(prefix='agent-no-handoff-') as d,
-                    self.settings(entries),
-                    patch.object(ar, 'launch', side_effect=self.fake_launch(seen)),
-                    patch.object(ar, 'wait_done', return_value=[outcome]),
-                ):
-                    result = ar.run('task', os.path.join(d, 'task.log'), d)
-
+                result, _ = self.dispatch([self.entry('first'), self.entry('second')], outcome,
+                                          self.fake_launch(seen))
                 self.assertEqual(result.status, outcome.status)
                 self.assertEqual([agent_id for agent_id, _ in seen], ['first'])
 
     def test_previous_attempt_output_does_not_reclassify_the_next_runtime(self):
-        entries = [self.entry('first', 'command-code'), self.entry('second')]
         seen = []
-
-        def launch(_prompt, outfile, _repo, agent, **kwargs):
-            seen.append(agent['id'])
-            mode = 'a' if kwargs.get('append') else 'w'
-            with open(outfile, mode, encoding='utf-8') as f:
-                f.write('quota exceeded' if agent['id'] == 'first' else 'task failed')
-            return FakeProcess(pid=100 + len(seen))
-
-        with (
-            tempfile.TemporaryDirectory(prefix='agent-log-scope-') as d,
-            self.settings(entries),
-            patch.object(ar, 'launch', side_effect=launch),
-            patch.object(ar, 'wait_done', side_effect=[
-                [ar.AgentResult('failed', 10, 101)], [ar.AgentResult('failed', 9, 102)],
-            ]),
-        ):
-            result = ar.run('task', os.path.join(d, 'task.log'), d)
-
+        result, _ = self.dispatch(
+            [self.entry('first', 'command-code'), self.entry('second')],
+            [[ar.AgentResult('failed', 10, 101)], [ar.AgentResult('failed', 9, 102)]],
+            self.fake_launch(seen, write={'first': 'quota exceeded', 'second': 'task failed'}))
         self.assertEqual(result.status, 'failed')
         self.assertEqual(result.agent_id, 'second')
-        self.assertEqual(seen, ['first', 'second'])
+        self.assertEqual([agent_id for agent_id, _ in seen], ['first', 'second'])
 
     def test_every_attempt_is_timed_in_the_runs_log(self):
         """每派一次 agent 記一行:哪一步、哪個 agent、花幾秒、結果;換手的兩次各一行。"""
-        import json
         entries = [self.entry('first', 'command-code'), self.entry('second')]
 
         def launch(_prompt, outfile, _repo, agent, **kwargs):
@@ -314,26 +279,15 @@ class OrderedDispatch(unittest.TestCase):
         self.assertIn('標準模式', text)
 
     def test_startup_failure_hands_off_and_logs_target_and_reason(self):
-        entries = [self.entry('first'), self.entry('second')]
-        seen = []
-        launch = self.fake_launch(seen)
+        launch = self.fake_launch([])
 
         def start(_prompt, outfile, repo, agent, **kwargs):
             if agent['id'] == 'first':
                 raise ar.AgentStartError('missing executable')
             return launch(_prompt, outfile, repo, agent, **kwargs)
 
-        with (
-            tempfile.TemporaryDirectory(prefix='agent-startup-') as d,
-            self.settings(entries),
-            patch.object(ar, 'launch', side_effect=start),
-            patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 102)]),
-        ):
-            log = os.path.join(d, 'task.log')
-            result = ar.run('task', log, d)
-            with open(log, encoding='utf-8') as f:
-                text = f.read()
-
+        result, text = self.dispatch([self.entry('first'), self.entry('second')],
+                                     ar.AgentResult('completed', 0, 102), start)
         self.assertEqual(result.agent_id, 'second')
         self.assertEqual(text.count('改用'), 1)
         self.assertIn('Beacon 清單第 2 個', text)
@@ -358,37 +312,18 @@ class OrderedDispatch(unittest.TestCase):
                 raise ar.AgentStartError('Claude 90 秒內看不到 agent 的 Chrome')
             return 'TASK FOR ' + agent['id']
 
-        with (
-            tempfile.TemporaryDirectory(prefix='agent-prepare-') as d,
-            self.settings(entries),
-            patch.object(ar, 'launch', side_effect=launch),
-            patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
-        ):
-            log = os.path.join(d, 'task.log')
-            result = ar.run('ORIGINAL', log, d, browser_required=True, prepare=prepare)
-            with open(log, encoding='utf-8') as f:
-                text = f.read()
+        result, text = self.dispatch(entries, ar.AgentResult('completed', 0, 101), launch, prompt='ORIGINAL',
+                                     browser_required=True, prepare=prepare)
         self.assertEqual(prompts, [('cx', 'TASK FOR cx'), ('cx2', 'TASK FOR cx2')])
         self.assertEqual(result.agent_id, 'cx2')
         self.assertIn('Claude 90 秒內看不到 agent 的 Chrome', text)      # 為什麼沒用 Claude,紀錄裡講得出來
 
     def test_pinned_agent_never_falls_through_to_another_entry(self):
-        entries = [self.entry('primary'), self.entry('secondary')]
         seen = []
-
-        def quota_launch(_prompt, outfile, _repo, agent, **kwargs):
-            seen.append(agent['id'])
-            with open(outfile, 'w', encoding='utf-8') as f:
-                f.write('quota exceeded')
-            return FakeProcess(pid=101)
-
-        with tempfile.TemporaryDirectory(prefix='agent-pinned-') as d, self.settings(entries), \
-             patch.object(ar, 'launch', side_effect=quota_launch), \
-             patch.object(ar, 'wait_done', return_value=[ar.AgentResult('failed', 1, 101)]):
-            result = ar.run('task', os.path.join(d, 'task.log'), d, agent_id='primary')
-
+        result, _ = self.dispatch([self.entry('primary'), self.entry('secondary')], ar.AgentResult('failed', 1, 101),
+                                  self.fake_launch(seen, write={'primary': 'quota exceeded'}), agent_id='primary')
         self.assertEqual(result.status, 'unavailable')
-        self.assertEqual(seen, ['primary'])
+        self.assertEqual([agent_id for agent_id, _ in seen], ['primary'])
 
     def test_runtime_failure_categories_are_narrow(self):
         for code, reason in ((3, 'authentication'), (5, 'rate_limit'), (6, 'service'),
@@ -404,6 +339,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
     """Claude Code(claude -p)當 agent:找缺、判斷、準備都能用;還不能開瀏覽器、不能接續對話。"""
     entry = staticmethod(OrderedDispatch.entry)
     settings = OrderedDispatch.settings
+    dispatch = OrderedDispatch.dispatch
 
     @staticmethod
     def result_line(**kw):
@@ -489,15 +425,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
                                              result="You've hit your session limit · resets 3pm") + '\n')
             return FakeProcess(pid=100 + len(seen))
 
-        with (
-            tempfile.TemporaryDirectory(prefix='agent-cc-') as d,
-            self.settings(entries),
-            patch.object(ar, 'launch', side_effect=launch),
-            patch.object(ar, 'wait_done', side_effect=[
-                [ar.AgentResult('completed', 0, 101)], [ar.AgentResult('completed', 0, 102)],
-            ]),
-        ):
-            result = ar.run('task', os.path.join(d, 'task.log'), d)
+        result, _ = self.dispatch(entries, ar.AgentResult('completed', 0, 101), launch)
         self.assertEqual(seen, ['cc', 'cx'])
         self.assertEqual(result.agent_id, 'cx')
 
@@ -617,47 +545,11 @@ class NoChromeOutsideApply(unittest.TestCase):
         self.assertNotIn('不要呼叫程式預抓', rule)            # 舊規矩叫它自己開瀏覽器、別叫程式抓
 
 
-class AgentSettingsMigration(unittest.TestCase):
+class AgentName(unittest.TestCase):
     def test_outcome_messages_use_the_global_agent_name(self):
         with patch.object(ar.cf, 'AGENT', 'Beacon'):
             self.assertIn('Beacon', ar.AgentResult('timeout', pid=42).message())
             self.assertIn('Beacon', ar.AgentResult('unavailable', reason='no_browser_agent').message())
-
-    def test_legacy_primary_and_secondary_become_ordered_agent_entries(self):
-        settings = {'agent': {'name': 'Helper', 'runtime': 'codex', 'model': 'model-a',
-                              'effort': 'high', 'alt_runtime': 'command-code', 'alt_model': 'model-b'}}
-
-        migrated, changed = ar.cf._migrate_agents(settings)
-
-        self.assertTrue(changed)
-        self.assertEqual(migrated['agent']['name'], 'Helper')
-        self.assertEqual(migrated['agent']['agents'], [
-            {'id': 'primary', 'runtime': 'codex', 'model': 'model-a', 'effort': 'high', 'speed': 'standard', 'browser': True},
-            {'id': 'secondary', 'runtime': 'command-code', 'model': 'model-b', 'effort': 'high', 'speed': 'standard', 'browser': False},
-        ])
-        self.assertNotIn('alt_runtime', migrated['agent'])
-
-    def test_a_legacy_claude_primary_keeps_using_chrome(self):
-        # 舊設定只有一個 Claude Code 主 agent:轉過來要照實能用 Chrome(以前只有 Codex 才勾,遷移後填表、查應徵進度都用不了)
-        migrated, _changed = ar.cf._migrate_agents({'agent': {'runtime': 'claude-code', 'model': 'sonnet'}})
-        self.assertTrue(migrated['agent']['agents'][0]['browser'])
-        migrated, _changed = ar.cf._migrate_agents({'agent': {'runtime': 'command-code'}})
-        self.assertFalse(migrated['agent']['agents'][0]['browser'])            # 不能開 Chrome 的照舊不勾
-
-    def test_reading_legacy_settings_persists_the_migration(self):
-        with tempfile.TemporaryDirectory(prefix='agent-settings-') as d:
-            path = os.path.join(d, ar.cf.NAME)
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump({'agent': {'name': 'Helper', 'runtime': 'codex', 'alt_runtime': 'command-code'}}, f)
-
-            loaded = ar.cf.user_settings(d)
-            with open(path, encoding='utf-8') as f:
-                persisted = json.load(f)
-
-        self.assertEqual(loaded, persisted)
-        self.assertEqual([a['id'] for a in persisted['agent']['agents']], ['primary', 'secondary'])
-        self.assertEqual([a['speed'] for a in persisted['agent']['agents']], ['standard', 'standard'])
-        self.assertFalse(persisted['agent']['agents'][1]['browser'])
 
 
 class CodexDispatch(unittest.TestCase):
@@ -700,6 +592,7 @@ class CodexDispatch(unittest.TestCase):
                 f.write(json.dumps({'type': 'thread.started', 'thread_id': '01a0e5b4-c1be-7a50-a5c1-c498707bfd42'})
                         + '\n' + page + '\n')
             self.assertEqual(ar.session_id(p), '01a0e5b4-c1be-7a50-a5c1-c498707bfd42')
+            self.assertIsNone(ar.session_id(p + '.missing'))
 
 
 if __name__ == '__main__':

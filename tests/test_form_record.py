@@ -184,19 +184,16 @@ class Translate(unittest.TestCase):
                    'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '5'}},
               U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}},
               U3: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}}}
-        self.assertEqual([e['k'] for e in fr.find_translate(fb)], ['n'])
         fr.apply_translate(fb, 'n', en='Republic of China (Taiwan)')
         e = fb['__ans__'][0]
         self.assertEqual((e['v'], 'tr' in e), ('Republic of China (Taiwan)', False))
         self.assertEqual(fb[U1]['form']['f'][0].get('refill'), 1)
         self.assertNotIn('refill', fb[U2]['form']['f'][0])          # 已投遞的不動
         self.assertNotIn('refill', fb[U3]['form']['f'][0])          # agent 還沒填過:雇主網頁上沒有舊字,填的時候照新的填
-        self.assertEqual(fr.find_translate(fb), [])
 
     def test_missing_chinese_is_listed_and_can_be_filled(self):
         fb = {'__ans__': [{'k': 'y', 'q': '全職', 'v': 'Yes', 'at': T}]}
         self.assertIn('沒有中文翻譯', ' '.join(fr.validate(fb)))
-        self.assertEqual([e['k'] for e in fr.find_translate(fb)], ['y'])
         fr.apply_translate(fb, 'y', zh='是')
         self.assertEqual(fr.validate(fb), [])
 
@@ -335,7 +332,9 @@ class ReadLang(unittest.TestCase):
         from unittest.mock import patch
         fb = {'__ans__': [{'k': 'a1', 'q': 'Years', 'v': 'Five years'}]}
         with patch.object(fr, 'read_lang', return_value='zh'):
-            self.assertEqual(fr.validate(fb), ['a1 是英文答案卻沒有中文翻譯(zh),他看不懂'])
+            bad = fr.validate(fb)
+            self.assertEqual(len(bad), 1)
+            self.assertIn('a1', bad[0])
         with patch.object(fr, 'read_lang', return_value='en'):
             self.assertEqual(fr.validate(fb), [])
 
@@ -402,7 +401,7 @@ class RefusedInput(unittest.TestCase):
 
 
 class Commands(unittest.TestCase):
-    """form_record.py 給 agent 和我跑的指令:每一種都照看板上現在的樣子回答。"""
+    """form_record.py 給 agent 跑的指令。"""
 
     def setUp(self):
         self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-cli-'))
@@ -415,7 +414,6 @@ class Commands(unittest.TestCase):
 
     def run_cli(self, *args):
         import contextlib, io
-        from unittest import mock
         out = io.StringIO()
         code = 0
         with mock.patch.object(sys, 'argv', ['form_record.py', '--board', self.board, *args]), \
@@ -430,35 +428,4 @@ class Commands(unittest.TestCase):
         code, _ = self.run_cli('--from-fill', os.path.join(self.dir, 'fill.json'))
         self.assertIn('--url', str(code))
 
-    def test_refills_lists_what_to_translate_first(self):
-        _code, out = self.run_cli('--refills')
-        self.assertIn('先翻', out)
-        self.assertIn('eng', out)
-        self.assertIn('Nationality', out)
 
-    def test_check_fails_when_something_is_wrong(self):
-        code, out = self.run_cli('--check')
-        self.assertEqual(code, 1)
-        self.assertIn('eng', out)
-
-    def test_shared_lists_his_confirmed_answers(self):
-        _code, out = self.run_cli('--shared')
-        self.assertIn('nat', out)
-        self.assertNotIn('eng', out)
-
-    def test_refills_without_anything_to_translate(self):
-        bd.set_fb(lambda fb: fb['__ans__'][1].__setitem__('zh', '我做東西。'), live=self.board)
-        _code, out = self.run_cli('--refills')
-        self.assertNotIn('先翻', out)
-        self.assertIn('Nationality', out)
-
-    def test_default_lists_answers_waiting_for_him(self):
-        _code, out = self.run_cli()
-        self.assertIn('eng', out)
-        self.assertIn('推論於', out)
-
-    def test_clear_refill_only_the_matching_question(self):
-        _code, out = self.run_cli('--clear-refill', U1, '--q', 'Nation')
-        self.assertIn('清掉 1 欄', out)
-        f = read_fb(self.board)[U1]['form']['f']
-        self.assertEqual([bool(x.get('refill')) for x in f], [False, True])

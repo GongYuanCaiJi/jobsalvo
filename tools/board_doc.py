@@ -9,8 +9,6 @@ import re,json,sys,os,copy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as _cf
 
-# 外掛裝進 data 的鍵,不是管線產的;install 一律沿用現行看板那份。
-EXTRA = ('bank',)
 
 def pre():
     """文件開頭。"""
@@ -79,10 +77,6 @@ def is_live(path, live=None):
         return _os.path.samefile(path, live or LIVE)
     except OSError:
         return False
-
-def _read(p):
-    with open(p, encoding='utf-8') as f: return f.read()
-
 
 # ---- 看板檔的指紋 ----
 # 卡片的記號只能透過事件改(#307)。每一次正常寫入(write_doc)都在旁邊記下檔案內容的指紋;讀的時候(read_doc)
@@ -175,51 +169,6 @@ def trust(live):
         with open(live, 'rb') as f:
             _fp_put(live, {_digest(f.read())})
 
-def install(src, live=None, quiet=False):
-    """把管線產物 src 裝成現行看板。回傳 (職缺數, 保留的標記數)。"""
-    live = target(live)
-    p = parse(_read(src))
-    if not p['data'].get('jobs'):
-        sys.exit(f'{src} 裡沒有職缺,不敢裝。')
-    if ':root{' not in p['sty'].replace(' ', ''):
-        sys.exit(f'{src} 的樣式區看起來不是 CSS,不敢裝。')
-    # 管線產物只提供一樣東西:職缺資料。標記、樣式、程式、頁首一律取現行看板。
-    # 管線一開跑就複製一份快照,跑一兩個小時才收尾;以前連 sty/app 也照抄快照,
-    # 等於把這期間所有 board.css/board.js 的修改整包倒回去(外殼會自己變回舊版,
-    # 行為時好時壞)。外殼的真相在 board/*,由 apply_shell 灌進現行看板。
-    if not _os.path.isfile(live):
-        # 還沒有現行看板:整份照產物裝(沒有別人的標記可保)
-        with live_lock(live):
-            write_doc(live, assemble(p['sty'], p['thdr'], p['tail'], p['data'], p['fb'], p['app']))
-        fb = p['fb']
-    else:
-        def put(lp):
-            # 不是管線產的資料(例如外掛另外裝進來的分頁內容)在 data 的 EXTRA 鍵裡。
-            # 管線的產物裡要嘛沒有、要嘛是開跑時的舊版,一律沿用現行看板那份。
-            for k in EXTRA:
-                if k in lp['data']:
-                    p['data'][k] = lp['data'][k]
-            lp['data'] = p['data']          # 頁首數字(stat_first)由 rewrite 跟著新的職缺數走
-            return json.dumps(lp['fb'])
-        fb = rewrite(put, live, by='install')
-    marks = sum(1 for v in json.loads(fb).values() if isinstance(v, dict) and v.get('s'))
-    if not quiet:
-        print(f'已裝成現行看板 → {live}(職缺 {len(p["data"]["jobs"])} · 保留標記 {marks})')
-        print('看板 server 直接讀這個檔,他重整就看得到。不需要再發布到任何地方。')
-    return len(p['data']['jobs']), marks
-
-SCRATCH = _os.path.join(_cf.TMP, 'board-pipeline')
-
-def scratch(live=LIVE):
-    """管線的中間檔。work 是現行看板的複本(會被就地改動),out 是產物;跑完用 install(out)
-    裝回去。中間檔放 /tmp,不進 repo——它們是過程,不是真相。"""
-    _os.makedirs(SCRATCH, exist_ok=True)
-    work = _os.path.join(SCRATCH, 'work.html')
-    out = _os.path.join(SCRATCH, 'merged.html')
-    copy_board(live, work)
-    return work, out
-
-
 # ---- 標記流水帳 ----
 # 每一次改到使用者的標記,把真的變了的那幾筆「從什麼變成什麼」附加一行。只附加,不覆寫,不刪。
 # 看板只留最後一個狀態,寫壞了沒有第二份可以對;使用者也不可能記得自己標過什麼。
@@ -287,7 +236,7 @@ def _by_id():
 def target(live=None):
     """要寫哪一份看板:派 agent 的程式指定的(AGENT_BOARD、agent 拿到的代號)優先,再來是呼叫的人給的,最後是現行看板。
     派出去的那一輪(和它叫的小工具)不管呼叫的人給了哪個路徑,都只寫派它的程式指定的那一份(#307)。
-    set_fb、set_data、install、add_jobs 都先照這裡挑;rewrite 是最底層,給它哪一份就寫哪一份。"""
+    set_fb、set_data 都先照這裡挑;rewrite 是最底層,給它哪一份就寫哪一份。"""
     return _os.environ.get('AGENT_BOARD') or _by_id() or live or LIVE
 
 
@@ -330,8 +279,7 @@ def rewrite(fn, live=None, by=''):
 
 
 def set_fb(mutate, live=None, by=''):
-    """改使用者的標記(data-fb)。install() 一律拿現行看板的 fb(那是為了保住他手機上的
-    最新標記),所以不能用 install 來改 fb——會把改動丟掉重讀舊的。要改就走這裡。
+    """改使用者的標記(data-fb)。
     mutate 收到 fb dict、就地改、不用回傳。每一次都記進流水帳(by 寫是誰改的,預設是程式名)。"""
     def fn(p):
         mutate(p['fb'])
@@ -345,42 +293,6 @@ def set_data(mutate, live=None):
     def fn(p):
         mutate(p['data'], copy.deepcopy(p['fb']))
     rewrite(fn, target(live))
-
-
-def add_jobs(src, live=None, quiet=False):
-    """找缺那一輪的收尾:只把產物裡「現行看板還沒有的職缺」加進去,既有職缺只換摘要
-    (card-summaries 的新內容),其他一律以現行看板為準。回傳新增幾筆。
-
-    為什麼不用 install:install 拿產物的整份職缺資料換掉現行的。找缺的產物是那一輪開跑時
-    複製的快照,一輪要跑將近一小時;這段時間準備區產出的履歷文字、投遞前驗收結果、
-    連結復活的標記,會整個被倒回開跑那一刻。
-
-    跟 reconcile 拿同一把鎖:reconcile 是「複製一份 → 改 → 整份裝回」,
-    中途插進來的新職缺會被它裝回去的那份蓋掉。"""
-    live = target(live)
-    p = parse(_read(src))
-    with open(_os.path.join(HOME, '.reconcile.lock'), 'w') as lk:
-        _fcntl.flock(lk, _fcntl.LOCK_EX)
-        def put(lp):
-            data = lp['data']
-            have = {j.get('id'): j for j in data.get('jobs', [])}
-            added = 0
-            for j in p['data'].get('jobs', []):
-                lj = have.get(j.get('id'))
-                if lj is None:
-                    data['jobs'].append(j); have[j.get('id')] = j; added += 1
-                    continue
-                s = j.get('sum')
-                if isinstance(s, dict) and 'fit' in s:
-                    s = dict(s); s.pop('cuts', None)
-                    cur = (lj.get('sum') or {}).get('cuts')   # 切角判斷是做履歷那步寫的,以現行為準
-                    if cur: s['cuts'] = cur
-                    lj['sum'] = s
-            return added
-        added = rewrite(put, live, by='add_jobs')
-    if not quiet:
-        print(f'新職缺併進現行看板 → {live}(新增 {added} 筆,其餘職缺資料保留現行)')
-    return added
 
 
 def main():

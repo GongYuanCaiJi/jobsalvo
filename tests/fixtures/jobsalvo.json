@@ -1,10 +1,14 @@
 {
-  "agent": {"name": "Agent"},
   "resume": {
-    "variants": {
-      "general": {"label": "通用版", "when": "大部分職缺", "zh": "resume/general-zh.pdf", "en": "resume/general-en.pdf"},
-      "tech": {"label": "技術版", "when": "要看技術細節的職缺", "zh": "resume/tech-zh.pdf", "en": "resume/tech-en.pdf",
-               "attachments": ["resume/portfolio.pdf"]}
-    }
+    "resumes": [
+      {"id": "general", "name": "通用版", "files": {"zh": "resume/general-zh.pdf", "en": "resume/general-en.pdf"},
+       "enabled": true, "when": "大部分職缺", "skill": ""},
+      {"id": "tech", "name": "技術版", "files": {"zh": "resume/tech-zh.pdf", "en": "resume/tech-en.pdf"},
+       "enabled": true, "when": "要看技術細節的職缺", "skill": ""}
+    ],
+    "attachments": [
+      {"id": "att-portfolio", "name": "portfolio.pdf", "files": {"zh": "resume/portfolio.pdf", "en": "resume/portfolio.pdf"},
+       "enabled": true, "resume_ids": ["tech"], "skill": ""}
+    ]
   }
 }

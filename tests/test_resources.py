@@ -29,7 +29,7 @@ def settle(before, wait=6):
 @unittest.skipUnless(chrome_bin.chrome(), '沒有 Chrome')
 class NoLeftoverChrome(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix='resources-')
+        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='resources-'))
         self.page = os.path.join(self.dir, 'page.html')
         with open(self.page, 'w', encoding='utf-8') as f:
             f.write('<html><body><h1>測試用的職缺</h1><p>工作內容</p></body></html>')

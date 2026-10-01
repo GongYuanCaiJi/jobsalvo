@@ -656,36 +656,22 @@ def first_run(state):
     cf.reload(cf.HOME)
 
 def migrate_marks(state):
-    """舊資料一次改成現在的樣子,寫回檔案(記進流水帳):伺服器的填表、送出、自動流程讀的都是檔案。
-    可投遞以前是 ship 布林、沒有 app。以前只有看板頁面在記憶體裡改,從沒存回去:
-    卡停在「可以投了」,讀檔的程式都看不到它。已經往後走(有 app)的不拉回可投遞,只拿掉舊欄位。
-    客製紀錄以前不分語言:照原始檔簽章補上語言(ship.migrate_custom_keys)。
-    投遞以前是十幾個記號拼的:轉成一張卡一個投遞狀態,只轉一次(delivery_state.migrate、docs/adr/0004)。
+    """伺服器起來時收尾,寫回檔案(記進流水帳):伺服器的填表、送出、自動流程讀的都是檔案。
     卡停在正在填、正在送出,那一輪卻已經不在跑(伺服器重開前被停掉、當掉):照狀態表收尾(apply_run.settle)。
     產生它的規則改了、造成它的 bug 修掉了的 agent 回報和還沒確認的答案:清掉(stale.sweep,GLOSSARY「過時」)。"""
-    import copy, ship, delivery_state, apply_run, stale
+    import copy, apply_run, stale
     with open(state,encoding='utf-8') as source: fb0=json.loads(bd.parse(source.read())['fb'])
-    old=[k for k,f in fb0.items() if isinstance(f,dict) and 'ship' in f]
-    custom=ship.migrate_custom_keys(copy.deepcopy(fb0))
     probe=copy.deepcopy(fb0)
-    states=delivery_state.migrate(probe)
     stuck=apply_run.settle(probe,_apply_busy())
     before=stale.boundaries()
     outdated=stale.sweep(probe,before)
-    if not old and not custom and not states and not stuck and not outdated: return
+    if not stuck and not outdated: return
     def mut(fb):
-        for k in old:
-            f=fb.get(k)
-            if isinstance(f,dict) and 'ship' in f:
-                if f.pop('ship') and not f.get('app'): f['app']='ship'
-        if custom: ship.migrate_custom_keys(fb)
-        delivery_state.migrate(fb)
         apply_run.settle(fb,_apply_busy())
         stale.sweep(fb,before)
     # 回不了頭:一律走 folder_history.convert,先留退回點(存一版或備份看板檔),沒有退回點就不轉
     import folder_history
-    why='、'.join(w for w,need in (('可投遞舊記號',old),('客製紀錄語言',custom),('投遞狀態',states),
-                                  ('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated)) if need)+'轉換'
+    why='、'.join(w for w,need in (('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated)) if need)+'轉換'
     done=folder_history.convert(cf.HOME,[state],why,lambda: bd.set_fb(mut, live=state, by='board_server'))
     if not done['done']:
         print(f'⚠ {why}沒有做:沒有退回點({done["reason"]})')
@@ -1163,7 +1149,7 @@ class H(BaseHTTPRequestHandler):
             import settings_api as sa
             note_existed=os.path.exists(cf.PREFERENCE_NOTE)
             d=sa.get()
-            if d.get('migration_notices') or (not note_existed and os.path.exists(cf.PREFERENCE_NOTE)):
+            if not note_existed and os.path.exists(cf.PREFERENCE_NOTE):
                 note_saved()
             try:
                 # 安檢門核對過的那一份(suggest_cats.checked);agent 交的 suggest.json 不直接給看
