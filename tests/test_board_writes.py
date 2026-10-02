@@ -133,6 +133,44 @@ class SameLockSameWrite(Tmp):
         self.assertIn('renderApp', read_board(self.path)['app'])
 
 
+class ManualSent(unittest.TestCase):
+    """「我已在外部送出」每一階都能按:不用走完準備履歷、待你決定、可以投了;但要記寄出的是哪一份,沒挑履歷就擋。"""
+
+    def setUp(self):
+        import board_server as bs
+        _env.use_home(self, resume={'langs': ['zh', 'en'], 'resumes': [
+            {'id': 'a', 'name': 'A', 'files': {'zh': 'resume/a-zh.md', 'en': 'resume/a-en.md'}, 'enabled': True}]})
+        self.bs = bs
+        self.n = 0
+        self.enterContext(mock.patch.object(bs, 'trigger_build', lambda: None))
+
+    def sent_manually(self, mark):
+        """他在還沒進流程、準備履歷中、待你決定任何一階按「我已在外部送出」。回 (被擋的事件, 存好的卡)。"""
+        self.n += 1
+        self.path = os.path.join(self.tmp, f'sent{self.n}.html')
+        make_board(self.path, {U: dict(mark)})
+        self.enterContext(mock.patch.object(self.bs, 'STATE', self.path))
+        rejected = []
+        ev = [{'u': U, 'ev': 'sent_manual', 'data': {'by': 'manual', 'at': '2026-10-02T10:00:00', 'sent_at': '2026-10-02'}}]
+        self.assertEqual(self.bs.write_fb({U: dict(mark)}, base={U: dict(mark)}, events=ev, rejected=rejected), [])
+        return rejected, read_fb(self.path)[U]
+
+    def test_every_stage_can_mark_sent_with_the_resume_the_user_picked(self):
+        for app in (None, 'prep', 'ready', 'ship'):
+            mark = {'s': 'like', 'resume_id': 'a', 'lang': 'en'}
+            if app:
+                mark['app'] = app
+            rejected, card = self.sent_manually(mark)
+            self.assertEqual((rejected, card['app'], card['sent_v']), ([], 'sent', 'en-a'), app)
+
+    def test_marking_sent_without_a_resume_asks_which_one_and_changes_nothing(self):
+        for app in (None, 'prep', 'ready'):
+            rejected, card = self.sent_manually({'s': 'like', **({'app': app} if app else {})})
+            self.assertEqual([r['ev'] for r in rejected], ['sent_manual'], app)
+            self.assertIn('挑一份履歷', rejected[0]['msg'])
+            self.assertNotEqual(card.get('app'), 'sent')
+
+
 with open(os.path.join(HERE, 'fixtures', 'delivery-cards.json'), encoding='utf-8') as _f:
     FIX = json.load(_f)
 CARD = FIX['url']

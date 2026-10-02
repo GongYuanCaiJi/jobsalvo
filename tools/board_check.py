@@ -4457,7 +4457,7 @@ def external_sent_case(board):
                     'need': '看卡上的原因', 'job': ids[0], 'n': 1})
         fb['__inbox__'] = box
     return _seed(board, [{
-        'app': 'ship',
+        'app': 'ship', 'resume_id': CHECK_RESUME, 'lang': 'zh',     # 標已投出要記寄出的是哪一份:沒挑履歷後台不收
         'form': {'plat': '測試', 'at': '2026-01-01', 'f': [{'q': 'Ext?', 'src': 'bank', 'k': 'bc_ext', 'refill': 1}]},
         'ds': 'parked',
         'apply': {'stage': 'fill', 'issues': [], 'session': 'bc-ext', 'tab_id': '5',

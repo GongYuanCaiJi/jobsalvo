@@ -438,6 +438,7 @@ a.att-pill:hover{border-color:var(--accent-ink)}
 .vd-b{font-size:11.5px;font-weight:600;padding:6px 11px;border:0;border-right:1px solid var(--line);white-space:nowrap;
   background:var(--surface);color:var(--ink-dim);cursor:pointer}
 .vd-b:last-child{border-right:0}
+.sentnow .vd-b{padding:10px 13px}   /* 沒進流程的卡上展開的履歷、語言選鈕:跟手機一樣好按 */
 .vd-b.y.on{background:var(--go);color:#fff}
 .vd-b.n.on{background:var(--warn);color:#fff}
 .vd-ship{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;padding-top:6px;

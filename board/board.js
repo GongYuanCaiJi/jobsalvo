@@ -382,6 +382,14 @@
       '<span class="att-pill" title="'+title+'">'+label+'</span>';}).join(' ');}
   // 兩個決定(版本、語言)agent 先判,使用者最終決定。長相要一樣、要相鄰,而且中間不要塞
   // 任何說明:agent 判了什麼、憑什麼判,全部收進下面那條摺疊行。
+  // 履歷、語言兩排選鈕(選不出履歷時都不亮)。有流程的卡、還沒進流程的卡(展開「我已投了」)共用
+  function picksHTML(j,r,p){
+    return '<div class="vd-row vd-picks"><span class="vd-pick"><span class="vd-lb">履歷</span><span class="vd-seg">'+(r.choices||[]).map(function(v){
+        return '<button class="vd-b'+(p&&p.variant===v.id?' on':'')+'" data-vd="'+esc(j.id)+'" data-vv="'+esc(v.id)+'" type="button">'+esc(v.name||v.id)+'</button>';}).join('')+
+      '</span></span><span class="vd-pick"><span class="vd-lb">語言</span><span class="vd-seg">'+(r.langs||LANGS).map(function(l){
+        return '<button class="vd-b lg'+(p&&p.lang===l?' on':'')+'" data-lg="'+esc(j.id)+'" data-lv="'+esc(l)+'" type="button">'+langLabel(l)+'</button>';}).join('')+
+      '</span></span></div>';
+  }
   function verdictBlockHTML(j){
     var rz=j.resume;
     var contentHint=rz&&rz.content_problem?'<div class="stage-blocked">⚠ agent 判斷這是履歷內容問題;要改內容請開客製</div>':'';
@@ -396,12 +404,7 @@
     var p=pickOf(j);
     // 履歷、語言兩個切換排在同一列(窄螢幕放不下才換行):以前各佔一列,再加一列 Agent 判的,手機上光這塊就 300px。
     // 能選哪幾份、哪幾個語言照後台現在的設定(設定頁改了不用重新整理);選不出履歷時兩排都不亮
-    var h='<div class="vd'+(rz&&rz.recommend?' y':'')+'">'+
-      '<div class="vd-row vd-picks"><span class="vd-pick"><span class="vd-lb">履歷</span><span class="vd-seg">'+(r.choices||[]).map(function(v){
-        return '<button class="vd-b'+(p&&p.variant===v.id?' on':'')+'" data-vd="'+esc(j.id)+'" data-vv="'+esc(v.id)+'" type="button">'+esc(v.name||v.id)+'</button>';}).join('')+
-      '</span></span><span class="vd-pick"><span class="vd-lb">語言</span><span class="vd-seg">'+(r.langs||LANGS).map(function(l){
-        return '<button class="vd-b lg'+(p&&p.lang===l?' on':'')+'" data-lg="'+esc(j.id)+'" data-lv="'+esc(l)+'" type="button">'+langLabel(l)+'</button>';}).join('')+
-      '</span></span></div>';
+    var h='<div class="vd'+(rz&&rz.recommend?' y':'')+'">'+picksHTML(j,r,p);
     if(r.lang_from)h+='<div class="vd-problem">⚠ 「'+esc(langLabel(r.lang_from))+'」不在你的語言清單上,改用 '+esc(langLabel(r.lang))+'</div>';
     if(!p)return h+'<div class="vd-problem">⚠ '+esc(r.problem||'還沒挑履歷')+'</div>'+contentHint+'</div>';
     var vkey=p.lang+'-'+p.variant;
@@ -957,6 +960,20 @@
     return '<span class="more"><button class="more-b" type="button" data-omore="1" aria-label="其他動作">⋯</button>'+
            '<span class="more-m" hidden>'+inner+'</span></span>';
   }
+  // 還沒進流程的卡也能直接記「我已投了」:展開後挑履歷和語言(要記寄出的是哪一份),再按「我已在外部送出」
+  // 沒挑履歷就按不得:要記寄出的是哪一份(後台也擋,這裡先灰掉並寫原因,不叫他按了才被拒絕)
+  function sentBtnHTML(j,title){
+    var ok=!!pickOf(j), r=shipOf(j)||{};
+    return '<button class="stage-b" data-adv="sent" type="button"'+(ok?'':' disabled')+' title="'+
+      escA(ok?title:(r.problem||'先挑一份履歷和語言,才記得下寄出的是哪一份'))+'">📮 我已在外部送出</button>';
+  }
+  function sentFoldHTML(j){
+    var r=shipOf(j); if(!r)return '';
+    var p=pickOf(j);
+    return fold('sentnow:'+j.id,'📮 我已投了','<div class="vd">'+picksHTML(j,r,p)+
+      (p?'':'<div class="vd-problem">⚠ '+esc(r.problem||'還沒挑履歷')+'</div>')+
+      '<div class="vd-row">'+sentBtnHTML(j,'')+'</div></div>',{cls:'sentnow'});
+  }
   function stageRowHTML(ap,j){
     if(ap==='prep'){
       var _rzv=(j&&j.resume&&j.resume.variants)||null;
@@ -971,6 +988,7 @@
           : (PREP.running?'<span class="stage-wait">⏳ 正在準備履歷</span>'
              :(j&&autoDo(j.id)==='prep'?'<span class="stage-wait">⏳ '+esc(nextOf(j.id).auto.line)+'</span>'
                :'<span class="stage-wait" title="不會自己啟動,要按這一頁最上面那顆">⏳ 等產履歷 · 按上面「▶ 準備履歷」</span>')))+
+        sentBtnHTML(j,'已經在外部投了:挑好上面的履歷和語言,按這顆就記成已投出')+
         '<button class="stage-b back" data-back="" type="button">← 退出流程</button>',{one:'prep|'+_curId});
     }
     // 掃履歷當下最常發現的就是「這個缺已經關了/這個 URL 指到別的缺」。原本技術錯誤鈕
@@ -1035,13 +1053,13 @@
   // 一個決定點、兩個出口:直接投(可投遞)或先客製。客製走完卡會回到這一階,
     // 讓他再看一次,所以客製不是另一個階段,是這一步的另一個出口。
     if(ap==='ready')return actRow(shipGateHTML(j)+
+      sentBtnHTML(j,'已經在外部投了:挑好上面的履歷和語言,按這顆就記成已投出')+
       '<button class="stage-b back" data-back="prep" type="button">← 退回「準備履歷中」</button>',{sub:custPartHTML(j)});
     // 程式不會替他送出。這一顆只是「我已經在外部送出了」的紀錄,文案要講明白。
     // 以前要按兩次(先確認再生效);主流是按下去就生效、當場給復原(Gmail 寄信也是這樣),
     // 誤按只要點一下復原,不用每次都多按一下。
     // 這一階的主線是上面代投那一塊(填表 → 看頁面 → 核准送出);自己在外部投的紀錄是另一條路,用次要的樣子。
-    if(ap==='ship')return actRow('<button class="stage-b" data-adv="sent" type="button" '+
-      'title="程式不會替你送出;這是你自己在外部送出後的紀錄">📮 我已在外部送出</button>'+
+    if(ap==='ship')return actRow(sentBtnHTML(j,'程式不會替你送出;這是你自己在外部送出後的紀錄')+
       '<button class="stage-b back" data-back="ready" type="button">← 退回「待你決定」</button>',{sub:triesHTML(FB[_curId])+custPartHTML(j),one:'apply|'+_curId});
     if(ap==='sent'){var sf=FB[_curId]||{}, at=sf.sent_at||'';
       // 證據只有一種的要標出來:已投遞不等於「外面也對得上」。ev 是查證後留下的說明,
@@ -1214,7 +1232,7 @@
     }
     return lockLeaving(j.id,'<article class="card'+(j.bk?' bk':'')+'" data-fid="'+esc(j.id)+'">'+
       headHTML(true)+factsLine(j)+srcLineHTML(j)+repostHTML(j)+riskHTML(j)+'<div class="chrow">'+_tagHTML(j)+chan+'</div>'+_sumHTML(j)+verdictBlockHTML(j)+
-      '<div class="fb">'+sentBtnsHTML(sent,j.id)+(removed(j.id)?'':stageRowHTML(ap,j))+note_t+save+'</div></article>');
+      '<div class="fb">'+sentBtnsHTML(sent,j.id)+(removed(j.id)?'':stageRowHTML(ap,j)+(ap?'':sentFoldHTML(j)))+note_t+save+'</div></article>');
   }
   // 卡歸在哪一家:後台算好跟著職缺送來的(card.label_jobs:別名、職稱字、法律字尾、同一家只有一個寫法)
   function companyOf(j){return (j&&j.co)||'其他';}

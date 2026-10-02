@@ -104,7 +104,8 @@ class FailuresReachTheBoard(unittest.TestCase):
         self.assertTrue(any('版本紀錄' in m and '磁碟滿了' in m for m in self.reports()), self.reports())
 
     def test_sent_version_not_recorded_is_reported(self):
-        with mock.patch('ship.record_sent', side_effect=OSError('讀不到履歷檔')):
+        with mock.patch('ship.record_sent', side_effect=OSError('讀不到履歷檔')), \
+             mock.patch.object(self.bs, '_manual_sent_problem', return_value=None):   # 這條測的是記不下來,不是有沒有挑履歷
             rejected = []
             self.bs.write_fb({}, events=[{'u': self.url, 'ev': 'sent_manual'}], rejected=rejected)
         self.assertEqual(rejected, [])

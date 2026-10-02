@@ -282,6 +282,13 @@ def _record_sent_version(fb, url, jobs):
         agent_report.apply_report(fb,'看板',f'記不下寄出的是哪一份:{str(e)[:120]}',
                                   need='這張照樣算已送出;要留紀錄就到可投遞夾看寄出的那一份',job=url)
 
+def _manual_sent_problem(job, fb):
+    """他按「我已在外部送出」(任何階段都能按):要記寄出的是哪一份履歷、哪個語言,他一定知道,所以還沒挑就擋下來請他挑。"""
+    import ship
+    if job and not ship.resolve(job,fb)[0]:
+        return '先在卡上挑一份履歷和語言,再按「我已在外部送出」(要記寄出的是哪一份)'
+    return None
+
 def write_fb(fb_obj, base=None, events=None, rejected=None, out=None):
     """把新的 data-fb 併進 STATE 檔,其餘(jobs/sty/app)不動。單寫者鎖。
 
@@ -343,6 +350,8 @@ def write_fb(fb_obj, base=None, events=None, rejected=None, out=None):
                 fev=str(fallback.get('ev') or '')
                 why=((next_step.refuse(cur,u,fev) if fev else None) if 'undo' in e
                      else next_step.refuse(cur,u,ev,d['data'].get('status')))
+                if not why and 'undo' not in e and ev=='sent_manual':
+                    why=_manual_sent_problem(jobs.get(u),cur)
                 if why:
                     raise ValueError(why)
                 if 'undo' in e:
