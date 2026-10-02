@@ -20,6 +20,16 @@ def _html(source, output, lang=''):
         return f.read()
 
 
+class OutputPath(unittest.TestCase):
+    def test_the_pdf_lands_where_the_source_name_says(self):
+        _env.use_home(self)
+        self.assertEqual(markdown_pdf.output_path(os.path.join(self.home, 'resume', 'master.md')),
+                         os.path.join(self.home, '.rendered', 'resume', 'master.pdf'))
+        # 資料夾外面的原稿照完整路徑放,不能跑出 .rendered
+        self.assertEqual(markdown_pdf.output_path('/elsewhere/cv.md'),
+                         os.path.join(self.home, '.rendered', '_外部', 'elsewhere', 'cv.pdf'))
+
+
 class MarkdownPdf(unittest.TestCase):
     def test_markdown_prints_with_chrome_and_user_css_controls_page_size(self):
         with tempfile.TemporaryDirectory(prefix='markdown-pdf-') as directory:

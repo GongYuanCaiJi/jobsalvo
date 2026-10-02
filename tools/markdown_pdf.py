@@ -4,7 +4,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -14,12 +13,14 @@ class RenderError(RuntimeError):
 
 
 def output_path(source_path):
-    """Stable private cache path for a Markdown source in the data folder."""
-    source_path = os.path.abspath(os.path.expanduser(source_path))
-    identity = hashlib.sha256(source_path.encode('utf-8')).hexdigest()[:20]
+    """排出來的 PDF 放哪:<資料夾>/.rendered/<原稿在資料夾裡的相對路徑>.pdf,從原稿就推得出來。
+    原稿在資料夾外面的,照它的完整路徑放在 .rendered/_外部/ 底下。"""
     import config as cf
-    return os.path.join(cf.HOME, '.rendered', identity,
-                        os.path.splitext(os.path.basename(source_path))[0] + '.pdf')
+    source_path = os.path.abspath(os.path.expanduser(source_path))
+    relative = os.path.relpath(source_path, cf.HOME)
+    if relative.startswith(os.pardir + os.sep):
+        relative = os.path.join('_外部', source_path.lstrip(os.sep))
+    return os.path.join(cf.HOME, '.rendered', os.path.splitext(relative)[0] + '.pdf')
 
 
 def render(source_path, destination, style_path=None, lang=''):

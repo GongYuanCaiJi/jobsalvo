@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Track configured resume and attachment inputs and refresh their PDF previews."""
+import contextlib
 import hashlib
 import json
 import os
 import traceback
+import unicodedata
 
 import config as cf
 import pdf_preview
@@ -145,6 +147,23 @@ def _diagnostic(category, error):
     return f'{category} ' + ' <- '.join(chain)
 
 
+def prune_rendered(board):
+    """排出來的 PDF 只留現在用得到的:原稿換了位置、不用了,舊的立刻丟(都能重排出來),空資料夾一併收掉。"""
+    root = os.path.join(cf.HOME, '.rendered')
+    norm = lambda path: unicodedata.normalize('NFC', path)
+    keep = {norm(effective_path(entry)) for entry in files(board)}
+    for folder, _dirs, names in os.walk(root, topdown=False):
+        if '.markdown-pdf-' in folder:   # 正在排版的暫存夾
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            if norm(path) not in keep:
+                os.remove(path)
+        if folder != root:
+            with contextlib.suppress(OSError):   # 還有東西的夾子不動
+                os.rmdir(folder)
+
+
 def refresh(manifest, check_only=False, board=None, diagnostics=None):
     """Render Markdown sources, update source fingerprints, page counts and PDF previews."""
     active = list(files(board))
@@ -231,6 +250,8 @@ def refresh(manifest, check_only=False, board=None, diagnostics=None):
                 input_key_name = key.replace(PAGE_KEY, 'file:', 1)
                 if input_key_name not in active_keys:
                     manifest.pop(key, None)
+        if board:    # 沒給看板就看不到自己上傳的檔,不知道哪些還要用
+            prune_rendered(board)
     return changed, errors
 
 

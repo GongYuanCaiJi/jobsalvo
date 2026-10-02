@@ -187,6 +187,65 @@ class PackageReconcile(unittest.TestCase):
         ship.reconcile_packages(man, force=False, check_only=False, board=self.board)
         self.assertNotEqual(self._folder_files()['base.pdf'], before['base.pdf'], '做完了就照新的檔重建')
 
+    def test_cards_with_the_same_files_share_one_copy_until_one_is_rebuilt(self):
+        """每張卡各複製一整份履歷和合併版,一份真實資料 87 夾 406MB 只有 56MB 是不同的內容:
+        同內容的檔共用同一份(硬連結),客製版內容不同、自己一份;重建一張不動另一張。"""
+        other, custom = 'test://jobs/13', 'test://jobs/14'
+        accepted = os.path.join(self.home, 'custom', 'accepted.pdf')
+        _env.tiny_pdf(accepted, 'accepted-custom-resume')
+        mark = {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'}
+        _env.make_board(self.board, {self.url: mark, other: mark, custom: {**mark, 'custom_file': 'custom/accepted.pdf'}},
+                        jobs=[self.job, {'id': other, 'target': 'Engineer · Beta'}, {'id': custom, 'target': 'Engineer · Gamma'}])
+        self.assertEqual(self._run(), 0)
+        here, there, own = (ship.folder(u) for u in (self.url, other, custom))
+        for name in ('base.pdf', ship.MERGED_FILE):
+            self.assertTrue(os.path.samefile(os.path.join(here, name), os.path.join(there, name)), name)
+        self.assertFalse(os.path.samefile(os.path.join(here, ship.MERGED_FILE), os.path.join(own, ship.MERGED_FILE)))
+        self.assertTrue(os.path.isfile(os.path.join(own, 'accepted.pdf')))
+
+        old = pathlib.Path(there, 'base.pdf').read_bytes()
+        bd.set_fb(lambda fb: fb[other].update(app='ship', ds='running', apply={'stage': 'fill', 'at': '2026-01-01T00:00:00'}),
+                  live=self.board)
+        _env.tiny_pdf(self.source, 'resume-v2')
+        self.assertEqual(self._run(), 0)
+        self.assertNotEqual(pathlib.Path(here, 'base.pdf').read_bytes(), old)
+        self.assertEqual(pathlib.Path(there, 'base.pdf').read_bytes(), old, '另一張沒重建,它夾裡的檔不能跟著變')
+
+    def test_a_sent_cards_folder_is_shared_too_with_the_same_bytes(self):
+        """已投出的卡不重建,但夾子也要統一共用,不能留下各自一份的例外;內容照舊,不是自己的檔(ship.json、.apply)不動。"""
+        _env.make_board(self.board, {self.url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'},
+                                     'test://jobs/15': {'app': 'sent'}},
+                        jobs=[self.job, {'id': 'test://jobs/15', 'target': 'Engineer · Sent'}])
+        self.assertEqual(self._run(), 0)
+        here = ship.folder(self.url)
+        sent = ship.path_for({'id': 'test://jobs/15', 'target': 'Engineer · Sent'})
+        shutil.copytree(here, sent)
+        os.makedirs(os.path.join(sent, '.apply'))
+        pathlib.Path(sent, '.apply', 'fill.png').write_bytes(b'png')
+        before = pathlib.Path(sent, 'base.pdf').read_bytes()
+        self.assertFalse(os.path.samefile(os.path.join(here, 'base.pdf'), os.path.join(sent, 'base.pdf')))
+        self.assertEqual(self._run(), 0)
+        for name in ('base.pdf', ship.MERGED_FILE):
+            self.assertTrue(os.path.samefile(os.path.join(here, name), os.path.join(sent, name)), name)
+        self.assertEqual(pathlib.Path(sent, 'base.pdf').read_bytes(), before)
+        self.assertFalse(os.path.samefile(os.path.join(here, 'ship.json'), os.path.join(sent, 'ship.json')))
+        self.assertEqual(pathlib.Path(sent, '.apply', 'fill.png').read_bytes(), b'png')
+        inode = os.stat(os.path.join(sent, 'base.pdf')).st_ino
+        self.assertEqual(self._run(), 0)
+        self.assertEqual(os.stat(os.path.join(sent, 'base.pdf')).st_ino, inode, '共用過的不再動')
+
+    def test_the_shared_store_keeps_what_cards_use_and_drops_the_rest(self):
+        self.assertEqual(self._run(), 0)
+        store = os.path.join(cf.SHIP_DIR, ship.STORE)
+        used = sorted(os.listdir(store))
+        self.assertEqual(len(used), 2)       # 履歷、合併版各一份
+        pathlib.Path(store, 'nobody-links-this').write_bytes(b'x')
+        cleaned, unknown = ship.clean_orphans(True, self.board)
+        self.assertEqual((cleaned, unknown), ([], []))
+        self.assertIn('nobody-links-this', os.listdir(store))
+        ship.clean_orphans(False, self.board)
+        self.assertEqual(sorted(os.listdir(store)), used)
+
     def test_rebuilding_never_shows_a_half_built_folder(self):
         """重建以前先把整個資料夾刪空、再一份份複製:這之間去拿的人拿到的是缺檔的一份(#308)。現在另外建好整份再換上。"""
         attachment = os.path.join(self.home, 'resume', 'letter.pdf')
@@ -208,7 +267,7 @@ class PackageReconcile(unittest.TestCase):
         self.assertTrue(seen)
         self.assertEqual([x for x in seen if x != complete], [], '重建途中,放在那裡的一直是完整的一份')
         self.assertEqual(sorted(self._folder_files()), complete)
-        self.assertEqual([n for n in os.listdir(os.path.dirname(ship.folder(self.url))) if n.startswith('.')], [],
+        self.assertEqual([n for n in os.listdir(os.path.dirname(ship.folder(self.url))) if n.startswith('.') and n != ship.STORE], [],
                          '建好就換上,不留暫存的資料夾')
 
     def test_reconcile_does_not_build_a_package_for_a_closed_card(self):
@@ -300,6 +359,21 @@ class PackageReconcile(unittest.TestCase):
             changed_size = (round(float(reader.pages[0].mediabox.width)),
                             round(float(reader.pages[0].mediabox.height)))
             self.assertEqual(changed_size, (420, 595))
+
+    def test_rendered_pdfs_nobody_uses_are_thrown_away_at_once(self):
+        """排出來的 PDF 換了位置之後,舊位置的檔留著就是垃圾:不要讓他自己去刪。"""
+        self.settings['resume']['resumes'][0]['files']['zh'] = 'resume/source.md'
+        self._write_settings()
+        rendered = os.path.join(self.home, '.rendered')
+        kept = os.path.join(rendered, 'resume', 'source.pdf')
+        old = os.path.join(rendered, 'd6b79b981a18a388885e', 'source.pdf')
+        midway = os.path.join(rendered, 'resume', '.markdown-pdf-abc', 'resume.pdf')
+        for path in (kept, old, midway):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            pathlib.Path(path).write_bytes(b'%PDF-')
+        source_sync.prune_rendered(self.board)
+        self.assertEqual((os.path.isfile(kept), os.path.exists(old), os.path.isfile(midway)), (True, False, True))
+        self.assertFalse(os.path.exists(os.path.dirname(old)), '空的資料夾一併收掉')
 
     def test_markdown_preview_cache_tracks_source_and_style_changes(self):
         source = os.path.join(self.home, 'resume', 'preview.md')
@@ -699,7 +773,7 @@ class PackageReconcile(unittest.TestCase):
             ship.reconcile_packages({}, force=True, check_only=False, board=self.board)
         package = ship.folder(self.url)
         self.assertTrue(os.path.isfile(os.path.join(package, '.apply', 'fill.png')))
-        self.assertEqual([n for n in os.listdir(os.path.dirname(package)) if n.startswith('.')], [])
+        self.assertEqual([n for n in os.listdir(os.path.dirname(package)) if n.startswith('.') and n != ship.STORE], [])
         with open(os.path.join(package, 'base.pdf'), 'rb') as f:
             self.assertIn(b'resume-v2', f.read())
 

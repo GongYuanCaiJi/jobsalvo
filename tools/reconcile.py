@@ -180,6 +180,8 @@ def run(a):
         print('  以上是過時清單,--check 不動手。拿掉 --check 重跑才會真的重建。')
     else:
         print('  看板服務直接讀這個檔,重整就看得到。')
+    if not a.check:
+        ship.share_files()
     cleaned, unknown = ship.clean_orphans(a.check, live)
     if cleaned:
         print(f'  {"會清" if a.check else "已清"} {len(cleaned)} 個過期可投遞夾(卡片已離開準備/投遞階段,可隨時重生):')

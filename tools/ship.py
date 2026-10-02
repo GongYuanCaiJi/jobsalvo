@@ -14,7 +14,8 @@ jobsalvo 不管履歷怎麼寫、怎麼排版。它只認三件事:
      也可選多份檔交給同一個 agent,依各檔 skill 修改;等使用者收下或直接上傳 PDF 後,
      才替換可投遞夾中對應的檔案。
 
-可投遞夾由 reconcile 建(uv run python tools/reconcile.py)。
+可投遞夾由 reconcile 建(uv run python tools/reconcile.py)。同內容的檔(履歷、附件、合併版)只在
+可投遞夾底下的 .store 存一份,每張卡夾子裡的檔是它的硬連結:沒客製的卡共用同一份,客製版內容不同、自然是自己的。
 """
 import os, sys, re, json, glob, shutil, hashlib, time, tempfile, contextlib, functools
 
@@ -29,6 +30,7 @@ import markdown_pdf
 
 STAGES = ('ready', 'ship')      # 有可投遞夾的階段
 MERGED_FILE = 'merged.pdf'
+STORE = '.store'                # 可投遞夾底下:同內容的檔只存一份在這,每張卡夾子裡的檔是它的硬連結
 
 
 def _safe(name):
@@ -399,8 +401,26 @@ def _unique_name(name, taken):
     return name
 
 
-def _write_merged(directory, info):
-    """Add the ordered resume-and-attachments PDF beside the individual package files."""
+def _share(path, store):
+    """path 這個檔改成跟 store 裡同內容那一份共用(硬連結;store 還沒有就由它自己當那一份)。
+    內容一個位元都沒變,只是不再各存一份。夾子換新是整夾換掉、沒有人原地改寫夾裡的檔,所以共用不會互相牽連。
+    連不了(換磁碟、檔案系統不支援)就維持原樣,還是一份完整的檔。"""
+    shared = os.path.join(store, _digest(path))
+    with contextlib.suppress(OSError):
+        if not os.path.exists(shared):
+            os.makedirs(store, exist_ok=True)
+            os.link(path, shared)
+        elif not os.path.samefile(path, shared):
+            swap = os.path.join(store, '.sharing')
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(swap)
+            os.link(shared, swap)
+            os.replace(swap, path)
+
+
+def _write_merged(directory, info, store=None):
+    """Add the ordered resume-and-attachments PDF beside the individual package files.
+    給了 store:合併好的檔也跟別張卡同內容的共用。"""
     files = [n for n in info.get('files', []) if isinstance(n, str) and n]
     old_merged = info.pop('merged', None)
     if old_merged and old_merged not in files:
@@ -419,6 +439,8 @@ def _write_merged(directory, info):
         try:
             pdf.merge(paths, temporary)
             os.replace(temporary, destination)
+            if store:
+                _share(destination, store)
             info['files'] = files
             info['merged'] = name
             problems = []
@@ -487,6 +509,7 @@ def _fill_package(j, fb, resume_id, lang, own, stage, d):
     bad = []
     files = []
     source_map = {}
+    store = os.path.join(os.path.dirname(d), STORE)
     items = source_items(j, fb)
     for item in items:
         p = item['path']
@@ -496,12 +519,13 @@ def _fill_package(j, fb, resume_id, lang, own, stage, d):
         name = _unique_name(os.path.basename(p), files + [MERGED_FILE])
         destination = os.path.join(stage, name)
         shutil.copy2(p, destination)
+        _share(destination, store)
         files.append(name)
         source_map[item['id']] = name
     info = {'variant': resume_id, 'lang': lang, 'files': files, 'custom': own, 'sources': source_map}
     _write_package_info(stage, info)
     if not bad:
-        bad.extend(_write_merged(stage, info))
+        bad.extend(_write_merged(stage, info, store))
     _put_in_place(stage, d)
     return d, bad
 
@@ -774,6 +798,18 @@ def reconcile_packages(man, force, check_only, board, timings=False):
     return did, failed
 
 
+def share_files():
+    """所有卡的夾子(含已投出的)裡還沒共用的檔(只有一個連結)換成共用;已共用的(連結數 > 1)不重算。
+    內容照舊,已投出那張當時寄出去的紀錄也一樣。"""
+    store = os.path.join(cf.SHIP_DIR, STORE)
+    for folder in sorted(glob.glob(os.path.join(cf.SHIP_DIR, '*'))):    # 開頭是 . 的(.store、暫存夾)不在內
+        if not os.path.isdir(folder):
+            continue
+        for entry in os.scandir(folder):
+            if entry.is_file(follow_symlinks=False) and entry.name != 'ship.json' and entry.stat().st_nlink == 1:
+                _share(entry.path, store)
+
+
 def clean_orphans(check_only, board):
     """清除不再對應準備/投遞卡的可重生套件；無法唯一對帳者只報不刪。"""
     root = cf.SHIP_DIR
@@ -794,6 +830,13 @@ def clean_orphans(check_only, board):
     for entry in sorted(os.listdir(root)):
         full = os.path.join(root, entry)
         if not os.path.isdir(full):
+            continue
+        if entry == STORE:
+            # 沒有任何一張卡的夾子還連著的(只剩這裡一個連結)是用不到的舊內容。不是卡的夾子,不報來歷不明
+            if not check_only:
+                for n in os.listdir(full):
+                    if os.stat(os.path.join(full, n)).st_nlink == 1:
+                        os.remove(os.path.join(full, n))
             continue
         if entry.startswith('.building-'):
             # 重建到一半當掉留下的暫存夾(build_default 另外建好再換上用的),是這裡建的:清掉,不報來歷不明
