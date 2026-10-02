@@ -624,13 +624,20 @@ WEB_CHECKS=[
    }
    return bad.join('；');
  """),
- ('卡片 ⋯ 可以改類別:改了存得進去、卡片換到那一類;選「照關鍵字」就拿掉',"""
+ ('卡片 ⋯:移除文字看得到、分類選項先隱藏;改類別存得住、選「照關鍵字」就拿掉',"""
    document.querySelector('[data-tab="all"]').click(); await T.sleep(300);
    var c=T.open(); if(!c)return '找不到卡片';
    var fid=c.getAttribute('data-fid'), bad=[];
    var ob=c.querySelector('[data-omore]'); if(ob){ob.click(); await T.sleep(100);}
+   var rm=c.querySelector('[data-rm="1"]'); if(!rm)return '⋯ 裡沒有「移除」';
+   var range=document.createRange(); range.selectNodeContents(rm);
+   var rect=range.getBoundingClientRect();
+   if(rect.left<0||rect.right>innerWidth)return '移除文字超出畫面';
+   var cats=c.querySelector('.catpick-m');
+   if(!cats||getComputedStyle(cats).display!=='none')return '未按「改類別」就顯示分類選項';
    var op=c.querySelector('[data-catopen]'); if(!op)return '⋯ 裡沒有「🗂 改類別」';
    op.click(); await T.sleep(100);
+   if(getComputedStyle(cats).display==='none')return '按「改類別」後分類選項仍隱藏';
    var picks=[...c.querySelectorAll('[data-catpick]')].filter(function(b){return b.getAttribute('data-catpick');});
    if(picks.length<2)return '改類別的選單沒有列出類別';
    var want=picks[picks.length-1].getAttribute('data-catpick'); picks[picks.length-1].click(); await T.idle();
