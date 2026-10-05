@@ -198,17 +198,23 @@ class Equivalents(unittest.TestCase):
         def state():
             with patch.object(ps.cf, 'master', return_value=self.master):
                 return [r['state'] for r in ps.status()]
-        self._master('希望地點：台中市')
-        self.assertEqual(state(), ['unchecked'])                      # 登記了、還沒讀回比過
-        self._check()
-        self.assertEqual(state(), ['ok'])                             # 比過、對得上
-        self._master('希望地點：高雄市')
-        self.assertEqual(state(), ['master-changed'])                 # 母稿一改,當下就變落後,沒有誰要記得去標
-        self._check(page=dict(self.page, text=self.page['text'].replace('台中市', '高雄市')))
-        self.assertEqual(state(), ['ok'])
-        self._master('希望地點：新竹市')
-        self._check()                                                  # 平台還是舊的:比過了,但對不上
-        self.assertEqual(state(), ['differs'])
+        judged = lambda ok: ps._remember_check('alpha.example', 'zh', 'general', ok)   # agent 判讀完記下(apply_run)
+        with patch.object(ps.cf, 'master', return_value=self.master):
+            self._master('希望地點：台中市')
+            self.assertEqual(state(), ['unchecked'])                  # 登記了、還沒判讀過
+            self._check()
+            self.assertEqual(state(), ['unchecked'])                  # 舊的字句診斷不算判讀
+            judged(True)
+            self.assertEqual(state(), ['ok'])
+            self._master('希望地點：高雄市')
+            self.assertEqual(state(), ['master-changed'])             # 母稿一改,當下就變落後,沒有誰要記得去標
+            judged(False)
+            self.assertEqual(state(), ['differs'])
+            reg = ps.registry()                                       # 舊版字句診斷留下的紀錄(沒有 by)開看板時清掉
+            reg['_profile_checks']['alpha.example#zh/general'].pop('by')
+            ps._save_registry(reg)
+            self.assertEqual(ps.drop_legacy_checks(), 1)
+            self.assertEqual(state(), ['unchecked'])
 
     def test_status_skips_a_platform_whose_master_is_not_set_up(self):
         with patch.object(ps.cf, 'master', return_value=None):

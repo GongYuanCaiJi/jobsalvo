@@ -58,7 +58,7 @@ class AcceptanceIsolation(unittest.TestCase):
         with open(os.path.join(self.temporary, 'agent.json'), 'w', encoding='utf-8') as target:
             target.write('{"instance":"test"}')
 
-    def test_clone_redirects_runtime_paths_and_browser_state(self):
+    def test_clone_redirects_runtime_paths(self):
         runtime = os.path.join(self.temporary, 'runtime')
         acceptance._clone_home(self.source, runtime)
         with open(os.path.join(runtime, 'jobsalvo.json'), encoding='utf-8') as source:
@@ -66,12 +66,10 @@ class AcceptanceIsolation(unittest.TestCase):
         for value in (
             settings['board']['file'], settings['resume']['ship_dir'],
             settings['resume']['prepare_dir'], *settings['paths'].values(),
-            settings['browser']['state'], settings['resume']['base'],
+            settings['resume']['base'],
         ):
             resolved = value if os.path.isabs(value) else os.path.join(runtime, value)
             self.assertTrue(acceptance._inside(runtime, resolved), value)
-        with open(os.path.join(runtime, settings['browser']['state']), encoding='utf-8') as source:
-            self.assertEqual(json.load(source), {'instance': 'test'})
         with open(os.path.join(runtime, settings['resume']['base']), encoding='utf-8') as source:
             self.assertEqual(source.read(), 'private resume')
         with open(os.path.join(self.source, 'jobsalvo.json'), encoding='utf-8') as source:

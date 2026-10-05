@@ -406,6 +406,21 @@ class Http(HttpBase):
         self.assertEqual(result, {'msg': message})
         preflight.assert_called_once_with()
 
+    def test_after_he_confirms_platform_content_fix_needs_no_note(self):
+        url = JOBS[1]['id']
+        fb = {url: {'app': 'ship', 'apply': {'session': 's1'}}, '__inbox__': [
+            {'id': 'r1', 'job': url, 'approve': [{'item': 'field:0'}], 'msg': 'x'}]}
+        doc = {'fb': json.dumps(fb), 'data': {}}
+        def ask():
+            with mock.patch.object(bs, 'read_doc', return_value=''), mock.patch.object(bd, 'parse', return_value=doc), \
+                    mock.patch('delivery_state.allowed', return_value=True), \
+                    mock.patch.object(bs, 'run_status', return_value={'running': True}):
+                return bs.start_run('apply', {'stage': 'fix', 'url': url})
+        self.assertEqual(ask()[1].get('msg'), '寫一下要 agent 改什麼')          # 沒寫要改什麼、也沒確認過:擋
+        fb['__inbox__'][0]['done'] = '2026-10-06'                              # 他在回報按了「處理好了」
+        doc['fb'] = json.dumps(fb)
+        self.assertNotEqual(ask()[1].get('msg'), '寫一下要 agent 改什麼')       # 修改就是重新核對,不用寫
+
     def test_agent_cannot_write_his_board(self):
         before = read(self.path)
         code, _, _ = self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'s': 'meh'}},

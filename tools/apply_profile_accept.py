@@ -277,20 +277,12 @@ def _clone_home(source_home, runtime_home):
     board = settings.setdefault('board', {})
     resume = settings.setdefault('resume', {})
     paths = settings.setdefault('paths', {})
-    browser = settings.setdefault('browser', {})
     original_board = _setting_path(source_home, board.get('file'), 'board.html')
     clone_board = os.path.join(runtime_home, '.acceptance-data', 'source-board.html')
     os.makedirs(os.path.dirname(clone_board), exist_ok=True)
     if os.path.isfile(original_board):
         shutil.copy2(original_board, clone_board)
     board['file'] = os.path.relpath(clone_board, runtime_home)
-
-    state = _setting_path(source_home, browser.get('state'), '~/.cache/jobsalvo/agent-chrome.json')
-    clone_state = os.path.join(runtime_home, '.acceptance-data', 'agent-chrome.json')
-    os.makedirs(os.path.dirname(clone_state), exist_ok=True)
-    if os.path.isfile(state):
-        shutil.copy2(state, clone_state)
-    browser['state'] = os.path.relpath(clone_state, runtime_home)
 
     resume['base'] = _copy_config_input(
         source_home, runtime_home, resume.get('base') or 'resume.md', 'resume-base',

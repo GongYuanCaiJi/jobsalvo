@@ -215,8 +215,21 @@ def _remember_check(platform, lang, variant, matched):
     """讀回來比過一次:記下比的是哪一版母稿、對不對得上。母稿之後再改,status() 自己看得出落後。"""
     reg = registry()
     reg.setdefault('_profile_checks', {})[f'{platform}#{lang}/{variant}'] = {
-        'master': _master_fp(lang, variant), 'matched': bool(matched)}
+        'master': _master_fp(lang, variant), 'matched': bool(matched), 'by': 'review'}
     _save_registry(reg)
+
+
+@_registry_writer
+def drop_legacy_checks():
+    """舊版逐字比對(check)記下的「對不上」:不是 agent 判讀的結果,清掉;下次填這個平台的卡時重新判讀。回清掉幾筆。"""
+    reg = registry()
+    checks = reg.get('_profile_checks') or {}
+    old = [k for k, v in checks.items() if not (isinstance(v, dict) and v.get('by') == 'review')]
+    for k in old:
+        del checks[k]
+    if old:
+        _save_registry(reg)
+    return len(old)
 
 
 def status():
@@ -764,7 +777,6 @@ def check(platform, lang, variant, board=None, reader=None, test_allow_local=Fal
         why = [f'「{m[:40]}」{rejected[_n(m)]}' for m in d['missing'] if _n(m) in rejected]
         if why:
             d['rejected'] = why
-    _remember_check(platform, lang, variant, not [d for d in ds if not d.get('warn')])
     return w, ds, ''
 
 

@@ -3875,9 +3875,10 @@
       var styleRow=markdown?'<div class="cfg-row"><label class="cfg-k">PDF 樣式</label><span class="cfg-file">'+
         (style?'🎨 '+esc(fileName(style)):'<i>未指定，使用瀏覽器原生排版</i>')+'</span><label class="cfg-b">'+
         (style?'換樣式':'上傳 CSS')+'<input type="file" accept=".css,text/css" data-cfstyle="'+escA(which)+'" hidden></label></div>':'';
-      var platformRows=kind!=='resume'?'':(CFGD.profile_status||[]).filter(function(r){return r.variant===id&&r.lang===l&&r.state!=='ok';}).map(function(r){
-        var why={'master-changed':'落後母稿(母稿改過,還沒讀回比對)','differs':'跟母稿對不上(上次比對有差)','unchecked':'還沒讀回比對過'}[r.state];
-        return '<div class="cfg-row"><span class="cfg-file">⚠ '+esc(r.platform)+' 上這一份'+esc(why)+'</span></div>';}).join('');
+      // 平台上這個語言的那一份:只有上次判讀發現問題才是 ⚠;母稿改過是下次填這個平台的卡時自動同步(只講一句),還沒判讀過不講
+      var platformRows=kind!=='resume'?'':(CFGD.profile_status||[]).filter(function(r){return r.variant===id&&r.lang===l&&(r.state==='differs'||r.state==='master-changed');}).map(function(r){
+        return '<div class="cfg-row"><span class="cfg-help">'+(r.state==='differs'?'⚠ '+esc(r.platform)+' 上的'+esc(langName(l))+'版上次判讀跟母稿對不上,下次填這個平台的卡時會照母稿改':
+          esc(r.platform)+' 上的'+esc(langName(l))+'版還是改之前的母稿,下次填這個平台的卡時只改有變的地方')+'</span></div>';}).join('');
       var pageWarning=warning?'<div class="cfg-row"><span class="cfg-file">⚠ '+esc(fileName(f))+' 排成 '+warning.pages+' 頁；建議檢查版面。</span></div>':'';
       return '<div class="cfg-row"><label class="cfg-k">'+esc(langName(l))+'版</label><span class="cfg-file'+(gone?' gone':'')+'">'+(f?(gone?'⚠ 找不到檔案:':'📄 ')+esc(fileName(f)):'<i>還沒上傳</i>')+'</span>'+
         (gone?'':preview)+'<label class="cfg-b">'+(f&&!gone?'換一份':(gone?'重新上傳':'上傳'))+'<input type="file" data-cfup="'+escA(which)+'" hidden></label></div>'+styleRow+pageWarning+platformRows;}).join('');
@@ -4024,6 +4025,7 @@
       '<div class="cfg-row"><label class="cfg-k">沒下文天數</label><input class="cfg-in num" type="number" min="7" max="120" data-cfn="replies.ghost_days" value="'+escA((CFGW.replies||{}).ghost_days==null?30:CFGW.replies.ghost_days)+'"></div>'+   // 照實顯示:存成 0 的舊值要看得到才改得了
       '<p class="cfg-help">查應徵進度的信箱。Gmail 的第二個帳號是 …/mail/u/1/;不是 Gmail(Outlook、公司信箱)也行,'+esc(AGENT)+' 會用 ego 打開這個網址查,記得先在 ego 登入。</p>'+
       '<div class="cfg-row"><label class="cfg-k">信箱網址</label><input class="cfg-in" data-cf="replies.mail_url" value="'+escA((CFGW.replies||{}).mail_url||'')+'" placeholder="https://mail.google.com/mail/u/0/"></div>',{cls:'cfg-d'});
+    var RT_NAME={'codex':'Codex','command-code':'Command Code','claude-code':'Claude Code'};
     var agentRows=agents.map(function(x,i){var runtime=['command-code','claude-code'].indexOf(x.runtime)>=0?x.runtime:'codex';
       return '<div class="cfg-card"><div class="cfg-row"><strong class="cfg-k">第 '+(i+1)+' 個 agent</strong>'+
         '<button class="cfg-b" type="button" data-cfagentmove="'+i+'|up" aria-label="上移"'+(i===0?' disabled':'')+'>↑</button>'+
@@ -4032,9 +4034,11 @@
         '<div class="cfg-row"><label class="cfg-k">執行環境</label><select class="cfg-in" data-cfa-runtime="'+i+'">'+[['codex','Codex'],['command-code','Command Code'],['claude-code','Claude Code']].map(function(o){return '<option value="'+o[0]+'"'+(runtime===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select>'+
         '<input class="cfg-in" data-cfa-model="'+i+'" value="'+escA(x.model||'')+'" placeholder="模型(空的=預設)"></div>'+
         (runtime==='codex'?'<div class="cfg-row"><label class="cfg-k">速度</label><select class="cfg-in" data-cfa-speed="'+i+'">'+['standard','fast'].map(function(v){return '<option value="'+v+'"'+((x.speed||'standard')===v?' selected':'')+'>'+(v==='fast'?'快速(比較耗額度)':'標準')+'</option>';}).join('')+'</select></div>'
-          :'<div class="cfg-row"><span class="cfg-k">速度</span><span class="cfg-help">Claude Code 沒有這個選項</span></div>')+
+          :'<div class="cfg-row"><span class="cfg-k">速度</span><span class="cfg-help">'+RT_NAME[runtime]+' 沒有這個選項</span></div>')+
         '<div class="cfg-row"><label class="cfg-k">思考強度</label><select class="cfg-in" data-cfa-effort="'+i+'">'+[['low','低'],['medium','中'],['high','高'],['xhigh','很高'],['max','最高']].map(function(o){return '<option value="'+o[0]+'"'+((x.effort||'max')===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select>'+
-        '<label class="cfg-file"><input type="checkbox" data-cfa-browser="'+i+'"'+(x.browser?' checked':'')+(runtime==='command-code'?' disabled':'')+'> 用它操作 ego</label></div></div>';}).join('');
+        // 不能操作瀏覽器的那一種不給勾選框(以前給一個按不了的,看起來像壞掉),直接講它做不到
+        (runtime==='command-code'?'<span class="cfg-help">'+RT_NAME[runtime]+' 不能操作瀏覽器:幫你填表、查應徵進度不會派給它</span>'
+          :'<label class="cfg-file"><input type="checkbox" data-cfa-browser="'+i+'"'+(x.browser?' checked':'')+'> 用它操作 ego</label>')+'</div></div>';}).join('');
     var br=cfgBrowserRuntime();
     var AGT=fold('cfg:agent','🤖 Agent 與瀏覽器','<p class="cfg-help">先用第 1 個;它額度用完、被限流或開不起來,才換下一個(逾時、其他錯誤不換)。'+
       '填表與查應徵進度交給勾了「用它操作 ego」的 agent,依清單順序派工;兩家共用同一個工作區。</p>'+agentRows+

@@ -937,7 +937,9 @@ def start_run(kind,args):
             if not delivery_state.allowed(m,'fix_start'):
                 return 400,{'msg':'這張「'+delivery_state.label(delivery_state.state(m))+'」,不能叫 agent 在原頁改'}
             import apply_run
-            if not note and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
+            # 他在回報按了「處理好了」確認平台內容:修改就是重新核對,不用另外寫要改什麼
+            confirmed=any(it.get('job')==url and it.get('approve') and it.get('done') and not it.get('res') for it in fb.get('__inbox__') or [])
+            if not note and not confirmed and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
                 return 400,{'msg':'寫一下要 agent 改什麼'}
         args={'stage':stage,'url':url,'note':note,'limit':0 if url else limit}
     if kind in ('prep','replies'):
@@ -1647,6 +1649,9 @@ def sandbox_home():
 
 def main():
     global STATE,RUNNING_VERSION
+    if os.environ.get('JOBSALVO_LAUNCHD')=='1':
+        import shell_env
+        shell_env.adopt()   # launchd 不讀 shell 設定:agent 的登入位置、PATH 從登入 shell 補上(#384)
     ap=argparse.ArgumentParser()
     ap.add_argument('--port',type=int,default=cf.PORT)
     ap.add_argument('--host',default='auto',help='auto=127.0.0.1 ＋ Tailscale IP(預設,安全);或指定 IP。禁 0.0.0.0')
@@ -1669,6 +1674,10 @@ def main():
             srvs.append(ThreadingHTTPServer((h,a.port),H))
         SERVERS[:]=srvs
         migrate_marks(STATE)   # 舊資料寫回成現在的樣子:自動流程第一次盤點、頁面第一次載入之前
+        if is_real():
+            cf.upgrade_file()          # 設定檔裡現在不用的舊設定寫回拿掉
+            import profile_sync
+            profile_sync.drop_legacy_checks()   # 舊的逐字比對留下的「對不上」不是現在的判讀結果
         start_pilot()  # 所有埠先綁好，首次盤點仍在開始接受 HTTP 前完成
         RUNNING_VERSION=code_version()
         launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1'

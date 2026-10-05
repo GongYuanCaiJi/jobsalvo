@@ -178,6 +178,21 @@ def user_settings(home=None):
         return {}
 
 
+def upgrade_file(home=None):
+    """設定檔裡舊版留下、現在不用的設定(migrate_settings 拿掉的)寫回檔案;沒變、讀不懂都不寫。回有沒有寫。"""
+    f = os.path.join(home or HOME, NAME)
+    try:
+        with open(f, encoding='utf-8') as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    new = migrate_settings(raw)
+    if new == raw:
+        return False
+    _dump(f, new)
+    return True
+
+
 def load(home=None):
     home = home or find_home()
     cfg = _merge(copy.deepcopy(DEFAULTS), migrate_settings(user_settings(home)))

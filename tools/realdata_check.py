@@ -358,7 +358,7 @@ def _check_copy(src, copy, quick):
     # keep all scratch writes under this automatically removed clone.
     settings.setdefault('paths', {})['tmp'] = '.realdata-check-tmp'
     redirectable = {('paths', 'prefs'), ('paths', 'preference_note'),
-                    ('paths', 'apply_rules'), ('browser', 'state')}
+                    ('paths', 'apply_rules')}
     bad = outside(copy, settings, skip=redirectable)
     if bad:
         print('設定裡有會被寫入、卻指到資料夾外面的路徑,在副本上跑會改到原本的檔,不跑:')

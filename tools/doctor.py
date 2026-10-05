@@ -249,6 +249,16 @@ def check_environment(agents=None):
                 'fix': '' if not problem else firewall_fix(exe),
             })
 
+    # 看板是背景服務時,agent 的登入位置、PATH 要從登入 shell 補(shell_env,#384);讀不到,agent 會被當成沒登入
+    import shell_env
+    if shell_env.STATUS is not None:
+        checks.append({
+            'key': 'service_env', 'label': '看板讀到你終端機的設定(agent 登入位置、PATH)', 'ok': not shell_env.STATUS,
+            'required': False,
+            'detail': shell_env.STATUS or '開看板時從登入 shell 讀到了',
+            'fix': '' if not shell_env.STATUS else '在終端機確認登入 shell 打得開(echo $SHELL),再到「⚙ 其他」關掉、重新開機自動啟動看板。',
+        })
+
     # 設定勾了會用 Chrome、而且那一種真的能用才算(以前只看設定:沒裝任何 agent 也寫「已設定」)
     import chrome_door
     browser_runtimes = {agent.get('runtime') for agent in agents

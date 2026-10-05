@@ -185,7 +185,8 @@ def markdown_warnings():
         if not entry['path'].lower().endswith(('.md', '.markdown')):
             continue
         pages = manifest.get(source_sync.page_key(entry))
-        if isinstance(pages, int) and pages > 1:
+        # 履歷超過一頁才提醒;附件是報告,好幾頁很正常,提醒只是雜訊
+        if entry['kind'] == 'resume' and isinstance(pages, int) and pages > 1:
             out.append({**{key: entry[key] for key in ('kind', 'id', 'lang')},
                         'name': os.path.basename(entry['path']), 'pages': pages})
     return out
