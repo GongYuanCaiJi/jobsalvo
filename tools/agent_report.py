@@ -37,10 +37,11 @@ def _now():
     return datetime.datetime.now().isoformat(timespec='seconds')
 
 
-def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False):
+def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, approve=None):
     """純函式版(測試用)。回傳那一筆。
     by_agent:agent 自己寫的(不是程式驗出來的):標 agent;還沒附程式自己截的那一頁就標 noev(缺證據),
-    不叫他照做(todo 不列),等程式附上截圖(apply_attach)才算數(#315)。"""
+    不叫他照做(todo 不列),等程式附上截圖(apply_attach)才算數(#315)。
+    approve:他按「處理好了」就算確認的平台內容(apply_run._take_confirmed 下次判讀時收下)。"""
     now = now or _now()
     msg, need, job, src = (msg or '').strip(), (need or '').strip(), (job or '').strip(), (src or 'agent').strip()
     if not msg:
@@ -52,6 +53,8 @@ def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False):
             it['at'] = now
             if need:
                 it['need'] = need
+            if approve:
+                it['approve'] = approve
             if by_agent:            # 同一句又報一次:這一次要附的是這一輪的截圖
                 it['agent'] = True
                 it.pop('ev', None)
@@ -63,6 +66,8 @@ def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False):
         it['need'] = need
     if job:
         it['job'] = job
+    if approve:
+        it['approve'] = approve
     if by_agent:
         it['agent'], it['noev'] = True, NO_SHOT
     box.append(it)
@@ -73,10 +78,10 @@ def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False):
     return it
 
 
-def report(src, msg, need='', job='', live=None, by_agent=False):
+def report(src, msg, need='', job='', live=None, by_agent=False, approve=None):
     live = bd.target(live)
     out = []
-    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job, by_agent=by_agent)), live=live,
+    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job, by_agent=by_agent, approve=approve)), live=live,
               by='agent_report')
     return out[0]
 

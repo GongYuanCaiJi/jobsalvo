@@ -70,18 +70,44 @@ def profile_key(url):
 def registry():
     try:
         with open(REG, encoding='utf-8') as f:
-            return json.load(f)
-    except (OSError, ValueError):
+            reg = json.load(f)
+        if not isinstance(reg, dict):
+            raise ValueError('平台履歷登記資料不是物件')
+        return reg
+    except FileNotFoundError:
         return {}
 
 
 
+def _registry_writer(method):
+    """共用既有檔案鎖，保護每個完整的讀→改→寫。"""
+    from functools import wraps
+
+    @wraps(method)
+    def write(*args, **kwargs):
+        import board_doc
+        os.makedirs(os.path.dirname(REG) or '.', exist_ok=True)
+        with board_doc.live_lock(REG):
+            return method(*args, **kwargs)
+    return write
+
+
 def _save_registry(reg):
+    import tempfile
     folder = os.path.dirname(REG)
     if folder:
         os.makedirs(folder, exist_ok=True)
-    with open(REG, 'w', encoding='utf-8') as f:
-        json.dump(reg, f, ensure_ascii=False, indent=2)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile('w', dir=folder or '.', encoding='utf-8', delete=False) as f:
+            temporary = f.name
+            json.dump(reg, f, ensure_ascii=False, indent=2, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, REG)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # 平台履歷的身分:平台 + 那一份的編號。同一份的網址常有不同寫法(多一個參數、參數順序不同),
@@ -125,6 +151,7 @@ def attachment_check(profile_url):
     return _checks(registry()).get(identity(profile_url)) or {}
 
 
+@_registry_writer
 def remember_attachment_check(profile_url, fingerprint, profile_kind, matched):
     key = identity(profile_url)
     if not key:
@@ -149,6 +176,7 @@ def invalidate_attachment_check(profile_url):
     )
 
 
+@_registry_writer
 def remember(platform, lang, variant, read_url, edit_url=None):
     """agent 第一次告訴我們那一份在哪:記下來,下次程式自己讀。"""
     reg = registry()
@@ -162,6 +190,58 @@ def where(platform, lang, variant):
     return (registry().get(platform) or {}).get(f'{lang}/{variant}')
 
 
+@_registry_writer
+def accept_extra(platform, lang, variant, label, value):
+    """他確認過「母稿沒有、但平台上這一格可以留」:記進那一份的 accepted,下次不再問。"""
+    reg = registry()
+    entry = (reg.get(platform) or {}).get(f'{lang}/{variant}')
+    if not entry:
+        raise ValueError(f'{platform} {lang}/{variant} 沒登記')
+    pair = f'{str(label).strip()}={str(value).strip()}'
+    if pair not in entry.setdefault('accepted', []):
+        entry['accepted'].append(pair)
+        _save_registry(reg)
+    return pair
+
+
+def _master_fp(lang, variant):
+    import source_sync
+    paths = [cf.master(part, lang) for part in variant.split('+')]
+    return '+'.join(source_sync.fingerprint(p) for p in paths) if all(paths) else ''
+
+
+@_registry_writer
+def _remember_check(platform, lang, variant, matched):
+    """讀回來比過一次:記下比的是哪一版母稿、對不對得上。母稿之後再改,status() 自己看得出落後。"""
+    reg = registry()
+    reg.setdefault('_profile_checks', {})[f'{platform}#{lang}/{variant}'] = {
+        'master': _master_fp(lang, variant), 'matched': bool(matched)}
+    _save_registry(reg)
+
+
+def status():
+    """登記過的每一份平台履歷現在跟母稿的關係:ok / master-changed(母稿改了、還沒讀回比) / differs(上次比有差) / unchecked。
+    不靠誰記得:母稿一改,狀態當下就變,不用有人去登記。"""
+    reg = registry()
+    saved = reg.get('_profile_checks') or {}
+    out = []
+    for platform, slots in reg.items():
+        if platform.startswith('_') or not isinstance(slots, dict):
+            continue
+        for slot, entry in slots.items():
+            lang, _, variant = slot.partition('/')
+            fp = _master_fp(lang, variant) if variant and isinstance(entry, dict) else ''
+            if not fp:                                    # 沒設定母稿:沒有東西可比
+                continue
+            rec = saved.get(f'{platform}#{slot}') or {}
+            state = ('unchecked' if not rec else 'master-changed' if rec.get('master') != fp
+                     else 'ok' if rec.get('matched') else 'differs')
+            out.append({'platform': platform, 'lang': lang, 'variant': variant, 'state': state,
+                        'url': entry.get('read') or ''})
+    return out
+
+
+@_registry_writer
 def remember_name(platform, lang, variant, name):
     """平台上那一份叫什麼(申請頁選平台履歷時顯示的字):程式在那一份的頁面上看到過才記。"""
     reg = registry()
@@ -339,30 +419,151 @@ def md_sections(text):
     return out
 
 
-def source_text(path):
-    """讀指定原稿全文；沒有可讀來源不能當作內容已完整。"""
+def capture_source(path):
+    """從同一份不可變 bytes 算雜湊並取文字；PDF 亦從捕獲副本抽取。"""
+    import hashlib
+    import tempfile
     if not path or not os.path.isfile(path) or not path.lower().endswith(('.md', '.markdown', '.txt', '.pdf')):
         raise ValueError('找不到可讀的指定履歷原稿')
     try:
+        with open(path, 'rb') as f:
+            data = f.read()
         if path.lower().endswith('.pdf'):
             import settings_api
-            text = settings_api.pdf_text(path)
+            with tempfile.NamedTemporaryFile(suffix='.pdf') as copy:
+                copy.write(data)
+                copy.flush()
+                text = settings_api.pdf_text(copy.name)
         else:
-            with open(path, encoding='utf-8') as f:
-                text = f.read()
+            text = data.decode('utf-8')
     except (OSError, UnicodeError, subprocess.SubprocessError, ValueError) as e:
         raise ValueError(f'讀不出母稿 {os.path.basename(path)}({str(e)[:80]})') from e
     if not text.strip():
         raise ValueError('指定履歷原稿沒有可讀文字')
-    return text
+    return {'sha256': hashlib.sha256(data).hexdigest(), 'text': text}
+
+
+def approved_facts(platform):
+    """人類核准的補充來源；跨履歷提供上下文，不直接放行。"""
+    facts = (registry().get(platform) or {}).get('approved_facts', [])
+    if not isinstance(facts, list) or any(not _valid_fact(f, platform) for f in facts):
+        raise ValueError('平台補充來源格式不正確')
+    return [f for f in facts if f.get('scope') == os.path.realpath(cf.HOME)]
+
+
+def _valid_fact(fact, platform):
+    """驗核准紀錄的必要結構與身分，不解釋聲明意思。"""
+    if not isinstance(fact, dict) or not isinstance(fact.get('statement'), str) or not fact['statement'].strip():
+        return False
+    context = fact.get('context')
+    if not isinstance(fact.get('scope'), str) or not isinstance(context, dict):
+        return False
+    page, resume = context.get('page'), context.get('resume')
+    if (not isinstance(page, dict) or not isinstance(page.get('url'), str)
+            or not isinstance(page.get('text'), str) or not page['text'].strip()
+            or not isinstance(resume, dict) or resume.get('platform') != platform
+            or not all(isinstance(resume.get(k), str) and resume[k] for k in ('lang', 'variant'))
+            or context.get('profile_identity') != identity(page['url'])
+            or not same_platform_url(page['url'], platform)
+            or not isinstance(context.get('source_sha256'), str)
+            or not re.fullmatch('[0-9a-f]{64}', context['source_sha256'])):
+        return False
+    try:
+        item = review_items('', page).get(context.get('item_id'))
+    except (ValueError, TypeError, KeyError):
+        return False
+    return bool(item and item['kind'] in ('text', 'field') and item == context.get('item'))
+
+
+def review_items(source, page, approved=()):
+    """本次項目編號：只分資料出處，不分類語意，也不略過空值或 0。"""
+    if not isinstance(source, str) or not isinstance(page, dict) or not isinstance(page.get('text'), str) or not page['text'].strip():
+        raise ValueError('讀回結果沒有完整文字')
+    if not isinstance(page.get('fields'), list) or any(not isinstance(f, dict) for f in page['fields']):
+        raise ValueError('讀回結果沒有完整的欄位清單，不能確認結構化欄位')
+    # 讀完沒有由這裡另訂:讀頁程式(chrome_door.read_pages)不在「載入中」、內容連續幾次一樣才交出來,沒讀完標 _ready=False
+    if page.get('readyState') == 'loading' or page.get('_ready') is False:
+        raise ValueError('平台履歷尚未讀取完成')
+    items = {}
+    for kind, values in (('source', source.split('\n\n')), ('text', page['text'].splitlines()),
+                         ('field', page['fields']), ('approved', approved)):
+        for i, value in enumerate(values):
+            if isinstance(value, str) and not value.strip():
+                continue
+            items[f'{kind}:{i}'] = {'kind': kind, 'value': value}
+    return items
+
+
+@_registry_writer
+def approve_fact(platform, material, page_url, item_id, statement):
+    """人工 CLI：核准完整聲明並保留當時上下文。Agent 不可自行呼叫。"""
+    binding = material.get('binding') or {}
+    scope = os.path.realpath(cf.HOME)
+    if binding.get('platform') != platform or material.get('scope') != scope:
+        raise ValueError('核准材料不屬於這個平台或使用者資料範圍')
+    if not isinstance(statement, str) or not statement.strip():
+        raise ValueError('要提供人類明確核准的完整聲明')
+    target = next((p for p in material.get('material', []) if p.get('url') == page_url), None)
+    if target is None:
+        raise ValueError('核准材料沒有指定頁面')
+    items = review_items(target['source'], target['page'])
+    item = items.get(item_id)
+    if not item or item['kind'] not in ('text', 'field'):
+        raise ValueError('要指定這次實際讀回的文字或欄位項目')
+    fact = {'statement': statement.strip(), 'scope': scope, 'context': {
+        'item_id': item_id, 'item': item, 'page': target['page'], 'profile_identity': identity(page_url),
+        'resume': binding, 'source_sha256': material['source_hashes'][target['source_path']],
+    }}
+    if not _valid_fact(fact, platform):
+        raise ValueError('核准材料缺少完整上下文或履歷身分')
+    reg = registry()
+    facts = reg.setdefault(platform, {}).setdefault('approved_facts', [])
+    if fact not in facts:
+        facts.append(fact)
+        _save_registry(reg)
+    return fact
+
+
+@_registry_writer
+def remember_review(platform, lang, variant, read_url, fingerprint, sheet, source=None, items=None, rules=None):
+    """只記指定履歷最近一次已核對的判讀；核准來源另外保存。
+    source:這次判讀通過時的原稿全文,下次填表只把原稿跟它不一樣的地方交給 agent(synced_source)。
+    items、rules:這次逐項判讀的項目和規則;下次內容沒變的項目沿用(apply_run._carry_over)。"""
+    reg = registry()
+    slot = (reg.get(platform) or {}).get(f'{lang}/{variant}') or {}
+    if identity(slot.get('read')) != identity(read_url):
+        return
+    slot['content_review'] = {'fingerprint': fingerprint, 'sheet': sheet}
+    if isinstance(source, str):
+        slot['content_review']['source'] = source
+    if isinstance(items, dict):
+        slot['content_review'].update(items=items, rules=rules)
+    _save_registry(reg)
+
+
+def synced_source(platform, lang, variant):
+    """平台上這一份最近一次判讀通過時對的是哪一版原稿(全文);沒有回 None。"""
+    review = (where(platform, lang, variant) or {}).get('content_review')
+    source = review.get('source') if isinstance(review, dict) else None
+    return source if isinstance(source, str) else None
 
 
 def expected(platform, lang, variant):
-    """舊 CLI 診斷用的片語；投遞內容判讀使用 source_text 全文。"""
+    """舊 CLI 診斷用的片語；投遞內容判讀使用 source_text 全文。
+    variant 可以用 + 串幾份(例如 'a+b'):這一份平台履歷是綜合版,頁面要有每一份母稿的全部內容,
+    同一句在幾份母稿裡都有只算一次。"""
+    if '+' in variant:
+        out, seen = [], set()
+        for part in variant.split('+'):
+            for where, text, links in expected(platform, lang, part):
+                if _n(text) not in seen:
+                    seen.add(_n(text))
+                    out.append((f'{part}:{where}', text, links))
+        return out
     path = cf.master(variant, lang)
     if not path or not os.path.isfile(path):
         return []
-    return md_sections(source_text(path))
+    return md_sections(capture_source(path)['text'])
 
 
 def _flat(x, path):
@@ -401,6 +602,77 @@ def _segments(piece):
         contact = (_n(label) in {_n(x) for x in _CONTACT_LABELS}
                    or bool(_EMAIL.search(value)) or bool(_PHONE.fullmatch(value.strip())))
         out.append((seg, value, contact))
+    return out
+
+
+_BRACKET_N = re.compile(r'\[\d+\]$')
+_NO_VALUE = {'', '-', '--', 'n/a', 'none', 'true', 'false', 'on', 'off'}     # 沒填、或只是開關(radio/checkbox 的 value),不是聲明
+_PLACEHOLDER = ('請選擇', 'select', 'please select', 'choose')            # 下拉選單還沒選的占位字
+_SKIP_TYPES = {'hidden', 'file', 'password', 'button', 'submit'}
+
+
+def _zero(v):
+    try:
+        return float(v) == 0
+    except ValueError:
+        return False
+
+
+def extras(page, want, accepted=None):
+    """反向檢查:頁面上有值、母稿卻沒有的欄位(身高、體重、婚姻…)。回 ['標籤=值'] 。
+    diff 只查「母稿有、頁面沒有」;頁面上多出他沒寫的東西不會被看到,存檔就等於替他背書。
+    母稿裡找得到那個值就算有來源;聯絡方式是帳號資料不比;他確認過可以留的記在 accepted(['標籤=值'])。"""
+    # 母稿的來源:每段文字、它的連結、段落標題(使用者貼進長文字欄時常加標題、把連結寫成網址)
+    master = _n(' '.join(_BRACKET_N.sub('', str(where)) + ' ' + text + ' ' + ' '.join(links)
+                         for where, text, links in want))
+    okay = {_n(x) for x in accepted or []}
+    out = []
+    for f in page.get('fields') or []:
+        if not isinstance(f, dict) or f.get('type') in _SKIP_TYPES:
+            continue
+        value = str(f.get('shown') or f.get('value') or '').strip()     # 下拉選單、自製選單看得到的字優先
+        label = str(f.get('label') or f.get('name') or '').strip()
+        if value.casefold() in _NO_VALUE or value.casefold().startswith(_PLACEHOLDER) or _n(value) == '' or (f.get('type') == 'number' and _zero(value)):
+            continue
+        contact = (_n(label) in {_n(x) for x in _CONTACT_LABELS} or bool(_EMAIL.search(value))
+                   or bool(_PHONE.fullmatch(value)))
+        pair = f'{label}={value}'
+        if contact or _n(pair) in okay or _n(value) in master:
+            continue
+        if len(_n(value)) > 40:        # 長文字欄(自傳):整段不會原樣出現在母稿,一句一句找,每句都有來源才算
+            miss = [p for p in _pieces(value) if _n(p) not in master]
+            if not miss:
+                continue
+            pair = f'{label}={miss[0][:60]}…(這欄有 {len(miss)} 句母稿沒有)'
+        out.append(pair)
+    return out
+
+
+def account(page, want):
+    """帳號資料(姓名、Email、電話、居住地)只做寬鬆比對,回提醒清單;不擋核准。
+    這幾格是帳號層級:平台只存一份、各家顯示方式不同(信箱截斷、電話分區碼、地址拆縣市區),agent 也改不了驗證過的手機和信箱。
+    所以不逐字比,各抓一個關鍵片段確認在頁面上:信箱開頭、電話後六碼、姓名、縣市加區。
+    不假設母稿怎麼排:信箱、電話在整份母稿裡找(任何語言都一樣),姓名取第一個標題,居住地才靠標籤(中英文都認)。"""
+    text = '\n'.join(t for _, t, _ in want)
+    got = _n(page.get('text')) + ' ' + _n(' '.join(str(f.get('shown') or f.get('value') or '')
+                                                   for f in page.get('fields') or [] if isinstance(f, dict)))
+    digits = re.sub(r'\D', '', got)
+    out = []
+    m = _EMAIL.search(text)
+    if m and _n(m.group(0).split('@')[0][:8]) not in got:
+        out.append(f'Email:母稿是「{m.group(0)}」,頁面上沒看到開頭')
+    m = _PHONE.search(text)
+    if m and re.sub(r'\D', '', m.group(0))[-6:] not in digits:
+        out.append(f'電話:母稿是「{m.group(0).strip()}」,頁面上沒看到後六碼')
+    m = re.search(r'^\s*#\s+(\S.*)$', text, re.M) or re.search(r'(?:姓名|名字|name)\s*[：:]\s*([^｜|\n]+)', text, re.I)
+    if m and len(_n(m.group(1))) >= 2 and _n(m.group(1)) not in got:
+        out.append(f'姓名:母稿是「{m.group(1).strip()}」,頁面上沒看到')
+    m = re.search(r'(?:居住地|地址|location|address|city)\s*[：:]\s*([^｜|\n]+)', text, re.I)
+    if m:
+        place = re.match(r'\s*(\S{2,3}[縣市])\s*(\S{1,3}[區鄉鎮市])?', m.group(1))
+        parts = [x for x in place.groups() if x] if place else [x.strip() for x in m.group(1).split(',')[:1]]
+        if any(_n(x) not in got for x in parts if _n(x)):
+            out.append(f'居住地:母稿是「{m.group(1).strip()}」,頁面上沒看到')
     return out
 
 
@@ -483,10 +755,16 @@ def check(platform, lang, variant, board=None, reader=None, test_allow_local=Fal
         return w, [], str(e)
     rejected = accept_equivalents(platform, lang, variant, page, want, reported) if reported else {}
     ds = diff(page, want, (where(platform, lang, variant) or {}).get('equivalents'))
+    more = extras(page, want, (w or {}).get('accepted'))
+    if more:                                              # 反向:頁面上有、母稿沒有的欄位,他回答之前不放行
+        ds.append({'where': '頁面上多出母稿沒有的欄位', 'want': '', 'missing': [], 'links': [], 'unexpected': more})
+    for m in account(page, want):                         # 帳號資料:寬鬆比、只提醒(warn),不擋核准
+        ds.append({'where': '帳號資料(只提醒)', 'want': m, 'missing': [], 'links': [], 'warn': True})
     for d in ds:                                          # 沒收下的原因掛在那一格上,讓下一輪知道怎麼改
         why = [f'「{m[:40]}」{rejected[_n(m)]}' for m in d['missing'] if _n(m) in rejected]
         if why:
             d['rejected'] = why
+    _remember_check(platform, lang, variant, not [d for d in ds if not d.get('warn')])
     return w, ds, ''
 
 
@@ -551,6 +829,7 @@ def same_platform_url(value, platform, allow_local=False):
 NOT_SHOWN_MAX = 24          # 「平台不顯示」只收短格子(兵役：免役、應屆畢業這種);一般句子、整段內容不能這樣帶過
 
 
+@_registry_writer
 def accept_equivalents(platform, lang, variant, page, want, reported):
     """驗 agent 回報的說法對照,收下合格的。回 {那一格(正規化): 沒收下的原因}。
     只收「字面比不過的那一格」;platform 那幾個字要在頁面上;not_shown 只收短的「標籤：值」格子。
@@ -601,6 +880,7 @@ def accept_equivalents(platform, lang, variant, page, want, reported):
     return rejected
 
 
+@_registry_writer
 def remember_application_history(platform, url):
     """平台的應徵紀錄頁(查回音用)。網址要屬於這個平台才記。"""
     if not url or not same_platform_url(url, platform):
@@ -1168,10 +1448,45 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--platform', required=True)
+    ap.add_argument('--status', action='store_true', help='每一份平台履歷現在跟母稿的關係(不開瀏覽器)')
+    ap.add_argument('--platform')
     ap.add_argument('--lang', choices=cf.LANGS, default=cf.LANGS[0])
-    ap.add_argument('--resume', '--variant', dest='resume', choices=list(cf.RESUMES) or None, required=True)
+    ap.add_argument('--resume', '--variant', dest='resume', help='哪一份母稿;綜合版的平台履歷用 + 串,例如 a+b')
+    ap.add_argument('--accept', help='人類明確核准的完整聲明；Agent 不可自行使用')
+    ap.add_argument('--material', help='程式捕獲的 profile-material.json')
+    ap.add_argument('--page', help='材料裡的指定頁面 URL')
+    ap.add_argument('--item', help='材料裡的 text:N 或 field:N')
+    ap.add_argument('--accept-extra', metavar='標籤=值',
+                    help='字句診斷用:母稿沒有、但他確認平台上這一格可以留(例如 "婚姻狀況=不提供"):記起來,下次不再問')
     a = ap.parse_args()
+    if a.status:
+        for r in status():
+            print(f'{r["platform"]} {r["lang"]}/{r["variant"]}: {r["state"]}')
+        return
+    if not a.platform:
+        ap.error('要 --platform(或只看狀態用 --status)')
+    if a.accept is not None:
+        if not all((a.material, a.page, a.item)):
+            ap.error('--accept 要同時指定 --material、--page、--item，保留原核准上下文')
+        try:
+            with open(a.material, encoding='utf-8') as f:
+                material = json.load(f)
+            approve_fact(a.platform, material, a.page, a.item, a.accept)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            sys.exit('無法核准補充來源：' + str(e))
+        print('已保存人類核准聲明及上下文；平台履歷仍由 Agent 判讀。')
+        return
+    if not a.resume:
+        ap.error('核對履歷要指定 --resume')
+    if not all(part in cf.RESUMES for part in a.resume.split('+')):
+        ap.error(f'--resume 要是這幾份之一(可用 + 串起來):{", ".join(cf.RESUMES)}')
+    if a.accept_extra:
+        label, _, value = a.accept_extra.partition('=')
+        try:
+            print('已記下可以留:' + accept_extra(a.platform, a.lang, a.resume, label, value))
+        except ValueError as e:
+            sys.exit(str(e))
+        return
     import chrome_door
     door = chrome_door.current()
     if door is None:
@@ -1181,7 +1496,7 @@ def main():
         sys.exit(prob)
     if not w:
         sys.exit(f'還不知道 {a.platform} {a.lang}/{a.resume} 那一份在哪({REG} 沒有)')
-    print(f'{w["read"]}:' + ('跟母稿對得上' if not ds else f'{len(ds)} 段對不上\\n' + describe(ds, 99)))
+    print(f'{w["read"]}:字句診斷（不決定能否送出）:' + ('字句可找到' if not ds else f'{len(ds)} 段未命中\\n' + describe(ds, 99)))
     try:
         import chrome_door
         chrome_door.close_if_idle()

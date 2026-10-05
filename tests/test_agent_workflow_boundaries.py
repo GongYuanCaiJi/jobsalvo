@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _env  # noqa: F401 — 測試先隔離資料與瀏覽器設定，再匯入工具。
 import apply_run as run
+import apply_tab
 import config as cf
 import delivery_state as ds
 import gate
@@ -31,6 +32,7 @@ class Responsibilities(unittest.TestCase):
         self.source = Path(self.home) / 'resume.md'
         self.source.write_text('# 履歷\n## 專案\nDelta（Repo）：維運排程與部署\n[影片](https://media.example.test/watch/a)\n')
         self.pages = {FIXED: {'url': FIXED, 'text': '專案\nDelta\n維運排程與部署',
+                              'fields': [],
                               'links': ['https://repo.example.test/project'],
                               'media': ['https://media.example.test/embed/a']}}
         self.delivery = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': FIXED}
@@ -45,7 +47,6 @@ class Responsibilities(unittest.TestCase):
         for target, value in (
             ('apply_run.load', lambda board: (self.jobs, self.fb)),
             ('apply_run.out_dir', lambda url, board: str(self.out)),
-            ('profile_sync.where', lambda *args: {'read': FIXED, 'edit': FIXED}),
             ('profile_sync.decided', lambda *args: dict(self.decision)),
             ('profile_sync.delivery_for', lambda *args: dict(self.delivery)),
             ('profile_sync.attachment_fingerprint', lambda *args: self.fingerprint),
@@ -55,12 +56,17 @@ class Responsibilities(unittest.TestCase):
         ):
             self.enterContext(patch(target, side_effect=value))
         self.enterContext(patch.object(cf, 'HOME', self.home))
+        self.enterContext(patch.object(ps, 'REG', str(Path(self.home) / 'profiles.json')))
+        ps.remember(self.decision['platform'], 'zh', 'base', FIXED)
 
     def judge(self, prompt, log, home, board, **kwargs):
         self.calls.append((prompt, kwargs))
+        material = json.loads(prompt.split('【材料】\n', 1)[1].split('\n【交件單】', 1)[0])
         (self.out / 'profile-review.json').write_text(json.dumps({
             'status': self.status, 'reason': '依本輪原稿與頁面判讀',
             'quotes': {url: page['text'] for url, page in self.pages.items()},
+            'checks': {p['url']: [{'id': i, 'status': self.status, 'reason': '本輪逐項判讀', 'basis': [i]}
+                                   for i, item in p['items'].items() if item['kind'] != 'approved'] for p in material},
         }, ensure_ascii=False))
         return SimpleNamespace(ok=True, message=lambda: '')
 
@@ -80,7 +86,58 @@ class Responsibilities(unittest.TestCase):
         self.assertIn('不用另開工具寫檔', prompt)
         for state in ('issues', 'unknown'):
             self.status = state
+            self.pages[FIXED]['text'] += '\n' + state
             self.assertTrue(self.review())
+
+    def test_judgment_records_which_master_the_platform_copy_was_checked_against(self):
+        with patch('profile_sync._remember_check') as remember:
+            for state in ('complete', 'issues', 'unknown'):
+                self.status = state
+                self.source.write_text(self.source.read_text() + '\n' + state)   # 原稿改了才重判,不沿用上次
+                self.review()
+        self.assertEqual([c.args for c in remember.call_args_list],
+                         [(self.decision['platform'], 'zh', 'base', True),
+                          (self.decision['platform'], 'zh', 'base', False)])   # 讀不清楚不算比過
+
+    def test_a_passed_judgment_remembers_which_master_the_platform_now_matches(self):
+        self.assertEqual(self.review(), [])
+        self.assertEqual(ps.synced_source(self.decision['platform'], 'zh', 'base'), self.source.read_text())
+
+    def test_attachments_are_compared_by_the_program_before_the_agent_is_told_to_reupload(self):
+        fixed = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': FIXED}
+        door = SimpleNamespace(download_attachments=lambda *a: None)
+        with patch('profile_sync.fixed_profile_delivery', return_value=fixed), \
+                patch('profile_sync.decided', return_value={'profile_kind': 'fixed'}), \
+                patch('profile_sync.attachment_sources', return_value=[{'id': 'a'}]), \
+                patch('profile_sync.attachment_fingerprint', return_value='now'), \
+                patch('profile_sync.check_attachments', return_value=[]) as compare:
+            with patch('profile_sync.attachment_check', return_value={}):
+                run._attachments_before_fill(URL, 'synthetic-board', door)
+            self.assertEqual(compare.call_args.kwargs['download_reader'], door.download_attachments)
+            compare.reset_mock()
+            with patch('profile_sync.attachment_check', return_value={'matched': True, 'fingerprint': 'now'}):
+                run._attachments_before_fill(URL, 'synthetic-board', door)      # 用現在的檔比過:不再下載
+            compare.assert_not_called()
+
+    def test_only_unchanged_items_whose_basis_is_still_there_are_carried_over(self):
+        item = lambda kind, value: {'kind': kind, 'value': value}
+        before = {'source:0': item('source', '專案 Delta'), 'text:0': item('text', 'Delta'), 'text:1': item('text', '台北市')}
+        prior = {'rules': 'R', 'items': {FIXED: before}, 'sheet': {'status': 'complete', 'checks': {FIXED: [
+            {'id': 'source:0', 'status': 'complete', 'reason': 'ok', 'basis': ['text:0']},
+            {'id': 'text:0', 'status': 'complete', 'reason': 'ok', 'basis': ['source:0']},
+            {'id': 'text:1', 'status': 'complete', 'reason': 'ok', 'basis': ['text:1']}]}}}
+        # 頁面多了一行在最前面:編號全部位移,沒變的照樣認得,依據跟著換成新編號
+        now = {'source:0': item('source', '專案 Delta'), 'text:0': item('text', '新北市'),
+               'text:1': item('text', 'Delta'), 'text:2': item('text', '台北市')}
+        carried, pending = run._carry_over(prior, [{'url': FIXED, 'items': now}], 'R')
+        self.assertEqual({r['id']: r['basis'] for r in carried[FIXED]},
+                         {'source:0': ['text:1'], 'text:1': ['source:0'], 'text:2': ['text:2']})
+        self.assertEqual(pending[FIXED], {'text:0'})
+        # 依據那一行不見了:靠它的那一項要重判
+        gone = {'source:0': item('source', '專案 Delta'), 'text:0': item('text', '台北市')}
+        carried, pending = run._carry_over(prior, [{'url': FIXED, 'items': gone}], 'R')
+        self.assertEqual(pending[FIXED], {'source:0'})
+        self.assertEqual(run._carry_over(prior, [{'url': FIXED, 'items': now}], '新規則'), ({}, None))   # 規則改了:全部重判
 
     def test_changed_source_and_changed_effective_files_invalidate_review(self):
         def changed_source(*args, **kwargs):
@@ -99,7 +156,7 @@ class Responsibilities(unittest.TestCase):
         custom.write_text('這張卡已接受的客製內容')
         self.delivery.update(profile_kind='custom', profile_url=CUSTOM)
         self.decision['profile_kind'] = 'custom'
-        self.pages[CUSTOM] = {'url': CUSTOM, 'text': '這張卡已接受的客製內容'}
+        self.pages[CUSTOM] = {'url': CUSTOM, 'text': '這張卡已接受的客製內容', 'fields': []}
         with patch('ship.documents', return_value=[{'kind': 'resume', 'effective_path': str(custom)}]):
             self.assertEqual(self.review(), [])
         self.assertEqual(len(self.calls), 1)
@@ -122,15 +179,223 @@ class Responsibilities(unittest.TestCase):
         self.source.unlink()
         self.assertTrue(self.review())
 
-    def test_judgments_are_not_cached_and_every_custom_page_needs_a_quote(self):
+    def test_unchanged_inputs_reuse_judgment_but_every_custom_page_needs_a_quote(self):
         self.assertEqual(self.review(), [])
         self.assertEqual(self.review(), [])
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 1)
+        self.source.write_text('改過的原稿')  # 輸入變了才重判;Agent 沒交件單就不能放行
         self.assertTrue(self.review(lambda *a, **kw: SimpleNamespace(ok=True, message=lambda: '')))
         verdict = gate.inspect('profile_review', {
             'status': 'complete', 'reason': 'complete', 'quotes': {FIXED: self.pages[FIXED]['text']},
         }, gate.Truth(given={FIXED: self.pages[FIXED]['text'], CUSTOM: '客製版原文'}))
         self.assertTrue(verdict.problems)
+
+    def test_same_text_does_not_hide_changed_fields_context_or_inputs(self):
+        self.source.write_text('上班時段：日班\n完成 170 個工單')
+        self.pages[FIXED].update(text=self.source.read_text(), fields=[
+            {'label': '上班時段', 'section': '求職條件', 'value': ''},
+            {'label': '身高', 'value': 0}, {'label': '意願', 'value': False},
+            {'label': '自傳', 'value': self.source.read_text() + '\nrecruiter@example.test'},
+        ])
+        self.assertEqual(self.review(), [])  # mocked Agent；這裡只驗材料／沿用，不能聲稱模型判對。
+        self.assertIn('"value": 0', self.calls[-1][0])
+        self.assertIn('"value": false', self.calls[-1][0])
+        self.assertIn('recruiter@example.test', self.calls[-1][0])
+        changes = [lambda: self.pages[FIXED]['fields'][0].update(value='日班'),
+                   lambda: self.pages[FIXED]['fields'][0].update(section='過去工作'),
+                   lambda: self.source.write_text('新原稿')]
+        for mutate in changes:
+            before = len(self.calls)
+            mutate()
+            self.assertEqual(self.review(), [])
+            self.assertEqual(len(self.calls), before + 1)
+            self.assertIn('這一次只判讀這些編號', self.calls[-1][0])     # 只交有變的那幾項
+        before = len(self.calls)
+        self.fingerprint = 'new-attachments'      # 附件程式自己逐位元組比;頁面每一項都沒變就不叫 agent
+        self.assertEqual(self.review(), [])
+        self.assertEqual(len(self.calls), before)
+        with patch.object(run, 'PROFILE_REVIEW_RULES', run.PROFILE_REVIEW_RULES + '新版規則'):
+            before = len(self.calls)
+            self.assertEqual(self.review(), [])
+            self.assertEqual(len(self.calls), before + 1)
+
+    def test_coverage_cannot_be_forged_or_overridden_by_global_complete(self):
+        self.pages[FIXED]['fields'] = [{'label': '上班時段', 'value': ''}]
+        def corrupt(mutate):
+            def judge(*args, **kwargs):
+                result = self.judge(*args, **kwargs)
+                path = self.out / 'profile-review.json'
+                sheet = json.loads(path.read_text())
+                mutate(sheet['checks'][FIXED])
+                path.write_text(json.dumps(sheet))
+                return result
+            return judge
+        for mutate in (lambda rows: rows.pop(), lambda rows: rows.append(rows[0]),
+                       lambda rows: rows[-1].update(basis=['invented:0']),
+                       lambda rows: rows[-1].update(basis=[]),
+                       lambda rows: rows[-1].update(status='issues', reason='實際時段仍空白'),
+                       lambda rows: rows[-1].update(status='unknown', reason='讀不到時段')):
+            self.assertTrue(self.review(corrupt(mutate)))
+        self.assertNotIn('content_review', ps.where(self.decision['platform'], 'zh', 'base'))
+
+    def test_unsourced_content_goes_to_the_report_and_only_his_done_approves_it(self):
+        self.pages[FIXED]['fields'] = [{'label': '性別', 'section': '基本資料', 'value': '男'}]
+        platform = self.decision['platform']
+        def marked(status):
+            def judge(*args, **kwargs):
+                result = self.judge(*args, **kwargs)
+                path = self.out / 'profile-review.json'
+                sheet = json.loads(path.read_text())
+                sheet['status'] = 'issues'
+                for row in sheet['checks'][FIXED]:
+                    if row['id'] == 'field:0':
+                        row.update(status=status, reason='性別：男')
+                path.write_text(json.dumps(sheet, ensure_ascii=False))
+                return result
+            return judge
+        # 原稿寫了卻不一樣是 issues:不會變成可以按「處理好了」核准的東西
+        self.assertTrue(self.review(marked('issues')))
+        self.assertIsNone(run._unsourced(str(self.out)))
+        problems = self.review(marked('unsourced'))
+        self.assertIn('要你確認一次', problems[0])
+        self.assertIn('「性別：男」', problems)
+        pending = run._unsourced(str(self.out))
+        self.assertEqual([(p['item'], p['statement']) for p in pending], [('field:0', '性別：男')])
+        inbox = self.fb.setdefault('__inbox__', [])
+        inbox.append({'id': 'r1', 'approve': pending})                                        # 還沒按
+        inbox.append({'id': 'r2', 'approve': pending, 'done': '2026-10-05', 'res': '重填成功'})  # 程式自動收的
+        run._take_confirmed(self.fb, platform)
+        self.assertEqual(ps.approved_facts(platform), [])
+        inbox[0]['done'] = '2026-10-05'                                                        # 他按了「處理好了」
+        self.assertEqual(self.review(), [])
+        self.assertEqual([f['statement'] for f in ps.approved_facts(platform)], ['性別：男'])
+        self.assertIn('性別：男', self.calls[-1][0])                                            # 下一次判讀看得到他確認過
+
+    def test_approval_keeps_original_context_and_only_adds_a_source(self):
+        self.pages[FIXED]['fields'] = [{'label': '公司', 'section': '過去經歷', 'value': 'Acme'}]
+        self.assertEqual(self.review(), [])
+        payload = json.loads((self.out / 'profile-material.json').read_text())
+        fact = ps.approve_fact(self.decision['platform'], payload, FIXED, 'field:0', '我過去在 Acme 工作')
+        self.assertEqual(fact['context']['item']['value']['section'], '過去經歷')
+        self.assertEqual(fact['context']['profile_identity'], ps.identity(FIXED))
+        ps.remember(self.decision['platform'], 'en', 'other', CUSTOM)
+        self.assertEqual(ps.approved_facts(self.decision['platform']), [fact])
+        before = len(self.calls)
+        self.assertEqual(self.review(), [])
+        self.assertEqual(len(self.calls), before)   # 每一項上次都判過、內容沒變:多一筆核准不用重判
+        self.pages[FIXED]['fields'][0]['value'] = 'Acme Inc.'
+        self.assertEqual(self.review(), [])
+        self.assertEqual(len(self.calls), before + 1)
+        self.assertIn('我過去在 Acme 工作', self.calls[-1][0])
+        with patch.object(cf, 'HOME', self.home + '-another-user'):
+            self.assertEqual(ps.approved_facts(self.decision['platform']), [])
+            with self.assertRaises(ValueError):
+                ps.approve_fact(self.decision['platform'], payload, FIXED, 'field:0', '另一個人的事實')
+        for page, item, statement in ((CUSTOM, 'field:0', 'x'), (FIXED, 'source:0', 'x'), (FIXED, 'field:0', '')):
+            with self.assertRaises(ValueError):
+                ps.approve_fact(self.decision['platform'], payload, page, item, statement)
+
+    def test_incomplete_capture_is_not_a_pure_text_profile(self):
+        self.pages[FIXED].pop('fields')
+        self.assertTrue(self.review())
+        self.assertEqual(self.calls, [])
+        self.pages[FIXED].update(fields=[], readyState='loading')
+        self.assertTrue(self.review())
+        self.assertEqual(self.calls, [])
+        self.pages[FIXED].update(readyState='interactive', _ready=False)   # 讀頁程式自己說沒讀完
+        self.assertTrue(self.review())
+        self.assertEqual(self.calls, [])
+
+    def test_a_page_the_reader_finished_is_judged_even_if_still_interactive(self):
+        # 104 這種網頁內容讀完、穩定了,document 仍停在 interactive;讀完由讀頁程式判斷,判讀不另訂(實站 2026-10-05)
+        self.pages[FIXED].update(fields=[], readyState='interactive', _ready=True)
+        self.assertEqual(self.review(), [])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_shared_native_reader_keeps_field_context_and_selection(self):
+        script = """
+const assert = require('node:assert/strict');
+const group = {getAttribute: () => null, querySelector: () => ({innerText: '過去經歷'})};
+const field = (type, value, label) => ({type, value, tagName: 'INPUT', checked: false,
+  getAttribute: key => key === 'aria-label' ? label : null,
+  closest: () => group, getClientRects: () => [{}]});
+const controls = [field('number', '0', '年資'), field('email', 'user@example.test', 'Email'),
+                  field('checkbox', 'on', '可遠端')];
+global.getComputedStyle = () => ({display: 'block', visibility: 'visible'});global.NodeFilter = {SHOW_TEXT: 4};
+global.location = {href: 'https://platform.example.test/profile/fixed'};
+global.document = {title: '履歷', readyState: 'complete', body: {innerText: '過去經歷'}, links: [],
+  querySelector: () => null, getElementById: () => null, createTreeWalker: () => ({nextNode: () => null}),
+  querySelectorAll: selector => selector.startsWith('input,') ? controls : []};
+const page = (READER)();
+assert.equal(page.fields.length, 3);
+assert.equal(page.fields[0].value, '0');
+assert.equal(page.fields[0].section, '過去經歷');
+assert.equal(page.fields[1].value, 'user@example.test');
+assert.equal(page.fields[2].checked, false);
+let selected = 'true';
+controls[0].getAttribute = key => key === 'role' ? 'option' : key === 'aria-selected' ? selected : null;
+const first = (READER)();
+selected = 'false';
+const second = (READER)();
+assert.equal(first.text, second.text);
+assert.notDeepEqual(first.fields, second.fields);
+""".replace('READER', apply_tab.PROFILE_FN)
+        result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_source_hash_and_pdf_text_share_the_same_captured_bytes(self):
+        import hashlib
+        pdf = Path(self.home) / 'original.pdf'
+        original = b'Original source A'
+        pdf.write_bytes(original)
+        def extract(captured_path):
+            pdf.write_bytes(b'Changed source B')
+            text = Path(captured_path).read_bytes().decode()
+            pdf.write_bytes(original)
+            return text
+        with patch('settings_api.pdf_text', side_effect=extract):
+            captured = ps.capture_source(str(pdf))
+        self.assertEqual(captured, {'sha256': hashlib.sha256(original).hexdigest(), 'text': original.decode()})
+
+    def test_concurrent_cache_write_cannot_erase_a_human_approval(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import fcntl
+        import threading
+        self.assertEqual(self.review(), [])
+        payload = json.loads((self.out / 'profile-material.json').read_text())
+        entered, release = threading.Event(), threading.Event()
+        original = ps.registry
+        def paused_read():
+            reg = original()
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError('測試交錯等待逾時')
+            return reg
+        with patch.object(ps, 'registry', side_effect=paused_read), ThreadPoolExecutor(max_workers=2) as pool:
+            writer = pool.submit(ps.remember_review, self.decision['platform'], 'zh', 'base', FIXED, 'later', {'status': 'complete'})
+            try:
+                self.assertTrue(entered.wait(5))
+                with open(ps.REG + '.lock', 'w') as lock:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                human = pool.submit(ps.approve_fact, self.decision['platform'], payload, FIXED, 'text:0', '我核准這段內容')
+            finally:
+                release.set()
+            writer.result(timeout=5)
+            human.result(timeout=5)
+        self.assertEqual(len(ps.approved_facts(self.decision['platform'])), 1)
+        self.assertEqual(ps.where(self.decision['platform'], 'zh', 'base')['content_review']['fingerprint'], 'later')
+
+    def test_broken_registry_and_context_are_not_silently_endorsed(self):
+        bad = {'statement': '過去在 Acme 工作', 'scope': self.home, 'context': {}}
+        ps._save_registry({self.decision['platform']: {'approved_facts': [bad]}})
+        with self.assertRaises(ValueError):
+            ps.approved_facts(self.decision['platform'])
+        Path(ps.REG).write_text('{broken')
+        with self.assertRaises(ValueError):
+            ps.remember(self.decision['platform'], 'zh', 'base', FIXED)
+        self.assertEqual(Path(ps.REG).read_text(), '{broken')
 
     def test_text_date_meaning_is_judged_but_calendar_and_source_are_checked(self):
         text = '刊登日期：2026年九月七日'

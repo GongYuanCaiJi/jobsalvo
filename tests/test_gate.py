@@ -92,6 +92,10 @@ SUBMIT_LIES = {
 
 # ---- 其他 7 種流程(#317):真相是程式交給 agent 的原文;一列一列的交件單,謊話填在第一列 ----
 A, B = 'https://ex.test/job/a', 'https://ex.test/job/b'
+PROFILE_CHECKS = {MINE: [
+    {'id': 'source:0', 'status': 'complete', 'reason': '原稿完整呈現', 'basis': ['text:0']},
+    {'id': 'text:0', 'status': 'complete', 'reason': '頁面有原稿來源', 'basis': ['source:0']},
+]}
 FLOWS = {
     # 刊登日期:程式從頁面挑出跟日期有關的那幾行交給它
     'posted_at': dict(
@@ -226,10 +230,12 @@ FLOWS = {
         judged={'findings.kind': 'interview', 'findings.todo': '回覆可面談時段',
                 'findings.date': '2026-09-03', 'job_ids.applied_at': '2026-09-01'}),
     'profile_review': dict(
-        honest={'status': 'complete', 'reason': '重要內容完整', 'quotes': {MINE: '目前履歷內容'}},
-        truth=lambda: gate.Truth(given={MINE: '目前履歷內容'}),
+        honest={'status': 'complete', 'reason': '重要內容完整', 'quotes': {MINE: '目前履歷內容'}, 'checks': PROFILE_CHECKS},
+        truth=lambda: gate.Truth(given={MINE: '目前履歷內容'}, attachments={'profile_items': {MINE: {
+            'source:0': {'kind': 'source', 'value': '目前履歷內容'}, 'text:0': {'kind': 'text', 'value': '目前履歷內容'},
+        }}}),
         lies={'quotes': ({MINE: '沒有出現的內容'}, ['指定頁面', '引用'])},
-        judged={'status': 'complete'}),
+        judged={'status': 'complete', 'checks': PROFILE_CHECKS}),
 }
 
 

@@ -36,6 +36,12 @@ class Report(unittest.TestCase):
         self.assertEqual(len(ar.open_items(fb)), 1)
         self.assertEqual(len(fb['__inbox__']), 2)
 
+    def test_a_report_can_carry_what_his_done_confirms(self):
+        fb, first, later = {}, [{'item': 'field:0'}], [{'item': 'field:1'}]
+        ar.apply_report(fb, '代投', '平台上有原稿沒寫的內容', job=U, now='t1', approve=first)
+        it = ar.apply_report(fb, '代投', '平台上有原稿沒寫的內容', job=U, now='t2', approve=later)
+        self.assertEqual((it['n'], it['approve']), (2, later))      # 同一則再報:帶的是這一輪的清單
+
     def test_empty_report_is_refused(self):
         with self.assertRaises(ValueError):
             ar.apply_report({}, '代投', '  ')

@@ -130,6 +130,7 @@ def get():
     prefs.ensure_note()
     preferences_custom, preferences_agent = prefs.note_sections()
     C = cf.C
+    import profile_sync
     render_warnings = markdown_warnings()
     return {
         'settings': cf.user_settings(),
@@ -151,6 +152,7 @@ def get():
         'doctor': doctor.check_environment(),
         'service': os.path.exists(__import__('install_service').plist_path()),
         'render_warnings': render_warnings,
+        'profile_status': profile_sync.status(),   # 平台上那份履歷跟母稿的關係,母稿一改就變
         'git_history': _git_history_status(),
         'version': version(),          # 放最後:上面讀設定時可能順手把舊格式改寫進檔
     }

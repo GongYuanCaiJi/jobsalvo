@@ -313,10 +313,38 @@ def _review_quotes(said, sheet, truth):
     return '指定頁面缺少可驗引用：' + '、'.join(missing) if missing else None
 
 
+def _review_checks(said, sheet, truth):
+    """只驗逐頁覆蓋與引用身分；每項意思仍是 Agent 判讀。"""
+    pages = (truth.attachments or {}).get('profile_items')
+    if not pages or not isinstance(said, dict) or set(said) != set(pages):
+        return '逐項判讀沒有涵蓋全部指定頁面'
+    for url, items in pages.items():
+        rows = said[url]
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            return f'{url} 的逐項判讀格式不正確'
+        ids = [r.get('id') for r in rows]
+        wanted = {i for i, item in items.items() if item['kind'] != 'approved'}
+        if any(not isinstance(i, str) for i in ids) or len(ids) != len(set(ids)) or set(ids) != wanted:
+            return f'{url} 的逐項判讀有漏項、重複或不屬於本輪的項目'
+        for row in rows:
+            status, basis = row.get('status'), row.get('basis')
+            # unsourced:頁面上有、原稿與核准來源都沒有的內容,交使用者在回報確認一次;原稿寫了卻不一樣是 issues
+            if status not in ('complete', 'issues', 'unknown', 'unsourced') or _review_reason(row.get('reason'), sheet, truth):
+                return f'{url} {row["id"]} 沒有有效判讀結果或理由'
+            if not isinstance(basis, list) or any(not isinstance(i, str) or i not in items for i in basis):
+                return f'{url} {row["id"]} 引用的依據不在本輪材料'
+            if status == 'complete' and not basis:
+                return f'{url} {row["id"]} 的 complete 沒有判讀依據'
+            if sheet.get('status') == 'complete' and status != 'complete':
+                return f'{url} {row["id"]} 尚有 {status}：{row["reason"]}'
+    return None
+
+
 PROFILE_REVIEW = {
     'status': Cell(JUDGED, '履歷內容是否完整', 'Agent 對本輪指定原稿與讀回內容的判斷', _review_status, required='沒有 status 判讀結果'),
     'reason': Cell(WORDS, '判讀說明', '保留給人核對', _review_reason, required='沒有 reason 判讀說明'),
     'quotes': Cell(CHECK, '各頁引用', '每一份指定讀回頁面上的逐字引用', _review_quotes, required='沒有 quotes 引用'),
+    'checks': Cell(JUDGED, '逐項內容判讀', 'Agent 判斷；程式核對覆蓋與本輪依據', _review_checks, required='沒有 checks 逐項判讀'),
 }
 
 

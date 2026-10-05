@@ -49,6 +49,73 @@ class Diff(unittest.TestCase):
         ds = ps.diff(moved, ps.md_sections('## 個人名片\n\n- ' + want[0][1]))
         self.assertEqual([d['missing'] for d in ds], [['居住地：台中市西屯區']])   # 值改了照樣抓到,只列那一格
 
+    def test_account_data_is_checked_loosely_and_only_warns(self):
+        want = [('個人名片[0]', '姓名：王小明｜Email：ming.wang@example.test｜手機：0912-345-678｜居住地：台中市西屯區', [])]
+        page = {'text': '王小明\n聯絡電話 0912345678\n電子信箱 ming.wan…\n聯絡地址 台中市 西屯區', 'fields': []}
+        self.assertEqual(ps.account(page, want), [])        # 信箱截斷、電話沒有連字號、地址拆開都算對
+        bad = {'text': '王小明\n聯絡電話 0988000111\n電子信箱 other@x.test\n聯絡地址 高雄市 左營區', 'fields': []}
+        self.assertEqual([m.split(':')[0] for m in ps.account(bad, want)], ['Email', '電話', '居住地'])
+
+    def test_account_check_does_not_assume_the_master_layout_or_language(self):
+        # 母稿沒有「標籤：值」的聯絡行、全英文:信箱、電話在整份裡找,姓名取第一個標題
+        want = [('header', '# Jane Doe\n\njane.doe@example.test | +1 415 555 0134 | Berlin', [])]
+        ok = {'text': 'Jane Doe\nPhone\n(415) 555-0134\njane.doe@exa…', 'fields': []}
+        self.assertEqual(ps.account(ok, want), [])
+        self.assertEqual([m.split(':')[0] for m in ps.account({'text': 'John Roe', 'fields': []}, want)],
+                         ['Email', '電話', '姓名'])
+
+    def test_extras_reads_the_shown_text_of_a_dropdown_and_ignores_unset_numbers(self):
+        want = [('x', '學歷：示範大學 物理學系', [])]
+        fields = [{'label': 'Degree', 'type': 'select-one', 'value': '3', 'shown': '博士'},
+                  {'label': 'Height', 'type': 'number', 'value': '0'},
+                  {'label': 'Pick one', 'type': 'select-one', 'value': '', 'shown': 'Please select'}]
+        fields += [{'label': 'x', 'type': 'select-one', 'value': '請選擇（年）'}, {'label': 'y', 'type': 'radio', 'value': 'false'}]
+        self.assertEqual(ps.extras({'fields': fields}, want), ['Degree=博士'])      # 全形占位字、radio 的 false 都不算
+
+    def test_a_confirmed_extra_is_remembered_in_the_registry(self):
+        ps.remember('example.test', 'zh', 'a', 'https://example.test/p', 'https://example.test/e')
+        self.assertEqual(ps.accept_extra('example.test', 'zh', 'a', '婚姻狀況', '不提供'), '婚姻狀況=不提供')
+        self.assertEqual(ps.where('example.test', 'zh', 'a')['accepted'], ['婚姻狀況=不提供'])
+        with self.assertRaises(ValueError):
+            ps.accept_extra('example.test', 'zh', 'nope', 'x', 'y')
+
+    def test_account_warning_never_blocks_approval(self):
+        w = {'read': 'https://x/', 'edit': 'https://x/'}
+        warn = {'where': '帳號資料(只提醒)', 'want': '電話:不一致', 'missing': [], 'links': [], 'warn': True}
+        delivery = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': 'https://www.104.com.tw/p'}
+        with patch.object(run, 'profile_check', return_value=(w, [warn], '')), \
+                patch.object(ps, 'profile_key', return_value='104'), patch.object(run, '_pick', return_value=('zh', 'a')):
+            self.assertEqual(run.profile_after('https://www.104.com.tw/job/1', {'delivery': delivery, 'profile': {}}), [])
+
+    def test_a_field_the_master_never_wrote_is_caught(self):
+        # 反向:平台頁面上有值、母稿沒有的欄位(身高、婚姻…)要列出來,不能存檔就算過
+        want = [('個人名片[0]', '學歷：示範大學 物理學系｜兵役：免役', [])]
+        fields = [{'label': '身高', 'type': 'number', 'value': '171'},
+                  {'label': '兵役狀況', 'type': 'text', 'value': '免役'},
+                  {'label': '手機號碼', 'type': 'tel', 'value': '0912345678'},
+                  {'label': '體重', 'type': 'number', 'value': '0'}]
+        self.assertEqual(ps.extras({'fields': fields}, want), ['身高=171'])   # 母稿有的、聯絡方式、空值都不算
+
+    def test_a_long_text_field_is_checked_sentence_by_sentence(self):
+        # 自傳欄:整段不會原樣出現在母稿(多了標題、換了段),一句一句都找得到才算有來源;多一句就列出來
+        want = [('自傳[0]', '碰到說不通的東西，我沒辦法放著不管。別人覺得正常的地方，只要有一點對不上，我就會一直挖到弄懂它。', [])]
+        body = '【自傳】\n碰到說不通的東西，我沒辦法放著不管。\n別人覺得正常的地方，只要有一點對不上，我就會一直挖到弄懂它。'
+        self.assertEqual(ps.extras({'fields': [{'label': '自傳', 'type': 'textarea', 'value': body}]}, want), [])
+        more = ps.extras({'fields': [{'label': '自傳', 'type': 'textarea', 'value': body + '\n我有十年的帶人經驗，管過五十人團隊。'}]}, want)
+        self.assertEqual(len(more), 1)
+        self.assertIn('這欄有 1 句母稿沒有', more[0])
+
+    def test_headings_and_links_the_master_has_are_a_source_too(self):
+        want = [('專案成就[0]', '開源貢獻：修了一個回報了很久的問題，被維護者採用。', ['https://example.test/pull/1'])]
+        body = '【專案成就】\n開源貢獻：修了一個回報了很久的問題，被維護者採用。 https://example.test/pull/1'
+        self.assertEqual(ps.extras({'fields': [{'label': '自傳', 'type': 'textarea', 'value': body}]}, want), [])
+
+    def test_an_extra_he_confirmed_is_not_asked_again(self):
+        want = [('個人名片[0]', '兵役：免役', [])]
+        page = {'fields': [{'label': '婚姻狀況', 'type': 'radio', 'value': '不提供'}]}
+        self.assertEqual(ps.extras(page, want), ['婚姻狀況=不提供'])
+        self.assertEqual(ps.extras(page, want, ['婚姻狀況=不提供']), [])
+
     def test_platform_is_recognised_from_the_job_url(self):
         self.assertEqual(ps.platform_of('https://www.104.com.tw/job/8bbbb'), '104')
         self.assertIsNone(ps.platform_of('https://attacker.example/path/104.com.tw/profile'))
@@ -72,6 +139,35 @@ class Step(unittest.TestCase):
         self.assertNotIn('profile.equivalents', s)
         self.assertNotIn('field_mapping', s)
 
+
+    def test_only_what_changed_in_the_master_since_the_last_passed_sync_is_handed_to_the_agent(self):
+        known = {'platform': '104', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'fixed', 'fixed_url': 'R'}
+        old = '# 履歷\n求職條件：台北市或遠端｜錄取後一個月內可上班\n專案：Delta\n'
+        with tempfile.TemporaryDirectory() as d:
+            master = os.path.join(d, 'master.md')
+            def step(base):
+                with patch.object(ps, 'synced_source', return_value=base), \
+                        patch.object(ps, 'where', return_value={'read': 'R', 'edit': 'E'}):
+                    return run.profile_step('https://www.104.com.tw/job/1', known, master)
+            with open(master, 'w', encoding='utf-8') as f:
+                f.write(old)
+            same = step(old)                                   # 原稿沒改:整步跳過
+            self.assertIn('不用打開、不用核對、不用改平台履歷的文字', same)
+            self.assertNotIn('逐段核對', same)
+            self.assertIn('不用打開', step(old + '\n\n'))       # 只差空白也算沒改
+            with open(master, 'w', encoding='utf-8') as f:
+                f.write(old.replace('台北市或遠端｜錄取後一個月內', '台北市、新北市或遠端｜錄取後兩週內'))
+            delta = step(old)                                  # 改了一句:只交那一句
+            self.assertIn('-求職條件：台北市或遠端｜錄取後一個月內可上班', delta)
+            self.assertIn('+求職條件：台北市、新北市或遠端｜錄取後兩週內可上班', delta)
+            self.assertNotIn('專案：Delta', delta)
+            self.assertNotIn('逐段核對', delta)
+            self.assertIn('只到 E', delta)
+            self.assertIn('platform_notes', delta)                # 試出來的操作方法記下來,下次照做
+            self.assertIn(run.SAME_MEANING, delta)                # 同步和判讀用同一份「一樣」的定義
+            self.assertIn(run.SAME_MEANING, run.PROFILE_REVIEW_RULES)
+            self.assertIn('逐段核對', step(None))              # 沒記過上次那一版:整份對一遍
+            self.assertIn('逐段核對', step('\n'.join(f'第 {i} 行' for i in range(60))))   # 大改:整份對一遍
 
 class Equivalents(unittest.TestCase):
     """平台用自己說法寫的格子:agent 回報「母稿這一格 ＝ 頁面上這幾個字」,程式驗過才記,以後照記下的比。"""
@@ -97,6 +193,41 @@ class Equivalents(unittest.TestCase):
         with patch.object(ps.cf, 'master', return_value=self.master):
             return ps.check('alpha.example', 'zh', 'general', reader=lambda _u: page or self.page,
                             reported=reported, **kw)
+
+    def test_status_follows_the_master_without_anyone_registering_a_change(self):
+        def state():
+            with patch.object(ps.cf, 'master', return_value=self.master):
+                return [r['state'] for r in ps.status()]
+        self._master('希望地點：台中市')
+        self.assertEqual(state(), ['unchecked'])                      # 登記了、還沒讀回比過
+        self._check()
+        self.assertEqual(state(), ['ok'])                             # 比過、對得上
+        self._master('希望地點：高雄市')
+        self.assertEqual(state(), ['master-changed'])                 # 母稿一改,當下就變落後,沒有誰要記得去標
+        self._check(page=dict(self.page, text=self.page['text'].replace('台中市', '高雄市')))
+        self.assertEqual(state(), ['ok'])
+        self._master('希望地點：新竹市')
+        self._check()                                                  # 平台還是舊的:比過了,但對不上
+        self.assertEqual(state(), ['differs'])
+
+    def test_status_skips_a_platform_whose_master_is_not_set_up(self):
+        with patch.object(ps.cf, 'master', return_value=None):
+            self.assertEqual(ps.status(), [])
+
+    def test_a_combined_profile_must_hold_every_master_it_names(self):
+        other = os.path.join(self.tmp, 'other.md')
+        with open(other, 'w', encoding='utf-8') as f:
+            f.write('# 候選人\n\n## 個人名片\n\n- 希望地點：台中市\n\n## 專案\n\n交易所體驗金漏洞分析：多帳號把不可提領的點數換成可提領資產。\n')
+        self._master('希望地點：台中市')
+        page = dict(self.page, text=self.page['text'])
+        with patch.object(ps.cf, 'master', side_effect=lambda v, _l: other if v == 'b' else self.master):
+            want = ps.expected('alpha.example', 'zh', 'a+b')
+            self.assertEqual(len([w for w in want if '希望地點' in w[1]]), 1)      # 兩份都有的同一句只算一次
+            miss = [d['where'] for d in ps.diff(page, want)]
+            self.assertTrue(any(w.startswith('b:') for w in miss))                 # 只有 b 才有的內容要在頁面上
+            full = dict(page, text=page['text'] + '\n交易所體驗金漏洞分析\n多帳號把不可提領的點數換成可提領資產')
+            self.assertFalse([d for d in ps.diff(full, want) if d['where'].startswith('b:')])
+            self.assertNotEqual(ps._master_fp('zh', 'a+b'), ps._master_fp('zh', 'a'))
 
     def test_unreadable_master_is_a_problem_not_a_match(self):
         # 以前母稿讀不出來就當成沒有要比的段落:什麼都沒比,結果卻是「跟母稿對得上」

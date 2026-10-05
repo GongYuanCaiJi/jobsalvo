@@ -3875,9 +3875,12 @@
       var styleRow=markdown?'<div class="cfg-row"><label class="cfg-k">PDF 樣式</label><span class="cfg-file">'+
         (style?'🎨 '+esc(fileName(style)):'<i>未指定，使用瀏覽器原生排版</i>')+'</span><label class="cfg-b">'+
         (style?'換樣式':'上傳 CSS')+'<input type="file" accept=".css,text/css" data-cfstyle="'+escA(which)+'" hidden></label></div>':'';
+      var platformRows=kind!=='resume'?'':(CFGD.profile_status||[]).filter(function(r){return r.variant===id&&r.lang===l&&r.state!=='ok';}).map(function(r){
+        var why={'master-changed':'落後母稿(母稿改過,還沒讀回比對)','differs':'跟母稿對不上(上次比對有差)','unchecked':'還沒讀回比對過'}[r.state];
+        return '<div class="cfg-row"><span class="cfg-file">⚠ '+esc(r.platform)+' 上這一份'+esc(why)+'</span></div>';}).join('');
       var pageWarning=warning?'<div class="cfg-row"><span class="cfg-file">⚠ '+esc(fileName(f))+' 排成 '+warning.pages+' 頁；建議檢查版面。</span></div>':'';
       return '<div class="cfg-row"><label class="cfg-k">'+esc(langName(l))+'版</label><span class="cfg-file'+(gone?' gone':'')+'">'+(f?(gone?'⚠ 找不到檔案:':'📄 ')+esc(fileName(f)):'<i>還沒上傳</i>')+'</span>'+
-        (gone?'':preview)+'<label class="cfg-b">'+(f&&!gone?'換一份':(gone?'重新上傳':'上傳'))+'<input type="file" data-cfup="'+escA(which)+'" hidden></label></div>'+styleRow+pageWarning;}).join('');
+        (gone?'':preview)+'<label class="cfg-b">'+(f&&!gone?'換一份':(gone?'重新上傳':'上傳'))+'<input type="file" data-cfup="'+escA(which)+'" hidden></label></div>'+styleRow+pageWarning+platformRows;}).join('');
   }
   // 他看得懂的語言:附翻譯用它,選简体中文時看板介面也整個換成簡體(zhView)。清單外的舊值照樣留著、選得到。
   // 履歷有哪些語言:勾選,不用他打「zh, en」這種代碼;設定檔裡原本就有的其他語言也列出來

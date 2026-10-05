@@ -105,26 +105,23 @@ PROFILE_FN = """() => {
     return (el.getAttribute('aria-label') || labelled || labels || el.getAttribute('placeholder') || '').trim();
   };
   const sectionFor = el => {
-    const group = el.closest('fieldset,section,[role=group]');
+    const group = el.closest('fieldset,section,[role=group],[role=radiogroup],[role=listbox]');
     const heading = group && group.querySelector('legend,[role=heading],h1,h2,h3,h4,h5');
-    return heading ? (heading.innerText || '').trim() : '';
+    return group ? (labelFor(group) || (heading && heading.innerText) || '').trim() : '';
   };
-  const controls = [...document.querySelectorAll('input,textarea,select,[role=textbox],[role=combobox],[contenteditable=true]')]
-    .filter(el => !['hidden','password','submit','button','file','image','reset'].includes((el.type || '').toLowerCase()))
-    .filter(el => {const s = getComputedStyle(el); return el.getClientRects().length && s.display !== 'none' && s.visibility !== 'hidden';});
-  const seen = new Map();
-  const fields = controls.map(el => {
-    const label = labelFor(el), section = sectionFor(el);
-    const role = el.getAttribute('role') || (el.tagName === 'TEXTAREA' ? 'textbox' :
-      el.tagName === 'SELECT' ? 'combobox' : el.isContentEditable ? 'textbox' : 'textbox');
-    const type = (el.type || el.tagName.toLowerCase()).toLowerCase();
-    const autocomplete = (el.getAttribute('autocomplete') || '').trim();
-    const key = JSON.stringify([label.toLocaleLowerCase(), section.toLocaleLowerCase(), role.toLowerCase(), type, autocomplete.toLowerCase()]);
-    const occurrence = seen.get(key) || 0; seen.set(key, occurrence + 1);
-    const value = (el.isContentEditable ? el.innerText :
-      (el.tagName === 'SELECT' ? [...el.selectedOptions].map(x => x.text).join(' ') : el.value));
-    return {label, section, role, type, autocomplete, occurrence, value: value || ''};
-  });
+  // 保留欄位上下文與選取狀態(勾選、aria),不猜哪些值是個人聲明;送出、按鈕類 input 不是資料
+  const fields = [...document.querySelectorAll('input,textarea,select,[role=textbox],[role=combobox],[role=checkbox],[role=radio],[role=switch],[role=listbox],[role=option],[role=slider],[role=spinbutton],[contenteditable=true],[aria-selected],[aria-checked],[aria-pressed],[aria-valuenow],[aria-valuetext],[aria-activedescendant],[aria-expanded]')]
+    .filter(el => !['hidden','password','file'].includes((el.type || '').toLowerCase()))
+    .filter(el => !(el.tagName === 'INPUT' && ['submit','button','image','reset'].includes((el.type || '').toLowerCase())))
+    .filter(el => {const s = getComputedStyle(el); return el.getClientRects().length && s.display !== 'none' && s.visibility !== 'hidden';})
+    .map(el => ({id: el.id || '', label: labelFor(el), section: sectionFor(el), role: el.getAttribute('role') || '',
+      type: (el.type || el.tagName.toLowerCase()).toLowerCase(), autocomplete: el.getAttribute('autocomplete') || '',
+      text: el.innerText || '', parentText: el.parentElement?.innerText || '',
+      value: (el.isContentEditable ? el.innerText : el.value) ?? '',
+      shown: el.tagName === 'SELECT' ? [...el.selectedOptions].map(x => x.text).join(' ') : undefined,
+      checked: ['checkbox','radio'].includes(el.type) ? el.checked : undefined,
+      aria: Object.fromEntries(['aria-selected','aria-checked','aria-pressed','aria-expanded','aria-activedescendant',
+        'aria-valuenow','aria-valuetext','aria-controls','aria-labelledby','aria-describedby'].map(a => [a, el.getAttribute(a)]))}));
   const emailQuery = new URL(location.href).searchParams;
   const emailThreadPrintView = emailQuery.get('view') === 'pt' &&
     emailQuery.get('search') === 'all' && emailQuery.has('th') &&
