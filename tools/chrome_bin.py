@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""chrome_bin —— 哪個 Chrome、有哪些設定檔。印 PDF / 截圖 / 跑 JS、開 agent 的 Chrome、環境檢查都照這裡找。"""
-import os, json, shutil
+"""chrome_bin —— 開發工具(看板檢查、介面截圖)用哪個 Chrome。使用者會跑到的程式都走 ego,不用它。"""
+import os, shutil
 
 GUI = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-# macOS 上 Chrome 放使用者資料的地方;設定檔清單在它的 Local State(Chrome 自己的設定檔選單讀的就是這份)。
-USER_DATA = os.path.expanduser('~/Library/Application Support/Google/Chrome')
-# Chrome 線上應用程式商店上的官方擴充功能(ID 固定):Codex 的叫 ChatGPT。
-EXTENSIONS = {'codex': ('hehggadaopoacecdllhhajmbjkdcmajg', 'ChatGPT'),
-              'claude': ('fcoeoabgfenejglbffodgkkbkcdhcgfn', 'Claude')}
 
 
 def find():
@@ -29,24 +24,6 @@ def chrome():
     return exe, ['--headless=new']
 
 
-def profiles(root=None):
-    """這台電腦 Chrome 的設定檔:[{dir: 資料夾名, name: Chrome 右上角看到的名字, ext: 裝了哪些官方擴充功能}]。
-    讀不到(沒裝 Chrome、不是 Mac)回 []。"""
-    root = root or USER_DATA
-    try:
-        with open(os.path.join(root, 'Local State'), encoding='utf-8') as f:
-            cache = json.load(f)['profile']['info_cache']
-    except (OSError, ValueError, KeyError, TypeError):
-        return []
-    out = [{'dir': d, 'name': (v or {}).get('name') or d,
-            'ext': [k for k, (ext_id, _) in EXTENSIONS.items()
-                    if os.path.isdir(os.path.join(root, d, 'Extensions', ext_id))]}
-           for d, v in cache.items() if os.path.isdir(os.path.join(root, d))]   # 刪掉的設定檔 Chrome 還會記著名字
-    names = [p['name'] for p in out]
-    for p in out:                        # 同名的(好幾個「daniel」)附上資料夾名,才分得出來
-        if names.count(p['name']) > 1:
-            p['name'] += f"({p['dir']})"
-    return sorted(out, key=lambda p: p['name'].lower())
 
 
 if __name__ == '__main__':

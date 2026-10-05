@@ -3,14 +3,13 @@
 """
 gate —— 安檢門(GLOSSARY「安檢門」「交件單」):agent 交回來的事實進到程式的唯一入口。
 
-每一種會叫 agent 的流程,agent 交一張交件單(幫你填表:填表、修改的 fill.json、送出前核對的 pre-submit.json、
+每一種會叫 agent 的流程,agent 交一張交件單(幫你填表:填表、修改的 fill.json、
 送出的 submit.json;其他 7 種流程各自的一份,見 FILES)。單子本身不是證據:程式只准用這裡核對過的格子。
 
   read(out, kind)              唯一打開交件單的地方(其他地方直接讀,tests/test_gate.py 的結構測試就失敗)
   inspect(kind, sheet, truth)  每一格跟程式自己看到的真相(Truth:頁面、紀錄、檔案、程式自己的設定)比;
                                回 Verdict:problems 每一條講「哪一格、agent 說什麼、實際是什麼」,facts 只有登記過的格子
   page_changes(seen, page)     按確認送出前、送出前:程式讀到的那一頁跟驗收時核對過的樣子比,哪一格從什麼變成什麼
-  after_send(page, form_url)   按了送出之後:程式讀到的那一頁是沒送出(還停在申請表)、送出了(有成功的字),還是判斷不了
 
 每一格都登記核對方式(SHEETS;幫你填表的在 gate_apply,其他 7 種流程的在 gate_flows,型別在 gate_cells),四種:
   核對       跟程式看到的比,對不上就擋
@@ -26,7 +25,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import evidence  # noqa: E402
 # 用的地方只 import gate:幫你填表的頁面判斷、型別從這裡拿(F401:這幾個是給別處用的)
-from gate_apply import (FILL, FORM_STILL, NOT_SENT, PRE_SUBMIT, SENT, SENT_WORDS, SUBMIT, after_send,  # noqa: E402,F401
+from gate_apply import (FILL, PROFILE_REVIEW, SUBMIT,  # noqa: E402,F401
                         page_changes, seen)
 from gate_cells import (CHECK, DECIDED, JUDGED, UNUSED, WORDS, Row, RowTruth, Truth,  # noqa: E402,F401
                         Verdict, short)
@@ -34,7 +33,7 @@ from gate_flows import (CUSTOMIZE, LINK_STATUS, POSTED_AT, PREPARE, REPLY, RESEA
                         RESEARCH_SEARCH, SUGGEST_CATS)
 
 # 每一種交件單的檔名(* 是每一輪、每一批不一樣的那一段)。程式裡別處打開這些檔,tests/test_gate.py 的結構測試就失敗
-FILES = {'fill': 'fill.json', 'pre_submit': 'pre-submit.json', 'submit': 'submit.json',
+FILES = {'fill': 'fill.json', 'submit': 'submit.json', 'profile_review': 'profile-review.json',
          'posted_at': 'posted_age_results.json', 'link_status': 'verdicts.json',
          'suggest_cats': 'suggest.json', 'customize': 'feedback_reports.json', 'prepare': 'fill.json',
          'research_search': 'search_*.json', 'research_judge': 'judge_*.json', 'reply': 'replies.json'}
@@ -48,7 +47,7 @@ ROWS = {'posted_at': {'dates': 'url', 'inaccessible': 'url'}, 'link_status': {'j
         'research_search': {'candidates': 'url'}, 'research_judge': {'jobs': 'id'},
         'reply': {'findings': 'url', 'job_ids': 'id', 'inaccessible': 'source'}}
 
-SHEETS = {'fill': FILL, 'pre_submit': PRE_SUBMIT, 'submit': SUBMIT, 'posted_at': POSTED_AT,
+SHEETS = {'fill': FILL, 'submit': SUBMIT, 'profile_review': PROFILE_REVIEW, 'posted_at': POSTED_AT,
           'link_status': LINK_STATUS, 'suggest_cats': SUGGEST_CATS, 'customize': CUSTOMIZE, 'prepare': PREPARE,
           'research_search': RESEARCH_SEARCH, 'research_judge': RESEARCH_JUDGE, 'reply': REPLY}
 
@@ -138,7 +137,7 @@ def inspect(kind, sheet, truth):
 def _evidence(kind, verdict, truth):
     """其他 7 種流程:安檢門的比對結果記進開著的那一輪證據(幫你填表那幾種 apply_run 自己記,講得更細)。
     有卡的(準備履歷一張一張核對)只記進那一張;一列一列的記每一列是誰、收下沒、判斷了什麼。"""
-    if kind in ('fill', 'pre_submit', 'submit'):
+    if kind in ('fill', 'submit'):
         return
     rnd = evidence.active()
     if rnd is None:
@@ -158,9 +157,19 @@ def read(out, kind, where=None):
     where:agent 自己跑 form_record --from-fill 時給的那個檔(沒給就是 out 底下那一份)。"""
     try:
         with open(where or path(out, kind), encoding='utf-8') as fh:
-            sheet = json.load(fh)
-    except (OSError, ValueError):   # 沒寫出來或寫壞了
+            text = fh.read()
+    except OSError:                 # 沒寫出來
         return None, f'沒有寫出 {FILES[kind]}'
+    try:
+        sheet = json.loads(text)
+    except ValueError as e:         # 寫了但不是合法 JSON:講清楚,不要說成沒寫
+        # 物件完整、後面只多了收尾的括號(agent 手寫長字串時多關一個,2026-10-05 104):意思不變,照收
+        try:
+            sheet, end = json.JSONDecoder().raw_decode(text.lstrip())
+        except ValueError:
+            sheet, end = None, 0
+        if sheet is None or text.lstrip()[end:].strip(' \t\r\n}]'):
+            return None, f'{FILES[kind]} 寫壞了,不是合法 JSON:{e}'
     if kind in LIST_SHEETS and isinstance(sheet, list):
         sheet = {LIST_SHEETS[kind]: sheet}
     if not isinstance(sheet, dict):

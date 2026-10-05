@@ -14,7 +14,7 @@ import unittest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 # 要擋的詞。每個都要在 GLOSSARY 的某一條 _Avoid_ 裡,GLOSSARY 才是用詞的依據
-WORDS = ('代投', '外掛')
+WORDS = ('代投',)
 
 # 只給開發者跑、不會出現在他面前的工具
 DEV_ONLY = ('tools/board_check*.py', 'tools/apply_accept.py', 'tools/realdata_check.py')
@@ -23,13 +23,6 @@ DEV_ONLY = ('tools/board_check*.py', 'tools/apply_accept.py', 'tools/realdata_ch
 ALLOWED = (
     # 給 agent 看的 prompt,不是畫面文字
     ('tools/apply_run.py', '你是代投 agent', '給 agent 的 prompt'),
-    ('tools/apply_run.py', '用 Codex 的 Chrome 外掛在 agent 專用的 Chrome 打開申請表單', '給 agent 的 prompt'),
-    ('tools/apply_run.py', '使用者在 {approve_at} 在看板上按了', '給 agent 的 prompt'),
-    ('tools/apply_run.py', '關分頁會讓外掛跟 Chrome 斷線', '給 agent 的 prompt'),
-    ('tools/agent_run.py', '【瀏覽器鐵律(代投)】', '給 agent 的 prompt'),
-    ('tools/profile_sync.py', '取檔方式(一定要照做)', '給 agent 的 prompt'),
-    ('tools/profile_sync.py', '--from 代投', '給 agent 照著跑的指令(回報來源代號)'),
-    ('tools/apply_tab.py', '() => {', '在 Chrome 裡跑的程式碼'),
 )
 
 

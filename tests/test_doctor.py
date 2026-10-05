@@ -104,8 +104,7 @@ class AgentCapability(unittest.TestCase):
         ags = [{'id': 'codex', 'runtime': 'codex', 'browser': True}]
         for installed, want in (({}, False), ({'codex': True}, True)):
             with mock.patch.object(doctor, '_runtime_path', side_effect=lambda r, which=None: f'/fake/{r}' if r in installed else None), \
-                    mock.patch.object(doctor, '_logged_in', side_effect=lambda r, p: installed[r]), \
-                    mock.patch('agent_chrome.conf', return_value={}):
+                    mock.patch.object(doctor, '_logged_in', side_effect=lambda r, p: installed[r]):
                 checks = {c['key']: c for c in doctor.check_environment(ags)['checks']}
             self.assertEqual(checks['browser_agent']['ok'], want, installed)
 

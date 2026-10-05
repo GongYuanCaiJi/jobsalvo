@@ -1,7 +1,7 @@
 """
 reply_run —— 「📬 查回音」:已投遞的卡,誰回了、回了什麼。
 
-agent 在自己的 Chrome 搜尋適合的來源,回傳回音證據、平台應徵紀錄上的職缺和無法讀取的來源。
+程式先在 agent 的瀏覽器讀信箱與平台應徵紀錄,讀不到的交給 agent 補查;agent 搜尋適合的來源,回傳回音證據、平台應徵紀錄上的職缺和無法讀取的來源。
 程式只驗證交件形狀,再依證據更新看板、對帳應徵紀錄(sync_sent)、記錄待辦和無下文狀態。
 """
 import contextlib, os, sys, json, time, argparse, datetime, hashlib, re, urllib.parse
@@ -244,6 +244,7 @@ _GMAIL_EMPTY_MARKERS = (
     'no conversations match your search', 'no messages matched your search',
     'no results found', '沒有符合搜尋條件的郵件', '沒有符合搜尋條件的對話',
     '找不到符合搜尋條件的郵件', '找不到符合條件的結果', '沒有符合搜尋條件的結果',
+    '找不到與你的搜尋條件相符的郵件',     # Gmail 繁中介面實際的字(2026-10-05 用 ego 讀到的)
 )
 
 
@@ -338,30 +339,13 @@ def _gmail_search_problem(page):
 
 # ---- 補查來源的核實(#289 決定 2):agent 說查過了不算數,程式核實過來源真的讀完,那幾張卡才推論沒下文 ----
 # 核實只看一份摘要(不是全文):網址、標題、載完沒、搜尋頁上的筆數那幾行和每封信的連結、列印檢視每封信都有正文。
-# Codex:程式自己再讀一次(read_pages 的全文照 _digest 算出摘要)。只用 Claude:Claude 在每一頁跑下面這支唯讀函式,
-# 程式從它那一輪的紀錄拿工具的回傳(apply_tab.self_reads,跟代投核對頁面同一套:只收程式碼一字不差的那幾次,
-# 內容是工具給的、模型改不了)。只回摘要是因為分段拿(每段 900 字),一封信的全文要拿好幾十次。
-# 函式裡不用反斜線:Claude 會自己把跳脫字換掉(apply_tab 實測),程式碼就對不上了。
+# 程式自己再讀一次(read_pages 的全文照 _digest 算出摘要)。
 _LINE_RE = re.compile('[0-9][0-9,]*.{0,3}[-–—].{0,3}[0-9]')
 _MAIL_LINK = 'https://mail.google.com/mail/u/'
-VERIFY_FN = (
-    "() => {const text = (document.body && document.body.innerText) || '';"
-    " const marks = " + json.dumps(list(_GMAIL_EMPTY_MARKERS), ensure_ascii=False) + ";"
-    " const lines = text.split(String.fromCharCode(10)).map(l => l.trim()).filter(l => l && l.length <= 80 &&"
-    " (new RegExp(" + json.dumps(_LINE_RE.pattern, ensure_ascii=False) + ").test(l) || marks.some(m => l.toLowerCase().includes(m))));"
-    " const links = [...new Set([...document.links].map(a => a.href).filter(h => h.startsWith(" + json.dumps(_MAIL_LINK) + ")"
-    " && (h.includes('#') || h.includes('th='))))];"
-    " const q = new URL(location.href).searchParams;"
-    " const printView = q.get('view') === 'pt' && q.get('search') === 'all' && q.has('th') && Boolean(document.querySelector('.bodycontainer'));"
-    " const bodies = (printView ? [...document.querySelectorAll('.bodycontainer .message')] : []).map(el => (el.innerText || el.textContent || '').trim());"
-    " const full = bodies.filter(b => b);"
-    " return {url: location.href, title: document.title, readyState: document.readyState, hasText: text.trim().length > 0,"
-    " lines, links, printView, messageCount: bodies.length, bodies: full.length, bodiesInText: full.every(b => text.includes(b))};}")
-_VERIFY_WHOLE = 'JSON.stringify((' + VERIFY_FN + ')())'
 
 
 def _digest(page):
-    """程式自己讀到的整頁(read_pages)算成跟 VERIFY_FN 一樣的摘要。"""
+    """程式自己讀到的整頁(read_pages)算成摘要。"""
     page = page or {}
     text = str(page.get('text') or '')
     lines = [line.strip() for line in text.split('\n')]
@@ -508,10 +492,6 @@ def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, t
     return got
 
 
-def claude_verified_reads(log):
-    """只用 Claude:它在每一頁跑 VERIFY_FN 的結果(從那一輪的紀錄拿工具的回傳)。"""
-    import apply_tab
-    return [d for d in apply_tab.self_reads(log, _VERIFY_WHOLE) if isinstance(d, dict)]
 
 
 def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS):
@@ -653,11 +633,12 @@ def apply_findings(fb, found, day=None):
         new = []
         enriched = False
         evidence_confirmed = False
+        needs_confirmation = False
         for it in items or []:
             it.setdefault('source_type', _source_type(it.get('src')))
             others = sorted(shared.get(_key(it), set()) - {url})
             evidence_confirmed = evidence_confirmed or (
-                not others and it.get('_source_verified')
+                not others and it.get('_source_verified') and not it.get('unverified')
                 and it.get('source_type') in ('email', 'application_record')
                 and it.get('kind') in KINDS
             )
@@ -671,11 +652,27 @@ def apply_findings(fb, found, day=None):
                 it['maybe'] = others              # 同一封也對到這幾張:分不出是哪一張,不自動改,卡上給他按
             existing = by_id.get(it['id'])
             if existing:
+                if existing.get('unverified') and not it.get('unverified'):
+                    pending = existing.pop('effect_pending', False)
+                    rejected = existing.get('effect_rejected')
+                    old_id = existing.get('id')
+                    existing.update(it)
+                    if old_id:
+                        existing['id'] = old_id  # oc_auto.by 與人類否決仍指向同一則
+                    existing.pop('unverified', None)
+                    if pending and not rejected:
+                        new.append(existing)  # 本版確定從未套用的回音，補驗後才消費
+                    elif not rejected:
+                        needs_confirmation = True  # legacy 無法分辨是否已被人復原，不重放
+                    enriched = True
+                    continue
                 if (it.get('kind') == 'reject' and it.get('reason')
                         and existing.get('kind') == 'reject' and not existing.get('reason')):
                     existing['reason'] = it['reason']
                     enriched = True
                 continue
+            if it.get('unverified'):
+                it['effect_pending'] = True  # 由程式記錄尚未套用，不能由 Agent 自報
             rp['items'].append(it)
             new.append(it)
             by_id[it['id']] = it
@@ -689,17 +686,21 @@ def apply_findings(fb, found, day=None):
         if maybe:
             what.append(f'可能是同一封回音 {len(maybe)} 則,沒自動改')
         if enriched:
-            what.append('補上拒絕理由')
+            what.append('補充回音證據')
+        if needs_confirmation:
+            what.append('舊回音已補驗，結果由你確認')
         if ev_cleared:
             what.append('已找到確認信或平台應徵紀錄')
-        decisive = sorted([x for x in new if x.get('kind') in KIND_TO_OC and not x.get('maybe')],
+        decisive = sorted([x for x in new if x.get('kind') in KIND_TO_OC and not x.get('maybe')
+                          and not x.get('unverified') and not x.get('effect_rejected')],
                           key=lambda x: x.get('date') or '')
         cur = m.get('oc') or ''
         steps = [(KIND_TO_OC[x['kind']], x) for x in decisive]
         # 沒下文的前提是「查過、一則回音都沒有」。程式自己記的沒下文,後來收到確認信(「還在審」)也是回音,
         # 照回音改回等回音(GLOSSARY「沒下文」)。他自己按的沒下文(沒有 oc_auto)是他的決定,不動
         if not steps and cur == 'ghost' and (m.get('oc_auto') or {}).get('s') == 'ghost':
-            steps = [('', x) for x in new if x.get('kind') == 'confirm' and not x.get('maybe')][-1:]
+            steps = [('', x) for x in new if x.get('kind') == 'confirm' and not x.get('maybe')
+                     and not x.get('unverified') and not x.get('effect_rejected')][-1:]
         if steps and cur != 'wd':                     # 「我不去了」是他的決定,不自動改
             at0 = dict(m.get('oc_at') or {})
             for s, x in steps:                        # 照日期一則一則走,保留中途狀態
@@ -785,10 +786,9 @@ def apply_ghost(fb, day=None, checked=None):
 
 def apply_results(fb, findings, checked, day=None, unverified=()):
     """套用本輪回音;只替來源完整查完的卡保存查過日期。
-    unverified:補查來源程式沒核實讀完的卡(unverified_cards):照樣算查過(查過日期往前推,下一輪搜尋範圍才會縮),
-    只是不推論沒下文。不然搜尋結果一頁放不下的那種,每一輪都從送出日搜起、永遠放不下。"""
+    unverified:來源尚未核實完整的卡，不推水位、不宣告查完、不推論沒下文。"""
     day = day or today()
-    checked = set(checked or [])
+    checked = set(checked or []) - set(unverified or ())
     result = apply_findings(fb, findings, day)
     for url in checked:
         item = fb.get(url)
@@ -797,7 +797,7 @@ def apply_results(fb, findings, checked, day=None, unverified=()):
         replies = item.setdefault('replies', {'items': []})
         replies['at'] = day
     weak_evidence = apply_checked_evidence(fb, checked)
-    ghosts = apply_ghost(fb, day=day, checked=checked - set(unverified or ()))
+    ghosts = apply_ghost(fb, day=day, checked=checked)
     return result, ghosts, weak_evidence
 
 
@@ -831,25 +831,15 @@ PROMPT = """你是查回音的 agent。程式已經搜尋信箱並把可讀來�
 """
 
 
-def self_read_rule():
-    """只用 Claude 補查時接在 prompt 後面:每一頁跑一次程式給的唯讀函式,程式從紀錄核實來源真的讀完(#289 決定 2)。"""
-    import apply_tab
-    return ('【讓程式核實你真的讀完】補查的每一頁(補查清單給的 Gmail 搜尋頁 url、搜尋結果裡每一封信、平台應徵紀錄頁)打開、'
-            '載完之後,在那一頁用 javascript_tool 跑一次下面這支唯讀函式;程式只靠它的回傳確認來源讀完了,'
-            '沒跑、沒讀完的來源影響到的卡,這一輪不會推論沒下文。回傳超過 1000 字會被截掉,所以分段:\n'
-            + apply_tab.self_read_steps(_VERIFY_WHOLE, '')
-            + 'Gmail:打開補查清單給的 url,不要自己改搜尋字。搜尋頁那次回傳的 links 裡每一封信(連結最後一段是信的代號),'
-            f'都要打開 {mailbox()[0]}?ui=2&view=pt&search=all&th=信的代號 這個列印檢視讀全文,每一封各跑一次上面兩步。\n')
 
 
-def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inaccessible=None, self_read=False):
+def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inaccessible=None):
     cards = '\n'.join(
         f'- {url} | {card.name(jobs.get(url) or {})} | {since_of(fb, url) or "?"} 起'
         for url in urls
     )
     fallback = json.dumps(inaccessible or [], ensure_ascii=False, indent=2) if inaccessible else '(沒有;不要開瀏覽器)'
-    return PROMPT.format(cards=cards, out=out, source_file=source_file, fallback_sources=fallback) + (
-        '\n' + self_read_rule() if self_read and inaccessible else '')
+    return PROMPT.format(cards=cards, out=out, source_file=source_file, fallback_sources=fallback)
 
 
 def source_texts(sources):
@@ -924,6 +914,7 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
         if item:
             if not texts.get(resolved_ref(row.row)):
                 item['unverified'] = True                # agent 補查、程式沒讀到原文:卡上照實講
+                item['_source_verified'] = False
             found.setdefault(url, []).append(item)
 
     job_ids = []
@@ -933,7 +924,7 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
                 raise ValueError('；'.join(row.problems))
             if not any(k in row.facts for k in ('id', 'url')):
                 continue                                  # 程式沒讀到應徵紀錄全文:核對不了,不拿來標已投遞
-            rec = _job_id(dict(row.facts, title=row.row.get('title')))
+            rec = _job_id(dict(row.facts, applied_at=row.judged.get('applied_at'), title=row.row.get('title')))
         except ValueError as e:
             dropped.append(str(e)[:300])
             continue
@@ -1132,12 +1123,10 @@ def main():
     verified = []
     rnd = None
     try:
-        import agent_chrome, chrome_door
-        # 查應徵進度跟其他工作一樣,交給設定裡用 Chrome 的那一家。程式自己讀得到的那一家先由程式讀;
-        # 讀不到的那一家(Claude)每個來源都交給它在 agent 的 Chrome 裡讀,程式從紀錄核實。agent 的 Chrome 照樣在背景藏著開
+        import chrome_door
+        # 查應徵進度跟其他工作一樣走 agent 的瀏覽器(chrome_door):程式先自己讀,讀不到的來源交給 agent 補查,程式再讀一次核實
         door = chrome_door.current()
-        up, msg, need = door.ready(board) if door else (False, chrome_door.NO_BROWSER_AGENT, '勾一個「用它操作 Chrome」的 agent')
-        program_reads = bool(door and door.program_reads)
+        up, msg, need = door.ready(board) if door else (False, chrome_door.NO_BROWSER_AGENT, '勾一個「用它操作 ego」的 agent')
         if not up:
             agent_report.report('查回音', msg, live=board, need='到「⚙ 設定 → 🤖 Agent 與瀏覽器」' + need)
             jobrun.write(st, dict(base, phase='failed', n=len(urls), done=0, msg=msg,
@@ -1150,7 +1139,7 @@ def main():
             os.makedirs(os.path.dirname(source_file), exist_ok=True)
             with open(source_file, 'w', encoding='utf-8') as f:
                 json.dump(sources, f, ensure_ascii=False)
-            prompt = prompt_for(fb, jobs, urls, out, source_file, program_unavailable, self_read=not program_reads)
+            prompt = prompt_for(fb, jobs, urls, out, source_file, program_unavailable)
             if os.path.exists(out):
                 os.remove(out)
             log = os.path.join(SP, 'replies.log')
@@ -1167,11 +1156,9 @@ def main():
                                  board=board, web=False,
                                  agent_id=None if program_unavailable else copy_agent)
                 rnd.handoff(out)
-            # agent 補查過的來源,程式自己核實讀完了沒(要在收掉 agent 的 Chrome 之前):程式讀得到的那一家再讀一次,
-            # 讀不到的那一家看它的紀錄
+            # agent 補查過的來源,程式自己再讀一次核實讀完了沒
             if program_unavailable and outcome.ok:
-                verified = (reread_fallback(program_unavailable, board, texts=texts) if program_reads
-                            else claude_verified_reads(log))
+                verified = reread_fallback(program_unavailable, board, texts=texts)
         finally:
             try:
                 os.remove(source_file)
@@ -1180,9 +1167,9 @@ def main():
             except OSError as e:
                 cleanup_errors.append(f'無法清除複製的查應徵進度來源檔({type(e).__name__})')
             try:
-                agent_chrome.close_if_idle(board)      # 用 Claude 讀的那條也收:以前只有程式自己讀的會收,Chrome 一直開著
+                chrome_door.close_if_idle(board)      # 收掉排入收尾的工作區
             except Exception as e:  # noqa: BLE001 — 收尾失敗照實記進 cleanup_errors 回報
-                cleanup_errors.append(f'agent Chrome 收尾失敗({type(e).__name__})')
+                cleanup_errors.append(f'agent 的瀏覽器收尾失敗({type(e).__name__})')
     except Exception as e:  # noqa: BLE001 — 這一輪最外層:原因照實寫進看板的回報與進度
         outcome = None
         error = f'查回音 agent 沒完成:{str(e)[-200:]}'
@@ -1218,6 +1205,9 @@ def main():
         print(error)
         return 1
 
+    unverified.update(url for url, items in parsed.findings.items()
+                      if any(item.get('unverified') for item in items))
+    parsed.checked.difference_update(unverified)
     msgs = []
     _report_inaccessible(parsed.inaccessible, board)
     if parsed.job_ids:
@@ -1254,7 +1244,7 @@ def main():
     if parsed.inaccessible:
         msgs.append(f'{len(parsed.inaccessible)} 個來源進不去,已寫入「📣 agent 回報」')
     if unverified:
-        msgs.append(f'{len(unverified)} 張靠 agent 補查、程式沒核實到來源讀完,這一輪不推論沒下文')
+        msgs.append(f'{len(unverified)} 張來源全文或讀取完整性沒核實,這一輪不推論沒下文')
     if parsed.dropped:
         print('agent 交件這幾筆格式不對,先略過:\n' + '\n'.join(parsed.dropped))
         msgs.append(f'agent 交件有 {len(parsed.dropped)} 筆格式不對,先略過,那幾張下一輪再查')

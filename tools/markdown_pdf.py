@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render Markdown with headless Chrome, using only an explicitly supplied stylesheet."""
+"""Render Markdown with the browser door, using only an explicitly supplied stylesheet."""
 import os
 import subprocess
 import sys
@@ -32,12 +32,6 @@ def render(source_path, destination, style_path=None, lang=''):
         raise RenderError('找不到 Markdown 原稿')
     if style_path and not os.path.isfile(style_path):
         raise RenderError('找不到指定的樣式檔')
-    try:
-        from chrome_bin import chrome
-        chrome()
-    except Exception as exc:
-        raise RenderError('找不到可用的 Chrome') from exc
-
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix='.markdown-pdf-', dir=os.path.dirname(destination)) as work:
@@ -47,18 +41,25 @@ def render(source_path, destination, style_path=None, lang=''):
                 subprocess.run(
                     [sys.executable, os.path.join(HERE, 'markdown_html.py'), source_path,
                      style_path, html_path, str(lang or '')], check=True, capture_output=True, timeout=120)
-                import browser   # 共用瀏覽器(tools/browser.py):不再每份 PDF 開一整個 Chrome
-                browser.print_pdf(html_path, pdf_path)
+                if os.environ.get('JOBSALVO_DEV_PDF') == '1':     # 開發工具的副本(看板檢查、截圖),見 dev_pdf
+                    import dev_pdf
+                    dev_pdf.print_pdf(html_path, pdf_path)
+                else:
+                    import chrome_door
+                    chrome_door.EgoDoor().print_pdf(html_path, pdf_path)
             except RenderError:
                 raise
             except Exception as exc:
-                why = (getattr(exc, 'stderr', b'') or b'').decode('utf-8', 'replace').strip().splitlines()
+                stderr = getattr(exc, 'stderr', b'') or b''
+                why = (stderr.decode('utf-8', 'replace') if isinstance(stderr, bytes) else stderr).strip().splitlines()
+                if not why:
+                    why = [str(exc)]
                 raise RenderError('Markdown 原稿無法排成 PDF' + (f':{why[-1][:200]}' if why else '')) from exc
             if not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) < 5:
-                raise RenderError('Chrome 沒有產生 PDF')
+                raise RenderError('瀏覽器沒有產生 PDF')
             with open(pdf_path, 'rb') as output:
                 if output.read(5) != b'%PDF-':
-                    raise RenderError('Chrome 產生的檔案不是 PDF')
+                    raise RenderError('瀏覽器產生的檔案不是 PDF')
             os.replace(pdf_path, destination)   # 暫存資料夾就在目的地同層:直接換名
     except RenderError:
         raise

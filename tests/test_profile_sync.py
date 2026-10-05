@@ -19,6 +19,16 @@ PAGE = {'text': '訂單對帳自動化（Python｜附件）\n\n每日對帳從�
 
 
 class Diff(unittest.TestCase):
+    def test_unselected_option_text_does_not_override_the_observed_profile_selection(self):
+        names = {'en/general': '固定平台履歷'}
+        custom = {'fields': [{'label': 'Platform resume (required)', 'type': 'select-one',
+                              'value': 'custom-1', 'shown': '驗收合成履歷'}],
+                  'lines': ['Select a platform resume...', '固定平台履歷', '驗收合成履歷']}
+        self.assertEqual(ps.picked(custom, names), set())
+        fixed = dict(custom, fields=[{'label': 'Platform resume (required)', 'type': 'select-one',
+                                     'value': 'fixed', 'shown': '固定平台履歷'}])
+        self.assertEqual(ps.picked(fixed, names), {'en/general'})
+
     def test_layout_differences_do_not_count(self):
         self.assertEqual(ps.diff(PAGE, WANT), [])      # 全形半形、分行、月份補零、連結結尾斜線
 
@@ -49,19 +59,17 @@ class Diff(unittest.TestCase):
 
 
 class Step(unittest.TestCase):
-    def test_agent_is_told_only_the_sections_that_differ(self):
+    def test_agent_judges_current_master_without_a_program_generated_missing_list(self):
         w = {'read': 'R', 'edit': 'E'}
         known = {'platform': '104', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'fixed', 'fixed_url': 'R'}
-        self.assertIn('內容不用動', run.profile_step('https://www.104.com.tw/job/1', known, 'M', (w, [], '')))
-        s = run.profile_step('https://www.104.com.tw/job/1', known, 'M', (w, ps.diff({'text': '', 'links': []}, WANT[:1]), ''))
-        self.assertIn('只處理這幾格', s)
-        self.assertIn('projects[0]', s)
+        s = run.profile_step('https://www.104.com.tw/job/1', known, 'M', (w, {'url': 'R', 'text': '目前頁面'}, ''))
+        self.assertIn('目前原始履歷 M', s)
+        self.assertIn('新增或修改的內容也要同步', s)
+        self.assertIn('呈現不同不代表缺漏', s)
+        self.assertNotIn('只處理這幾格', s)
         unknown = {'platform': 'cake', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'fixed'}
         self.assertIn('profile.url', run.profile_step('https://www.cake.me/jobs/1', unknown, 'M', (None, [], '')))
-        # 有差異時告訴它:平台只是用自己的說法寫的,回報 equivalents 就好,不用改平台;格式寫明,不用讀原始碼
-        self.assertIn('profile.equivalents', s)
-        self.assertIn('not_shown', s)
-        self.assertIn('不用去讀程式原始碼', s)
+        self.assertNotIn('profile.equivalents', s)
         self.assertNotIn('field_mapping', s)
 
 

@@ -14,27 +14,27 @@ sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401
 
 
-class ChromeFallbackLimit(unittest.TestCase):
-    """連結檢查 6 條一起跑,退到無頭 Chrome 的同一時間最多 CHROME_FALLBACK_WORKERS 個。"""
+class EgoFallbackLimit(unittest.TestCase):
+    """連結檢查 6 條一起跑,退到 ego 的同一時間最多 EGO_FALLBACK_WORKERS 個工作區。"""
 
-    def test_at_most_two_chromes_at_once(self):
+    def test_at_most_two_workspaces_at_once(self):
         import page_fetch, time as _time
         from concurrent.futures import ThreadPoolExecutor
         live, peak, lock = [0], [0], threading.Lock()
 
-        def fake_now(url, pinned_ip=''):
+        def fake_now(url):
             with lock:
                 live[0] += 1
                 peak[0] = max(peak[0], live[0])
             _time.sleep(0.2)
             with lock:
                 live[0] -= 1
-            return page_fetch.PageResult(url, 'ok', text='x', via='chrome')
+            return page_fetch.PageResult(url, 'ok', text='x', via='ego')
 
-        with patch.object(page_fetch, '_chrome_now', side_effect=fake_now):
+        with patch.object(page_fetch, '_ego_now', side_effect=fake_now):
             with ThreadPoolExecutor(6) as pool:
-                list(pool.map(page_fetch._chrome, [f'https://ex.test/{i}' for i in range(12)]))
-        self.assertEqual(peak[0], page_fetch.CHROME_FALLBACK_WORKERS)
+                list(pool.map(page_fetch._ego, [f'https://ex.test/{i}' for i in range(12)]))
+        self.assertEqual(peak[0], page_fetch.EGO_FALLBACK_WORKERS)
 
 
 class CommandLine(unittest.TestCase):
@@ -163,15 +163,29 @@ class PageFetchRoutes(unittest.TestCase):
             self.assertEqual(result.via, 'direct')
         self.assertEqual(self.requests, ['/gone404', '/gone410'])
 
+    def fake_ego(self, rendered=None):
+        """假的 agent 的瀏覽器:用一般瀏覽器的 UA 讀本機假伺服器,回 read_pages 的樣子;rendered 是跑完 JS 後的字。"""
+        import chrome_door, urllib.request, re as _re
+
+        def read_pages(_door, urls, *a, **k):
+            out = {}
+            for url in urls:
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 ego'})
+                body = urllib.request.urlopen(req, timeout=5).read().decode('utf-8', 'replace')  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+                text = rendered if rendered is not None else _re.sub(r'<[^>]+>', ' ', body).strip()
+                out[url] = {'url': url, 'title': '', 'text': text}
+            return out
+        return patch.object(chrome_door.EgoDoor, 'read_pages', read_pages)
+
     def test_full_route_ladder_retries_once_and_recovers(self):
         import page_fetch
 
         with patch.object(page_fetch, 'READER_ROOT', self.base + '/reader-fail'), \
-             patch.object(page_fetch, 'RETRY_WAIT', 0):
+             patch.object(page_fetch, 'RETRY_WAIT', 0), self.fake_ego():
             result = page_fetch.fetch(self.base + '/retry')
 
         self.assertEqual(result.status, 'ok')
-        self.assertEqual(result.via, 'chrome')
+        self.assertEqual(result.via, 'ego')
         self.assertIn('Retry recovered', result.text)
         self.assertEqual(self.requests.count('/retry'), 4)
         self.assertEqual(PageFetchRoutes.chrome_requests, 2)
@@ -208,18 +222,27 @@ class PageFetchRoutes(unittest.TestCase):
 
         self.assertEqual(result.status, 'unknown')
         self.assertNotIn('/admin', self.requests)
-        self.assertEqual(self.requests.count('/redirect-internal'), 2)
+        self.assertEqual(self.requests.count('/redirect-internal'), 1)      # 測試裡沒有 ego,只有直接抓那一次
 
-    def test_headless_chrome_reads_javascript_generated_text(self):
+    def test_an_ego_page_that_ends_up_on_a_local_address_is_not_used(self):
+        # ego 照網頁導向走:最後停在內網、本機的頁不收(fetch 開始前網址本身已確認是公開的)
+        import chrome_door, page_fetch
+        landed = {'url': 'http://10.0.0.9/admin', 'title': 'admin', 'text': 'internal secrets'}
+        with patch.object(chrome_door.EgoDoor, 'read_pages', lambda _d, urls, *a, **k: {u: dict(landed) for u in urls}), \
+             patch.dict(os.environ, {'JOBSALVO_TEST_ALLOW_LOOPBACK_FETCH': '0'}):
+            with self.assertRaises(Exception):
+                page_fetch._ego_now('https://jobs.example/job')
+
+    def test_ego_reads_javascript_generated_text(self):
         import page_fetch
 
         with patch.object(page_fetch, 'READER_ROOT', self.base + '/reader-fail'), \
              patch.object(page_fetch, 'RETRIES', 1), patch.object(page_fetch, 'RETRY_WAIT', 0), \
-             patch.dict(os.environ, {'JOBSALVO_TEST_ALLOW_LOOPBACK_FETCH': '1'}):
+             self.fake_ego(rendered='Dynamic job content'):
             result = page_fetch.fetch(self.base + '/script')
 
         self.assertEqual(result.status, 'ok')
-        self.assertEqual(result.via, 'chrome')
+        self.assertEqual(result.via, 'ego')
         self.assertEqual(result.text, 'Dynamic job content')
 
     def test_lever_public_postings_api_precedes_the_job_page(self):
@@ -551,8 +574,8 @@ class PostedAgeCache(unittest.TestCase):
         self.assertEqual(job['posted_src'], 'Posted on')
 
 
-    def test_a_date_that_is_not_on_the_page_is_not_written_and_is_reported(self):
-        """安檢門(#317):agent 交的日期在程式給它的那幾行裡看不到,這一張不寫、原因寫出 agent 說什麼、實際是什麼。"""
+    def test_an_invalid_calendar_date_is_not_written_and_is_reported(self):
+        """Agent 解釋文字日期；程式仍拒收不合法的日曆日期。"""
         import config as cf, page_fetch, posted_age, board_doc, agent_report
         from types import SimpleNamespace
         page = page_fetch.PageResult(self.url, 'ok', text='Posted on September 7, 2026. Platform Engineer.',
@@ -560,7 +583,7 @@ class PostedAgeCache(unittest.TestCase):
 
         def run_agent(prompt, _log, _home, **kwargs):
             with open(posted_age.RESULT, 'w', encoding='utf-8') as f:
-                json.dump({'dates': [{'url': self.url, 'posted_at': '2026-08-01', 'source': 'Posted on'}],
+                json.dump({'dates': [{'url': self.url, 'posted_at': '2026-02-31', 'source': 'Posted on'}],
                            'inaccessible': []}, f)
             return SimpleNamespace(ok=True, message=lambda: 'completed')
 
@@ -574,7 +597,7 @@ class PostedAgeCache(unittest.TestCase):
             job = board_doc.parse(f.read())['data']['jobs'][0]
         self.assertNotIn('posted_at', job)
         said = [c.args[1] for c in report.call_args_list if c.kwargs.get('job') == self.url]
-        self.assertTrue(any('刊登日期' in m and '2026-08-01' in m and '2026-09-07' in m for m in said), said)
+        self.assertTrue(any('刊登日期' in m and '2026-02-31' in m and 'YYYY-MM-DD' in m for m in said), said)
 
     # 一輪最多交 20 頁給 agent、只給跟日期有關的那幾行;連一行日期都沒有的頁不問 agent。
     def test_agent_gets_small_prompt(self):

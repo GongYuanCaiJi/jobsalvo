@@ -261,7 +261,8 @@ class FromFill(unittest.TestCase):
     def test_page_value_becomes_the_value_except_for_bank_answers(self):
         name, nat, why, sal = fr.fields_from_fill(self.FILL)
         self.assertEqual(name, {'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'})
-        self.assertEqual(nat, {'q': 'What is your nationality?', 'src': 'bank', 'k': 'nationality'})   # 值以答案庫為準
+        # 值以答案庫為準;頁面值只帶去記錄時比對原文,不當成答案
+        self.assertEqual(nat, {'q': 'What is your nationality?', 'src': 'bank', 'k': 'nationality', 'page_value': 'Taiwan'})
         self.assertEqual(why['v'], 'Because A.')
         self.assertEqual((sal['v'], sal['why']), ('', '他說面談再談'))
 
@@ -311,6 +312,20 @@ class FromFill(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('nationality', r.stderr)
         self.assertNotIn('form', fb[U1])
+
+    def test_malformed_fill_shapes_fail_before_writing_the_board(self):
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-fill-shape-'))
+        board = self._board(d)
+        before = read_fb(board)
+        for fields in (1, True, {}, None, [{'q': 7, 'value': 'x'}],
+                       [{'q': 'Q', 'bank_q': 7, 'value': 'x'}], [{'q': 'Q', 'v': 5}],
+                       [{'q': 'Q', 'k': ['x']}], [{'q': 'Q', 'k': {'k': 'x'}}]):
+            with self.subTest(fields=fields):
+                r, fb = self._run(board, {'platform': 'Example', 'fields': fields}, d)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('fields', r.stderr)
+                self.assertNotIn('TypeError', r.stderr)
+                self.assertEqual(fb, before)
 
 
 class ReadLang(unittest.TestCase):
@@ -427,5 +442,3 @@ class Commands(unittest.TestCase):
     def test_from_fill_needs_a_card(self):
         code, _ = self.run_cli('--from-fill', os.path.join(self.dir, 'fill.json'))
         self.assertIn('--url', str(code))
-
-

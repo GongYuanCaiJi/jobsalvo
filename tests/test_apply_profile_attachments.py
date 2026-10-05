@@ -10,7 +10,7 @@ sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import apply_run as run       # noqa: E402
 import chrome_door            # noqa: E402
-import fake_chrome as fc      # noqa: E402
+import fake_door as fc      # noqa: E402
 import config as cf           # noqa: E402
 import form_record as fr      # noqa: E402
 
@@ -128,28 +128,27 @@ class ProfileAttachments(unittest.TestCase):
         """Claude 那一輪的紀錄:它在平台履歷頁跑了算附件雜湊的那段(或被改過的一段)。"""
         return fc.claude_log(os.path.join(self.tmp, 'claude.log'), fc.attach_read(url, files, code))
 
-    def test_claude_checks_attachments_by_hash_without_downloading(self):
-        # #294:只用 Claude 時沒有把檔取回來的工具。它在平台履歷頁算每個檔的雜湊,程式從紀錄拿、跟本機檔比
-        import hashlib
-        url = 'https://profiles.example/1'
-        same = {'name': 'cover.pdf', 'size': 11, 'sha256': hashlib.sha256(b'cover bytes').hexdigest()}
-        other = {'name': 'cover.pdf', 'size': 11, 'sha256': hashlib.sha256(b'Cover bytes').hexdigest()}
-        extra = {'name': 'old.pdf', 'size': 3, 'sha256': hashlib.sha256(b'old').hexdigest()}
-        report = {'delivery': {'method': 'platform_profile', 'profile_url': url, 'profile_kind': 'fixed'},
-                  'profile_attachments': []}
-        self.fb.setdefault(URL, {}).setdefault('apply', {})['delivery'] = report['delivery']
+    def test_program_downloads_override_an_agents_claimed_matching_attachments(self):
+        wrong = self._download('cover.pdf', b'old cover')
+        extra = self._download('old.pdf', b'old experiment')
+        calls = []
+        def download(url, directory):
+            calls.append((url, directory))
+            return {'files': [{'name': 'cover.pdf', 'path': wrong}, {'name': 'old.pdf', 'path': extra}], 'problems': []}
+        report = {'delivery': dict(FIXED), 'profile_attachments': [{'name': 'cover.pdf', 'path': self.expected}]}
+        bad = self.ps.check_attachments(self.job, self.fb, URL, report, self.downloads,
+                                        force=True, download_reader=download)
+        self.assertEqual(calls, [(FIXED['profile_url'], self.downloads)])
+        self.assertTrue(any('內容不同' in p for p in bad))
+        self.assertTrue(any('多出' in p for p in bad))
 
-        def check(log):
-            return (self.ps.check_attachments(self.job, self.fb, URL, report, self.downloads, force=True,
-                                              hash_reader=CLAUDE.attachment_hashes([log]))
-                    + run._cleanup_downloads(self.downloads, report, self.job, self.fb, URL))
-        self.assertEqual(check(self._claude_log(url, [same])), [])
-        self.assertTrue(any('內容不同' in p for p in check(self._claude_log(url, [other]))))
-        self.assertTrue(any('少了' in p for p in check(self._claude_log(url, []))))
-        self.assertTrue(any('多出' in p for p in check(self._claude_log(url, [same, extra]))))
-        # 別的網址、被改過的程式碼算出來的,不採信
-        self.assertTrue(any('沒核對到' in p for p in check(self._claude_log('https://profiles.example/2', [same]))))
-        self.assertTrue(any('沒核對到' in p for p in check(self._claude_log(url, [same], code='(() => "x")()'))))
+    def test_program_download_failure_does_not_call_an_unknown_attachment_missing(self):
+        def download(url, directory):
+            raise chrome_door.NotNow('登入頁,未核對')
+        bad = self.ps.check_attachments(self.job, self.fb, URL, {'delivery': dict(FIXED)}, self.downloads,
+                                        force=True, download_reader=download)
+        self.assertTrue(any('未核對' in p for p in bad))
+        self.assertFalse(any('少了' in p for p in bad))
 
     def test_fill_check_does_not_download_platform_profile_attachments(self):
         # 填表只填申請表:平台履歷附件沒下載不算問題,說明裡也叫它不用下載
@@ -172,11 +171,11 @@ class ProfileAttachments(unittest.TestCase):
         self.assertNotIn('清單以外的檔案', prompt)                 # 只看檔名判「多出來」會誤判,留到核對那一輪
         self.assertIn('不用去讀 jobsalvo 的程式原始碼', prompt)   # agent 看不懂格式就會翻原始碼,一次花好幾分鐘
         check = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX, verify_profile=True)
-        self.assertIn('清單以外的檔案', check)
+        self.assertIn('包含清單外檔', check)
 
     def test_prepared_tab_is_handed_over_with_the_fields_already_read(self):
         # 程式先開好申請頁、讀好欄位:agent 不用自己開分頁、關舊的、整頁重讀(以前每輪五到十步)
-        prepared = {'tab_id': '5296', 'page': {
+        prepared = {'workspace': {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}, 'tab_id': '42:p1', 'page': {
             'title': 'Job Application', 'url': URL + '/apply', 'lines': ['Apply for this job'],
             'fields': [{'label': 'First Name', 'type': 'text', 'value': ''},
                        {'label': 'Resume', 'type': 'file', 'value': []}]}}
@@ -187,11 +186,11 @@ class ProfileAttachments(unittest.TestCase):
                                           attachment_download_dir=self.downloads, prepared=prepared, door=CODEX)
             plain, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                          attachment_download_dir=self.downloads, door=CODEX)
-        self.assertIn("cua.getTab('5296'", prompt)
+        self.assertIn('taskSpace(42)', prompt)
         self.assertIn('First Name [text]', prompt)
         self.assertNotIn('打開申請表單。那裡如果還有', prompt)
-        self.assertIn('打開申請表單。那裡如果還有', plain)          # 程式開不起來時照舊自己開
-        self.assertIn('確定的動作合成一次呼叫', prompt)
+        self.assertIn('停止並回報', plain)          # 程式開不起來時照舊自己開
+        self.assertIn('合成一段 ego 腳本', prompt)
 
     def test_platform_notes_are_kept_per_platform_and_handed_to_the_next_round(self):
         # agent 在一個平台試出來的做法存起來,下一輪同平台直接附上;說不對的那句拿掉;別的平台看不到
@@ -223,9 +222,53 @@ class ProfileAttachments(unittest.TestCase):
         self.assertIn('我擅長把系統拆開、一次只動一個變數。', prompt)
         self.assertNotIn('寫法看 tools/form_record.py', prompt)
         self.assertIn('"src": "bank", "k": 那條的 k', prompt)
-        # 表單只記一次:寫 fill.json 之後從它記進看板,不再另外寫一份 fr.record(...)
-        self.assertIn('form_record.py --from-fill', prompt)
+        # 原生 CLI 收最後的交件 JSON,固定記錄工作交回程式。
+        self.assertIn('直接回傳一個完整交件 JSON', prompt)
+        self.assertNotIn('form_record.py --from-fill', prompt)
         self.assertNotIn('fr.record(', prompt)
+
+    def test_generated_prompts_keep_text_updates_separate_from_attachment_permissions(self):
+        self.fb[URL]['apply'] = {'delivery': {'method': 'platform_profile', 'profile_kind': 'fixed',
+                                              'profile_url': 'https://profiles.example/1'}}
+        with patch.object(run.ship, 'folder', return_value=''), \
+             patch.object(run.ship, 'read_info', return_value={}):
+            fill, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            fix, _ = run.prompt_for('fix', URL, self.job, self.fb, self.out, note='只改作品連結', door=CODEX)
+            self.assertIn('逐段核對目前原始履歷', fill)
+            for prompt in (fill, fix):
+                self.assertIn('本機檔是唯一真相', prompt)
+                self.assertNotIn('不要修改固定平台履歷', prompt)
+            self.assertIn('只改作品連結', fix)
+            self.assertNotIn('逐段核對目前原始履歷', fix)
+            self.assertNotIn('【這張使用的履歷母稿原文】', fix)
+            for prompt in (fill, fix):
+                self.assertIn('本輪需要上傳時', prompt)
+                self.assertNotIn('才可 markHandoff', prompt)
+            self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'))
+            custom, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            self.assertIn('固定平台履歷只能讀', custom)
+            self.assertIn('不要修改固定平台履歷', custom)
+
+    def test_fill_prompt_reads_the_current_master_and_handles_unreadable_sources(self):
+        master = self._put_home('resume/master.md', b'')
+        with patch.object(run.cf, 'master', return_value=master), \
+             patch.object(run.ship, 'folder', return_value=''), \
+             patch.object(run.ship, 'read_info', return_value={}), \
+             patch.object(self.ps, 'attachment_step', return_value=''):
+            for text in ('母稿原文\n姓名與完整經歷', '本輪新版本\n更新後的完整經歷'):
+                with open(master, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                prompt, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+                self.assertIn(text, prompt)
+                self.assertIn(master, prompt)
+                self.assertNotIn('程式未能讀取母稿', prompt)
+            with open(master, 'wb') as f:
+                f.write(b'\xff')
+            prompt, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            self.assertIn('程式未能讀取母稿', prompt)
+            os.unlink(master)
+            prompt, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            self.assertIn('程式未能讀取母稿', prompt)
 
     def test_instructions_come_from_the_card_now_not_from_the_old_form(self):
         # #314:這張卡以前用英文那份填過(舊表單記著「選擇履歷=英文」),現在挑的是中文。
@@ -283,14 +326,15 @@ class ProfileAttachments(unittest.TestCase):
             self.assertIn(q, prompt)
             self.assertIn('重新代填', prompt)
             self.assertNotIn('"k": "r1"', prompt)                      # 不要照舊的那一條記
-        self.assertIn('每一題都幫他填好', fix)                           # 改那一輪也拿到代填的規矩
+            self.assertIn('意見、承諾、時間安排、薪資等可推論的題目', prompt)
+            self.assertIn('個人事實須符合題目要求的時間與身分關係', prompt)
         self.fb[URL]['ds'] = 'running'
         fr.apply_record(self.fb, URL, 'New Platform', [{'q': q, 'src': 'bank', 'v': '想把資料工作做深', 'why': '履歷'}])
         answer = next(e for e in self.fb['__ans__'] if e['q'] == q)
         self.assertEqual((answer['v'], 'redo' in answer, bool(answer.get('inf'))), ('想把資料工作做深', False, True))
 
     def _whole_fill(self, shown_on_page, reported_name='中文履歷', delivery=None, url=URL, mine=MINE, linked=(),
-                    profile_text='中文履歷\n經歷\n做過資料管線'):
+                    profile_text='中文履歷\n經歷\n做過資料管線', review_problems=()):
         """用假的 agent 的 Chrome 跑整條填表(填表 → 程式驗收 → 填完後的附件核對)。
         agent 交件單照實寫投遞方式(delivery 給了就照它寫,例如把固定版標成客製版);申請頁上選好的平台履歷顯示 shown_on_page,
         linked:申請頁上「預覽履歷」這種連到選好的那一份的連結。url、mine:換成別的平台(104)的卡、那一份的網址;
@@ -307,8 +351,9 @@ class ProfileAttachments(unittest.TestCase):
         profile_page = {'url': mine, 'text': profile_text, 'links': []}
         page = {'url': url + '/apply', 'title': 'Apply', 'lines': ['選擇履歷', shown_on_page], 'profileLinks': list(linked),
                 'fields': [{'label': 'Name', 'name': 'name', 'type': 'text', 'value': 'x'}]}
-        chrome = fc.FakeChrome('codex', page=page, pages={mine: profile_page})
+        chrome = fc.FakeDoor('codex', page=page, pages={mine: profile_page})
         self.fb[url]['app'] = 'ship'
+        chrome.attachments = [{'name': '求職信', 'bytes': b'cover bytes'}]
         calls = []
 
         def agent(prompt, log, *_a, **kw):
@@ -331,6 +376,7 @@ class ProfileAttachments(unittest.TestCase):
              patch.object(run, 'out_dir', return_value=self.out), \
              patch.object(run.ar, 'run', side_effect=agent), \
              patch.object(run.ar, 'session_id', return_value='S1'), \
+             patch.object(run, '_review_profile', return_value=list(review_problems)), \
              patch.object(run.fr, 'shared_text', return_value=''), \
              patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={'lang': 'zh', 'variant': 'general'}), \
@@ -347,7 +393,7 @@ class ProfileAttachments(unittest.TestCase):
         # #314:agent 照做(選中文那份)→ 過關;附件比對真的有做(拿該用的那一份和這張卡該附的檔比),而且通過
         ok, message, calls = self._whole_fill('中文履歷')
         self.assertTrue(ok, message)
-        self.assertEqual(calls, [None, 'S1'])                                  # 填完後真的叫回去取附件核對
+        self.assertEqual(calls, [None])                                  # 填完後真的叫回去取附件核對
         self.assertTrue(self.ps.attachment_check(MINE).get('matched'))
         self.assertEqual(self.ps.where(self.ps.profile_key(URL), 'zh', 'general').get('name'), '中文履歷')
 
@@ -383,7 +429,7 @@ class ProfileAttachments(unittest.TestCase):
         ok, message, calls = self._whole_fill('資安紅隊｜中文', reported_name=None, url=U104, mine=MINE104,
                                               linked=[MINE104 + '&from=apply'], profile_text='經歷\n做過資料管線')
         self.assertTrue(ok, message)
-        self.assertEqual(calls, [None, 'S1'])
+        self.assertEqual(calls, [None])
         self.assertTrue(self.ps.attachment_check(MINE104).get('matched'))
 
     def test_whole_104_fill_stops_on_the_wrong_number_not_on_missing_attachments(self):
@@ -549,7 +595,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertEqual(len(first), 1, checks)
         self.assertTrue(first[0]['matched'])
 
-    def test_extra_platform_attachments_require_problem_and_user_report(self):
+    def test_profile_collection_leaves_source_comparison_and_reports_to_the_program(self):
         import profile_sync as ps
 
         delivery = dict(FIXED)
@@ -557,12 +603,50 @@ class ProfileAttachments(unittest.TestCase):
 
         prompt = ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX)
 
-        self.assertIn('清單以外的檔案（包含舊版）', prompt)
-        self.assertIn('JSON 的 problems 寫明', prompt)
-        self.assertIn('agent_report.py', prompt)
-        self.assertIn('--from 代投', prompt)
-        self.assertIn('只列在 profile_attachments', prompt)
-        self.assertIn('兩者完成前不得 markHandoff', prompt)
+        self.assertIn('全部附件（包含清單外檔）', prompt)
+        self.assertIn('未核對項目', prompt)
+        self.assertIn('不用自行下載或算雜湊', prompt)
+        self.assertIn('實站 bytes', prompt)
+        self.assertNotIn('agent_report.py', prompt)
+        self.assertNotIn(self.expected, prompt)
+
+    def test_both_parent_failures_report_every_extra_file_without_an_agent_report(self):
+        self.fb[URL]['app'] = 'ship'
+        self.fb[URL]['apply'] = {'delivery': dict(FIXED)}
+        names = ['舊附件完整名稱一.pdf', '舊附件完整名稱二.pdf']
+        files = [{'name': name, 'path': self._download(name, name.encode())} for name in names]
+        bad = self.ps.check_attachments(self.job, self.fb, URL, {'delivery': dict(FIXED), 'problems': []}, self.downloads,
+                                        force=True, expected_delivery=dict(FIXED),
+                                        download_reader=lambda url, d: {'files': files, 'problems': []})
+        self.assertTrue(any('少了' in p for p in bad), bad)
+        self.assertTrue(all(any(name in p and '多出' in p for p in bad) for name in names), bad)
+        self.assertFalse(self.ps.attachment_check(FIXED['profile_url'])['matched'])
+        report = {'delivery': dict(FIXED), 'fields': [], 'submitted': False,
+                  'tab_id': '7', 'tab_url': URL + '/apply', 'handoff': True}
+        with fc.installed(fc.FakeDoor('claude-code', agent_id='test-agent')), \
+             patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
+             patch.object(run, 'profile_check', return_value=None), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.out)), \
+             patch.object(run.ar, 'run', return_value=SimpleNamespace(ok=True, agent_id='test-agent')), \
+             patch.object(run.ar, 'session_id', return_value='apply-session'), \
+             patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', return_value=([], report)), \
+             patch.object(run, 'profile_after', return_value=[]), \
+             patch.object(run, '_picked_problem', return_value=''), \
+             patch.object(run, '_review_profile', return_value=[]), \
+             patch.object(run, '_profile_check_after_fill', return_value=bad), \
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live, by: mut(self.fb)), \
+             patch.object(run.agent_report, 'resolve'), \
+             patch.object(run.agent_report, 'report') as notice:
+            ok, _ = run._run_one('fill', URL, 'board', attachment_download_dir=self.downloads)
+            self.assertFalse(ok)
+            self.assertTrue(all(name in notice.call_args.args[1] for name in names), notice.call_args)
+            self.assertIn('照本機把平台附件同步', notice.call_args.kwargs['need'])
+            self.fb[URL]['ds'] = 'confirmed'
+            ok, _ = run._block_profile_submit(URL, 'board', self.fb, bad)
+            self.assertFalse(ok)
+            self.assertTrue(all(name in notice.call_args.args[1] for name in names))
+            self.assertIn('照本機把平台附件同步', notice.call_args.kwargs['need'])
 
     def test_unchecking_an_attachment_invalidates_the_cached_profile_check(self):
         downloaded = self._download('cover.pdf', b'cover bytes')
@@ -597,36 +681,27 @@ class ProfileAttachments(unittest.TestCase):
         self.fb[URL]['approve'] = {'at': '2026-09-24', 'snap': fr.snapshot(self.fb, URL)}
 
         def agent_run(prompt, log, *_args, **_kwargs):
-            if prompt == 'profile preflight':
-                actual = self._download('cover.pdf', b'Cover bytes')
-                with open(os.path.join(self.out, 'pre-submit.json'), 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'delivery': delivery,
-                        'profile_attachments': [{'name': '求職信', 'path': actual}],
-                    }, f, ensure_ascii=False)
-            else:
-                self.assertEqual(prompt, 'actual send')
+            self.assertEqual(prompt, 'actual send')
             return SimpleNamespace(ok=True, status='completed', agent_id='primary', message=lambda: '')
 
         with patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
-             patch.object(run, 'profile_check', return_value=({'read': delivery['profile_url']},
-                    [{'where': '求職經歷', 'missing': ['內容不同']}], '')) , \
+             patch.object(run, 'profile_check', return_value=({'read': delivery['profile_url']}, {'text': '存檔後內容'}, '')), \
+             patch.object(run, '_review_profile', return_value=['Agent 判讀：求職經歷內容不同']), \
              patch.object(run, 'out_dir', return_value=self.out), \
-             patch.object(run, 'pre_submit_prompt', return_value=('profile preflight', self.out), create=True), \
              patch.object(run, 'prompt_for', return_value=('actual send', self.out)) as send_prompt, \
              patch.object(run.ar, 'run', side_effect=agent_run) as agent, \
              patch.object(run.ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)), \
-             patch.object(run, 'tempfile', SimpleNamespace(mkdtemp=lambda **_kw: self.downloads), create=True), \
-             patch('agent_chrome.ensure', return_value=(True, '')):
+             patch.object(run, 'tempfile', SimpleNamespace(mkdtemp=lambda **_kw: self.downloads, TemporaryDirectory=lambda **_kw: __import__('contextlib').nullcontext(self.downloads)), create=True), \
+             fc.installed(fc.FakeDoor(attachments=[{'name': '求職信', 'bytes': b'cover bytes'}])):
             ok, message = run.run_one('submit', URL, os.path.join(self.tmp, 'board.html'))
 
         self.assertFalse(ok)
         self.assertIn('內容不同', message)
-        agent.assert_not_called()
-        send_prompt.assert_not_called()
+        self.assertEqual(agent.call_count, 0)  # 程式取檔後，內容判讀阻止真正送出
+        self.assertEqual(send_prompt.call_count, 1)
         self.assertFalse(os.path.exists(self.downloads))
         self.assertTrue(any('內容不同' in p for p in self.fb[URL]['apply']['issues']))
 
@@ -640,21 +715,13 @@ class ProfileAttachments(unittest.TestCase):
         self.fb[URL]['approve'] = {'at': '2026-09-24', 'snap': fr.snapshot(self.fb, URL)}
 
         def agent_run(prompt, _log, *_args, **_kwargs):
-            if prompt == 'profile preflight':
-                actual = self._download('cover.pdf', b'cover bytes')
-                with open(os.path.join(self.out, 'pre-submit.json'), 'w', encoding='utf-8') as f:
-                    json.dump({
-                        'delivery': delivery,
-                        'profile_attachments': [{'name': '求職信', 'path': actual}],
-                    }, f, ensure_ascii=False)
-            else:
-                self.assertEqual(prompt, 'actual send')
+            self.assertEqual(prompt, 'actual send')
             return SimpleNamespace(ok=True, status='completed', agent_id='primary', message=lambda: '')
 
         with patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
-             patch.object(run, 'profile_check', return_value=({'read': delivery['profile_url']}, [], '')) , \
+             patch.object(run, 'profile_check', return_value=({'read': delivery['profile_url']}, {'text': '存檔後內容'}, '')), \
+             patch.object(run, '_review_profile', return_value=[]) as review, \
              patch.object(run, 'out_dir', return_value=self.out), \
-             patch.object(run, 'pre_submit_prompt', return_value=('profile preflight', self.out), create=True), \
              patch.object(run, 'prompt_for', return_value=('actual send', self.out)) as send_prompt, \
              patch.object(run.ar, 'run', side_effect=agent_run) as agent, \
              patch.object(run.ar, 'session_id', return_value='S1'), \
@@ -665,14 +732,14 @@ class ProfileAttachments(unittest.TestCase):
              patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)), \
-             patch.object(run, 'tempfile', SimpleNamespace(mkdtemp=lambda **_kw: self.downloads), create=True), \
-             patch('agent_chrome.ensure', return_value=(True, '')), \
-             patch('apply_tab.release'):
+             patch.object(run, 'tempfile', SimpleNamespace(mkdtemp=lambda **_kw: self.downloads, TemporaryDirectory=lambda **_kw: __import__('contextlib').nullcontext(self.downloads)), create=True), \
+             fc.installed(fc.FakeDoor(attachments=[{'name': '求職信', 'bytes': b'cover bytes'}])):
             ok, message = run.run_one('submit', URL, os.path.join(self.tmp, 'board.html'))
 
         self.assertTrue(ok, message)
-        self.assertEqual(agent.call_count, 2)
-        send_prompt.assert_called_once()
+        self.assertEqual(agent.call_count, 1)
+        review.assert_called_once()
+        self.assertEqual(send_prompt.call_count, 2)  # 內容判讀後重新讀取核准並產生送出指示
         self.assertFalse(os.path.exists(self.downloads))
         # 剛核對過、履歷和附件都沒改:下一次送出不再派 agent 重新下載,直接送
         agent.reset_mock()
@@ -703,9 +770,9 @@ class ProfileAttachments(unittest.TestCase):
             return SimpleNamespace(ok=True, status='completed', agent_id='primary', message=lambda: '')
 
         with patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
-             patch.object(run, 'profile_check', return_value=({'read': delivery['profile_url']}, [], '')), \
+             patch.object(run, 'profile_check', return_value=({'read': delivery['profile_url']}, {'text': '存檔後內容'}, '')), \
+             patch.object(run, '_review_profile', return_value=[]) as review, \
              patch.object(run, 'out_dir', return_value=self.out), \
-             patch.object(run, 'pre_submit_prompt', return_value=('profile preflight', self.out)), \
              patch.object(run, 'prompt_for', return_value=('actual send', self.out)), \
              patch.object(run.ar, 'run', side_effect=agent_run), \
              patch.object(run.ar, 'session_id', return_value='S1'), \
@@ -716,29 +783,29 @@ class ProfileAttachments(unittest.TestCase):
              patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)), \
-             patch('agent_chrome.ensure', return_value=(True, '')), \
-             patch('apply_tab.release'):
+             fc.installed(fc.FakeDoor(attachments=[{'name': '求職信', 'bytes': b'cover bytes'}])):
             ok, message = run.run_one('submit', URL, os.path.join(self.tmp, 'board.html'))
         self.assertTrue(ok, message)
         self.assertEqual(prompts, ['actual send'])          # 沒有「送出前下載核對」那一輪
+        review.assert_called_once()  # 附件快取不會跳過內容判讀
 
     def test_after_fill_check_runs_only_when_the_profile_is_not_checked_for_current_files(self):
         delivery = dict(FIXED)
-        self.fb[URL]['apply'] = {'stage': 'fill', 'session': 'S1', 'delivery': delivery}
+        self.fb[URL]['apply'] = {'stage': 'fill', 'session': 'S1', 'delivery': delivery, 'tab_id': '73'}
         calls = []
+        with open(os.path.join(self.out, 'pre-submit.json'), 'w', encoding='utf-8') as f:
+            f.write('{"delivery":{"method":"no_profile"}}')
 
-        def agent_run(prompt, log, *_args, **kw):
-            calls.append((prompt, kw.get('resume'), kw.get('timeout')))
+        def download(url, directory):
+            calls.append((url, directory))
             actual = self._download('cover.pdf', b'cover bytes')
-            with open(os.path.join(self.out, 'pre-submit.json'), 'w', encoding='utf-8') as f:
-                json.dump({'delivery': delivery, 'profile_attachments': [{'name': '求職信', 'path': actual}]},
-                          f, ensure_ascii=False)
-            return SimpleNamespace(ok=True, status='completed', agent_id='primary', message=lambda: '')
+            return {'files': [{'name': '求職信', 'path': actual}], 'problems': []}
 
         with patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
              patch.object(run, 'out_dir', return_value=self.out), \
              patch.object(run, 'profile_after', return_value=[]), \
-             patch.object(run.ar, 'run', side_effect=agent_run), \
+             patch.object(CODEX, 'download_attachments', side_effect=download, create=True), \
+             patch.object(run.ar, 'run', side_effect=AssertionError('程式下載不能派模型')), \
              patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run, 'tempfile', SimpleNamespace(
@@ -746,12 +813,7 @@ class ProfileAttachments(unittest.TestCase):
             first = run._profile_check_after_fill(URL, 'board', 'S1', CODEX)
             again = run._profile_check_after_fill(URL, 'board', 'S1', CODEX)
         self.assertEqual((first, again), ([], []))
-        self.assertEqual(len(calls), 1)                        # 第一次核對過、檔沒變:第二張起不再派 agent
-        prompt, resume, timeout = calls[0]
-        self.assertEqual(resume, 'S1')
-        self.assertEqual(timeout, run.PROFILE_CHECK_TIMEOUT)    # 自己的時間上限,不佔填表那 40 分鐘
-        self.assertIn('第一次用這份平台履歷', prompt)
-        self.assertIn('不可按送出', prompt)
+        self.assertEqual(calls, [(delivery['profile_url'], self.downloads)])
 
 
     def test_direct_upload_of_custom_documents_is_checked_by_downloaded_bytes(self):
@@ -1014,7 +1076,7 @@ class ProfileAttachments(unittest.TestCase):
         self.fb[URL]['apply'] = {'tab_id': '111'}                       # 上一輪的舊分頁
         seen = []
         with mock.patch.dict(os.environ, {'AGENT_BOARD': os.path.join(self.tmp, 'board.html')}):
-            with fc.installed(fc.FakeChrome('claude-code', agent_id='test-agent')), \
+            with fc.installed(fc.FakeDoor('claude-code', agent_id='test-agent')), \
                     mock.patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
                     mock.patch.object(run, 'profile_check', return_value=None), \
                     mock.patch.object(run, 'prompt_for', return_value=('prompt', self.out)), \
@@ -1049,7 +1111,7 @@ class ProfileAttachments(unittest.TestCase):
             'tab_id': '7', 'tab_url': URL + '/apply', 'handoff': True,
         }
         with mock.patch.dict(os.environ, {'AGENT_BOARD': os.path.join(self.tmp, 'board.html')}):
-            with fc.installed(fc.FakeChrome('claude-code', agent_id='test-agent')), \
+            with fc.installed(fc.FakeDoor('claude-code', agent_id='test-agent')), \
                     mock.patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
                     mock.patch.object(run, 'profile_check', return_value=None), \
                     mock.patch.object(run, 'prompt_for', return_value=('prompt', self.out)), \
@@ -1064,7 +1126,7 @@ class ProfileAttachments(unittest.TestCase):
                                       side_effect=lambda mut, live, by: mut(self.fb)), \
                     mock.patch.object(run.agent_report, 'resolve'), \
                     mock.patch.object(run.agent_report, 'report'), \
-                    mock.patch('agent_chrome.ensure', return_value=(True, '')):
+                    fc.installed(fc.FakeDoor(attachments=[{'name': '求職信', 'bytes': b'cover bytes'}])):
                 ok, message = run._run_one(
                     'fill', URL, os.path.join(self.tmp, 'board.html'),
                     attachment_download_dir=self.downloads,
@@ -1093,8 +1155,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertIn(custom, attachments)
         self.assertIn('不要刪', attachments)
         self.assertIn('格子滿', attachments)
-        self.assertIn('多出來', attachments)
-        self.assertIn('waitForEvent("filechooser")', attachments)
+        self.assertIn('waitForFileChooser', attachments)
         self.assertIn('setFiles', attachments)
         self.assertIn('保留原申請頁不動', attachments)
         self.assertNotIn('curl multipart', attachments)
@@ -1102,15 +1163,15 @@ class ProfileAttachments(unittest.TestCase):
         local_attachments = ps.attachment_step(
             self.job, self.fb, 'http://127.0.0.1:8899/apply', self.downloads, CODEX,
         )
-        self.assertIn('curl multipart', local_attachments)
-        self.assertIn('curl -fL', local_attachments)
-        self.assertIn('不可改 Chrome 權限', local_attachments)
-        self.assertIn('都會顯示「本機假驗收頁」標記', local_attachments)
+        self.assertNotIn('curl multipart', local_attachments)
+        self.assertNotIn('curl -fL', local_attachments)
+        self.assertIn('setInputFiles', local_attachments)
+        self.assertIn('下載', local_attachments)
         self.assertNotIn('curl fallback', attachments)
         self.assertNotIn('不可用頁面程式、fetch/HTTP、直接 multipart 請求', run.FILL)
-        self.assertIn('唯一例外是本輪明確標示為本機假驗收頁', run.FILL)
-        self.assertIn('舊分頁留著不算 problems', run.OPEN_STEP)
-        self.assertIn('不要關任何分頁', run.OPEN_STEP)                      # 關分頁會讓外掛斷線
+        self.assertNotIn('唯一例外', run.FILL)
+        self.assertIn('不要自行另建工作區', run.OPEN_STEP)
+        self.assertIn('停止並回報', run.OPEN_STEP)                      # 關分頁會讓外掛斷線
 
         no_profile = run.profile_step('https://unknown.example/jobs/1',
                                       dict(custom_decision, platform='unknown.example'), custom, None)
@@ -1165,7 +1226,7 @@ class ProfileAttachments(unittest.TestCase):
         self.assertTrue(any('通用版' in problem and '內容不同' in problem
                             for problem in problems), problems)
 
-    def test_custom_profile_reads_the_fixed_profile_and_reports_drift(self):
+    def test_custom_profile_reports_unreadable_fixed_source(self):
         import unittest.mock as mock
         import profile_sync as ps
 
@@ -1176,23 +1237,22 @@ class ProfileAttachments(unittest.TestCase):
         }
         fixed = {'read': 'https://profiles.example/fixed/1',
                  'edit': 'https://profiles.example/fixed/1'}
-        diffs = [{'where': '求職經歷'}]
         with mock.patch.object(ps, 'platform_of', return_value='Example'), \
                 mock.patch.object(run, '_pick', return_value=('zh', 'general')), \
                 mock.patch.object(ps, 'where', return_value=fixed), \
                 mock.patch.object(ps, 'remember') as remember, \
-                mock.patch.object(run, 'profile_check', return_value=(fixed, diffs, '')):
+                mock.patch.object(run, 'profile_check', return_value=(fixed, None, '讀不到指定頁面')):
             problems = run.profile_after(
                 URL, {'delivery': delivery,
                       'profile': {'url': delivery['profile_url']}}, self.out,
             )
 
-        self.assertTrue(any('固定平台履歷' in problem and '求職經歷' in problem
+        self.assertTrue(any('固定平台履歷' in problem and '讀不到指定頁面' in problem
                             for problem in problems), problems)
         remember.assert_not_called()
 
 
-    def test_profile_text_comparison_uses_reported_delivery_method(self):
+    def test_profile_readback_uses_reported_delivery_method(self):
         import unittest.mock as mock
         import profile_sync as ps
 
@@ -1209,37 +1269,16 @@ class ProfileAttachments(unittest.TestCase):
         }
         with mock.patch.object(ps, 'platform_of', return_value=None), \
                 mock.patch.object(ps, 'where', return_value=fixed), \
-                mock.patch.object(ps, 'check', return_value=(fixed, [], '')) as check, \
+                mock.patch.object(ps, 'read', return_value=(fixed, {'text': '讀回內容'}, '')) as check, \
                 mock.patch.object(run, '_pick', return_value=('zh', 'general')):
             self.assertEqual(run.profile_after(URL, report, self.out), [])
-            check.assert_called_once_with(ps.profile_key(URL), 'zh', 'general', self.out,
-                                          reported=report['profile']['equivalents'], reader=None, name=None)
+            check.assert_called_once_with(ps.profile_key(URL), 'zh', 'general', self.out, reader=None, name=None)
 
             self.assertEqual(
                 run.profile_after(URL, {'delivery': {'method': 'direct_upload'}}, self.out),
                 [],
             )
             check.assert_called_once()
-
-    def test_custom_profile_on_the_same_page_as_the_fixed_one_keeps_reported_equivalents(self):
-        # 104 的客製版跟固定版是同一頁:agent 回報的「平台用自己說法寫」講的就是程式要讀回的那一頁,要收
-        # (以前客製版一律丟掉,全部照原句比,每張都判「個人名片對不上」)
-        import unittest.mock as mock
-        import profile_sync as ps
-        page = {'read': 'https://profiles.example/preview?v=1', 'edit': 'https://profiles.example/edit?v=1'}
-        eq = [{'master': '可上班日：一個月內', 'platform': '一個月內可上班'}]
-        report = {'delivery': {'method': 'platform_profile', 'profile_url': page['read'], 'profile_kind': 'custom'},
-                  'profile': {'url': page['read'], 'equivalents': eq}}
-        with mock.patch.object(ps, 'platform_of', return_value=None), \
-                mock.patch.object(ps, 'where', return_value=page), \
-                mock.patch.object(ps, 'check', return_value=(page, [], '')) as check, \
-                mock.patch.object(run, '_pick', return_value=('zh', 'general')):
-            run.profile_after(URL, report, self.out)
-            self.assertEqual(check.call_args.kwargs['reported'], eq)
-            other = dict(page, read='https://profiles.example/preview?v=2')   # 客製版是另一頁:講的不是同一份,不收
-            with mock.patch.object(ps, 'where', return_value=other):
-                run.profile_after(URL, report, self.out)
-            self.assertIsNone(check.call_args.kwargs['reported'])
 
     def test_first_platform_profile_location_and_history_page_are_saved(self):
         delivery = {'method': 'platform_profile', 'profile_url': 'https://new-platform.example/profile',
@@ -1257,73 +1296,51 @@ class ProfileAttachments(unittest.TestCase):
         self.assertEqual(self.ps.application_record_pages(),
                          [{'platform': 'new-platform.example', 'url': 'https://new-platform.example/applications'}])
 
-    def test_profile_differences_block_right_after_the_fill(self):
-        # 沒有「先不比、等欄位對照」那回事了:填完就比,對不上的格子直接擋
-        delivery = {'method': 'platform_profile', 'profile_url': 'https://new-platform.example/profile',
-                    'profile_kind': 'fixed'}
-        found = ({'read': delivery['profile_url']}, [{'where': '社團[9]', 'missing': ['任期一學年']}], '')
-        with patch.object(run, '_pick', return_value=('en', 'general')), \
-                patch.object(self.ps, 'where', return_value={'read': delivery['profile_url']}), \
-                patch.object(run, 'profile_check', return_value=found):
-            problems = run.profile_after(URL, {'delivery': delivery}, self.out)
-        self.assertTrue(any('社團[9]' in p for p in problems), problems)
+    def test_content_judgment_blocks_right_after_the_fill(self):
+        ok, message, calls = self._whole_fill('中文履歷', review_problems=['Agent 判讀：社團[9] 缺少任期'])
+        self.assertFalse(ok)
+        self.assertIn('社團[9]', message)
+        self.assertEqual(len(calls), 1)  # 不繼續附件操作
 
-    def test_fill_prompt_does_not_list_fixed_profile_attachments(self):
+    def test_fill_prompt_mirrors_changed_local_attachments_to_fixed_profile(self):
+        # 本機是唯一真相,平台履歷是鏡像:本機附件改過時,填表那一輪讓平台附件照清單同步(可上傳、覆寫、刪除)
         self.fb[URL]['apply'] = {'delivery': {'method': 'platform_profile', 'profile_kind': 'fixed',
                                               'profile_url': 'https://profiles.example/1'}}
         step = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX, verify_profile=False)
-        self.assertNotIn('這張卡要用的平台履歷附件', step)
-        self.assertIn('不用看平台履歷上的附件', step)
-        self.assertIn('這張卡要用的平台履歷附件',
-                      self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX, verify_profile=True))
+        self.assertIn('下面清單每一份都要重傳', step)
+        self.assertIn('清單外的平台附件也刪掉', step)
+        self.assertIn(self.expected, step)
+        self.assertNotIn('這一輪不要刪除或覆寫', step)
+        self.assertIn('可投遞夾的 ship.json 中 files/merged', step)
+        self.assertIn('單檔／多檔容量', step)
+        self.assertIn('容量不足', step)
+        self.assertIn('用既有 merged', step)
+        self.assertIn('整套 files 或單一 merged', step)
+        self.assertIn('不可混搭、漏交或重複', step)
+        self.assertIn('merged 放 Resume,求職信檔案欄留空', step)
+        self.assertIn('求職信檔案欄必填,停止並回報', step)
+        self.assertIn('不能只因 accept=pdf 就認定用途相符', step)
+        self.assertIn('不可把履歷或附件拆進去', step)
+        self.assertIn('缺少必填材料或上傳失敗時停止', step)
+        check = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX, verify_profile=True)
+        self.assertNotIn('這張卡要用的平台履歷附件', check)
+        self.assertIn('全部附件（包含清單外檔）由程式', check)
 
-    def test_attachments_are_taken_one_per_tab_not_by_chrome_download(self):
-        # Mac 上 Chrome 一般下載會跳到最前面、切走使用者畫面;外掛 evaluate 的環境沒有 fetch;
-        # 同一頁下載第二個檔會卡在「要下載多個檔案」的詢問。核對、填表的指示都要照「一個檔一個新分頁 downloadMedia」
-        self.fb[URL]['apply'] = {'delivery': {'method': 'platform_profile', 'profile_kind': 'fixed',
-                                              'profile_url': 'https://profiles.example/1'}}
+    def test_attachment_prompts_use_ego_upload_and_program_profile_downloads(self):
+        self.fb[URL]['apply'] = {'delivery': dict(FIXED)}
         for verify in (True, False):
             step = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX, verify_profile=verify)
-            self.assertIn('downloadMedia()', step)
-            self.assertIn('一個檔開一個新的背景分頁', step)
-            self.assertIn('不要點下載連結', step)
-            self.assertNotIn('fetch(href', step)
-            self.assertNotIn('照檔名到那裡找', step)
+            self.assertIn('page.setInputFiles', step)
+            self.assertIn('download.saveAs', step)
+            for old in ('downloadMedia', '一個檔開一個', 'N*120000', 'renameSync', '外掛'):
+                self.assertNotIn(old, step)
 
-    def test_the_fetch_rule_is_given_per_runtime(self):
-        # 取檔規則是 Codex 外掛的做法(downloadMedia、timeout_ms、REPL、renameSync);Claude 收到同一份再加對照表,
-        # 對照表又叫它 base64 回傳(javascript_tool 超過 1000 字會截斷,編碼回傳會被安全過濾擋,ADR 0003):兩邊矛盾。
-        # 照執行者給:Claude 照實講取不回、寫進 problems,不叫它試做不到的路
-        self.fb[URL]['apply'] = {'delivery': {'method': 'platform_profile', 'profile_kind': 'fixed',
-                                              'profile_url': 'https://profiles.example/1'}}
+    def test_the_fetch_rule_is_shared_by_both_runtimes(self):
+        self.fb[URL]['apply'] = {'delivery': dict(FIXED)}
         codex = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CODEX, verify_profile=True)
         claude = self.ps.attachment_step(self.job, self.fb, URL, self.downloads, CLAUDE, verify_profile=True)
-        self.assertIn('downloadMedia()', codex)
-        for word in ('downloadMedia', 'timeout_ms', 'renameSync', 'REPL', 'base64'):
-            self.assertNotIn(word, claude)
-        self.assertIn('problems', claude)
-        self.assertIn('upload_readback', claude)          # 申請表上傳檔走「讀不回、程式核對本機檔」那條
-        self.assertIn('profile_attachments(和 fixed_profile 的 attachments)回報空清單', claude)   # 卡上才寫「沒下載到」,不是「沒回報」
-        rule = run.ar.apply_rule('claude-code')
-        self.assertNotIn('base64', rule)                  # 對照表不再教一條做不到的路
-        self.assertNotIn('downloadMedia', self.ps.attachment_step(
-            self.job, self.fb, URL, self.downloads, CLAUDE, verify_profile=False))
-        with patch.object(run.ar, 'claude_paired_device', return_value='dev'):
-            prompt, _out = run.pre_submit_prompt(URL, self.job, self.fb, self.out, self.downloads, CLAUDE)
-        self.assertNotIn('downloadMedia', prompt)
-        # Codex 外掛的選檔做法(Playwright filechooser)不給 Claude:它用 file_upload(代投規矩的對照表)
-        self.assertIn('filechooser', codex)
-        self.assertNotIn('filechooser', claude)
-
-    def test_after_fill_check_does_not_refetch_unchanged_attachments(self):
-        # 附件沒變時,填完後的核對不要再叫 agent 把平台上的附件全部下載一次
-        delivery = dict(FIXED)
-        self.fb[URL]['apply'] = {'delivery': delivery}
-        self.ps.remember_attachment_check(delivery['profile_url'],
-                                          self.ps.attachment_fingerprint(self.job, self.fb, delivery), 'fixed', True)
-        with patch.object(run, 'out_dir', return_value=self.out):
-            after_fill, _ = run.pre_submit_prompt(URL, self.job, self.fb, None, self.downloads, CODEX, after_fill=True)
-            before_submit, _ = run.pre_submit_prompt(URL, self.job, self.fb, None, self.downloads, CODEX)
-        self.assertIn('本輪不必下載附件', after_fill)
-        self.assertNotIn('逐一下載到這個暫存資料夾', after_fill)
-        self.assertIn('逐一下載到這個暫存資料夾', before_submit)    # 真的要送出前的核對照舊要取
+        self.assertEqual(codex, claude)
+        self.assertIn('profile_attachments 留空', claude)
+        self.assertIn('page.fetch', claude)
+        for old in ('downloadMedia', 'timeout_ms', 'renameSync', 'REPL', 'base64'):
+            self.assertNotIn(old, claude)

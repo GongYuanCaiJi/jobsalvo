@@ -21,18 +21,17 @@ class OwnPaths(unittest.TestCase):
         with open(os.path.join(home, 'jobsalvo.json'), encoding='utf-8') as f:
             return json.load(f)
 
-    def test_two_new_homes_do_not_share_tmp_or_agent_chrome_state(self):
+    def test_two_new_homes_do_not_share_tmp(self):
         a, b = os.path.join(self.root, 'a'), os.path.join(self.root, 'b')
         init.scaffold(a)
         init.scaffold(b)
         ca, cb = self.config_of(a), self.config_of(b)
         self.assertNotEqual(ca['paths']['tmp'], cb['paths']['tmp'])
-        self.assertNotEqual(ca['browser']['state'], cb['browser']['state'])
         self.assertNotEqual(ca['paths']['tmp'], '/tmp/jobsalvo')
         self.assertEqual(ca['agent']['name'], 'Agent')          # 範例裡原本的設定還在
 
     def test_board_server_first_run_uses_the_new_homes_own_paths(self):
-        # 看板第一次在空資料夾啟動:建好設定後,這個行程要用這份資料夾自己的暫存和連線檔
+        # 看板第一次在空資料夾啟動:建好設定後,這個行程要用這份資料夾自己的暫存
         import board_server as bs
         home = os.path.join(self.root, 'fresh')
         os.makedirs(home)
@@ -41,7 +40,6 @@ class OwnPaths(unittest.TestCase):
         bs.first_run(cf.LIVE)
         self.assertEqual(cf.TMP, self.config_of(home)['paths']['tmp'])
         self.assertNotEqual(cf.TMP, '/tmp/jobsalvo')
-        self.assertIn(os.path.basename(cf.TMP).split('-')[-1], cf.BROWSER_STATE)
 
     def test_port_given_at_install_is_remembered(self):
         # JOBSALVO_PORT 以前只在安裝那一次用到:開機自動啟動(board_serve.sh 不帶 --port)又回到 8899

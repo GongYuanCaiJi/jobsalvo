@@ -85,7 +85,7 @@ class StateTable(unittest.TestCase):
 
 
 class PageLeftWaiting(unittest.TestCase):
-    """停著的頁只看投遞狀態;卡片移除了、退出可以投了、公司被封鎖了的不算(以前 agent_chrome.protected_tabs、
+    """停著的頁只看投遞狀態;卡片移除了、退出可以投了、公司被封鎖了的不算(以前 protected_tabs、
     autopilot.held、看板 held 各寫一份:退回、移除、送出的卡留下的舊分頁編號被當成在等他,Chrome 永遠關不掉)。"""
     JOB = {'id': URL, 'target': '**Role · Acme**'}
 

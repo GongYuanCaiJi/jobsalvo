@@ -215,9 +215,14 @@ def checked_reasons(value, citation_sources=None):
     citation_sources = citation_sources or {}
 
     def matches(citation, sources):
-        quote = ' '.join(citation.strip('「」『』"“”` ').split())
-        return bool(quote) and any(quote in ' '.join(str(source or '').split())
-                                   for source in sources)
+        # agent 會在前面標舊卡代號(「c139：」「[c139]」)、用 ｜ 或 … 跳著摘(2026-10-05 加職缺實測):
+        # 標記不算引用內容,拆開的每一段都要在同一份材料裡逐字找得到
+        quote = re.sub(r'^\[?c\d+\]?[：:\s]*', '', citation.strip())
+        parts = [' '.join(p.strip('「」『』"“”` ').split()) for p in re.split(r'[｜|\n]|…|\.\.\.', quote)]
+        # Markdown 的粗體、行內碼符號不算字(筆記寫 **原話**,agent 引用時拿掉 **;2026-10-05 找缺實測)
+        plain = lambda t: ' '.join(re.sub(r'\*\*|__|`', '', str(t or '')).split())
+        parts = [plain(p) for p in parts if plain(p)]          # 只剩符號的段落不算引用
+        return bool(parts) and any(all(p in plain(source) for p in parts) for source in sources)
 
     for row in rows:
         if not isinstance(row, dict):
@@ -612,8 +617,10 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
             'ids': {cid for cid, _ in nb},
             'sources': {
                 'JD 原文': [c.get('jd') or '', c.get('jd_excerpt') or ''],
-                '使用者原話': [card.get('note') or '' for _, card in nb],
-                '偏好筆記': [note_text],
+                # 他的原話也記在偏好筆記裡(「我感覺能攻擊的都挺好玩」這類);引用照樣逐字比,只是不卡在標哪一類
+                '使用者原話': [card.get('note') or '' for _, card in nb] + [note_text],
+                # 給它看的相似舊卡表態(prefs.render)也算:agent 引用的是畫面上那幾行,材料裡少了它就一律對不上
+                '偏好筆記': [note_text, prefs.render(nb)],
             },
         }
         reposts = []
@@ -651,16 +658,17 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
               '[{"id":"J1","title":"頁面上的職稱","company":"頁面上的公司","keep":true,"fit":4,'
               '"cite":["c12"],"why":"一句結論",'
               '"risk":{"kind":"scam / ghost / 空字串","why":"引用 JD 原文或程式提醒;沒有就空字串"},'
-              '"reasons":[{"text":"一段理由","citation":"引用偏好筆記條目、舊卡原話或 JD 原文；引用不到寫「筆記裡沒有相關的」",'
+              '"reasons":[{"text":"一段理由","citation":"逐字引用偏好筆記條目、舊卡原話或 JD 原文(程式會逐字比對);跳過中間的字要用 … 隔開,不要自己接句子;引用不到寫「筆記裡沒有相關的」",'
               '"basis":"JD 原文/使用者原話/偏好筆記/推估"}],',
               selection_fields,
               '"cat":"' + '/'.join(CATS) + ' 挑一個",',
               '"card":{"fit":"為什麼適合他:他的履歷哪一段對上 JD 哪個需求,1-2 句","co":"公司在做什麼,一句",'
               '"loc":"地點與遠端","deadline":"截止日,沒寫填無","salary":"薪資,沒寫填未公開",'
               '"bar":"門檻(年資/學歷/技能,只記不篩)","posted":"刊登日,沒寫填無",'
-              '"ammo":"打法:直投或找誰;不指定附件,附件由程式照勾選組"}}, ...]\n',
+              '"ammo":"打法:直投或找誰;不指定附件,附件由程式照勾選組",'
+              '"quote":"有日期或薪資時，附指定 JD 的逐字引用；查不到就不要猜"}}, ...]\n',
               '每段理由都要有引用和根據類型;引用不到時寫「筆記裡沒有相關的」。引用必須能在本輪給你的筆記、相似舊卡原話或 JD 摘錄中逐字找到。\n',
-              'title、company 逐字抄 JD 原文;截止日、刊登日、薪資照 JD 原文寫。程式會拿這些和引用、cite 的舊卡代號跟給你的材料比,'
+              'title、company 逐字抄 JD 原文；日期與薪資單位由你依 JD 理解，並附 card.quote。程式核對原文引用與 cite 的舊卡代號,'
               '對不上的那一張這一輪不進板。\n',
               'keep = 要不要送到他眼前。fit 1-5:5 = 他幾乎一定會喜歡,1 = 他一定不要。',
               # 使用者自己貼進來的(貼網址加入):他已經決定要看這張,判成先不送也要寫摘要,不然卡上一整排「無」

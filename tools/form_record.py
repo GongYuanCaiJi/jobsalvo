@@ -36,7 +36,7 @@ form_record —— agent 填雇主表單時,把每一欄記進看板的唯一入
   fr.record(url, plat, fields)     # 寫入/覆蓋這張卡的 form;回傳這次新開的 k(英文答案要給 zh)
   fr.translate(k, en=..., zh=...)  # 照他改的中文重翻英文 / 替英文答案補中文
 """
-import os, sys, re, datetime, argparse, unicodedata, hashlib
+import os, sys, re, datetime, argparse, unicodedata, hashlib, json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -45,7 +45,7 @@ import delivery_state as ds
 
 SRCS = ('rz', 'bank', 'skip')
 KINDS = ('txt', 'op', 'pick', 'val', 'ck')
-BANK_FIELD = ('q', 'src', 'k', 'opt', 'lim', 'refill')     # 表單上指向答案庫的欄位只能有這些
+BANK_FIELD = ('q', 'src', 'k', 'opt', 'lim', 'refill', 'choice')     # choice 是本輪原生選項對應,不改答案庫
 PLAIN_FIELD = ('q', 'src', 'v', 'why', 'opt', 'lim')        # rz / skip 留在表單上的
 
 
@@ -55,6 +55,12 @@ def _today():
 
 def _bank(fb):
     return fb.setdefault('__ans__', [])
+
+
+def answer_fingerprint(entry):
+    """選項對應只適用這一版來源;答案或確認狀態變了就不能沿用。"""
+    source = {k: v for k, v in entry.items() if k != 'qs'}  # qs 只是每次連用時自動收集的問法。
+    return hashlib.sha256(json.dumps(source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def _entry(fb, k):
@@ -241,7 +247,7 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         raise ValueError('這張表單已鎖(已投遞),是送出時的紀錄,不能改。')
     prev = {x.get('q'): x.get('k') for x in old.get('f', []) if x.get('k')}
     before = {e.get('k') for e in _bank(fb)}
-    out = []
+    out, unmapped = [], []
     for x in fields:
         src = x.get('src') or 'bank'
         if src in ('rz', 'skip'):
@@ -252,10 +258,18 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         if src not in ('bank', 'new'):
             raise ValueError(f"src 要是 rz / skip / bank 其中之一:{x.get('q')!r}")
         e = _answer(fb, url, x, prev.get(x.get('q')), today)
+        shown = ' '.join(str(x.get('page_value') or '').split()).casefold()
+        if x.get('k') and 'choice' not in x and shown not in ('', '<redacted>') and shown not in {
+                ' '.join(str(e.get(kk) or '').split()).casefold() for kk in ('v', 'zh')}:
+            unmapped.append(f"「{x['q'][:40]}」頁面上是 {x['page_value']!r},答案庫 {e['k']} 是 {e.get('v')!r}")
         y = {'q': x['q'], 'src': 'bank', 'k': e['k']}
-        for kk in ('opt', 'lim'):
+        for kk in ('opt', 'lim', 'choice'):
             if x.get(kk): y[kk] = x[kk]
         out.append(y)
+    if unmapped:
+        # 驗收只認答案庫原文;字不同又沒對應,填得再對也會在最後被擋。在交件這一步就退回,叫同一隻 agent 補(#358)
+        raise ValueError('這幾欄頁面上的值跟答案庫原文不同,卻沒有 choice:' + ';'.join(unmapped)
+                         + '。同義就照規則在該欄加 choice;不同義就把該欄拿掉、寫進 problems。')
     # 記到秒:代投核對「這一輪有沒有記表單」要跟這一輪開始的時間比,只有日期的話同一天第二輪沒記也會過
     cur['form'] = {'plat': plat, 'f': out, 'at': at or datetime.datetime.now().isoformat(timespec='seconds')}
     ds.try_fire(fb, url, 'answers_changed')   # 表單重記過,他確認的就不是這一份了,要重新確認
@@ -283,11 +297,21 @@ def fields_from_fill(fill):
     以前 agent 同一張表單要寫兩份:form_record 一份、fill.json 一份,每一輪多想一兩分鐘,兩份還可能對不上。
     現在只寫 fill.json:每欄照抄頁面上的值(value),再標來源(src、k;新答案多給 zh、why、kind、pj)。
     答案庫現成的(有 k)不帶值,值以答案庫為準;其他沒另外給 v 的,送出的值就是頁面上的值。"""
+    if not isinstance(fill, dict) or not isinstance(fill.get('fields', []), list):
+        raise ValueError('fill.json 必須是物件，fields 必須是清單')
     out = []
-    for x in (fill or {}).get('fields') or []:
+    for x in fill.get('fields', []):
         if not isinstance(x, dict) or not x.get('q'):
             continue
+        if (not isinstance(x['q'], str)
+                or any(x.get(key) is not None and not isinstance(x[key], str) for key in ('bank_q', 'k'))
+                or ('v' in x and not isinstance(x['v'], str))):
+            raise ValueError('fields 的 q、bank_q、k 與 v 必須是文字')
         y = {kk: vv for kk, vv in x.items() if kk != 'value' and not (kk == 'k' and not vv)}
+        if isinstance(y.get('choice'), dict):
+            y['choice'] = dict(y['choice'], value=x.get('value'))
+        elif y.get('k') and isinstance(x.get('value'), str):
+            y['page_value'] = x['value']   # 只給記錄時比對答案庫原文,不寫進看板
         if not y.get('k') and 'v' not in y and x.get('value') is not None:
             y['v'] = str(x['value'])
         out.append(y)
@@ -505,6 +529,10 @@ def approval_problem(fb, url, status=None):
     tab = (m.get('approve') or {}).get('tab')
     if tab is not None and tab != apply.get('tab_id'):
         return '確認的不是現在這一頁,要重新確認送出'        # 也綁在「哪一頁」:換過一頁就作廢(以前的確認沒記頁,不看)
+    workspace = (m.get('approve') or {}).get('workspace')
+    if workspace is not None and workspace != {k: (apply.get('workspace') or {}).get(k)
+                                              for k in ('id', 'name', 'page')}:
+        return '確認的不是現在這個工作區,要重新確認送出'
     ks = {x.get('k') for x in f.get('f', []) if x.get('src') == 'bank'}
     if answers_pending(fb, url):
         # 等他的全是缺證據的(不叫他確認):照實講缺證據,不然他看到「等你確認」卻找不到要確認的那一條(#315)
@@ -537,6 +565,8 @@ def approval(fb, url, at=None):
     後台收到確認事件時當下算(看板只送按下去的時間)。"""
     apply = (fb.get(url) or {}).get('apply') or {}
     out = {'snap': snapshot(fb, url), 'round': apply.get('at'), 'tab': apply.get('tab_id')}
+    if apply.get('workspace'):
+        out['workspace'] = {k: apply['workspace'].get(k) for k in ('id', 'name', 'page')}
     if at:
         out['at'] = at
     return out
@@ -571,7 +601,7 @@ def find_shared(fb):
 
 def shared_text(fb):
     """find_shared 排成給人(和 agent)讀的字:填新表單前先讀的那一份。"""
-    return '\n'.join(f"{e['k']}: {e.get('q')}\n   中文 {e.get('zh') or e.get('v')!r}\n   送出 {e.get('v')!r}"
+    return '\n'.join(f"k={json.dumps(e['k'])}: {e.get('q')}\n   中文 {e.get('zh') or e.get('v')!r}\n   送出 {e.get('v')!r}\n   source_hash {answer_fingerprint(e)}"
                      for e in find_shared(fb))
 
 

@@ -200,7 +200,7 @@ class TwoDevices(unittest.TestCase):
         return read_fb(self.path).get(CARD) or {}
 
     def backend(self, event, **data):
-        """後台(agent 回報、程式偵測)送一個事件:跟 apply_run、agent_chrome 同一條路。"""
+        """後台(agent 回報、程式偵測)送一個事件:跟 apply_run、chrome_door 同一條路。"""
         import delivery_state as ds
         d = dict(copy.deepcopy(FIX['data'].get(event) or {}), **data)
         bd.set_fb(lambda fb: ds.try_fire(fb, CARD, event, **d), live=self.path, by='test')
@@ -314,28 +314,32 @@ class TwoDevices(unittest.TestCase):
 
 
 class GoneSweepInLock(Tmp):
-    """掃「頁面不見了」以前拿舊快照算、直接寫:算完到寫進去之間剛填好的新頁(新的 Chrome 程序開的)會被誤標成不見。"""
+    """掃「頁面不見了」以前拿舊快照算、直接寫:算完到寫進去之間剛填好的新頁(新的工作區)會被誤標成不見。"""
+    OLD, NEW = {'id': 1, 'name': 'old', 'page': 'p1'}, {'id': 2, 'name': 'new', 'page': 'p1'}
 
-    def seed(self, chrome):
-        rec = {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '5', 'chrome': chrome, 'runtime': 'codex'}
+    def seed(self, workspace):
+        rec = {'stage': 'fill', 'at': '2026-09-29T17:06:02', 'tab_id': '1:p1', 'workspace': workspace, 'runtime': 'codex'}
         make_board(self.path, {U: {'app': 'ship', 'ds': 'parked', 'apply': rec}})
 
-    def test_a_page_filled_after_the_snapshot_is_not_marked_gone(self):
+    def sweep(self, snapshot):
         import autopilot as ap
-        self.seed({'pid': 100, 'start': 1000.0})                   # 上一個 Chrome 開的頁
-        stale = read_fb(self.path)
-        self.seed({'pid': 200, 'start': 2000.0})                   # 快照之後,新的 Chrome 重填好了這一張
+        import chrome_door
+        old_gone = lambda fb, *a, **k: [u for u, m in fb.items()                       # noqa: E731 — 只有舊工作區不在了
+                                        if ((m.get('apply') or {}).get('workspace') or {}).get('id') == self.OLD['id']]
         pilot = ap.Pilot(self.path, None, lambda k: {}, None, lambda: True)
-        with mock.patch('agent_chrome.pid', return_value=200), mock.patch('agent_chrome.started_at', return_value=2000.0):
-            pilot._sweep_gone(stale)
+        with mock.patch.object(chrome_door, 'gone_pages', old_gone):
+            pilot._sweep_gone(snapshot)
+
+    def test_a_page_filled_after_the_snapshot_is_not_marked_gone(self):
+        self.seed(self.OLD)
+        stale = read_fb(self.path)
+        self.seed(self.NEW)                                         # 快照之後,新的工作區重填好了這一張
+        self.sweep(stale)
         self.assertEqual(read_fb(self.path)[U]['ds'], 'parked', '剛填好的新頁不能被當成不見了')
 
-    def test_a_page_from_the_old_chrome_is_still_marked(self):
-        import autopilot as ap
-        self.seed({'pid': 100, 'start': 1000.0})
-        pilot = ap.Pilot(self.path, None, lambda k: {}, None, lambda: True)
-        with mock.patch('agent_chrome.pid', return_value=200), mock.patch('agent_chrome.started_at', return_value=2000.0):
-            pilot._sweep_gone(read_fb(self.path))
+    def test_a_page_from_a_closed_workspace_is_still_marked(self):
+        self.seed(self.OLD)
+        self.sweep(read_fb(self.path))
         self.assertEqual(read_fb(self.path)[U]['ds'], 'gone')
 
 

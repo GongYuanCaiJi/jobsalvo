@@ -10,6 +10,7 @@ import _env  # noqa: E402  測試跑在暫存資料夾
 
 from apply_fakeprofile import FakePlatformProfile, acceptance_scenarios, sha256
 import profile_sync
+from apply_profile_accept import make_pdf
 
 
 def _post(url, fields=None, filename=None, content=b''):
@@ -66,8 +67,10 @@ class FakePlatformProfileServer(unittest.TestCase):
         self.assertIn('沒有直接附件上傳欄', page)
         self.assertIn('本機假驗收頁', page)
         self.assertIn('name="profile_id"', page)
+        self.assertIn(f'<a target="_blank" href="{self.server.manager_url("normal")}">', page)
         self.assertIn('value="fixed"', page)
         self.assertNotIn('<input id="resume"', page)
+        self.assertNotIn('{upload_fields}', page)
         self.assertIn('127.0.0.1', self.server.url('normal'))
         self.assertEqual(profile_sync.platform_of(self.server.url('normal')), '104')
 
@@ -101,6 +104,36 @@ class FakePlatformProfileServer(unittest.TestCase):
         self.assertEqual([event['sha256'] for event in uploads], [
             sha256(self.files['custom']), sha256(self.files['support']),
         ])
+
+    def test_custom_profile_body_follows_the_uploaded_resume_bytes(self):
+        fixed_before = self.server.fixed_snapshot('normal')
+        created = _post(self.server.manager_url('normal').replace('/profiles/', '/create/'),
+                        fields={'name': 'Uploaded resume preview'})
+        created.read()
+        url = self.server.profile_url('normal', 'custom-1')
+        upload = url.replace('/profile/', '/upload/')
+        _post(upload, filename='resume.pdf', content=make_pdf('actual custom resume marker')).read()
+        _post(upload, filename='support.pdf', content=make_pdf('support must not replace resume text')).read()
+        page = urllib.request.urlopen(url).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        self.assertIn('actual custom resume marker', page)
+        self.assertNotIn('support must not replace resume text', page)
+        _post(upload, filename='resume.pdf', content=make_pdf('updated custom resume marker')).read()
+        page = urllib.request.urlopen(url).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        self.assertIn('updated custom resume marker', page)
+        self.assertNotIn('actual custom resume marker', page)
+        self.assertEqual(self.server.fixed_snapshot('normal'), fixed_before)
+
+    def test_application_can_refresh_profile_options_after_creation(self):
+        import json
+        endpoint = self.server.url('normal').replace('/apply?', '/profile-options?')
+        self.assertEqual(json.loads(urllib.request.urlopen(endpoint).read()),  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+                         [{'value': 'fixed', 'name': '固定平台履歷'}])
+        _post(self.server.manager_url('normal').replace('/profiles/', '/create/'),
+              fields={'name': 'newly created resume'}).read()
+        options = json.loads(urllib.request.urlopen(endpoint).read())  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        self.assertEqual(options[-1], {'value': 'custom-1', 'name': 'newly created resume'})
+        page = urllib.request.urlopen(self.server.url('normal')).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        self.assertIn('/profile-options?', page)
 
     def test_download_and_same_name_upload_record_hashes_and_replacement(self):
         url = self.server.download_url('normal', 'fixed', 'support')

@@ -77,62 +77,25 @@ def require_success(results):
         raise AgentRunError(failed)
     return results
 
-# 不是代投的 agent(找缺、加職缺、客製、判斷…)prompt 前面加這段:它們沒有操作 Chrome 的能力(#287,派出去時 Chrome 工具也關了),
-# 要讀網頁用網路搜尋工具,或叫程式的 page_fetch 抓(直接抓 → 閱讀代理 → 無頭 Chrome);要登入的網站就回報。
+# 不開瀏覽器的 agent(判斷、客製…)prompt 前面加這段;要開網頁的(幫你填表、找缺、加職缺、查應徵進度)拿的是 ego 的用法(apply_rule)。
+# 要讀網頁用網路搜尋工具,或叫程式的 page_fetch 抓(直接抓 → 閱讀代理 → ego);要登入的網站就回報。
 def page_fetch_cmd():
-    """給 agent 跑的抓網頁指令。用程式自己這個 Python(裝好套件的那一個):最後一條路無頭 Chrome 要 Playwright,
-    agent 的 python3 不一定是它。"""
+    """給 agent 跑的抓網頁指令。用程式自己這個 Python(裝好套件的那一個),agent 的 python3 不一定是它。"""
     import shlex
     return f'{shlex.quote(sys.executable)} {shlex.quote(cf.tool("page_fetch.py"))}'
 
 
 def browser_rule():
     return (
-        '【抓網頁鐵律】這一輪你沒有、也不准操作任何瀏覽器(包括使用者本人的 Chrome 和 agent 專用的 Chrome)。'
+        '【抓網頁鐵律】這一輪你沒有、也不准操作任何瀏覽器(包括使用者本人的瀏覽器和 agent 的瀏覽器)。'
         '要讀網頁:用你手上的網路搜尋工具,或跑 '
         f'`{page_fetch_cmd()} <網址>`(程式抓好印出文字;抓不到會照實說每條路敗在哪)。'
         '網頁要登入、要驗證碼(CAPTCHA)才看得到:停下照【回報】的規矩回報,不要嘗試繞過,也不要猜內容。\n\n'
     )
 
-# 代投(填表單、送出)是唯一需要真的操作網頁的任務。它用 Codex 自己的 Chrome 外掛,
-# 只在 agent 專用的那個 Chrome 設定檔裡操作,不准碰使用者本人的 Chrome。
-# 外掛開的分頁在螢幕外的視窗,不會跳出來搶畫面;設定檔怎麼藏起來看 agent_chrome.py。
-# 填好的分頁標 markHandoff() 留著;核准或要改時,程式用 codex exec resume 叫回同一段對話,在原本那頁上送出或改,
-# 不是做完就結束、換一隻新的從頭來。
-# 這一輪關掉 playwright MCP(會自己開一個看得到的瀏覽器)和 node_repl(它的 Chrome 介面會把分頁群組放進使用者正在用的視窗),
-# 只留外掛的 cua_repl。computer use(點螢幕)規矩裡禁止。
-APPLY_RULE=('【瀏覽器鐵律(代投)】只准用 cua_repl 的 cua 操作 {agent} 專用的 Chrome:先跑 `await cua.listBrowsers()`,'
- '用 metadata.extensionInstanceId 是 {instance} 的那一個的 id 開分頁。其他 Chrome 是使用者本人的,絕對不准碰(不准列它的分頁、不准開、不准關)。'
- '找不到 {agent} 的 Chrome 就停下回報,不要開任何視窗。分頁一律在背景開,不要設定 visibility、不要把 Chrome 叫到前面。'
- '禁止 computer use(點螢幕、打鍵盤)、禁止啟動 /Applications 裡的任何瀏覽器、禁止 open 指令開網址、禁止 kill/pkill 任何瀏覽器行程。'
- '遇到驗證碼(CAPTCHA、hCaptcha、reCAPTCHA)或要輸入密碼:停下,照實寫進輸出,不要嘗試繞過,也不要猜密碼。\n\n')
-
-# Claude Code 用 Claude in Chrome 擴充功能操作同一個 agent 專用的 Chrome。代投指示是照 Codex 外掛的說法寫的,
-# 這裡給一張對照表,不另外維護第二份指示(兩邊一起改,不會分岔)。
-# 選哪個瀏覽器:agent 的 Chrome 裡 Claude 擴充功能自己的編號(「連接 Claude」時讀出來記在 agent_chrome 的狀態檔)。
-# 不用 Claude Code 記的配對:使用者自己的 Chrome 也裝了 Claude 時,配對可能指向那一個;名字(Browser 1…)會變,只認 deviceId。
-APPLY_RULE_CLAUDE=('【瀏覽器鐵律(代投)】只准用 Claude in Chrome 的工具操作 {agent} 專用的 Chrome:先 list_connected_browsers,'
- '找 deviceId 是 {device} 的那一個;它的 inUse 不是 true 就用 select_browser 選它(不要用 switch_browser、不要發配對請求)。'
- '清單裡沒有這個 deviceId:立刻停下回報,一個動作都不要做。'
- '其他瀏覽器是使用者本人的,絕對不准碰。分頁用 tabs_context_mcp(createIfEmpty)開在你自己的分頁群組,不要把 Chrome 叫到前面。'
- '禁止操作瀏覽器以外的 App、禁止啟動 /Applications 裡的任何瀏覽器、禁止 open 指令開網址、禁止 kill/pkill 任何瀏覽器行程。'
- '遇到驗證碼(CAPTCHA、hCaptcha、reCAPTCHA)或要輸入密碼:停下,照實寫進輸出,不要嘗試繞過,也不要猜密碼。\n'
- # 網頁自己開的彈出視窗在 Claude 的分頁群組外,Claude 看不到(anthropics/claude-code#96516):按了只會卡住
- '網頁自己開的彈出視窗(「Apply with LinkedIn」「Sign in with Google」這類一鍵帶入、授權)你看不到也操作不了:不要按,'
- '改填頁面上的一般表單;只有這條路能投時停下,在 problems 寫明。\n'
- '下面的指示是用 Codex 外掛的說法寫的,你照這張表換成 Claude in Chrome 的做法:\n'
- '- 開背景分頁(cua.createBrowserTab)→ tabs_context_mcp createIfEmpty 或 tabs_create_mcp,再 navigate\n'
- '- 讀頁面(domSnapshot、getAXState、playwright.evaluate)→ read_page、find、get_page_text、javascript_tool\n'
- '- 填欄位、點按鈕(setValue、click、fill)→ form_input、computer(左鍵點 ref);同一頁好幾欄用 browser_batch 一次做完\n'
- '- 選檔上傳(playwright filechooser + setFiles)→ file_upload,給上傳欄的 ref 和檔案的絕對路徑\n'
- '- 交接分頁(markHandoff())→ 那個分頁不要關,把它的 tabId 寫進 fill.json 的 tab_id\n'
- '- 取平台上的檔(downloadMedia)→ 你沒有做法,不要取,照【取檔方式(用 Claude 時)】做\n\n')
 
 
-def claude_paired_device():
-    """agent 的 Chrome 裡 Claude 擴充功能的 deviceId(「連接 Claude」時記下的);還沒連接回 None。"""
-    import agent_chrome
-    return agent_chrome.conf().get('claude_device') or None
+
 
 
 def apply_rule(runtime):
@@ -180,7 +143,7 @@ CODEX_CONFIG='~/.codex/config.toml'
 
 def lean(chrome=False):
     """派 codex 時只開這一輪用得到的工具。全域設定可能掛了十幾個 MCP 和外掛,agent 一開頭會照全域指示
-    先去啟用它們、讀操作手冊、翻 repo,啟動慢到拖垮整輪。這裡把 MCP 全關、外掛全關;代投(chrome=True)只留 Chrome 外掛。
+    先去啟用它們、讀操作手冊、翻 repo,啟動慢到拖垮整輪。這裡把 MCP 全關、外掛全關(要開網頁的 agent 用終端機跑 ego-browser,也不需要外掛)。
     hooks 也關:全域 hooks 多半是規劃文件、壓縮 context 這類輔助,開著的話每一輪開頭都會被塞跟這些流程無關的指示。
     網頁搜尋是內建工具,不受影響。"""
     try:
@@ -189,16 +152,14 @@ def lean(chrome=False):
     except OSError:
         cfg=''
     browser_plugins=('chrome@openai-bundled','computer-use@openai-bundled','unified-computer-use@openai-bundled')
-    keep=set(browser_plugins) if chrome else set()
     # 記憶也關:agent 每輪開頭會去搜使用者的個人記憶檔(判斷職缺那輪 7 步裡 3 步在讀它),跟這份工作無關,
     # 還會把他其他專案的東西帶進來。claude 那邊一樣關(claude_lean 的 autoMemoryEnabled)
     out=['-c','features.hooks=false','-c','features.plugin_hooks=false','-c','features.memories=false']
     for n in dict.fromkeys(re.findall(r'^\[mcp_servers\.([^.\]]+)\]',cfg,re.M)):
         out+=['-c',f'mcp_servers.{n}.enabled=false']
-    # 不是代投:操作瀏覽器的外掛一律關,設定檔裡沒寫到的也關(內建的外掛可能沒寫進設定檔就開著,#287)
-    for n in dict.fromkeys(re.findall(r'^\[plugins\."([^"]+)"\]',cfg,re.M) + ([] if chrome else list(browser_plugins))):
-        if n not in keep:
-            out+=['-c',f'plugins.{n}.enabled=false']   # 名稱加引號 Codex 會默默忽略,外掛就沒關掉
+    # 操作瀏覽器的外掛一律關,設定檔裡沒寫到的也關(內建的外掛可能沒寫進設定檔就開著,#287)
+    for n in dict.fromkeys(re.findall(r'^\[plugins\."([^"]+)"\]',cfg,re.M) + list(browser_plugins)):
+        out+=['-c',f'plugins.{n}.enabled=false']   # 名稱加引號 Codex 會默默忽略,外掛就沒關掉
     # skill 也關:codex 會把這台電腦裝的所有 skill 列給 agent,它看到就想先讀說明
     # (找缺那一輪去讀了一份不相干的搜尋 skill)。這些流程要做什麼 prompt 裡都寫了。官方做法是 [[skills.config]] enabled=false
     skills=codex_skills()
@@ -239,13 +200,11 @@ def claude_lean(chrome=False):
         plugins = {}
     off = {'disableAllHooks': True, 'autoMemoryEnabled': False,
            'enabledPlugins': {name: False for name in plugins}}
-    if chrome:      # 代投:Claude in Chrome 的工具和所有網站都允許(只在 agent 專用的 Chrome 裡,鐵律另外管)
-        off['permissions'] = {'allow': ['mcp__claude-in-chrome', 'ClaudeInChromeDomain(*)']}
     return ['--strict-mcp-config', '--settings', json.dumps(off, ensure_ascii=False)]
 
 
 def apply_overrides():
-    """代投:只留 Chrome 外掛(cua_repl),其他 MCP、外掛全關(見 lean)。"""
+    """代投透過終端機呼叫 ego,原生瀏覽器外掛也關掉。"""
     return lean(True)
 
 def _events(text):
@@ -294,24 +253,22 @@ def prompt_stdin(model, prompt, browser=None, board=None, web=True, chrome=False
     agent = _agent_entry(model)
     if _runtime(agent)[0] not in ('claude-code', 'codex'):
         return None
-    return rules_for(agent, bool(chrome and browser), board, web) + prompt
+    return rules_for(agent, bool(chrome), board, web) + prompt
 
 
 def argv_for(model, prompt, repo, effort=None, browser=None, resume=None, board=None, web=True,
-             chrome=False):
+             chrome=False, output_last_message=None):
     """回 (argv, cwd)。model 可為設定清單項目、項目 id 或舊的 main/alt 選擇器。
     codex、claude-code 的 prompt 不在 argv 裡,由 prompt_stdin 給。"""
     agent = _agent_entry(model)
     effort = effort or agent.get('effort') or 'max'
-    has_browser = bool(chrome and browser)
+    has_browser = bool(chrome)
     prompt = rules_for(agent, has_browser, board, web) + prompt
     rt, m = _runtime(agent)
     if rt not in RUNTIMES:
         raise ValueError(f'不支援的 agent 執行環境: {rt}')
     if rt == 'claude-code':
-        # 瀏覽器:Claude in Chrome(--chrome)。codex 那份 browser 參數(-c 外掛開關)對它沒意義,不用。
-        # Chrome 的每個動作有自己一道權限檢查,--dangerously-skip-permissions 也要搭配允許規則才過(claude_lean(chrome))。
-        # 只有 Sonnet、Opus 過得了這道檢查;Haiku 在背景模式下 Chrome 動作一律被擋。
+        # 瀏覽器:跟 codex 一樣在終端機跑 ego-browser,不載入 Claude in Chrome(--no-chrome)。
         # stream-json:跟 codex exec 一樣邊跑邊把每一步寫進紀錄(看紀錄、按停止都看得到跑到哪),最後一行是結果。
         # 權限全開跟 codex 的 danger-full-access 對齊:它要在資料夾裡寫檔、跑 python。
         # prompt 不放在指令參數:裡面有履歷和個資,ps 看得到;太長也會超過參數上限。launch 從 stdin 餵(見 prompt_stdin)。
@@ -337,6 +294,8 @@ def argv_for(model, prompt, repo, effort=None, browser=None, resume=None, board=
     if agent.get('speed') == 'fast':
         common += ["-c", 'service_tier="priority"']
     common += browser or lean(chrome)
+    if output_last_message:
+        common += ['--output-last-message', output_last_message]
     if resume:
         return ([codex_bin() or "codex", "exec", "resume", resume] + common + ["-c", 'sandbox_mode="danger-full-access"',
                 "--skip-git-repo-check", "-"], repo)
@@ -344,8 +303,8 @@ def argv_for(model, prompt, repo, effort=None, browser=None, resume=None, board=
             "-C", repo, "-"], None)
 
 def _claude_browser(on):
-    """claude -p 的瀏覽器參數:要用瀏覽器就開 Claude in Chrome(--chrome),不用就關掉它的工具。"""
-    return (['--chrome'] if on else ['--no-chrome']) + claude_lean(chrome=on)
+    """ego 用終端機共用;不載入 Claude in Chrome。"""
+    return ['--no-chrome'] + claude_lean(chrome=on)
 
 
 RUNTIMES = ('codex', 'command-code', 'claude-code')
@@ -399,9 +358,10 @@ def agent_env(board, argv=(), *said):
 
 
 def launch(prompt, outfile, repo, model='main', effort=None, browser=None, resume=None, board=None,
-           web=True, chrome=False, append=False):
+           web=True, chrome=False, append=False, output_last_message=None):
     agent = _agent_entry(model)
-    argv, cwd = argv_for(agent, prompt, repo, effort, browser, resume, board, web, chrome)
+    argv, cwd = argv_for(agent, prompt, repo, effort, browser, resume, board, web, chrome,
+                         output_last_message=output_last_message)
     fed = prompt_stdin(agent, prompt, browser, board, web, chrome)
     # stdin 一定不能是開著的管線:CLI 看到會一直等「更多輸入」。要餵 prompt 就給一個檔,讀到尾就結束。
     stdin = subprocess.DEVNULL
@@ -615,7 +575,8 @@ def _record(outfile, agent, index, started, result, prompt):
 
 def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
         browser_required=False, browser=None, resume=None, board=None, web=True,
-        agent_id=None, on_start=None, launcher=None, waiter=None, prepare=None, report_from=None):
+        agent_id=None, on_start=None, launcher=None, waiter=None, prepare=None, report_from=None,
+        output_last_message=None):
     """依序試用符合瀏覽器需求的 agent;只在 runtime 明確不可用時換手。
     report_from:這一輪 agent 回報時的來源(程式給的,例如「代投」);agent 自己寫別的也照這個記(#316)。
     prepare(agent):輪到這個 agent 時回給它的 prompt(代投換手到另一家時照那一家重組、重做 Chrome 檢查,#288);
@@ -634,7 +595,7 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
     try:
         return _run(prompt, outfile, repo, timeout, browser_required=browser_required or chrome, browser=browser,
                     resume=resume, board=board, web=web, agent_id=agent_id, on_start=on_start,
-                    launcher=launcher, waiter=waiter, prepare=noted)
+                    launcher=launcher, waiter=waiter, prepare=noted, output_last_message=output_last_message)
     finally:
         if token is not None:
             _REPORT_FROM.reset(token)
@@ -642,7 +603,7 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
 
 
 def _run(prompt, outfile, repo, timeout, *, browser_required, browser, resume, board, web,
-         agent_id, on_start, launcher, waiter, prepare):
+         agent_id, on_start, launcher, waiter, prepare, output_last_message=None):
     browser_required = bool(browser_required)
     launch_agent = launcher or launch
     wait_for_agent = waiter or wait_done
@@ -662,7 +623,8 @@ def _run(prompt, outfile, repo, timeout, *, browser_required, browser, resume, b
             task = prepare(agent) if prepare else prompt
             proc = launch_agent(task, outfile, repo, agent, browser=browser, resume=resume,
                                 board=board, web=web, append=index > 1,
-                                chrome=browser_required)
+                                chrome=browser_required,
+                                **({'output_last_message': output_last_message} if output_last_message else {}))
         except AgentStartError as e:
             reason = 'startup'
             _failure_line(outfile, agent, index, reason, str(e.error)[:200])

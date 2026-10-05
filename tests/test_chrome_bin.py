@@ -1,4 +1,3 @@
-import json
 import os
 import tempfile
 import unittest
@@ -44,34 +43,6 @@ class FindChrome(unittest.TestCase):
              mock.patch.object(chrome_bin.os.path, 'isfile', return_value=False), \
              mock.patch.object(chrome_bin.shutil, 'which', return_value=None):
             self.assertEqual(chrome_bin.find(), '')
-
-
-class Profiles(unittest.TestCase):
-    """設定檔清單:讀 Chrome 自己的 Local State,顯示右上角看到的名字、標出裝了哪個官方擴充功能。"""
-
-    def test_lists_names_and_extensions(self):
-        with tempfile.TemporaryDirectory() as root:
-            with open(os.path.join(root, 'Local State'), 'w', encoding='utf-8') as f:
-                json.dump({'profile': {'info_cache': {'Profile 7': {'name': '工作用'}, 'Default': {'name': 'A 個人'}}}}, f)
-            os.makedirs(os.path.join(root, 'Profile 7', 'Extensions', chrome_bin.EXTENSIONS['codex'][0]))
-            os.makedirs(os.path.join(root, 'Default'))
-            got = chrome_bin.profiles(root)
-        self.assertEqual(got, [{'dir': 'Default', 'name': 'A 個人', 'ext': []},
-                               {'dir': 'Profile 7', 'name': '工作用', 'ext': ['codex']}])
-
-    def test_deleted_profiles_are_left_out_and_same_names_get_their_folder(self):
-        with tempfile.TemporaryDirectory() as root:
-            with open(os.path.join(root, 'Local State'), 'w', encoding='utf-8') as f:
-                json.dump({'profile': {'info_cache': {'Profile 1': {'name': 'me'}, 'Profile 2': {'name': 'me'},
-                                                      'Gone': {'name': '舊的'}}}}, f)
-            for d in ('Profile 1', 'Profile 2'):
-                os.makedirs(os.path.join(root, d))             # Gone 的資料夾已經刪了,Chrome 還記著名字
-            got = [p['name'] for p in chrome_bin.profiles(root)]
-        self.assertEqual(got, ['me(Profile 1)', 'me(Profile 2)'])
-
-    def test_no_chrome_is_empty_list(self):
-        with tempfile.TemporaryDirectory() as root:
-            self.assertEqual(chrome_bin.profiles(root), [])
 
 
 if __name__ == '__main__':

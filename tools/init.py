@@ -53,7 +53,6 @@ def own_paths(config_path, home):
     with open(config_path, encoding='utf-8') as f:
         data = json.load(f)
     data.setdefault('paths', {}).setdefault('tmp', f'/tmp/jobsalvo-{tag}')
-    data.setdefault('browser', {}).setdefault('state', f'~/.cache/jobsalvo/agent-chrome-{tag}.json')
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write('\n')

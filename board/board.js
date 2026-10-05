@@ -1485,8 +1485,8 @@
     var A=FB['__auto__']||{}, old=autoOld(stage).length;
     var what={prep:'有新卡就自動準備',ship:'進來就讓 '+AGENT+' 填表,停在送出前',sent:'每天 '+esc(FLOW.replies_at)+' 自動查'}[stage];
     return '<span class="auto-chip" title="⚙ 設定 → 🔁 自動流程可以關">🤖 自動:'+what+'</span>'+
-      (A.blocked&&stage!=='prep'?(/Chrome/.test(A.blocked)
-        ?'<button class="stage-b" type="button" data-gocfg="cfg:agent" title="⚙ 設定 → 🤖 Agent 與瀏覽器:開設定檔、裝擴充功能、按連接">⚠ 自動停著:'+esc(A.blocked)+' → 去連接</button>'
+      (A.blocked&&stage!=='prep'?(/ego|瀏覽器/.test(A.blocked)
+        ?'<button class="stage-b" type="button" data-gocfg="cfg:agent" title="⚙ 設定 → 🤖 Agent 與瀏覽器:檢查 ego">⚠ 自動停著:'+esc(A.blocked)+' → 去檢查</button>'
         :'<span class="prep-st bad">⚠ 自動停著:'+esc(A.blocked)+'</span>'):'')+
       (stage!=='sent'&&old?'<button class="stage-b" type="button" data-autotake="'+stage+'">之前的 '+old+' 張也交給自動</button>':'');
   }
@@ -3094,6 +3094,8 @@
     var oun=e.target.closest('[data-ocundo]');
     if(oun){var ou=oun.getAttribute('data-ocundo'), om=FB[ou]||{}, oa=om.oc_auto; if(!oa)return;
       var _pv={oc:om.oc, at:om.oc_at&&JSON.parse(JSON.stringify(om.oc_at)), g:om.ghost_no};
+      var _ri=((om.replies||{}).items||[]).find(function(x){return x&&x.id===oa.by;}), _rejected=_ri&&_ri.effect_rejected;
+      if(_ri)_ri.effect_rejected=true;
       // 程式改之前的結果和日期存在 from_at(reply_run):原封放回。只照 from 重算的話,
       // 沒下文 → 面試 → 復原會留著面試日期、沒下文日期變成今天,成效表把它算成有回音、面試過
       if(oa.from_at){if(oa.from)om.oc=oa.from; else delete om.oc; om.oc_at=JSON.parse(JSON.stringify(oa.from_at));}
@@ -3101,6 +3103,7 @@
       delete om.oc_auto; if(oa.s==='ghost')om.ghost_no=1;
       markDirty(ou); patchInPlace(ou);
       snack('改回「'+ocLabel(oa.from||'')+'」',function(){om.oc_auto=oa;
+        if(_ri){if(_rejected!==undefined)_ri.effect_rejected=_rejected; else delete _ri.effect_rejected;}
         if(_pv.oc)om.oc=_pv.oc; else delete om.oc; if(_pv.at)om.oc_at=_pv.at; else delete om.oc_at;
         if(_pv.g)om.ghost_no=_pv.g; else delete om.ghost_no; markDirty(ou); patchInPlace(ou);});
       return;}
@@ -3470,36 +3473,37 @@
       .then(function(d){modal('<div class="rzm-box custom-diff-box"><button class="rzm-x" type="button">✕ 關閉</button><h3>'+esc(d.name)+' · 原檔與客製版差異</h3><pre>'+esc(d.diff)+'</pre></div>','');})
       .catch(function(err){snack('讀不到差異('+err.message+'),重新整理再試一次');});return;}
   });
-  // 「👀 看現在的頁面」在看板上的彈窗開,不開新分頁:截圖要等十幾秒,
-  // 以前開新分頁,頁面不在了就是一張只有一行字的空白分頁,手機上還要自己關回來。
+  // 卡住的頁面由明確點選交給使用者;其他狀態在看板看程式直接截的圖。
   document.addEventListener('click',function(e){
     var sh=e.target.closest&&e.target.closest('a[data-apshot]'); if(!sh||e.metaKey||e.ctrlKey)return;
     e.preventDefault();
-    var art=sh.closest('article[data-fid]'); openShot(sh.getAttribute('href'),art&&art.getAttribute('data-fid'));
+    var art=sh.closest('article[data-fid]'), href=sh.getAttribute('href');
+    if(/\/api\/live\?/.test(href)){var u=new URL(href,location.href).searchParams.get('u');openLive(u);}
+    else openShot(href,art&&art.getAttribute('data-fid'));
   });
   // 「👀 看現在的頁面」:卡上、「這一頁要你處理的」那一行、填好時的通知都叫這一支,不用他去找卡
   function liveHref(jid){return '/api/live?u='+encodeURIComponent(jid);}
+  function openLive(id){
+    fetch('/api/live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({u:id})})
+      .then(function(r){return r.json();}).then(function(d){if(!d.ok){snack(d.msg||'接不上頁面');return;}
+        if(d.handoff)snack(d.msg); else openShot(liveHref(id),id);})
+      .catch(function(){snack('接不上頁面,再試一次');});
+  }
   function openShot(href,jid){
     var j=jid&&jobOf(jid);
     modal('<div class="rzm-box ap-shotbox"><button class="rzm-x" type="button">✕ 關閉</button>'+
       '<p class="ap-shotttl">'+esc(j?cardName(j):'')+'</p><p class="ap-shotmsg" id="ap-shotmsg">⏳ 正在截 '+esc(AGENT)+' 開著的那一頁…</p></div>','');
     var live=/\/api\/live\?/.test(href), sh={getAttribute:function(){return href;}};
-    var every=4, shotAt=null;
+    var every=4;
     fetch(href).then(function(r){
       if(r.status===404&&live)throw new Error('gone');
       if(!r.ok)return r.text().then(function(t){throw new Error(t||('http '+r.status));});
-      every=+(r.headers.get('X-Refresh')||4); shotAt=r.headers.get('X-Shot-At');
+      every=+(r.headers.get('X-Refresh')||4);
       return r.blob();
     }).then(function(b){var el=$('ap-shotmsg'); if(!el)return;
       var img=document.createElement('img'); img.className='rzm-pg'; img.alt='幫你填表頁面現在的樣子'; img.src=URL.createObjectURL(b);
       el.replaceWith(img);
-      // 用 Claude、agent 的 Chrome 正在跑別的:伺服器給的是那一頁填好時截的圖(同一時間只能一個 Claude 在裡面),講是幾點截的
-      if(shotAt){var d=new Date(+shotAt*1000), note=document.createElement('p'); note.className='ap-shotmsg';
-        note.textContent='這是 '+('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+' 截的畫面(上一輪填好、改好時):'+AGENT+
-          ' 的 Chrome 正在幫你填表或查應徵進度,用 Claude 時同一時間只能一個在裡面。跑完再按 👀 看現在的。';
-        img.before(note);}
       // 「現在的頁面」開著就每幾秒重截一次:agent 還在填時看得到它填到哪(關掉彈窗就停)
-      // Claude 那一頁每截一次要十幾秒、算一次用量:伺服器說 0 就不自動重截
       // 重截失敗時舊圖留著,但要標是幾點的畫面、之後截不到(以前舊圖一直當成「現在的頁面」);
       // 頁面不在了、或連續三次截不到就不再重截(以前每幾秒一直叫伺服器截)。再截到就拿掉標示
       if(live&&every>0)(function(){var fails=0, at=new Date(), note=null;
@@ -3513,19 +3517,19 @@
           .catch(function(e){if(!img.isConnected)return; fails++; var stop=!!(e&&e.gone)||fails>=3;
             if(!note){note=document.createElement('p'); note.className='ap-shotmsg bad'; img.before(note);}
             note.textContent='⚠ 下面是 '+hm(at)+' 的畫面,之後截不到'+
-              (e&&e.gone?':那一頁已經不在了('+AGENT+' 的 Chrome 關掉或重開過)':(e&&e.msg?'('+String(e.msg).slice(0,80)+')':''))+
+              (e&&e.gone?':那一頁已經不在了('+AGENT+' 的瀏覽器工作區被關掉了)':(e&&e.msg?'('+String(e.msg).slice(0,80)+')':''))+
               (stop?'。不再自動更新,要再看就關掉重按 👀。':'');
             if(!stop)again();});
         },every*1000);})();})();
     }).catch(function(err){var el=$('ap-shotmsg'); if(!el)return; el.classList.add('bad');
-      // 那一頁不在了(被關掉、Chrome 重開):講清楚,並在這裡直接給重填,不用關掉彈窗再去卡上找
-      if(err.message==='gone'&&jid){el.textContent=AGENT+' 填這張時開著的那一頁已經不在了('+AGENT+' 的 Chrome 關掉或重開過)。要再看,讓它重填一次。';
+      // 那一頁不在了(工作區被關掉):講清楚,並在這裡直接給重填,不用關掉彈窗再去卡上找
+      if(err.message==='gone'&&jid){el.textContent=AGENT+' 填這張時開著的那一頁已經不在了('+AGENT+' 的瀏覽器工作區被關掉了)。要再看,讓它重填一次。';
         var b2=document.createElement('button'); b2.type='button'; b2.className='stage-b adv'; b2.setAttribute('data-apshot-refill',jid);
         b2.textContent='▶ 讓 '+AGENT+' 重填這張'; el.after(b2);}
       else el.textContent=err.message;});
   }
   document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-livego]'); if(!b)return;
-    var id=b.getAttribute('data-livego'); openShot(liveHref(id),id);});
+    openLive(b.getAttribute('data-livego'));});
   document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-apshot-refill]'); if(!b)return;
     closeModal(); startRun('apply',{stage:'fill',url:b.getAttribute('data-apshot-refill')},null); snack(AGENT+' 重填這一張,好了會再告訴你');});
   // ---- 🔗 同一家公司兩個名字(「甲科技」「甲科技股份有限公司」):在看板上直接併 ----
@@ -3741,7 +3745,7 @@
         goToJob(gid, ga&&(STAGES.indexOf(ga)>=0||ga==='sent')?ga:(sentOf(gid)||'none'));}
     });
     renderInbox();})();
-  // ---- ⚙ 設定:使用者只碰網頁就能把 jobsalvo 設定好(履歷、硬規則、填表做法、分類、agent、Chrome) ----
+  // ---- ⚙ 設定:使用者只碰網頁就能把 jobsalvo 設定好(履歷、硬規則、填表做法、分類、agent、ego) ----
   // 資料在伺服器的 /api/settings;這裡改的是一份工作副本(CFGW 設定、CFGT 三份文字),按「💾 儲存設定」才寫回。
   // 上傳檔案例外:檔一傳上去就連同設定一起存,不用再按儲存(不然使用者以為傳好了,其實沒記進設定)。
   var CFGD=null, CFGW=null, CFGT=null, CFGDIRTY=false, CFGAWAY=false, CFG0='';
@@ -3756,7 +3760,7 @@
       CFGD=d; var e=d.effective||{}, w=_clone(d.settings||{});
       // 這幾塊一律從「實際生效的值」起頭,使用者看到的就是現在在用的(包括預設)
       w.board=w.board||{}; w.board.categories=_clone(e.board.categories); w.board.tags=_clone(e.board.tags);
-      w.agent=_clone(e.agent); w.browser=_clone(e.browser); w.search=_clone(e.search); w.replies=_clone(e.replies);
+      w.agent=_clone(e.agent); w.search=_clone(e.search); w.replies=_clone(e.replies);
       w.flow=_clone(e.flow||{});
       w.resume=w.resume||{};
       w.resume.resumes=_clone(Array.isArray(w.resume.resumes)?w.resume.resumes:(e.resume.resumes||[]));
@@ -3783,14 +3787,14 @@
     var resumes=cfgGet('resume.resumes')||[];
     var available=CFGD.files||[];
     var hasFile=resumes.some(function(x){return x.enabled!==false&&(CFGW.resume.langs||[]).some(function(l){var p=(x.files||{})[l];return p&&available.indexOf(p)>=0;});});
-    var br=cfgBrowserRuntime(), chromeOk=br==='codex'?CFGD.browser_ok:br==='claude-code'?!!CFGD.claude_paired:false;
+    var br=cfgBrowserRuntime(), chromeOk=!!(br&&CFGD.ego&&CFGD.ego.ok);
     return '<div class="cfg-check'+(hasFile?' done':'')+'"><div class="cfg-ch-h">🚦 開始前 '+(hasFile?'1/1 ✓':'0/1')+'</div>'+
       '<button class="cfg-ch'+(hasFile?' ok':'')+'" type="button" data-cfgo="cfg:resumes">'+
       (hasFile?'✅ ':'⬜ ')+'上傳至少一份履歷(📄 你的履歷)</button>'+
       '<button class="cfg-ch'+(chromeOk?' ok':'')+'" type="button" data-cfgo="cfg:agent">'+
-      (chromeOk?'✅ ':'⬜ ')+'(選用)要幫你填表:連接'+(br==='claude-code'?' Claude ':br==='codex'?' Codex ':'')+'操作的 Chrome(🤖 Agent 與瀏覽器)</button></div>';
+      (chromeOk?'✅ ':'⬜ ')+'(選用)要幫你填表:準備 ego(🤖 Agent 與瀏覽器)</button></div>';
   }
-  // 勾了「用它操作 Chrome」的那一個 agent 是哪一種;沒有回 ''(只准勾一個)
+  // 勾了「用它操作 ego」的那一個 agent 是哪一種;沒有回 ''(只准勾一個)
   function cfgBrowserRuntime(){
     var a=((CFGW.agent||{}).agents||[]).filter(function(x){return x.browser&&x.runtime!=='command-code';})[0];
     return a?(a.runtime==='claude-code'?'claude-code':'codex'):'';
@@ -3962,18 +3966,6 @@
       fields.forEach(function(el){el.setAttribute('aria-label',title+((el.placeholder||'').trim()?':'+el.placeholder.trim():''));});
     });
   }
-  // 第一次建 agent 的 Chrome 時從哪個設定檔複製登入狀態:顯示 Chrome 右上角看到的名字、裝了哪個官方擴充功能;存的是資料夾名。
-  // 以前要去 chrome://version 抄資料夾名,新使用者幾乎一定填錯(#159)。清單讀不到才退回手填。
-  function chromeProfilePick(cur){
-    var ps=CFGD.chrome_profiles||[], EXT={codex:'Codex',claude:'Claude'};
-    if(!ps.length)return '<input class="cfg-in" id="cfg-chprof" data-cf="browser.profile" value="'+escA(cur)+'" placeholder="Chrome 設定檔的資料夾名(chrome://version 看得到)">';
-    var known=ps.some(function(p){return p.dir===cur;});
-    return '<select class="cfg-in" id="cfg-chprof" data-cf="browser.profile">'+
-      '<option value=""'+(cur?'':' selected')+'>不複製(自己在 agent 的 Chrome 裡登入)</option>'+
-      (known||!cur?'':'<option value="'+escA(cur)+'" selected>'+esc(cur)+'(Chrome 裡找不到,請重選)</option>')+
-      ps.map(function(p){var ex=(p.ext||[]).map(function(k){return EXT[k]||k;});
-        return '<option value="'+escA(p.dir)+'"'+(p.dir===cur?' selected':'')+'>'+esc(p.name)+
-          (ex.length?'(已裝 '+esc(ex.join('、'))+' 擴充功能)':'')+'</option>';}).join('')+'</select>';}
   function renderCfg(){
     inApplyView=true;
     if(!CFGD){CFGAWAY=false; $('app').innerHTML='<div class="emptytab">讀取設定中…</div>'; cfgLoad(renderCfg); return;}   // 第一次讀就是最新的,讀好不用再讀
@@ -4027,7 +4019,7 @@
       '<div class="cfg-row"><label class="cfg-k">要小心</label><textarea class="cfg-in" rows="3" data-cfl="search.flag_words" placeholder="例:community">'+esc((s.flag_words||[]).join('\n'))+'</textarea></div>',{cls:'cfg-d'});
     var RPL=fold('cfg:replies','📬 查應徵進度','<p class="cfg-help">投出去之後,'+esc(AGENT)+' 去信箱和平台看有沒有回音;超過這麼多天都沒消息就標成沒下文。</p>'+
       '<div class="cfg-row"><label class="cfg-k">沒下文天數</label><input class="cfg-in num" type="number" min="7" max="120" data-cfn="replies.ghost_days" value="'+escA((CFGW.replies||{}).ghost_days==null?30:CFGW.replies.ghost_days)+'"></div>'+   // 照實顯示:存成 0 的舊值要看得到才改得了
-      '<p class="cfg-help">查應徵進度的信箱。Gmail 的第二個帳號是 …/mail/u/1/;不是 Gmail(Outlook、公司信箱)也行,'+esc(AGENT)+' 會用它的 Chrome 打開這個網址查,記得先在那個 Chrome 登入。</p>'+
+      '<p class="cfg-help">查應徵進度的信箱。Gmail 的第二個帳號是 …/mail/u/1/;不是 Gmail(Outlook、公司信箱)也行,'+esc(AGENT)+' 會用 ego 打開這個網址查,記得先在 ego 登入。</p>'+
       '<div class="cfg-row"><label class="cfg-k">信箱網址</label><input class="cfg-in" data-cf="replies.mail_url" value="'+escA((CFGW.replies||{}).mail_url||'')+'" placeholder="https://mail.google.com/mail/u/0/"></div>',{cls:'cfg-d'});
     var agentRows=agents.map(function(x,i){var runtime=['command-code','claude-code'].indexOf(x.runtime)>=0?x.runtime:'codex';
       return '<div class="cfg-card"><div class="cfg-row"><strong class="cfg-k">第 '+(i+1)+' 個 agent</strong>'+
@@ -4039,27 +4031,16 @@
         (runtime==='codex'?'<div class="cfg-row"><label class="cfg-k">速度</label><select class="cfg-in" data-cfa-speed="'+i+'">'+['standard','fast'].map(function(v){return '<option value="'+v+'"'+((x.speed||'standard')===v?' selected':'')+'>'+(v==='fast'?'快速(比較耗額度)':'標準')+'</option>';}).join('')+'</select></div>'
           :'<div class="cfg-row"><span class="cfg-k">速度</span><span class="cfg-help">Claude Code 沒有這個選項</span></div>')+
         '<div class="cfg-row"><label class="cfg-k">思考強度</label><select class="cfg-in" data-cfa-effort="'+i+'">'+[['low','低'],['medium','中'],['high','高'],['xhigh','很高'],['max','最高']].map(function(o){return '<option value="'+o[0]+'"'+((x.effort||'max')===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select>'+
-        '<label class="cfg-file"><input type="checkbox" data-cfa-browser="'+i+'"'+(x.browser?' checked':'')+(runtime==='command-code'?' disabled':'')+'> 用它操作 Chrome(只能選一個)</label></div></div>';}).join('');
+        '<label class="cfg-file"><input type="checkbox" data-cfa-browser="'+i+'"'+(x.browser?' checked':'')+(runtime==='command-code'?' disabled':'')+'> 用它操作 ego</label></div></div>';}).join('');
     var br=cfgBrowserRuntime();
     var AGT=fold('cfg:agent','🤖 Agent 與瀏覽器','<p class="cfg-help">先用第 1 個;它額度用完、被限流或開不起來,才換下一個(逾時、其他錯誤不換)。'+
-      '要開 Chrome 的工作(填表、查應徵進度)只交給勾了「用它操作 Chrome」的那一個,它不行也不會換別的。</p>'+agentRows+
+      '填表與查應徵進度交給勾了「用它操作 ego」的 agent,依清單順序派工;兩家共用同一個工作區。</p>'+agentRows+
       '<div class="cfg-row"><button class="cfg-b" type="button" data-cfagentadd="1">＋ 新增 agent</button></div>'+
-      // 幫你填表用的 Chrome:只畫勾了的那一家的連接(另一家用不到,畫出來只會讓人以為兩個都要連);只在第一次建立時才有意義的欄位才畫
-      '<p class="cfg-help"><b>幫你填表用的 Chrome</b>:jobsalvo 自己開的另一個正常的 Chrome,一直在背景跑,不會跳到你面前,也碰不到你平常用的 Chrome。'+
-        '要看它填的頁,按卡上的「👀 看現在的頁面」'+(br==='claude-code'?'(Claude 的頁每按一次截一次)':'(開著會一直更新)')+'。'+
-        '<a href="https://github.com/GongYuanCaiJi/jobsalvo/blob/main/docs/agent-chrome.md" target="_blank" rel="noopener">📖 設定教學</a></p>'+
-      // agent 的 Chrome 第一次建立(按連接或 🔑 時)才用得到:放在連接之前,先選再按
-      (CFGD.agent_chrome_made?'':'<div class="cfg-row"><label class="cfg-k" for="cfg-chprof">從哪個設定檔複製</label>'+chromeProfilePick(b.profile||'')+
-        '<span class="cfg-help">第一次按連接或「🔑 打開」時會建立 agent 的 Chrome,把你選的 Chrome 設定檔的登入狀態和擴充功能複製過去(選填;不複製就自己在它裡面登入)</span></div>')+
-      (br==='codex'?'<div class="cfg-row"><label class="cfg-k">Codex</label><span class="cfg-file">'+(CFGD.browser_ok?'✅ '+(CFGD.browser_ok===true?'連接過':esc(mdOf(CFGD.browser_ok))+' 確認連得上'):'⬜ 還沒連接')+'</span>'+
-        '<button class="cfg-b" type="button" data-cfbrowser="setup">🔌 連接 Codex</button>'+
-        '<span class="cfg-help">要先在 agent 的 Chrome 裝 Codex 的擴充功能(商店上叫 ChatGPT);上傳履歷、下載附件前還要在 ~/.codex/browser/config.toml 允許那些網站(看設定教學)</span></div>':'')+
-      (br==='claude-code'?'<div class="cfg-row"><label class="cfg-k">Claude</label><span class="cfg-file">'+(CFGD.claude_paired?'✅ '+esc(mdOf(CFGD.claude_paired))+' 確認連得上':'⬜ 還沒連接')+'</span>'+
-        '<button class="cfg-b" type="button" data-cfbrowser="claude">🔌 連接 Claude</button>'+
-        '<span class="cfg-help">要先在 agent 的 Chrome 登入 claude.ai;還沒登入,按下去會把它開在你面前</span></div>':'')+
-      (br?'':'<p class="cfg-help">⚠ 還沒有 agent 勾「用它操作 Chrome」:填表、查應徵進度會先停著。</p>')+
-      '<div class="cfg-row"><label class="cfg-k">打開它</label><button class="cfg-b" type="button" data-cfbrowser="show">🔑 打開 agent 的 Chrome</button>'+
-        '<span class="cfg-help">登入 Gmail、104、LinkedIn,或親手看它開著的頁;只有你按了才會出現</span></div>',{cls:'cfg-d'});
+      '<p class="cfg-help"><b>幫你填表用的 ego</b>:先在 ego lite 完成第一次匯入。每張卡的工作區獨立保存,填好後可按 👀 看頁面。'+
+        '卡在登入或驗證時,按 👀 接手該頁;處理完按「修改」接著做。</p>'+
+      '<div class="cfg-row"><label class="cfg-k">ego</label><span class="cfg-file">'+esc((CFGD.ego||{}).reason||'還沒準備好')+'</span>'+
+        '<button class="cfg-b" type="button" data-cfbrowser="setup">檢查 ego</button></div>'+
+      (br?'':'<p class="cfg-help">⚠ 還沒有 agent 勾「用它操作 ego」:填表與查應徵進度會先停著。</p>'),{cls:'cfg-d'});
     var SYS=fold('cfg:sys','⚙ 其他','<div class="cfg-row"><label class="cfg-k">資料夾</label><span class="cfg-file">'+esc(CFGD.home||'')+'</span></div>'+
       '<div class="cfg-row"><label class="cfg-k">開機自動啟動</label><span class="cfg-file">'+(CFGD.service?'✅ 已開':'⬜ 沒開')+'</span>'+
       '<button class="cfg-b" type="button" data-cfservice="'+(CFGD.service?'remove':'install')+'">'+(CFGD.service?'關掉':'打開')+'</button></div>'+
@@ -4155,7 +4136,7 @@
       if(taken.length)snack('拿掉了'+langName(k)+'版的 '+taken.length+' 個檔(存了才算數)',function(){
         taken.forEach(function(e){e[0][k]=e[1];}); CFGW.resume.langs=langs0; cfgMark(); renderCfg();});
       return;}
-    if((k=t.getAttribute('data-cfa-browser'))!=null){CFGW.agent.agents.forEach(function(x,i){x.browser=t.checked&&i===+k;}); cfgMark(); renderCfg(); return;}
+    if((k=t.getAttribute('data-cfa-browser'))!=null){CFGW.agent.agents[+k].browser=t.checked; cfgMark(); renderCfg(); return;}
     var styleInput=e.target.closest&&e.target.closest('input[data-cfstyle]');
     if(styleInput&&styleInput.files&&styleInput.files[0]){
       var sp=styleInput.getAttribute('data-cfstyle').split('|'), skind=sp[0], sid=sp[1], slang=sp[2], sf=styleInput.files[0];
@@ -4192,7 +4173,7 @@
     if(t.hasAttribute('data-cfagentadd')){var entries=CFGW.agent.agents, id;
       do{id='agent-'+Date.now().toString(36)+'-'+Math.floor(Math.random()*1e9).toString(36);}
       while(entries.some(function(x){return x.id===id;}));
-      // 只准一個 agent 用 Chrome:已經有人勾了,新的就不勾
+      // 只准一個 agent 用 ego:已經有人勾了,新的就不勾
       entries.push({id:id,runtime:'codex',model:'',effort:'max',speed:'standard',browser:!entries.some(function(x){return x.browser;})});
       cfgMark(); renderCfg(); return;}
     if((g=t.getAttribute('data-cfagentdel'))!=null){if(CFGW.agent.agents.length<=1){snack('至少要留一個 agent');return;}
@@ -4267,16 +4248,11 @@
     if(t.hasAttribute('data-cfsugapply')){var sg=CFGD.suggest; CFGW.board.categories=_clone(sg.categories); CFGW.board.tags=_clone(sg.tags||[]);
       cfgMark(); renderCfg(); snack('套用了,按「💾 儲存設定」才會生效'); return;}
     if((g=t.getAttribute('data-cfbrowser'))){
-      var go=function(force){t.disabled=true; t.textContent=g==='setup'?'連接中…(最多一分半)':g==='claude'?'確認中…(最多 2 分鐘)':'打開中…';
-        fetch('/api/settings/browser',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({act:g,force:!!force})})
-          .then(function(r){return r.json();}).then(function(d){
-            // 連接要把 agent 的 Chrome 關掉重開,填好等他核對的頁會一起不見:伺服器先問,他確定了才關
-            if(d.confirm){if(confirm(d.msg))go(true); else cfgLoad(renderCfg); return;}
-            snack(d.msg||(d.ok?'好了':'沒成功')); cfgLoad(renderCfg);
-            // Claude 要他在跳出來的視窗登入:伺服器登入好會自己記下,這裡每 20 秒重讀一次,連上了就換成「確認連得上」
-            if(g==='claude'&&!d.ok)(function poll(n){setTimeout(function(){if(active!=='cfg'||n>45)return; if(CFGDIRTY){poll(n+1);return;}
-              cfgLoad(function(){if(CFGD.claude_paired)renderCfg(); else poll(n+1);});},20000);})(0);});};
-      if(CFGDIRTY)cfgSave(false).then(function(){go();}).catch(function(err){snack('設定沒存成('+err.message+'),照上面說的改好再按一次');}); else go();
+      var go=function(){t.disabled=true; t.textContent='檢查中…';
+        fetch('/api/settings/browser',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({act:g})})
+          .then(function(r){return r.json();}).then(function(d){snack(d.msg||(d.ok?'好了':'沒成功')); cfgLoad(renderCfg);})
+          .catch(function(){snack('檢查沒完成,再試一次'); t.disabled=false; t.textContent='檢查 ego';});};
+      if(CFGDIRTY)cfgSave(false).then(go).catch(function(err){snack('設定沒存成('+err.message+'),先存好再檢查');}); else go();
       return;}
     if((g=t.getAttribute('data-cfuseagent'))){
       if(CFGDIRTY){snack('設定頁有改動還沒存,先存或放棄再按'); return;}

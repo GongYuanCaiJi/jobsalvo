@@ -5,7 +5,7 @@
 一輪的資料夾裡有:程式給的指示、agent 的動作紀錄、交件單、程式的比對結果、之後每次讀那一頁看到的樣子(連同程式自己截的圖),
 events.jsonl 照時間排。要使用者確認的事都附程式自己截的那一頁;沒有就不叫他做,改回報「缺證據」。
 
-測法:用假的 agent 的 Chrome(tests/fake_chrome.py)和假的 agent(換掉 agent_run 開行程、等行程那兩支,
+測法:用假的 agent 的 Chrome(tests/fake_door.py)和假的 agent(換掉 agent_run 開行程、等行程那兩支,
 agent_run.run 本身照真的跑),跑正式的入口,再打開那張卡的證據資料夾看。
 """
 import json
@@ -22,8 +22,9 @@ import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import agent_run as ar        # noqa: E402
 import apply_run as run       # noqa: E402
 import board_doc as bd        # noqa: E402
+import chrome_door            # noqa: E402
 import evidence               # noqa: E402
-import fake_chrome as fc      # noqa: E402
+import fake_door as fc      # noqa: E402
 import form_record as fr      # noqa: E402
 
 U = 'https://jobs.lever.co/evidence/1'
@@ -42,7 +43,7 @@ def board():
 
 
 class FakeAgent:
-    """假的 agent:寫一份 codex 格式的動作紀錄、照 fill 把交件單寫進輸出資料夾、把表單記進看板(agent 本來用 form_record 記)。
+    """假的 agent:寫動作紀錄與完整交件單;原生 CLI 由程式記表單,其他 runtime 由 agent 記。
     fill:交件單(fill.json 的內容);fields:它記進看板的欄位;inferred:它推論、要他確認的答案。"""
 
     def __init__(self, fb, out, fill=None, fields=None, report=None):
@@ -54,16 +55,25 @@ class FakeAgent:
 
     def launch(self, task, outfile, repo, agent, **kw):
         self.tasks.append(task)
+        native = chrome_door.of(ar._agent_entry(agent)['runtime']).native_json_output
         with open(outfile, 'a' if kw.get('append') else 'w', encoding='utf-8') as f:
             f.write(json.dumps({'type': 'thread.started', 'thread_id': 'S1'}) + '\n')
             f.write(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '選了 Taiwan'}}, ensure_ascii=False) + '\n')
             f.write(json.dumps({'type': 'turn.completed'}) + '\n')
+            if not native:
+                f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                    'session_id': 'S1', 'result': '@@DONE@@'}) + '\n')
         os.makedirs(self.out, exist_ok=True)
-        with open(os.path.join(self.out, 'fill.json'), 'w', encoding='utf-8') as f:
-            json.dump(self.fill, f, ensure_ascii=False)
-        fr.apply_record(self.fb, U, 'Lever', self.fields or [
+        fields = self.fields or [
             {'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'},
-            {'q': 'Nationality', 'src': 'bank', 'k': 'nat'}], at=run.now())
+            {'q': 'Nationality', 'src': 'bank', 'k': 'nat'}]
+        bank = {x['k']: x.get('v', '') for x in self.fb.get('__ans__', [])}
+        sheet = dict(self.fill, platform='Lever', fields=[
+            dict(x, value=x.get('v', bank.get(x.get('k'), ''))) for x in fields])
+        with open(os.path.join(self.out, 'fill.json'), 'w', encoding='utf-8') as f:
+            json.dump(sheet, f, ensure_ascii=False)
+        if not native:
+            fr.apply_record(self.fb, U, 'Lever', fields, at=run.now())
         if self.report:
             import agent_report
             with patch.dict(os.environ, {ar.REPORT_FROM_ENV: ar._REPORT_FROM.get() or 'x'}), \
@@ -103,7 +113,7 @@ class Fill(unittest.TestCase):
         return result, fb
 
     def test_a_fill_round_leaves_its_whole_evidence_in_the_cards_folder_in_time_order(self):
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=PAGE))
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=PAGE))
         self.assertTrue(ok, msg)
         rounds = _env.evidence_rounds(U, '/tmp/board.html')
         self.assertEqual(len(rounds), 1)
@@ -125,6 +135,12 @@ class Fill(unittest.TestCase):
             self.assertEqual(json.load(f)['fields'][1]['value'], 'Taiwan')
         self.assertTrue(os.path.isfile(os.path.join(rnd, page['shot'])))   # 讀頁跟程式截的圖綁在同一筆
         self.assertEqual(by['check']['problems'], [])
+
+    def test_legacy_round_records_the_form_before_program_verification(self):
+        (ok, msg), fb = self.fill(fc.FakeDoor('claude-code', page=PAGE))
+        self.assertTrue(ok, msg)
+        self.assertEqual(fb[U]['form']['plat'], 'Lever')
+        self.assertEqual(fb[U]['form']['f'][0]['v'], 'Alex Chen')
 
 
 WHY = {'q': 'Why do you want to join?', 'src': 'new', 'v': 'I like the mission.', 'zh': '我喜歡這個使命。',
@@ -150,7 +166,7 @@ class QuestionsForHimCarryTheScreenshot(unittest.TestCase):
 
     def test_a_question_on_the_page_it_shot_is_asked_with_that_screenshot(self):
         fb = board()
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=PAGE), self.agent(fb), fb)
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=PAGE), self.agent(fb), fb)
         e = self.inferred(fb)
         self.assertIn(e, [x for x, _ in fr.find_pending(fb)])            # 照樣叫他確認
         shot = evidence.path(U, e['ev']['f'], '/tmp/board.html')          # 看板點得開的那張,在這張卡的證據夾
@@ -162,7 +178,7 @@ class QuestionsForHimCarryTheScreenshot(unittest.TestCase):
 
     def test_no_screenshot_means_it_is_not_asked_and_is_reported_as_missing_evidence(self):
         fb = board()
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=PAGE, not_now={'shot'}), self.agent(fb), fb)
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=PAGE, not_now={'shot'}), self.agent(fb), fb)
         e = self.inferred(fb)
         self.assertNotIn(e, [x for x, _ in fr.find_pending(fb)])          # 不在要你處理的清單
         self.assertNotIn('ev', e)
@@ -175,7 +191,7 @@ class QuestionsForHimCarryTheScreenshot(unittest.TestCase):
     def test_a_question_that_is_not_on_the_page_it_read_is_not_asked(self):
         fb = board()
         page = dict(PAGE, fields=PAGE['fields'][:2])                      # agent 說有這一題,頁面上沒有
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=page), self.agent(fb), fb)
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=page), self.agent(fb), fb)
         e = self.inferred(fb)
         self.assertNotIn(e, [x for x, _ in fr.find_pending(fb)])
         self.assertTrue(any('缺證據' in it['msg'] and WHY['q'] in it['msg'] for it in self.reports(fb)))
@@ -196,7 +212,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
 
     def test_a_report_after_a_round_carries_the_page_it_shot(self):
         page = dict(PAGE, fields=[PAGE['fields'][0]])                     # Nationality 沒填上:驗收不過,程式回報
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=page))
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=page))
         self.assertFalse(ok)
         it = next(x for x in fb['__inbox__'] if not x.get('done') and x.get('job') == U)
         self.opens(it['ev'])
@@ -221,7 +237,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
         fb = board()
         agent = FakeAgent(fb, self.out, report=('這一頁要他本人登入', '登入'))
         page = dict(PAGE, fields=[PAGE['fields'][0]])                     # 沒填完:這張的回報留著給他看
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=page), agent, fb)
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=page), agent, fb)
         it = next(x for x in fb['__inbox__'] if x['msg'] == '這一頁要他本人登入')
         self.opens(it['ev'])
         self.assertNotIn('noev', it)
@@ -229,7 +245,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
         self.assertIn(it, agent_report.todo(fb))
 
     def test_the_card_line_after_a_round_links_the_page_it_shot(self):
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=PAGE))
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=PAGE))
         self.assertTrue(ok, msg)
         self.opens(fb[U]['apply']['ev'])
 
@@ -238,7 +254,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
         fb[U]['apply'] = {'stage': 'fill', 'tab_id': '7', 'session': 'S0', 'runtime': 'codex', 'at': '2020-01-01'}
         agent = FakeAgent(fb, self.out)
         agent.wait = lambda procs, timeout=None, paused=None: [SimpleNamespace(status='failed', returncode=1, pid=4242)]
-        (ok, msg), fb = self.fill(fc.FakeChrome('codex', page=PAGE), agent, fb)
+        (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=PAGE), agent, fb)
         self.assertFalse(ok)
         self.assertIn(fb[U]['ds'], ('stuck', 'nopage'))                   # 這一輪沒成
         self.opens(fb[U]['apply']['ev'])                                   # agent 開到一半的那一頁,程式自己截的
@@ -252,7 +268,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
         fb[U]['ds'] = 'confirmed'
         fb[U]['approve'] = {'at': run.today(), 'snap': fr.snapshot(fb, U)}
         agent = FakeAgent(fb, self.out, fill=None)
-        door = fc.FakeChrome('codex', page=PAGE)
+        door = fc.FakeDoor('codex', page=PAGE)
 
         def launch(task, outfile, repo, agent_entry, **kw):
             # 按完送出之後頁面換了、又沒有確認頁的字:程式也判斷不了,才是送出結果不明(#316)

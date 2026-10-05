@@ -5,6 +5,7 @@ import email.parser
 import email.policy
 import hashlib
 import html
+import io
 import json
 import threading
 import time
@@ -135,6 +136,14 @@ class FakePlatformProfile:
                 parsed = urlparse(self.path)
                 parts = [p for p in parsed.path.split('/') if p]
                 query = parse_qs(parsed.query)
+                if parsed.path == '/profile-options':
+                    state = srv.scenarios.get((query.get('job') or [''])[0])
+                    if state is None:
+                        return self._send(404, 'unknown scenario')
+                    return self._send(200, json.dumps([
+                        {'value': str(pid), 'name': profile['name']}
+                        for pid, profile in state['profiles'].items()
+                    ], ensure_ascii=False), 'application/json')
                 if parsed.path == '/apply':
                     case = (query.get('job') or [''])[0]
                     state = srv.scenarios.get(case)
@@ -142,7 +151,7 @@ class FakePlatformProfile:
                         return self._send(404, 'unknown scenario')
                     self._event(action='VIEW_APPLICATION', case=case, status=200)
                     text_fields = [item for item in FIELDS if item[2] != 'file']
-                    page = PAGE.replace('{job}', html.escape(case)).replace(
+                    page = PAGE.replace('{job}', html.escape(case)).replace('{upload_fields}', '').replace(
                         '{fields}', ''.join(_field_html(*field) for field in text_fields)
                     )
                     page = page.replace(
@@ -164,8 +173,16 @@ class FakePlatformProfile:
                     page = page.replace('</form>', (
                         selector
                         + f'<p>此職缺使用平台履歷，申請表沒有直接附件上傳欄。'
-                        f'<a href="{srv.manager_url(case)}">管理平台履歷</a></p></form>'
+                        f'<a target="_blank" href="{srv.manager_url(case)}">管理平台履歷</a></p></form>'
                     ))
+                    # 平台管理頁新增履歷後,原本的申請頁更新選單,不用 reload 丟掉已填的格子。
+                    page += ('<script>setInterval(async()=>{try{'
+                             f'const rows=await(await fetch("/profile-options?job={quote(case)}")).json();'
+                             'const select=document.querySelector("select[name=profile_id]"),chosen=select.value;'
+                             'for(const row of rows){let option=[...select.options].find(o=>o.value===row.value);'
+                             'if(!option){option=document.createElement("option");option.value=row.value;select.add(option);}'
+                             'option.textContent=row.name;}select.value=chosen;'
+                             '}catch(error){console.warn("profile options unavailable",error);}},500);</script>')
                     return self._send(200, page)
                 if len(parts) == 2 and parts[0] == 'profiles':
                     case = parts[1]
@@ -298,6 +315,16 @@ class FakePlatformProfile:
                     else:
                         aid = f'upload-{len(profile["attachments"]) + 1}'
                         profile['attachments'].append({'id': aid, 'name': filename, 'content': content})
+                    if profile.get('kind') == 'custom' and (len(profile['attachments']) == 1
+                                                          or profile.get('text_file') == filename):
+                        # 模擬平台的 PDF 履歷預覽;本文必須來自收到的 bytes,不能借本機母稿。
+                        import pdf_tools
+                        try:
+                            pdf = pdf_tools.pypdf.PdfReader(io.BytesIO(content))
+                            profile['text'] = '\n'.join(page.extract_text() or '' for page in pdf.pages)
+                            profile['text_file'] = filename
+                        except Exception:  # noqa: BLE001 — 非 PDF 仍保存原始附件,只是不冒充能讀的履歷本文。
+                            profile['text'] = ''
                     self._event(action='UPLOAD', case=case, profile=profile_id,
                                 profile_kind=profile.get('kind'), name=filename,
                                 sha256=sha256(content), previous_sha256=old_sha,
@@ -373,7 +400,7 @@ class FakePlatformProfile:
         pid = profile['id']
         return ''.join(
             f'<li>{html.escape(item["name"])} '
-            f'<a href="{self.download_url(case, pid, item["id"])}">下載</a> '
+            f'<a href="{self.download_url(case, pid, item["id"])}" download="{html.escape(item["name"], quote=True)}">下載</a> '
             f'<form method="post" action="/delete-attachment/{quote(case)}/{quote(pid)}/{quote(str(item["id"]))}">'
             '<button type="submit">刪除附件</button></form></li>'
             for item in profile['attachments']
@@ -461,4 +488,3 @@ class FakePlatformProfile:
 
     def fixed_snapshot(self, case):
         return self._scenario_hash(case, kind='fixed')
-

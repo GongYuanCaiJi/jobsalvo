@@ -231,11 +231,11 @@ class Pilot:
         """agent 的 Chrome 關掉或重開過:那之前填好的頁一定不在了,卡上改成要重填(👀、要它改都不再顯示)。
         開那一頁的那一家確定接不回來(設定換了 agent、更新前填的沒記是哪一家):一樣改成要重填,卡上寫哪一種。
         以前要等他按 👀 截不到、按送出才發現,這之間卡上一直寫填好了、還能按 👀。只看真的機器上的 Chrome,副本不看。"""
-        import agent_chrome
+        import chrome_door
         st = self.run_status('apply')
         running = st.get('url') if st.get('running') else ''
         # 在看板鎖內照現在的看板算(不是這一輪開頭讀的快照):快照之後剛填好的新頁不會被誤標(#308)
-        got = agent_chrome.sweep_gone(self.state, running, by='autopilot', unreachable=True)
+        got = chrome_door.sweep_gone(self.state, running, by='autopilot', unreachable=True)
         if got:
             # 這一輪接下來照看板現在的樣子排(不在舊快照上再標一次:快照之後別處改過的卡,那樣會算錯)
             fb.clear()
@@ -334,7 +334,7 @@ class Pilot:
                 a['replies_retry'] = {'day': today, 'n': (r.get('n', 0) if r.get('day') == today else 0)
                                       + (1 if pl.get('replies_retry') else 0)}
             if need_browser:
-                a['blocked'] = 'Chrome 沒連接'
+                a['blocked'] = 'ego 沒準備好'
             elif ok.get('fill') or ok.get('fix') or ok.get('replies'):
                 a.pop('blocked', None)
             for i in pl['advance']:
@@ -347,13 +347,13 @@ class Pilot:
         if pl['init'] or pl['seen'] or pl['advance'] or pl['rf'] or started or expire:
             bd.set_fb(mut, live=self.state, by='autopilot')
         if was_blocked and not need_browser and (ok.get('fill') or ok.get('fix') or ok.get('replies')):
-            # 連上了、自動的步驟接著跑:之前「Chrome 沒連接」那則回報收掉,不留著讓他以為還要處理
+            # 連上了、自動的步驟接著跑:之前「ego 沒準備好」那則回報收掉,不留著讓他以為還要處理
             import agent_report
-            agent_report.resolve_from('自動流程', 'agent 的 Chrome 連上了,自動的步驟接著跑',
+            agent_report.resolve_from('自動流程', 'agent 的瀏覽器準備好了,自動的步驟接著跑',
                                       datetime.datetime.now().isoformat(timespec='seconds'), live=self.state)
         if need_browser and self.report and not was_blocked:
             # 只講一次:連上之前不會每一分鐘都再講
-            self.report('自動流程', '要讓 agent 填表或查回音,但 agent 專用的 Chrome 沒連接,自動的這幾步先停著',
+            self.report('自動流程', '要讓 agent 填表或查回音,但 agent 的瀏覽器(ego)沒準備好,自動的這幾步先停著',
                         need='到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「連接」')
         if pl['seen'] and self.build and self.is_real():
             # 準備區跑完是 cut_tailor 直接寫檔推進待你決定,不經過存檔,伺服器不會自己建;這裡補一輪

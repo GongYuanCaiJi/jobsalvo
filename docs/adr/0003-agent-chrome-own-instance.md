@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0006
+---
+
 # agent 的 Chrome:自己一個正常的 Chrome,一直在背景,只靠官方擴充功能操作
 
 agent 用的 Chrome 是 jobsalvo 自己的一個 Chrome 資料夾(`browser.data_dir`,預設 `~/Library/Application Support/jobsalvo/agent-chrome`),跟使用者本人的 Chrome 是兩個程序。只有一種開法:

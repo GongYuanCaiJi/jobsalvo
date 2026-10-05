@@ -18,25 +18,25 @@
   程式先清掉重複的、職稱撞到「一定不要」的,agent 再逐張拿 JD 對照你對相似舊卡的表態,決定要不要送到你眼前。每輪預設最多 15 分鐘(可改,0 = 不限)。
   有詐騙徵兆的(照 FTC 的求職詐騙說明,例如要先繳錢、要敏感個資)不送;看起來掛著沒在招人的幽靈職缺照樣送,但卡上標出來。
 - **準備履歷**:agent 讀每張的 JD,從你勾選的履歷裡挑一份、挑語言,程式建好要寄的檔案。想為某個缺改履歷,可以交給 agent 客製,或自己上傳。
-- **幫你填表**:agent 在它專用的 Chrome(跟你的 Chrome 分開、平常在背景跑,不會跳到你面前)裡把表單填好、停在送出前。你按卡上的「👀 看現在的頁面」看它填好的樣子(手機也行),要親手看就在設定頁打開 agent 的 Chrome,
+- **幫你填表**:agent 在它專用的瀏覽器(ego lite,跟你的瀏覽器分開、每張卡一個工作區,不搶你的畫面)裡把表單填好、停在送出前。你按卡上的「👀 看現在的頁面」看它填好的樣子(手機也行),要親手看就在 ego lite 裡打開那張卡的工作區,
   按「✅ 確認送出」後,同一段對話才在同一頁送出,8 秒內可以復原。**程式不會自動送出。**
-- **查應徵進度**:程式先在 agent 的 Chrome 讀 Gmail 和各平台的應徵紀錄,交給 agent 判斷誰回了什麼;讀不到的來源才讓 agent 自己去看。程式照證據改狀態(可復原)。
+- **查應徵進度**:程式先在 agent 的瀏覽器讀 Gmail 和各平台的應徵紀錄,交給 agent 判斷誰回了什麼;讀不到的來源才讓 agent 自己去看。程式照證據改狀態(可復原)。
 - **🔁 自動流程**(預設全開):按 👍 就開始準備、準備好自動進「可以投了」、自動填表、每天 09:00 查應徵進度;都停在送出前。
 - agent 做不到、要你本人處理的事(登入、驗證碼),會出現在看板最上面的「📣 回報」。
 
 ## 需要什麼
 
-- macOS、Google Chrome、git(沒有的話跑 `xcode-select --install`)。
+- macOS、git(沒有的話跑 `xcode-select --install`)。
 - 至少一個裝好、登入好的 agent:Codex CLI(`codex`)、Claude Code(`claude`)或 Command Code(`command-code`)。
   環境檢查只讀本機的登入紀錄,不送請求、不查額度。
 - 三種都能找缺、判斷、準備履歷;這些工作都不操作 Chrome(網頁由程式抓,要登入才看得到的頁會回報給你)。Command Code 不能用瀏覽器。會碰瀏覽器的只有兩件事:
   - **幫你填表**:Codex,或 Claude Code(模型要 Sonnet 或 Opus,Haiku 會被 Claude 的擴充功能擋)。兩種都一樣由程式自己讀回那一頁核對、截圖;只裝其中一種就好。用 Claude 時「Apply with LinkedIn」這類網頁自己開的授權小視窗做不到(Claude 看不到),改填一般表單。
-  - **查應徵進度**:Codex 或 Claude Code 都可以。用 Codex 時程式先自己讀信箱和平台頁;用 Claude 時交給 Claude 在 agent 的 Chrome 裡讀。
-  - 同一時間只讓一個 agent 用 Chrome(設定裡只能勾一個)。
-- 幫你填表與查應徵進度要一個 agent 專用的 Chrome:jobsalvo 自己開的另一個正常的 Chrome(自己的資料夾、自己的程序,一直在背景跑、不搶你的畫面),步驟見 [設定幫你填表用的 Chrome](docs/agent-chrome.md)。沒有時仍可找缺。
+  - **查應徵進度**:Codex 或 Claude Code 都可以,程式先自己讀信箱和平台頁,讀不到的才交給 agent。
+  - 同一時間只讓一個 agent 用瀏覽器(設定裡只能勾一個)。
+- 幫你填表與查應徵進度要一個 agent 專用的瀏覽器 ego lite(裝一個 app、匯入一次),步驟見 [設定幫你填表用的瀏覽器](docs/agent-browser.md)。沒有時仍可找缺(只有要跑 JS 才有字的職缺頁讀不到)。
 
-Python 和套件(Markdown、pypdf、Playwright)由 [uv](https://docs.astral.sh/uv/)(管 Python 和套件的工具)裝在程式資料夾的 `.venv`,
-版本鎖在 `uv.lock`;安裝程式會在沒有 uv 時自動裝。Playwright 用這台電腦的 Chrome,不另外下載瀏覽器。
+Python 和套件(Markdown、pypdf)由 [uv](https://docs.astral.sh/uv/)(管 Python 和套件的工具)裝在程式資料夾的 `.venv`,
+版本鎖在 `uv.lock`;安裝程式會在沒有 uv 時自動裝。
 
 ## 開始用
 
@@ -76,7 +76,7 @@ bash -o pipefail -c 'curl -fsSL https://raw.githubusercontent.com/GongYuanCaiJi/
 | 🔁 自動流程 | 上面「它怎麼運作」那幾步各自開關;最多停幾張等你確認送出(預設 5) |
 | 📝 填表做法 | 連結欄填什麼、哪些勾選框要勾…幫你填表時原文交給 agent |
 | 📬 查應徵進度 | 沒下文的天數、查應徵進度的信箱網址(Gmail 任一帳號,或其他信箱) |
-| 🤖 Agent 與瀏覽器 | agent 清單(執行環境、模型、思考強度,由上往下試;只能勾一個「用它操作 Chrome」);第一次建立時從哪個 Chrome 設定檔複製登入狀態;連接勾了的那一家;打開 agent 的 Chrome 去登入或親手看 |
+| 🤖 Agent 與瀏覽器 | agent 清單(執行環境、模型、思考強度,由上往下試;只能勾一個「用它操作 ego」);檢查 ego 裝好、匯入了沒 |
 | ⚙ 其他 | 開機自動啟動、程式版本與「更新」、資料夾自動留版的時間 |
 
 看板上:「🔎 找新職缺」可以貼自己找到的職缺網址;卡片 ⋯ 可以改類別;待你決定、可以投了的卡可以「📎 這張用自己的檔」;
@@ -128,7 +128,7 @@ ship/              要寄的檔案:<卡名>-<網址 sha1 前 12 碼>/
 
 ## 履歷
 
-- Markdown 原稿由無頭 Chrome 排成 PDF,有上傳 CSS 就用它,沒有就用瀏覽器預設樣式(產品不附版型);PDF 原樣使用。排出來超過一頁時設定頁會提醒。
+- Markdown 原稿由 agent 的瀏覽器(ego)排成 PDF,有上傳 CSS 就用它,沒有就用瀏覽器預設樣式(產品不附版型);PDF 原樣使用。排出來超過一頁時設定頁會提醒。
 - **要寄的檔案** `ship/<卡名>-<id>/`:履歷和附件的個別檔、程式產的合併 PDF(`merged.pdf`),以及 `ship.json`(`variant`、`lang`、`files`、`merged`);原稿或 CSS 改了會重做。
 - **客製**:「待你決定」和「可以投了」的卡可以一次選多份履歷或附件交給同一個 agent,照各檔的改履歷的規則修改。
   輸出要通過 PDF 與頁數檢查,等你看過收下才替換要寄的檔案;退回重寫或檢查中不能送出。直接上傳自己的 PDF 算已收下。
@@ -139,7 +139,7 @@ ship/              要寄的檔案:<卡名>-<網址 sha1 前 12 碼>/
 ```bash
 uv run python tools/reconcile.py      # 冪等:換上新的看板外殼、整理要寄的檔案、驗收、清過期夾
 uv run python -m unittest discover -s tests
-uv run python tools/board_check.py    # 用無頭 Chrome 在示範看板上實際點一遍;改介面時先跑 --fast
+uv run python tools/board_check.py    # 開發用:用無頭 Chrome 在示範看板上實際點一遍;改介面時先跑 --fast
 pre-commit install                    # commit 前的檢查(.pre-commit-config.yaml,pre-commit 要另外裝);私人字串清單放 .git/info/private-words
 ```
 

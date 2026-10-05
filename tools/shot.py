@@ -76,7 +76,8 @@ class Sandbox:
             [sys.executable, os.path.join(HERE, 'board_server.py'),
              '--port', str(self.port), '--host', '127.0.0.1', '--state', self.copy],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=dict(os.environ, AGENT_BOARD=self.copy))
+            # 副本產 PDF 用開發用的 Chrome(dev_pdf),不去叫使用者的 ego;CI 的 Linux 上也沒有 ego
+            env=dict(os.environ, AGENT_BOARD=self.copy, JOBSALVO_DEV_PDF='1'))
         self.url = f'http://localhost:{self.port}'
         for _ in range(80):
             try:

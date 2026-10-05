@@ -400,7 +400,10 @@ def write_fb(fb_obj, base=None, events=None, rejected=None, out=None):
                 (cur.get(k) or {}).get(f)!=v.get(f) for f in delivery_state.SWAP_FIELDS) else None
             before=_doc_sig(job,cur) if job else None
             old=cur.get(k) if isinstance(cur.get(k),dict) else {}
-            if v is None: cur.pop(k,None)
+            if v is None:
+                old_apply=old.get('apply')
+                delivery_state.queue_workspace(cur,old_apply.get('workspace') if isinstance(old_apply,dict) else None,'card_removed')
+                cur.pop(k,None)
             else: cur[k]=v
             if job and _doc_sig(job,cur)!=before:
                 delivery_state.try_fire(cur,k,'files_changed',why=_swap_why(old,v))
@@ -419,6 +422,8 @@ def write_fb(fb_obj, base=None, events=None, rejected=None, out=None):
         if bd.rewrite(put,STATE,by='看板') is bd.SKIP:
             return bad
     note_saved()
+    import chrome_door
+    chrome_door.close_if_idle(STATE)
     return []
 
 
@@ -718,14 +723,14 @@ def files_changed(before,why):
 
 
 def page_gone(u):
-    """👀 截不到那一頁時:agent 的 Chrome 在這張填好之後關掉或重開過,就把它改標成「頁面不見了,要重填」
-    (自動流程每分鐘也會做同一件事)。外掛一時沒連上這種不確定的情況不動。
-    副本不看:agent 的 Chrome 整台電腦只有一個,副本的卡不是它填的,拿它的程序判斷會把副本的卡亂標。"""
-    import agent_chrome
+    """👀 截不到那一頁時:那張卡的工作區或頁已經不在 ego 裡,就把它改標成「頁面不見了,要重填」
+    (自動流程每分鐘也會做同一件事)。ego 一時連不上這種不確定的情況不動。
+    副本不看:ego 整台電腦只有一個,副本的卡不是它填的,拿它判斷會把副本的卡亂標。"""
+    import chrome_door
     if not is_real():
         return False
     try:
-        return bool(agent_chrome.sweep_gone(STATE,only=u,by='board_server'))   # 在看板鎖內照現在的看板算(#308)
+        return bool(chrome_door.sweep_gone(STATE,only=u,by='board_server'))   # 在看板鎖內照現在的看板算(#308)
     except Exception:  # noqa: BLE001 — 判斷不了就當頁面還在:👀 回「接不上,等一下再按」,自動流程每分鐘會再掃一次
         return False
 
@@ -942,17 +947,18 @@ def start_run(kind,args):
         if not urls: return 400,{'msg':'貼一個以上的職缺網址(http 開頭)'}
         args={'urls':urls}
     if kind in ('apply', 'replies') and is_real():
-        import agent_chrome
-        if not agent_chrome.configured():
+        import chrome_door
+        if not chrome_door.configured():
+            ego = chrome_door.settings_status()['ego']
             return 409, {'needs_browser':True,
-                         'msg':'這個動作需要 agent 專用的 Chrome。請到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「連接」，再試一次。'}
+                         'msg':f'這個動作需要 agent 的瀏覽器(ego):{ego["reason"]}。到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「檢查 ego」看怎麼補。'}
     with _RUN_LOCK:
         st=run_status(kind)
         if st.get('running'): return 409,st
-        # 代投和查應徵進度都用 agent 的 Chrome:一邊收尾會把 Chrome 關掉,另一邊就斷了。單飛一起算
+        # 代投和查應徵進度都用 agent 的瀏覽器,一次只跑一個(電腦資源)
         other={'apply':'replies','replies':'apply'}.get(kind)
         if other and run_status(other).get('running'):
-            return 409,{'other':True,'msg':('查應徵進度' if other=='replies' else '幫你填表')+'正在用 agent 的 Chrome,等它跑完再按'}
+            return 409,{'other':True,'msg':('查應徵進度' if other=='replies' else '幫你填表')+'正在用 agent 的瀏覽器,等它跑完再按'}
         sp=run_sp(kind); os.makedirs(sp,exist_ok=True)
         env=dict(os.environ); env[RUNS[kind]['env']]=sp
         if kind in ('research', 'suggest'): env['JOBSALVO_RESUME_TEXT']=args['resume_text']
@@ -1067,7 +1073,6 @@ class H(BaseHTTPRequestHandler):
             if ast.get('running') and ast.get('url')==u:
                 # agent 正拿著這一頁在填/改/送:這時用同一段對話去截,會搶它的分頁、甚至把它那一輪收掉
                 return self._send(409,'Agent 正在處理這一張,跑完再看(進度在最上面的「🚀 填表進度」)','text/plain; charset=utf-8')
-            out=os.path.join(tempfile.gettempdir(),'apply-live-%d.jpg'%os.getpid())
             # 照這張卡記的那一家的門路截(chrome_door):那一家停用、移除或卡上沒記,那一頁接不回來,跟卡上講的一樣要重填
             import chrome_door
             try: door=chrome_door.for_card((json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}).get('apply'))
@@ -1082,38 +1087,30 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404,str(gone)+':按卡上的「▶ 讓 agent 重填這張」。','text/plain; charset=utf-8')
             if door is None:
                 return self._send(503,'這次讀不到看板,等一下再按一次 👀。','text/plain; charset=utf-8')
-            if not door.shot_while_busy and (ast.get('running') or run_status('replies').get('running')):
-                # 這一家的 👀 是再叫一個 agent 進 agent 的 Chrome 截圖(Claude):同一時間只准一個 agent 在裡面
-                # (另一個會把正在跑的那一輪用的瀏覽器選走)。先給那一頁填好時截的圖:填完、交接之後 agent 不再動它,
-                # 畫面就是現在的樣子;標明是幾點截的,跑完再按一次截現在的(隨時截得到的那一家不走這裡)
-                import apply_run
-                saved=os.path.join(apply_run.out_dir(u,STATE,run_sp('apply')),'fill.png')
-                if u and os.path.isfile(saved):
-                    with open(saved,'rb') as fh: body=fh.read()
-                    self.send_response(200); self.send_header('Content-Type','image/png')
-                    self.send_header('X-Refresh','0'); self.send_header('X-Shot-At',str(int(os.path.getmtime(saved))))
-                    self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
-                    return
-                return self._send(409,'幫你填表或查應徵進度正在用 agent 的 Chrome,這一家同一時間只能一個 agent 在裡面:跑完再按 👀',
-                                  'text/plain; charset=utf-8')
+            fd,out=tempfile.mkstemp(prefix='apply-live-',suffix='.png')
+            os.close(fd)
             try:
-                code=_run_then_stop([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
-                                    door.live_timeout)
-                ok=bool(u) and code==0 and os.path.isfile(out)
-            except (OSError,subprocess.SubprocessError):   # 截圖程式開不起來:跟截不到同一條,下面照實說頁面不見了或接不上
-                ok=False
-            if ok:
-                with open(out,'rb') as fh: body=fh.read()
-                self.send_response(200); self.send_header('Content-Type','image/jpeg')
-                self.send_header('X-Refresh',str(door.live_refresh))
-                self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
-            elif page_gone(u):
-                self._send(404,'那一頁已經不在了(agent 的 Chrome 關掉或重開過)。卡上已改成要重填:按卡上的「▶ 讓 agent 重填這張」。',
-                           'text/plain; charset=utf-8')
-            else:
-                # 程序還是填好那時候的那一個:頁面應該還在,只是這次接不上(外掛一時斷線這類),不叫他重填
-                self._send(503,'這次接不上 agent 的 Chrome 裡的那一頁,頁面應該還在。等一下再按一次 👀。',
-                           'text/plain; charset=utf-8')
+                try:
+                    code=_run_then_stop([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
+                                        door.live_timeout)
+                    ok=bool(u) and code==0 and os.path.isfile(out)
+                except (OSError,subprocess.SubprocessError):   # 截圖程式開不起來:跟截不到同一條,下面照實說頁面不見了或接不上
+                    ok=False
+                if ok:
+                    with open(out,'rb') as fh: body=fh.read()
+                    self.send_response(200); self.send_header('Content-Type','image/png')
+                    self.send_header('X-Refresh',str(door.live_refresh))
+                    self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+                elif page_gone(u):
+                    self._send(404,'那一頁已經不在了(agent 的 Chrome 關掉或重開過)。卡上已改成要重填:按卡上的「▶ 讓 agent 重填這張」。',
+                               'text/plain; charset=utf-8')
+                else:
+                    # 程序還是填好那時候的那一個:頁面應該還在,只是這次接不上(外掛一時斷線這類),不叫他重填
+                    self._send(503,'這次接不上 agent 的 Chrome 裡的那一頁,頁面應該還在。等一下再按一次 👀。',
+                               'text/plain; charset=utf-8')
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(out)
         elif self.path.startswith('/api/shot?'):
             # agent 填表/送出時截的圖(可投遞夾的 .apply/ 裡)。只給這兩張,路徑由網址算,不收任何路徑參數。
             from urllib.parse import urlparse, parse_qs
@@ -1333,24 +1330,11 @@ class H(BaseHTTPRequestHandler):
             if skill: note_saved()
             return self._json(200 if skill else 400,{'ok':bool(skill),'skill':skill,'msg':msg})
         if act=='browser':
-            import agent_chrome
-            # agent 的 Chrome 資料夾整台電腦只有一個:副本(沙箱、截圖、介面檢查)按了會關掉、叫出真的那一個
-            if not is_real():
-                return self._json(400,{'ok':False,'msg':'這是副本,不動 agent 的 Chrome'})
-            a=body.get('act')
-            # 連接會把 agent 的 Chrome 關掉重開、或再叫一個 agent 進去:代投、查應徵進度正在用它時不准
-            if a in ('setup','claude') and (run_status('apply').get('running') or run_status('replies').get('running')):
-                return self._json(409,{'ok':False,'msg':'幫你填表或查應徵進度正在用 agent 的 Chrome,等它跑完再按連接'})
-            try:
-                if a=='setup': ok,msg=agent_chrome.setup(STATE,force=bool(body.get('force')))
-                elif a=='claude':   # 他登入時的背景輪詢也要叫 Claude 進去:代投、查應徵進度在跑就先跳過那一次
-                    ok,msg=agent_chrome.claude_setup(busy=lambda: bool(run_status('apply').get('running') or run_status('replies').get('running')),
-                                                     board=STATE)
-                else: ok,msg=agent_chrome.show()
+            # 設定頁的「檢查 ego」:只看裝好沒、指令跑不跑得起來、匯入了沒,不開也不關任何瀏覽器
+            import chrome_door
+            try: ok,msg=chrome_door.setup()
             except Exception as e:  # noqa: BLE001 — 原因照實回給看板(沒成功:…)
                 ok,msg=False,f'沒成功:{str(e)[:120]}'
-            if ok is None:      # 有填好等他核對的頁,連接會把它們關掉:先問他
-                return self._json(409,{'ok':False,'confirm':True,'msg':msg})
             return self._json(200 if ok else 400,{'ok':ok,'msg':msg})
         if act=='use_agent':
             # 環境檢查「至少一個能用的 agent」那一列的「改用 X」:把這台電腦上能用的那一種放到 agent 清單最前面
@@ -1482,6 +1466,26 @@ class H(BaseHTTPRequestHandler):
 
     def _do_POST(self):
         if self._foreign(True): return
+        if self.path=='/api/live':
+            if self._agent_blocked():return
+            body=self._json_body()
+            if body is None:return
+            u=body.get('u') or ''
+            # 每張卡一個工作區:只擋 agent 正在處理的那一張,別張照樣能接手
+            if run_status('apply').get('running') and run_status('apply').get('url')==u:
+                return self._json(409,{'ok':False,'msg':'Agent 正在處理這一張,等它停下再接手'})
+            import chrome_door, delivery_state as ds
+            m=json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}
+            if ds.state(m)!='stuck' or not (m.get('apply') or {}).get('workspace'):
+                return self._json(200,{'ok':True,'handoff':False})
+            try:
+                door=chrome_door.for_card(m.get('apply'))
+                receipt=door.hand_off()
+            except (chrome_door.Unreachable,chrome_door.NotNow) as e:
+                return self._json(503,{'ok':False,'msg':str(e)})
+            return self._json(200,{'ok':True,'handoff':True,'shown':(receipt or {}).get('shown'),
+                                  'page':(receipt or {}).get('page'),'site':(receipt or {}).get('site'),
+                                  'msg':'已交給你接手這張卡的頁面;處理完按「修改」繼續'})
         if self.path=='/api/settings' or self.path.startswith('/api/settings/'):
             return self.do_POST_settings()
         if self.path=='/api/update':

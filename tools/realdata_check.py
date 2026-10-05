@@ -15,7 +15,7 @@ realdata_check —— 在使用者真實資料的副本上跑一次,看改過的
   uv run python tools/realdata_check.py [資料夾]          # 讀設定 + 全部重建(幾分鐘)
   uv run python tools/realdata_check.py [資料夾] --quick  # 只讀設定
 """
-import json, os, re, shutil, subprocess, sys, tempfile, time, hashlib
+import json, os, re, shutil, subprocess, sys, tempfile, time, hashlib, contextlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WRITTEN = (
@@ -312,10 +312,6 @@ def _redirect_absolute_inputs(copy, settings):
     for key in ('prefs', 'preference_note', 'apply_rules', 'tmp'):
         if key in paths:
             paths[key] = redirect(paths[key])
-    browser = settings.get('browser') or {}
-    if 'state' in browser:
-        # Never copy or consult the user's agent-browser session in this check.
-        browser['state'] = '.realdata-check-agent-state.json'
     config_path = os.path.join(copy, 'jobsalvo.json')
     with open(config_path, 'w', encoding='utf-8') as target:
         json.dump(settings, target, ensure_ascii=False, indent=2)
@@ -437,8 +433,18 @@ def main(argv):
     if not src or not os.path.isfile(os.path.join(src, 'jobsalvo.json')):
         print('找不到資料夾(給一個含 jobsalvo.json 的資料夾,或設 JOBSALVO_HOME)。')
         return 2
-    with tempfile.TemporaryDirectory(prefix='jobsalvo-realdata-') as temporary:
-        return _check_copy(src, os.path.join(temporary, 'home'), a.quick)
+    import chrome_door
+    scope = (chrome_door.test_workspaces() if not a.quick and chrome_door.ego_bin()
+             else contextlib.nullcontext({}))
+    counts = {}
+    try:
+        with scope as counts, tempfile.TemporaryDirectory(prefix='jobsalvo-realdata-') as temporary:
+            code = _check_copy(src, os.path.join(temporary, 'home'), a.quick)
+    finally:
+        if counts:
+            print(f'ego 工作區:{counts.get("before_count")} → {counts.get("after_count")};'
+                  f'收掉 {len(counts.get("finished", []))} 個;收尾錯誤 {len(counts.get("errors", []))} 個')
+    return code or (1 if counts and not counts.get('returned_to_baseline') else 0)
 
 
 

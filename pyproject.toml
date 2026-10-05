@@ -7,7 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "Markdown==3.10.3",          # 履歷 Markdown 轉 PDF
     "pypdf==6.19.0",             # 讀 PDF 頁數、比對頁面
-    "playwright==1.63.0",        # 開瀏覽器:讀網頁文字、截圖、看板檢查(用這台的 Chrome,不另外下載)
 ]
 
 [tool.uv]
@@ -26,6 +25,7 @@ select = ["BLE001", "S110", "S112", "SIM105", "E722", "F401", "F821", "F841"]
 
 [dependency-groups]
 dev = [
+    "playwright==1.63.0",        # 開發用:看板檢查、介面截圖(board_check、shot;用這台的 Chrome,不另外下載)。使用者的功能都走 ego
     "coverage==7.16.1",          # 測試的分岔覆蓋率:哪些 if/except 的路從來沒被測到(CI 單元測試那一步)
 ]
 

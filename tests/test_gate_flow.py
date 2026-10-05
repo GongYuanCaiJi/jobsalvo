@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """幫你填表整條流程過安檢門(#316):填表 → 程式驗收 → 他按確認送出 → 程式送出。
 
-用假的 agent 的 Chrome(Codex 那條)和真的 Claude 門路(頁面從那一輪的紀錄拿,docs/adr/0003)各跑一次,判斷標準一樣:
+用兩個 CLI 共用的瀏覽器門路各跑一次,判斷標準一樣:
   · agent 照做:一路到已送出。
-  · agent 做完之後頁面上一格被改掉:他按確認前被擋(Codex;Claude 確認時程式讀不到即時的頁,見下)、程式送出前也被擋,
+  · agent 做完之後頁面上一格被改掉:他按確認前被擋、程式送出前也被擋,
     卡上寫出哪一格從什麼變成什麼和下一步。
-  · 按了送出頁面還停在申請表(跳出驗證碼)、agent 說不確定:記成沒送出,不是送出結果不明,不叫他去信箱查。
+  · 按了送出跳出驗證碼，agent 有當次證據確認沒送出:記成沒送出；表單還在本身不能判斷結果。
   · 送出結果不明的卡他按「確認沒送出」:這張跟送出有關的回報全部收掉。
   · agent 回報時自己寫了別的來源:照程式給的來源記;這張重填成功後,那一則收掉。
 
@@ -31,7 +31,7 @@ import apply_run as run       # noqa: E402
 import board_server as bs     # noqa: E402
 import chrome_door            # noqa: E402
 import delivery_state as ds   # noqa: E402
-import fake_chrome as fc      # noqa: E402
+import fake_door as fc      # noqa: E402
 import form_record as fr      # noqa: E402
 
 U = 'https://jobs.lever.co/gate/1'
@@ -39,14 +39,15 @@ OKST = {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True, 'i
 FORM_PAGE = {'url': U + '/apply', 'title': 'Engineer - Example', 'lines': ['Engineer', 'Example'],
              'fields': [{'label': 'Full name', 'name': 'name', 'type': 'text', 'value': 'Alex Chen'},
                         {'label': 'Nationality', 'name': 'nat', 'type': 'text', 'value': 'Taiwan'}]}
-HONEST = {'url': U, 'platform': 'Lever', 'tab_id': '7', 'handoff': True, 'tab_url': U + '/apply',
+HONEST = {'url': U, 'platform': 'Lever', 'tab_id': '7:p1', 'handoff': True, 'tab_url': U + '/apply',
           'posting': {'title': 'Engineer', 'company': 'Example', 'same_job': True},
           'delivery': {'method': 'no_profile'}, 'uploaded': [],
           'fields': [{'q': 'Full name', 'value': 'Alex Chen', 'src': 'rz'},
                      {'q': 'Nationality', 'value': 'Taiwan', 'src': 'bank', 'k': 'nat'}],
           'problems': [], 'notes': [], 'submitted': False}
 THANKS = {'url': U + '/thanks', 'title': 'Thanks', 'lines': ['Application submitted'], 'fields': []}
-SENT = {'submitted': True, 'clicked': True, 'confirm_url': U + '/thanks', 'confirm_text': 'Application submitted'}
+SENT = {'submitted': True, 'clicked': True, 'reason': '本次申請已收到',
+        'confirm_url': U + '/thanks', 'confirm_text': 'Application submitted'}
 
 
 def captcha(page):
@@ -77,14 +78,14 @@ class CodexFlow(unittest.TestCase):
             self.enterContext(p)
 
     def make_door(self):
-        return fc.FakeChrome('codex', page=self.page)
+        return fc.FakeDoor(self.RUNTIME, page=self.page, prepared={
+            'workspace': {'id': 7, 'name': 'jobsalvo-gate-test', 'page': 'p1'},
+            'tab_id': '7:p1', 'page': self.page})
 
     def patches(self):
         return [fc.installed(self.door),
                 patch.object(run, 'out_dir', return_value=self.out),
                 patch.object(run, 'prompt_for', side_effect=lambda stage, *a, **k: (f'指示:{stage}', self.out)),
-                patch.object(run, 'pre_submit_prompt', side_effect=lambda *a, **k: (
-                    '送出前核對' + (k['door'] if 'door' in k else a[5]).page_reread(k.get('page_tab')), self.out)),
                 patch.object(ar.subprocess, 'Popen', side_effect=self.agent),
                 patch.object(ar, 'wait_done', side_effect=lambda procs, timeout=None, paused=None: [
                     SimpleNamespace(status='completed', returncode=0, pid=4242)]),
@@ -94,7 +95,7 @@ class CodexFlow(unittest.TestCase):
 
     # ---- 假的 agent(一個行程):照這一輪的指示做,環境是程式給的 ----
     def agent(self, argv, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None, env=None):
-        stage = os.path.basename(stdout.name).split('.')[0]          # fill / submit-check / submit
+        stage = os.path.basename(stdout.name).split('.')[0]          # fill / submit
         self.rounds.append(stage)
         with patch.dict(os.environ, env, clear=True):
             if stage == 'fill':
@@ -170,11 +171,42 @@ class CodexFlow(unittest.TestCase):
         self.assertEqual(m['apply']['issues'][-1], run.NEXT_STEP)
         self.assertTrue(ds.allowed(m, 'fix_start') and ds.allowed(m, 'fill_start'))
 
-    def test_a_page_from_a_chrome_that_was_restarted_is_not_compared(self):
-        # Chrome 關過、重開過:記著的分頁編號可能剛好是別張卡的頁,不拿它去比;這張算頁面不見了、要重填
+    def test_verified_negative_after_an_accidental_click_is_not_changed_to_unknown(self):
+        self.page['lines'].append('Submission blocked by validation')
+        self.sheet.update(submitted=False, clicked=True, reason='驗證擋住，沒有送出',
+                          confirm_url=self.page['url'], confirm_text='Submission blocked by validation')
+        ok, message = self.fill()
+        self.assertTrue(ok, message)
+        self.assertEqual(ds.state(self.card()), 'parked')
+
+    def test_invalid_send_result_type_still_prevents_another_fill(self):
+        self.sheet['submitted'] = 'true'
+        ok, message = self.fill()
+        self.assertFalse(ok, message)
+        self.assertEqual(ds.state(self.card()), 'unsure')
+        self.assertFalse(ds.allowed(self.card(), 'fill_start'))
+        self.assertFalse(ds.allowed(self.card(), 'fix_start'))
+
+    def test_invalid_negative_result_type_still_prevents_another_fill(self):
+        self.sheet['submitted'] = 'false'
+        ok, message = self.fill()
+        self.assertFalse(ok, message)
+        self.assertEqual(ds.state(self.card()), 'unsure')
+        self.assertFalse(ds.allowed(self.card(), 'fill_start'))
+        self.assertFalse(ds.allowed(self.card(), 'fix_start'))
+
+    def test_unverified_negative_after_an_accidental_click_is_unsure(self):
+        self.sheet.update(submitted=False, clicked=True, reason='沒有送出')
+        ok, _message = self.fill()
+        self.assertFalse(ok)
+        self.assertEqual(ds.state(self.card()), 'unsure')
+        self.assertFalse(ds.allowed(self.card(), 'fill_start'))
+
+    def test_a_missing_bound_workspace_is_not_compared_or_confirmed(self):
+        # 門路查到綁定的工作區不見了,不拿另一張頁去比;這張要重填。
         ok, msg = self.fill()
         self.assertTrue(ok, msg)
-        with patch('agent_chrome.pid', return_value=5555), patch('agent_chrome.started_at', return_value=9e9):
+        with patch.object(chrome_door, 'gone_pages', return_value=[U]):
             rejected = self.confirm()
         self.assertEqual(len(rejected), 1)
         self.assertEqual(ds.state(self.card()), 'gone')
@@ -195,31 +227,30 @@ class CodexFlow(unittest.TestCase):
     def test_a_send_left_on_the_form_by_a_captcha_is_not_sent_not_unsure(self):
         self.filled_and_confirmed()
         self.after_submit = captcha
-        self.submit_sheet = {'submitted': False, 'clicked': True, 'problems': ['不確定有沒有送出']}
+        self.submit_sheet = {'submitted': False, 'clicked': True, 'reason': '真人驗證擋住，沒送出',
+                             'confirm_url': U + '/apply', 'confirm_text': 'Verify you are human', 'problems': []}
         ok, msg = self.submit()
         self.assertFalse(ok)
         m = self.card()
-        self.assertEqual(ds.state(m), 'stuck')                          # 沒送出(頁還在),不是送出結果不明
+        self.assertEqual(ds.state(m), 'stuck')                          # Agent 明確判定沒送出，網址與引用由程式核實
         self.assertIn('沒送出', m['apply']['issues'][0])
         self.assertIn('真人驗證', m['apply']['issues'][0])
         self.assertFalse([it for it in self.open_reports() if '信箱' in it['msg'] + it.get('need', '')])
 
-    def test_a_send_the_agent_calls_a_success_is_not_believed_while_the_form_is_still_there(self):
+    def test_a_send_claim_with_a_different_confirmation_url_is_unsure(self):
         self.filled_and_confirmed()
         self.after_submit = lambda page: None                          # 頁面沒動,它卻說送出了
         ok, _msg = self.submit()
         self.assertFalse(ok)
-        self.assertEqual(ds.state(self.card()), 'stuck')
-        self.assertFalse([it for it in self.open_reports() if '信箱' in it['msg'] + it.get('need', '')])
+        self.assertEqual(ds.state(self.card()), 'unsure')
 
-    def test_a_send_on_a_thank_you_page_is_sent_even_when_the_agent_is_unsure(self):
-        # 送出成功由程式自己看那一頁判斷(#316):已經是確認頁,agent 說不確定也不算送出結果不明
+    def test_a_thank_you_page_does_not_override_an_unknown_result(self):
         self.filled_and_confirmed()
-        self.submit_sheet = {'submitted': False, 'clicked': True, 'problems': ['不確定有沒有送出']}
+        self.submit_sheet = {'submitted': None, 'clicked': True, 'reason': '不確定有沒有送出',
+                             'confirm_url': THANKS['url'], 'confirm_text': 'Application submitted', 'problems': []}
         ok, msg = self.submit()
-        self.assertTrue(ok, msg)
-        self.assertEqual(ds.state(self.card()), 'sent')
-        self.assertFalse([it for it in self.open_reports() if '信箱' in it['msg'] + it.get('need', '')])
+        self.assertFalse(ok, msg)
+        self.assertEqual(ds.state(self.card()), 'unsure')
 
     def test_a_form_that_is_still_there_under_a_new_address_is_not_called_sent_by_its_thank_you_line(self):
         # 按了送出,驗證沒過、網址多了一段,表單每一格都還在,頁首寫「Thank you for your interest」:不是送出成功
@@ -230,13 +261,13 @@ class CodexFlow(unittest.TestCase):
         self.assertFalse(ok)
         self.assertNotEqual(ds.state(self.card()), 'sent')
 
-    def test_the_agent_calling_a_form_that_is_still_there_a_success_is_not_believed(self):
+    def test_retained_form_does_not_override_a_verified_agent_result(self):
         self.filled_and_confirmed()
-        self.after_submit = lambda page: page.update(url=U + '/apply?step=2', lines=['Thank you for your interest'] + page['lines'])
-        self.submit_sheet = dict(SENT, confirm_url=U + '/apply?step=2', confirm_text='Thank you for your interest')
+        self.after_submit = lambda page: page.update(url=U + '/apply?step=2', lines=['Application received'] + page['lines'])
+        self.submit_sheet = dict(SENT, confirm_url=U + '/apply?step=2', confirm_text='Application received')
         ok, _msg = self.submit()
-        self.assertFalse(ok)
-        self.assertNotEqual(ds.state(self.card()), 'sent')
+        self.assertTrue(ok)
+        self.assertEqual(ds.state(self.card()), 'sent')
 
     def test_an_unsure_send_marked_not_sent_clears_its_reports(self):
         self.filled_and_confirmed()
@@ -265,41 +296,14 @@ class CodexFlow(unittest.TestCase):
 
 
 class ClaudeFlow(CodexFlow):
-    """Claude:程式自己讀不到即時的頁,從那一輪的紀錄拿(它在那一頁跑唯讀函式);判斷標準跟 Codex 一樣。
-    送出前多一輪「送出前核對」叫它把那一頁讀給程式。確認時沒有新的一輪(ADR-0003:不另外叫它讀),
-    程式照實記「沒讀」,不拿填完那一輪的舊頁假裝讀過;Claude 的「頁面變了」在送出前擋。"""
+    """Claude 的對話紀錄格式不同,瀏覽器門路與即時核對行為相同。"""
     RUNTIME = chrome_door.CLAUDE
-
-    def make_door(self):
-        return chrome_door.ClaudeDoor('cc')
-
-    def patches(self):
-        return super().patches() + [
-            patch('agent_chrome.wait_claude', return_value=(True, '')),
-            patch('apply_tab.claude_shot', side_effect=lambda s, t, out: open(out, 'wb').write(b'PNG') and out),
-            patch('apply_tab.claude_release')]
 
     def log_lines(self):
         lines = [{'type': 'system', 'subtype': 'init', 'session_id': 'S1'}]
-        lines += fc.claude_lines(fc.page_read(self.page))               # 它照指示在那一頁跑唯讀函式
         lines.append({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '@@DONE@@',
                       'session_id': 'S1'})
         return ''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in lines)
-
-    def test_a_field_changed_after_the_agent_is_stopped_before_he_can_confirm(self):
-        ok, msg = self.fill()
-        self.assertTrue(ok, msg)
-        self.page['fields'][1]['value'] = 'Japan'
-        self.assertEqual(self.confirm(), [])        # 確認時程式讀不到 Claude 即時的頁:不拿填完那一輪的舊頁假裝讀過
-        confirm = [r for r in _env.evidence_rounds(U, self.board) if r.endswith('-confirm')]
-        events = _env.evidence_events(confirm[-1])
-        self.assertFalse([e for e in events if e['kind'] == 'page' and e.get('file')], '確認前沒有真的讀頁,不記成讀過')
-        self.assertTrue([e for e in events if e['kind'] == 'page' and '送出前' in e.get('unread', '')], events)
-        ok, msg = self.submit()                     # 送出前那一輪它把頁讀給程式:跟 Codex 一樣擋下、原因一樣
-        self.assertFalse(ok)
-        self.assertIn('「Nationality」從「Taiwan」變成「Japan」', msg)
-        self.assertEqual(self.rounds, ['fill', 'submit-check'])
-        self.assertEqual(ds.state(self.card()), 'stuck')
 
 
 if __name__ == '__main__':

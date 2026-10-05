@@ -38,7 +38,7 @@ AUTO_FILL = {s: x['auto_fill'] for s, x in TABLE['states'].items() if x.get('aut
 SWAP_FIELDS = ('resume_id', 'lang', 'custom_file')     # 卡上換檔的那幾欄:換了就是換檔
 # 換檔會動到的狀態(表上 files_changed 那一格不只是原地不動):頁上傳的會變成舊檔,或先記下來
 FILES_MATTER = frozenset(s for s, c in TABLE['cells'].items() if c.get('files_changed') not in (None, {'to': s}))
-GONE = '填好的那一頁不見了(agent 的 Chrome 關掉或重開過),要重填'
+GONE = '填好的那一頁不見了(它的工作區被關掉了),要重填'
 NO_FORM = '填好了,卻沒有留下表單紀錄(看不到填了哪些欄),要再填一次'
 
 
@@ -186,6 +186,14 @@ def _apply(m, cell, event, data):
         f.pop('lock', None)
 
 
+def queue_workspace(fb, workspace, reason):
+    if not isinstance(workspace, dict) or not workspace.get('id'):
+        return
+    pending = fb.setdefault('__browser_cleanup__', [])
+    if not any(x.get('workspace') == workspace for x in pending):
+        pending.append({'workspace': copy.deepcopy(workspace), 'reason': reason})
+
+
 def fire(fb, url, event, **data):
     """送一個事件給這張卡:照表改,回傳改動前的那一張(深拷貝;復原就整張放回)。不准就丟 Forbidden,卡不動。"""
     if event not in TABLE['events']:
@@ -218,6 +226,14 @@ def fire(fb, url, event, **data):
     else:
         m['ds'] = to
     fb[url] = m
+    if event in ('fill_start', 'page_lost', 'leave', 'back', 'submit_ok', 'fill_submitted',
+                 'actually_sent', 'sent_manual', 'platform_found'):
+        previous_apply = (prev or {}).get('apply')
+        workspace = previous_apply.get('workspace') if isinstance(previous_apply, dict) else None
+        if workspace:
+            queue_workspace(fb, workspace, event)
+            if isinstance(m.get('apply'), dict):
+                m['apply'].pop('workspace', None)
     return prev
 
 

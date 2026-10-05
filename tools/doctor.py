@@ -25,15 +25,18 @@ RUNTIMES = {
 # 程式會呼叫、但環境檢查不用查的外部指令,寫明為什麼(tests/test_doctor_coverage.py 會對:
 # 程式裡新呼叫了一個外部指令,既不是下面檢查的那幾項、也不在這張表,CI 就失敗)
 NOT_CHECKED = {
-    'ps': 'macOS 內建', 'open': 'macOS 內建', 'lsappinfo': 'macOS 內建', 'launchctl': 'macOS 內建',
+    'ps': 'macOS 內建',
+    'open': 'macOS 內建', 'lsappinfo': 'macOS 內建', 'launchctl': 'macOS 內建',
     'osascript': 'macOS 內建', 'qlmanage': 'macOS 內建', 'screencapture': 'macOS 內建',
+    '/usr/bin/log': 'macOS 內建;只有驗收工具查是不是使用者自己切了桌面',
     'gh': '只有開發時開 issue 用,使用者不需要',
     'tailscale': '選用:沒裝就只開在本機 127.0.0.1',
     'pdftoppm': '只在 Linux 的 CI 上代替 macOS 的 qlmanage',
+    'google-chrome': '開發用(看板檢查、介面截圖);使用者的功能都走 ego', 'google-chrome-stable': '同上',
+    'chromium': '同上', 'chromium-browser': '同上',
 }
 # 下面實際檢查的外部指令
-CHECKED = {'git', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
-           'codex', 'claude', 'command-code', 'uv'}
+CHECKED = {'git', 'codex', 'claude', 'command-code', 'uv', 'ego-browser'}
 
 
 def _runtime_path(runtime, which=None):
@@ -97,7 +100,7 @@ def _folder_history_row():
 
 
 def check_environment(agents=None):
-    """Check Python, Chrome, and only the runtimes in the configured agent list.
+    """Check Python and only the runtimes in the configured agent list.
 
     The browser capability row is informational: its absence disables applying
     and reply checks, but does not prevent searching for jobs.
@@ -122,14 +125,6 @@ def check_environment(agents=None):
         'key': 'python', 'label': 'Python 3.11 以上', 'ok': py_ok,
         'detail': sys.version.split()[0],
         'fix': '' if py_ok else '安裝 Python 3.11 或更新版本，重新執行安裝程式。',
-    })
-
-    import chrome_bin
-    chrome_path = chrome_bin.find()   # 跟開 agent 的 Chrome、印 PDF 同一套找法
-    checks.append({
-        'key': 'chrome', 'label': 'Google Chrome', 'ok': bool(chrome_path),
-        'detail': chrome_path or '找不到 Chrome',
-        'fix': '' if chrome_path else '安裝 Google Chrome 後重新執行；若裝在自訂位置，設定 CHROME_BIN。',
     })
 
     git = shutil.which('git')
@@ -203,42 +198,22 @@ def check_environment(agents=None):
         'label': '瀏覽器 agent（選用）',
         'ok': browser_ready,
         'required': False,
-        'detail': ('已設定可使用 Chrome 的 agent' if browser_ready else
+        'detail': ('已設定會操作瀏覽器的 agent' if browser_ready else
                    '清單中沒有支援瀏覽器的 agent；幫你填表與查應徵進度無法使用，找缺不受影響。'),
         'fix': ('' if browser_ready else
-                '需要幫你填表或查應徵進度時，在設定頁新增或啟用可使用 Chrome 的 Codex 或 Claude Code agent。'),
+                '需要幫你填表或查應徵進度時，在設定頁新增或啟用會操作瀏覽器的 Codex 或 Claude Code agent。'),
     })
     if browser_ready:
-        # agent 清單設好了還不夠:agent 自己的 Chrome 要連過一次(那一家用那一家的門路看)。只讀本機紀錄,不開 Chrome。
-        linked = any(door.configured() for door in map(chrome_door.of, browser_runtimes) if door)
+        # agent 清單設好了還不夠:ego 要裝好、匯入過、開著,指令真的跑得起來(門路的 ready 一項一項看,講缺哪一項、怎麼補)
+        linked, reason, need = chrome_door.EgoDoor().ready()
         checks.append({
-            'key': 'agent_chrome',
-            'label': '幫你填表用的 Chrome（選用）',
+            'key': 'ego',
+            'label': '幫你填表用的 ego（選用）',
             'ok': linked,
             'required': False,
-            'detail': ('已連接過 agent 專用的 Chrome(自己一個程序,在背景開,不會出現在你的畫面上)' if linked else
-                       '還沒連接;幫你填表與查應徵進度會先停著，找缺不受影響。'),
-            'fix': ('' if linked else
-                    '到看板「⚙ 設定 → 🤖 Agent 與瀏覽器」:1. 按「🔑 打開 agent 的 Chrome」,在那個視窗裝 Codex 的擴充功能(商店上叫 ChatGPT)'
-                    '(或 Claude 的擴充功能)、登入要用的網站 2. 按「🔌 連接」。'
-                    '一步一步的教學:docs/agent-chrome.md'),
+            'detail': '已連上 ego lite' if linked else reason,
+            'fix': '' if linked else need + ';安裝與匯入的步驟見 docs/agent-browser.md。',
         })
-    if 'codex' in browser_runtimes:
-        # Codex 上傳、下載前會先問「允許嗎?」,背景沒人能按就卡住:只讀它的設定看允許了沒,不替他寫
-        import agent_chrome
-        # 要允許哪些網站從他自己的卡和平台履歷推出來(每個人投的網站不一樣);沒允許,第一次傳履歷就卡住,所以是必要的
-        missing = agent_chrome.codex_sites_missing()
-        words = {'uploads': '上傳履歷', 'downloads': '下載平台附件'}
-        checks.append({
-            'key': 'codex_sites',
-            'label': 'Codex 可以在你要投的網站上傳、下載',
-            'ok': not missing,
-            'detail': ('你要投的網站都允許了(還沒有要投的卡時也算)' if not missing else
-                       ';'.join(words[k] + '還沒允許:' + '、'.join(v) for k, v in missing.items())),
-            'fix': '' if not missing else ('把下面這一段貼進 ~/.codex/browser/config.toml(已經有這幾段就整段換掉,原本允許的網站都留著):\n'
-                                           + agent_chrome.codex_sites_snippet(missing)),
-        })
-
     return {
         'ok': all(item['ok'] for item in checks if item.get('required', True)),
         'checks': checks,

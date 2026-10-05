@@ -531,7 +531,7 @@ class JobPageUnreadable(RuntimeError):
 
 
 def _job_page_text(url):
-    """程式抓職缺頁的文字(page_fetch:直接抓 → 閱讀代理 → 無頭 Chrome)。抓不到就不派 agent,照實講。"""
+    """程式抓職缺頁的文字(page_fetch:直接抓 → 閱讀代理 → ego)。抓不到就不派 agent,照實講。"""
     import page_fetch
     page = page_fetch.fetch(url)
     if page.readable:

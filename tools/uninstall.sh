@@ -30,8 +30,8 @@ fi
 rm -f "$HOME"/Library/LaunchAgents/dev.jobsalvo.board-server*.plist
 echo "移除開機自動啟動"
 
-# 3. 快取(轉 PDF、截圖用的套件、agent Chrome 的連線紀錄)和暫存
-rm -rf "$HOME/.cache/jobsalvo"
+# 3. 快取、舊版的 agent Chrome 資料夾(換成 ego 之後不再用,docs/adr/0006;只刪 agent-chrome,同一層可能有他的資料)和暫存
+rm -rf "$HOME/.cache/jobsalvo" "$HOME/Library/Application Support/jobsalvo/agent-chrome"
 tmp=''
 if [[ -n "$python" && -f "$app_dir/tools/config.py" ]]; then
   tmp="$(cd "$app_dir/tools" && JOBSALVO_HOME="$data_home" "$python" -c 'import config; print(config.TMP)' 2>/dev/null || true)"

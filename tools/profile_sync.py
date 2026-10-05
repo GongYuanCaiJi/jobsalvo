@@ -22,7 +22,7 @@ profile.url,程式記進去,下次起就由程式讀。
   uv run python tools/profile_sync.py --platform 104 --lang zh --resume <id>       # 讀回來比,印對不上的
   (程式自己開頁讀,只有 Codex 做得到;用 Claude 時直接說做不到,改在看板讓 agent 填表或送出時讀)
 """
-import os, sys, re, json, html, argparse, unicodedata, hashlib, shlex, subprocess, contextlib
+import os, sys, re, json, html, argparse, unicodedata, hashlib, subprocess, contextlib
 from urllib.parse import parse_qs, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -174,10 +174,18 @@ def remember_name(platform, lang, variant, name):
 def picked(page, names):
     """申請頁上選好的是哪幾份(names:{哪一份: 平台上的名稱})。先看下拉選單選好的字;
     104 這種選單不是表單欄位,選好的值只是一行字:一行裡只出現一份的名稱才算選了它(列出全部選項的那行不算)。"""
-    shown = {_n(f.get('shown') or f.get('value')) for f in page.get('fields') or []
+    fields = page.get('fields') or []
+    shown = {_n(f.get('shown') or f.get('value')) for f in fields
              if not isinstance(f.get('value'), list)}
     hit = {slot for slot, n in names.items() if _n(n) in shown}
-    if hit:
+    profile_choice = any(
+        (str(f.get('type') or '').startswith('select') or f.get('role') == 'combobox')
+        and re.search(r'resume|履歷|\bcv\b|\bprofile\b|profile_id',
+                      str(f.get('label') or '') + ' ' + str(f.get('name') or ''), re.I)
+        for f in fields
+    )
+    # 原生選單已讀到選取值時,body 內未選的 option 文字不能推翻它。
+    if hit or profile_choice:
         return hit
     for line in page.get('lines') or []:
         inside = {slot for slot, n in names.items() if _n(n) and _n(n) in _n(line)}
@@ -331,11 +339,10 @@ def md_sections(text):
     return out
 
 
-def expected(platform, lang, variant):
-    """回 [(哪一段, 內容, 連結清單)]。母稿在卻讀不出來丟 ValueError(不能當成沒東西要比,那會變成「對得上」)。"""
-    path = cf.master(variant, lang)
+def source_text(path):
+    """讀指定原稿全文；沒有可讀來源不能當作內容已完整。"""
     if not path or not os.path.isfile(path) or not path.lower().endswith(('.md', '.markdown', '.txt', '.pdf')):
-        return []
+        raise ValueError('找不到可讀的指定履歷原稿')
     try:
         if path.lower().endswith('.pdf'):
             import settings_api
@@ -345,7 +352,17 @@ def expected(platform, lang, variant):
                 text = f.read()
     except (OSError, UnicodeError, subprocess.SubprocessError, ValueError) as e:
         raise ValueError(f'讀不出母稿 {os.path.basename(path)}({str(e)[:80]})') from e
-    return md_sections(text)
+    if not text.strip():
+        raise ValueError('指定履歷原稿沒有可讀文字')
+    return text
+
+
+def expected(platform, lang, variant):
+    """舊 CLI 診斷用的片語；投遞內容判讀使用 source_text 全文。"""
+    path = cf.master(variant, lang)
+    if not path or not os.path.isfile(path):
+        return []
+    return md_sections(source_text(path))
 
 
 def _flat(x, path):
@@ -421,11 +438,11 @@ def diff(page, want, equivalents=None):
     return out
 
 
-def check(platform, lang, variant, board=None, reader=None, test_allow_local=False, reported=None, name=None):
-    """讀回來比。loopback 只供本機假頁測試明確開啟;正式呼叫保持關閉。
-    reported:agent 這一輪回報的「平台用自己說法寫」清單,程式在同一頁上驗過才收下,再一起比。
+def read(platform, lang, variant, board=None, reader=None, test_allow_local=False, name=None, read_url=None):
+    """讀回指定平台履歷，驗來源與可讀性，不判斷內容意思。loopback 只供假頁測試。
     name:agent 回報這一份在平台上的名稱;在這一頁上真的看得到才記下(之後程式讀申請頁核對選的是哪一份)。"""
-    w = where(platform, lang, variant)
+    specific_page = bool(read_url)
+    w = {'read': read_url, 'edit': read_url} if read_url else where(platform, lang, variant)
     if not w:
         return None, [], ''
     read_url = w['read']
@@ -441,17 +458,29 @@ def check(platform, lang, variant, board=None, reader=None, test_allow_local=Fal
         page = reader(read_url)
     except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;原因照實回報成這一份的問題
         return w, [], f'讀不到平台上那一份({str(e)[:80]})'
-    final_url = page.get('url') or read_url
+    final_url = page.get('url') or ''
+    if not final_url:
+        return w, [], '讀回結果沒有實際頁面網址，無法確認是哪份履歷'
     if not same_platform_url(final_url, platform, allow_local=test_allow_local):
         return w, [], '平台履歷讀取後跳到不屬於原平台的網址'
+    if identity(final_url) != identity(read_url):
+        return w, [], '讀回的是同平台的另一份履歷，無法確認指定版本'
     if 'login' in str(final_url).lower() or not page.get('text'):
         return w, [], f'讀不到平台上那一份(可能要登入):{page.get("url") or read_url}'
+    if not specific_page and name and len(_n(name)) >= 2 and _n(name) in _n(page.get('text')):
+        remember_name(platform, lang, variant, str(name).strip()[:80])
+    return w, page, ''
+
+
+def check(platform, lang, variant, board=None, reader=None, test_allow_local=False, reported=None, name=None):
+    """舊片語比較僅供 CLI 診斷；投遞驗收使用 read＋Agent 判讀，不以這裡放行。"""
+    w, page, problem = read(platform, lang, variant, board, reader, test_allow_local, name)
+    if not w or problem:
+        return w, [], problem
     try:
         want = expected(platform, lang, variant)
     except ValueError as e:
         return w, [], str(e)
-    if name and len(_n(name)) >= 2 and _n(name) in _n(page.get('text')):
-        remember_name(platform, lang, variant, str(name).strip()[:80])
     rejected = accept_equivalents(platform, lang, variant, page, want, reported) if reported else {}
     ds = diff(page, want, (where(platform, lang, variant) or {}).get('equivalents'))
     for d in ds:                                          # 沒收下的原因掛在那一格上,讓下一輪知道怎麼改
@@ -765,24 +794,10 @@ def _pair_reported_files(expected, actual, positional_fallback=False):
     return pairs, remaining
 
 
-def _pair_hashes(expected, files):
-    """用 Claude 時(沒下載檔,只有平台上每個檔的雜湊):先按雜湊配對,再按檔名兜底;回法跟 _pair_reported_files 一樣。"""
-    remaining = [dict(f) for f in files]
-    pairs = []
-    for entry in expected:
-        digest = _sha_file(entry[2])
-        i = next((k for k, f in enumerate(remaining) if f.get('sha256') == digest), None)
-        if i is not None:
-            pairs.append((entry, remaining.pop(i), True))
-            continue
-        aliases = {os.path.basename(entry[1]).casefold(), os.path.basename(entry[2]).casefold()}
-        i = next((k for k, f in enumerate(remaining) if os.path.basename(str(f.get('name') or '')).casefold() in aliases), None)
-        pairs.append((entry, remaining.pop(i) if i is not None else None, False))
-    return pairs, remaining
 
 
 def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
-                               force=False, hash_reader=None):
+                               force=False, download_reader=None):
     profile_url = str(delivery.get('profile_url') or '').strip()
     profile_kind = delivery.get('profile_kind')
     fingerprint = attachment_fingerprint(job, fb, delivery)
@@ -794,7 +809,7 @@ def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
 
     problems = []
     source_report = report
-    if field == 'fixed_profile_attachments' and not hash_reader:   # 用 Claude 時不靠 agent 回報,照登記的網址從紀錄拿雜湊
+    if field == 'fixed_profile_attachments' and not download_reader:
         fixed = report.get('fixed_profile')
         if not isinstance(fixed, dict):
             problems.append('agent 沒回報固定平台履歷的網址和附件')
@@ -807,16 +822,16 @@ def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
         source_report = {'fixed_profile_attachments': fixed.get('attachments')}
 
     label = '固定平台履歷附件' if field == 'fixed_profile_attachments' else '平台附件'
-    hashed = None
-    if hash_reader:
-        # 用 Claude 時(#294):不下載,Claude 在平台履歷頁算每個檔的雜湊,程式從它那一輪的紀錄拿(不採信它轉述)
+    if download_reader:
         try:
-            hashed = hash_reader(profile_url)
-        except LookupError as e:
-            problems.append(f'{label}沒核對到:{e}')
+            downloaded = download_reader(profile_url, download_dir)
+            failed = downloaded.get('problems') or []
+            if failed:
+                raise LookupError('; '.join(str(x) for x in failed))
+            actual = _reported_downloads({field: downloaded['files']}, field, download_dir, problems)
+        except (LookupError, OSError, ValueError, KeyError) as e:
             remember_attachment_check(profile_url, fingerprint, profile_kind, False)
-            return problems
-        actual = []
+            return [f'{label}未核對:{e}']
     else:
         actual = _reported_downloads(source_report, field, download_dir, problems)
     expected = []
@@ -829,13 +844,12 @@ def _check_profile_attachments(job, fb, report, download_dir, delivery, field,
             expected.append((item, name, source))
 
     agent_problems = [str(x).strip() for x in (report.get('problems') or []) if str(x).strip()]
-    if hashed is None and expected and not actual and agent_problems:
+    if expected and not actual and agent_problems:
         # 一個都沒拿到、agent 自己講了原因(下載逾時、被拒):平台上不一定少,是沒核對到。照它的原因寫,不寫「少了」
-        import agent_chrome                   # Codex 沒被允許下載的,照實講要改哪個檔
-        problems.append(f'{label}沒下載到,內容沒核對:{agent_chrome.explain_blocked(agent_problems[0][:150])}')
+        problems.append(f'{label}沒下載到,內容沒核對:{agent_problems[0][:150]}')
         remember_attachment_check(profile_url, fingerprint, profile_kind, False)
         return problems
-    pairs, remaining = _pair_hashes(expected, hashed) if hashed is not None else _pair_reported_files(expected, actual)
+    pairs, remaining = _pair_reported_files(expected, actual)
     for (item, name, source), downloaded, same_bytes in pairs:
         if downloaded is None:
             problems.append(f'{label}「{name}」少了')
@@ -934,7 +948,7 @@ NO_DELIVERY = '交件單上沒寫這次直接上傳還是用哪一份平台履�
 
 
 def check_attachments(job, fb, url, report, download_dir, force=False,
-                      expected_delivery=None, verify_profile=True, hash_reader=None):
+                      expected_delivery=None, verify_profile=True, download_reader=None):
     """依 agent 回報的投遞方式檢查平台附件或申請表實際上傳檔。
     verify_profile=False:平台履歷上的附件這一輪沒下載,不核對(填完後、送出前另外核對)。"""
     if not isinstance(report, dict):
@@ -969,7 +983,7 @@ def check_attachments(job, fb, url, report, download_dir, force=False,
 
     problems = _check_profile_attachments(
         job, fb, report, download_dir, delivery, 'profile_attachments',
-        force=force, hash_reader=hash_reader,
+        force=force, download_reader=download_reader,
     )
     if profile_kind == 'custom':
         fixed = fixed_profile_delivery(job, fb, url)
@@ -980,7 +994,7 @@ def check_attachments(job, fb, url, report, download_dir, force=False,
         else:
             problems.extend(_check_profile_attachments(
                 job, fb, report, download_dir, fixed,
-                'fixed_profile_attachments', force=True, hash_reader=hash_reader,
+                'fixed_profile_attachments', force=True, download_reader=download_reader,
             ))
     return problems
 
@@ -999,58 +1013,15 @@ def profile_attachments_fresh(job, fb, url):
                 and saved.get('profile_kind') == 'fixed')
 
 
-# 平台上的檔要拿回來比對時怎麼取。三條路都試過:
-# 點下載連結 → Chrome 一般下載,Mac 上會把 Chrome 叫到最前面、切走使用者的畫面;
-# 在頁面裡 fetch → 外掛跑 evaluate 的環境根本沒有 fetch/XMLHttpRequest;
-# locator.downloadMedia() → 外掛自己的下載,不搶前景、回傳確切路徑,但同一頁下載第二個檔會跳「要下載多個檔案」的詢問,
-# 沒人按就卡到逾時(實測卡 120 秒、REPL 被重置)。所以一個檔開一個新分頁。
-# 2026-09-29 一張 104:下載第一個附件超過 js 預設的 30 秒,REPL 被重置,申請表那一頁沒交接過、接不回來(Debugger unattached),
-# 整輪白做。下載前先把申請表那頁交接、下載那一次把時間放寬;下載完的分頁不關(程式這邊關分頁,外掛會跟 Chrome 斷線)。
-# 卡住的真正原因:Codex 下載前要先問「允許從這個網站下載?」,背景沒人按(直接跑回「could not complete the permission request
-# to download files」)。要在 ~/.codex/browser/config.toml 的 [downloads] allowed 列上那個網站(docs/agent-chrome.md)。
-FETCH_FILE_RULE = (
-    '取檔方式(一定要照做):開始下載之前,先對申請表那一頁呼叫 markHandoff()(REPL 萬一被重置,交接過的分頁才接得回來)。'
-    '一個檔開一個新的背景分頁(cua.createBrowserTab 開那個檔所在的頁面),'
-    '在那個分頁對那個檔的連結呼叫 tab.playwright.locator(...).downloadMedia(),它會回傳存好的完整路徑;'
-    '呼叫 downloadMedia 的那一次 js 帶 timeout_ms: 120000(預設 30 秒,大一點的檔下載不完、REPL 會被重置)。'
-    '用 REPL 的 await import("node:fs") 把「回傳的那個路徑」搬(renameSync,不是複製)進暫存資料夾,'
-    '那個分頁換成空白頁(await tab.goto("about:blank"))留著、不要關(關分頁會讓外掛跟這個 Chrome 斷線),'
-    '下一個檔再開新分頁。同一個分頁連續下載第二個檔會跳「要下載多個檔案」的詢問,沒人按就卡住。'
-    '不要點下載連結、不要把檔案網址開成分頁(會觸發 Chrome 的一般下載,Chrome 會跳到最前面、把使用者的畫面切走);'
-    '也不要去翻使用者的「下載」資料夾找檔,只搬 downloadMedia 回傳的那個路徑。'
-    '取不到(逾時、被拒)就把原因寫進 problems 並停止,不要改用點連結或開分頁。'
-)
-
-# 選本機檔上傳:Codex 外掛的 Playwright filechooser(Claude 用 file_upload,代投規矩的對照表講過,不給它這段)
-CHOOSE_FILE_RULE = (
-    '需要選本機檔案時,使用 Agent Chrome 的 Playwright filechooser:先 waitForEvent("filechooser"),'
-    '再點檔案欄位,最後對 chooser 呼叫 setFiles([完整檔案路徑])。選擇後要確認頁面已收到檔案;'
-    '若 input.files.length 仍是 0,不能宣稱成功或直接交接。'
-)
 
 
-# 用 Claude 時的取檔:Claude in Chrome 沒有把檔完整取回來的工具。javascript_tool 的回傳超過 1000 字會被截斷,
-# 把檔編碼後分段回傳會被安全過濾擋(看起來像偷資料,ADR 0003);點下載連結是 Chrome 一般下載,會把 Chrome 叫到前面。
-# 所以不取檔:平台履歷上的附件改由它在那一頁算雜湊(apply_tab.ATTACH_JS),程式從紀錄拿來比(#294)。
-FETCH_FILE_RULE_CLAUDE = (
-    '取檔方式(用 Claude 時):你現在沒有能把平台上的檔完整取回來的做法,不要嘗試(不要點下載連結、不要把檔案內容編碼回傳)。'
-    '申請表上傳的檔:照上面「沒有下載回來的入口」那條回報(uploaded_files 空清單、upload_readback 寫 unavailable、'
-    'uploaded_from 列你放進上傳欄的本機檔),程式自己核對那個檔。'
-    '平台履歷上的附件:不用取回,照【讀平台履歷給程式】第 3 步在平台履歷頁跑那段算雜湊的程式就好(程式拿雜湊跟本機的檔比);'
-    'profile_attachments(和 fixed_profile 的 attachments)回報空清單,不用寫進 problems。'
-)
+
 
 
 def attachment_step(job, fb, url, download_dir, door, force=False, verify_profile=True):
     """告訴 agent 回報投遞方式,並核對實際使用的附件。
     verify_profile=False(填表、修改):平台履歷附件這一輪不下載核對,程式填完後只在需要時另外核對。
     door:這一輪用 agent 的 Chrome 的那一家(chrome_door);取檔、選檔的做法照它給(Codex 外掛的做法 Claude 做不到)。"""
-    import ship
-    try:
-        host = (urlsplit(str(url)).hostname or '').casefold()
-    except ValueError:
-        host = ''
-    local_acceptance = host in ('localhost', '127.0.0.1', '::1')
     apply = (fb.get(url) or {}).get('apply') or {}
     # 用哪一份、固定版還是客製版照程式決定的;上一輪交件單只拿投遞方式和 agent 新開的客製版網址(#313)
     delivery = delivery_for(job, fb, url, apply.get('delivery'))
@@ -1082,7 +1053,6 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
             for item in items
         ]
 
-    root = download_dir or '(執行時建立暫存資料夾)'
     route = (
         '請在程式指定的 JSON 回報檔中寫 delivery.method,照申請頁實際怎麼交履歷:'
         '{"method":"direct_upload"}(申請表上直接上傳檔)、{"method":"no_profile"}(不用平台履歷也不用上傳),'
@@ -1093,7 +1063,8 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
         route += (
             '這張卡有已收下的客製履歷:申請表能直接上傳時用這張卡的檔;沒有可見的檔案欄時,開申請頁提供的'
             '「管理平台履歷」連結的 href,在同一個 Agent Chrome 另開分頁,保留原申請頁不動。'
-            '在管理頁另外建立客製平台履歷、上傳這張卡的檔,再回原申請頁選新履歷;'
+            '在管理頁另外建立客製平台履歷、上傳這張卡的履歷和下面列出的全部平台履歷附件,'
+            '逐檔讀回確認收到,再回原申請頁選新履歷;'
             '新開那一份的網址只有你知道,寫在 delivery.profile_url。'
             '不可只填一般表單就交接,也不可改選固定平台履歷來代替客製版。'
         )
@@ -1115,13 +1086,8 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
         )
     else:
         request += (
-            '\n若使用平台履歷,請把該履歷頁上看到的全部附件逐一下載到這個暫存資料夾:'
-            + root + '\n'
-            '取檔方式照下面「取檔方式」那段。'
-            '在 profile_attachments 回報全部下載檔,格式為 '
-            '{"profile_attachments":[{"name":"平台顯示名稱","path":"暫存資料夾內的完整路徑"}]}。'
-            '沒有附件時也要回報空清單;不可只回報清單上的附件,不可用本機正確檔冒充下載檔。'
-            '不要用檔名或大小判斷內容。'
+            '\n若使用平台履歷,全部附件（包含清單外檔）由程式從登記頁面下載、比對實際內容。'
+            'profile_attachments 留空,不用自行下載或算雜湊。'
         )
     request += (
         '\n若 delivery.method=direct_upload,或這張卡有客製文件而回報 no_profile,'
@@ -1132,22 +1098,10 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
         '{"uploaded_from":[{"name":"申請表上顯示的檔名","path":"你交給 setFiles 的完整路徑"}]},程式會自己核對那個檔;'
         '這不算卡住,不要寫進 problems。'
     ) + door.fetch_rule()
-    if local_acceptance:
-        request += (
-            '本輪網址在 loopback。驗收用申請頁、它連到的同站管理頁與履歷頁都會顯示「本機假驗收頁」標記。'
-            '只有目前頁面可見這個標記、主機仍是 loopback,而且你從該頁讀到實際 input 所屬 form 的 action 和 name 時,'
-            '才可用 curl multipart 對該 action 上傳清單所列合成測試檔;檢查 HTTP 狀態並重整頁面確認結果。'
-            '下載這種本機假頁的附件時,從頁面讀出下載連結 href,用 curl -fL 將遠端回傳內容存到指定暫存夾;'
-            '不可用本機來源檔複製冒充下載檔。不可猜 endpoint,也不可改 Chrome 權限或開 chrome://extensions。'
-        )
-    else:
-        request += (
-            '若上傳欄沒選入檔案,把選檔失敗寫入 problems 並停止;不要改 Chrome 權限,'
-            '不要使用其他方式假裝已上傳。'
-        )
+    request += '若上傳欄沒選入檔案,把選檔失敗寫入 problems;不可用 HTTP 上傳代替瀏覽器選檔。'
     request += (
         '填文字欄的做法不能代替選檔。沒有可見上傳欄時,到平台履歷管理頁完成需要的附件操作。'
-        '只有確認上傳成功或確認平台回報失敗並寫入 problems 後,才可 markHandoff;'
+        '本輪需要上傳時,只有確認上傳成功或確認平台回報失敗並寫入 problems 後,才可完成交件;'
         '空欄位、未選檔或空檔都不算上傳成功。'
     )
     custom_profile = custom_resume or custom_docs or (
@@ -1158,53 +1112,58 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
         fixed = fixed_profile_delivery(job, fb, url)
         if fixed:
             request += (
-                '\n若 delivery.method=platform_profile 且 profile_kind=custom,另外重新打開固定平台履歷 '
+                '\n若 delivery.method=platform_profile 且 profile_kind=custom,固定平台履歷 '
                 + fixed['profile_url']
-                + '。只讀不改;即使以前比對過,本輪仍要把它上面的全部附件重新下載到 '
-                + root
-                + '。在 fixed_profile 回報網址和附件,格式為 '
-                '{"fixed_profile":{"url":"固定平台履歷網址","attachments":'
-                '[{"name":"平台顯示名稱","path":"暫存資料夾內的完整路徑"}]}}。'
+                + '只讀不改;程式本輪會重新下載它的附件確認原稿沒有被改。'
             )
         else:
             request += (
                 '\n若 delivery.method=platform_profile 且 profile_kind=custom,程式目前找不到已登記的固定平台履歷。'
                 '先停止並在 problems 說明,不要建立或修改固定履歷。'
             )
+    # 本機是唯一真相,平台履歷只是它的鏡像(像 push):固定版在填表/修改時照本機同步,可新增、覆寫、刪除。
+    # 核對輪只取檔;客製版那一輪固定版是別張卡共用的,只讀。
+    mirror = bool(profile_expected) and not verify_profile and not custom_profile and not skip
+    if mirror:
+        request += (
+            '\n第 0 步同步固定平台履歷附件:程式無法確認平台上的附件是最新版(檔名相同不代表內容相同),'
+            '所以下面清單每一份都要重傳:刪掉平台上對應的舊檔,再上傳正確檔(或用平台的取代功能);清單外的平台附件也刪掉。'
+            '本機檔是唯一真相,平台上的只是鏡像。只動這份平台履歷的附件,本機檔不要改。'
+            '格子不夠時先刪再傳。不用自己比內容,程式之後會下載全部附件逐位元組核對。\n'
+            + '\n'.join(rows(profile_expected))
+        )
     request += (
-        '不要刪除任何平台履歷或附件,也不要修改固定平台履歷。平台格子滿了,'
-        '或多出來的檔需要清理時,停止並寫入 problems 回報使用者;不要自己處理。'
+        '平台履歷文字依本輪填表／修改指示。'
+        + ('這一輪不要刪除或覆寫平台上的附件,' if not mirror else '')
+        + ('核對輪或使用客製檔時,不要修改固定平台履歷;平台格子滿了需要清理時,停止並寫入 problems 回報。'
+           if verify_profile or custom_profile else '')
     )
-    report_command = (
-        f'python3 {shlex.quote(cf.tool("agent_report.py"))} --from 代投 '
-        f'--job {shlex.quote(str(url))} --need "清理平台多出附件" '
-        '"平台履歷多出附件：<完整檔名>；已保留未刪，請使用者處理。"'
-    )
-    # 多出來的附件要下載回來逐位元組比才判得準;平台上顯示的是檔名,跟看板上取的名字本來就不一樣,
-    # 填表那一輪只看名字會把正確的檔當成多出來的(2026-09-27 e2e 一張 104 就這樣卡住)。只在核對那一輪做。
     if verify_profile:
         request += (
-            '若任何固定或客製平台履歷有本輪正確附件清單以外的檔案（包含舊版），'
-            '必須在 JSON 的 problems 寫明平台履歷類型、完整檔名及需使用者處理的原因，'
-            '並另外執行標準回報指令: ' + report_command + '。'
-            '只列在 profile_attachments、fixed_profile.attachments 或 notes 不算回報；'
-            'problems 與看板回報兩者完成前不得 markHandoff。保留平台原檔，不可刪除或覆寫。'
+            '本輪平台只讀不改,程式會自己取回實站 bytes,回報全部不符或未核對項目。'
         )
-    if profile_expected and (verify_profile or custom_profile):
-        request += '\n這張卡要用的平台履歷附件:\n' + '\n'.join(rows(profile_expected))
-    elif profile_expected:
+    if profile_expected and custom_profile:
+        request += ('\n客製平台履歷必須上傳以下全部附件,完成後由程式下載核對:\n'
+                    + '\n'.join(rows(profile_expected)))
+    elif profile_expected and not verify_profile and not mirror:
         # 列了清單,agent 就會自己拿平台上的檔名去比(檔名跟看板上取的名字本來就不同),寫成「卡住」
         request += ('\n這一輪不用看平台履歷上的附件:平台上顯示的檔名跟看板上的名稱不同是正常的,'
                     '不要比、也不要寫進 problems;程式填完後會另外下載核對。')
-    request += '\n這張卡直接上傳申請表時要用的檔:\n' + '\n'.join(
-        rows(ship.documents(job, fb))
-    )
+    if not verify_profile:
+        request += (
+            '\n申請表直接上傳時,只從這張卡可投遞夾的 ship.json 中 files/merged 選檔,'
+            '以投遞夾內的完整路徑交給 setFiles。一次交付只能是整套 files 或單一 merged,不可混搭、漏交或重複。'
+            '先一起確認欄位標籤與說明、必填、單檔／多檔容量與頁面明示的檔案限制;'
+            '個別檔能全部放進用途相符的欄位時用 files;容量不足時,先按標籤與說明確認履歷／文件欄可收本輪合併材料,'
+            '且格式、大小與其他必填欄仍符合時,用既有 merged。不能只因 accept=pdf 就認定用途相符。'
+            '只有 Resume 與 Cover Letter 兩個檔案欄、沒有附件欄時,merged 放 Resume,求職信檔案欄留空;'
+            '有求職信文字框才填既有固定文字,不可把履歷或附件拆進去。'
+            '另一必填檔案欄若不能由選定的完整檔案集合合法滿足,或求職信檔案欄必填,停止並回報。'
+            '不要自行產檔或合併;遇到無法確認是否符合的限制、缺少必填材料或上傳失敗時停止並回報。'
+        )
     return request
 
 
-# 用 Claude 時程式自己打不開它的分頁:命令列這條路做不到,照實講、講改用什麼
-CLI_NOT_NOW = ('用 Claude 時這個命令列工具讀不了平台上那一份(程式自己打不開 Claude 的分頁)。'
-               '改在看板讓 agent 填表或送出:Claude 會在那一輪把平台履歷讀給程式,比對結果寫在卡上。')
 
 
 def main():
@@ -1217,8 +1176,6 @@ def main():
     door = chrome_door.current()
     if door is None:
         sys.exit(chrome_door.NO_BROWSER_AGENT)
-    if not door.program_reads:
-        sys.exit(CLI_NOT_NOW)
     w, ds, prob = check(a.platform, a.lang, a.resume)
     if prob:
         sys.exit(prob)
@@ -1226,8 +1183,8 @@ def main():
         sys.exit(f'還不知道 {a.platform} {a.lang}/{a.resume} 那一份在哪({REG} 沒有)')
     print(f'{w["read"]}:' + ('跟母稿對得上' if not ds else f'{len(ds)} 段對不上\\n' + describe(ds, 99)))
     try:
-        import agent_chrome
-        agent_chrome.close_if_idle()
+        import chrome_door
+        chrome_door.close_if_idle()
     except Exception:  # noqa: BLE001, S110 — 核對結果上面已經印出;收尾關 agent 的 Chrome 失敗不影響結果,下一批做完會再關
         pass
 

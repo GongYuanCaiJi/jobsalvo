@@ -63,7 +63,7 @@ LIES = {
     'delivery.profile_url': (OTHER, ['用的平台履歷', 'vno=2', MINE]),
     'uploaded': (['ghost.pdf'], ['上傳欄裡沒有 ghost.pdf'], 'direct'),   # 申請表直接上傳時才看它
     'fields': ([{'q': '姓名', 'value': '李大華', 'src': 'rz'}], ['姓名', '李大華']),
-    'submitted': (True, ['已送出', 'true', '頁面還停在申請表']),
+    'submitted': (True, ['已送出', 'true', 'reason']),
     'confirm_url': ('https://www.104.com.tw/thanks', ['確認頁網址', 'thanks', FORM]),
     'confirm_text': ('應徵成功', ['確認頁的字', '應徵成功', '頁面上沒有這句話']),
     'fixed_profile.url': (OTHER, ['固定平台履歷', 'vno=2', MINE]),
@@ -73,29 +73,20 @@ LIES = {
 # 找不到那一條測試,這支測試就失敗,不會變成一行沒人管的註解)
 _PA = 'test_apply_profile_attachments.ProfileAttachments.'
 ELSEWHERE = {
-    'profile.equivalents': 'test_profile_sync.Equivalents.test_wording_that_is_not_on_the_page_is_refused',
     'uploaded_files': _PA + 'test_direct_upload_with_a_different_custom_file_is_a_problem',
     'uploaded_from': _PA + 'test_platform_without_readback_rejects_a_file_outside_the_card_folder',
     'upload_readback': _PA + 'test_platform_without_readback_checks_the_local_file_put_into_the_form',
     'fixed_profile.attachments': _PA + 'test_custom_profile_rechecks_fixed_attachments_and_names_overwrite',
     'profile_attachments': _PA + 'test_missing_changed_and_extra_attachments_are_named',
-    # 送出那一輪:按完送出後程式讀的那一頁還停在申請表,它說送出了也不算(整條流程)
-    'submit:submitted': 'test_gate_flow.CodexFlow.test_a_send_the_agent_calls_a_success_is_not_believed_while_the_form_is_still_there',
+    'submit:submitted': 'test_agent_workflow_boundaries.Responsibilities.test_send_result_is_not_inferred_from_success_words_or_retained_form',
 }
 THANKS = {'url': 'https://www.104.com.tw/apply/done', 'title': '應徵成功', 'lines': ['應徵成功', '謝謝'], 'fields': []}
-SUBMIT_HONEST = {'submitted': True, 'clicked': True, 'confirm_url': THANKS['url'], 'confirm_text': '應徵成功',
+SUBMIT_HONEST = {'submitted': True, 'clicked': True, 'reason': '本次申請已收到', 'confirm_url': THANKS['url'], 'confirm_text': '應徵成功',
                  'tab_id': '7', 'problems': []}
 SUBMIT_LIES = {
     'confirm_url': ('https://www.104.com.tw/other', ['確認頁網址', '/other', THANKS['url']]),
     'confirm_text': ('Application received', ['確認頁的字', 'Application received', '頁面上沒有這句話']),
     'tab_id': ('9', ['分頁', '9', '分頁 7']),
-}
-PRE_SUBMIT_HONEST = {'delivery': {'method': 'platform_profile'}, 'profile_attachments': [], 'problems': []}
-PRE_SUBMIT_LIES = {
-    'delivery.profile_kind': ('custom', ['固定版還是客製版', 'custom', 'fixed']),
-    'delivery.profile_url': (OTHER, ['用的平台履歷', 'vno=2', MINE]),
-    'fixed_profile.url': (OTHER, ['固定平台履歷', 'vno=2', MINE]),
-    'problems': (['平台履歷多出附件'], ['卡住', '平台履歷多出附件']),
 }
 
 
@@ -109,9 +100,10 @@ FLOWS = {
         truth=lambda: gate.Truth(given={A: 'Posted on September 7, 2026\nUpdated 3 days ago', B: 'Apply by Oct 1'},
                                  fetched_on={A: '2026-09-20', B: '2026-09-20'}),
         lies={'dates.url': ('https://ex.test/job/other', ['職缺網址', 'job/other', '這一輪沒有交給它']),
-              'dates.posted_at': ('2026-09-08', ['刊登日期', '2026-09-08', '2026-09-07']),
+              'dates.posted_at': ('2026-02-31', ['刊登日期', '2026-02-31', 'YYYY-MM-DD']),
               'dates.source': ('First published', ['日期欄位的名稱', 'First published', '原文裡沒有']),
-              'inaccessible.url': ('https://ex.test/job/other', ['職缺網址', 'job/other', '這一輪沒有交給它'])}),
+              'inaccessible.url': ('https://ex.test/job/other', ['職缺網址', 'job/other', '這一輪沒有交給它'])},
+        judged={'dates.posted_at': '2026-09-07'}),
     # 職缺關了沒:程式抓好的頁面原文交給它判斷;關了沒是 agent 判斷,它抄的那一句要在原文裡
     'link_status': dict(
         honest={'jobs': [{'id': 'J1', 'status': 'closed', 'quote': 'This position has been filled', 'reason': '徵到人了'},
@@ -174,7 +166,8 @@ FLOWS = {
                           'reasons': [{'text': '他說喜歡管線', 'citation': '很喜歡資料管線', 'basis': '使用者原話'}],
                           'resume': 'general', 'lang': 'zh', 'pick_why': '中文 JD', 'cat': '工程',
                           'card': {'fit': '管線經驗對上', 'co': '做電商', 'loc': '台北', 'deadline': '2026-10-31',
-                                   'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投'}}]},
+                                   'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投',
+                                   'quote': '月薪 50,000 起。應徵截止 2026/10/31。'}}]},
         variants={'ghost': {'jobs': [{'id': 'J1', 'keep': False, 'risk': {'kind': 'ghost', 'why': '刊登已經 200 天'}}]},
                   'old': {'jobs': [{'id': 'J1', 'variant': 'general', 'lang': 'zh', 'pick_why': '舊的寫法'}]}},
         truth=lambda: gate.Truth(
@@ -193,12 +186,13 @@ FLOWS = {
               'jobs.variant': ('secret', ['挑的履歷(舊寫法)', 'secret', '不是勾選']),
               'jobs.lang': ('klingon', ['語言', 'klingon', '只能是']),
               'jobs.risk': ({'kind': 'scam', 'why': '要先匯保證金'}, ['詐騙或幽靈缺', '保證金', '都沒有']),
-              'jobs.card': ({'deadline': '2026-12-01', 'salary': '月薪 90,000'},
-                            ['卡片摘要', '截止日 2026-12-01', '薪資', '90000'])},
+              'jobs.card': ({'deadline': '2026-12-01', 'salary': '月薪 90,000', 'quote': '原文沒有這一句'},
+                            ['卡片摘要', '指定 JD', 'quote'])},
         judged={'jobs.keep': True, 'jobs.fit': 4, 'jobs.cat': '工程', 'jobs.resume': 'general', 'jobs.lang': 'zh',
                 'jobs.variant': ('general', 'old'), 'jobs.risk': ({'kind': 'ghost', 'why': '刊登已經 200 天'}, 'ghost'),
                 'jobs.card': {'fit': '管線經驗對上', 'co': '做電商', 'loc': '台北', 'deadline': '2026-10-31',
-                              'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投'}}),
+                              'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投',
+                              'quote': '月薪 50,000 起。應徵截止 2026/10/31。'}}),
     # 查應徵進度:程式複製的信和平台應徵紀錄全文交給它;信算哪一種、要他做的事是 agent 判斷
     'reply': dict(
         honest={'checked': [A],
@@ -217,7 +211,7 @@ FLOWS = {
               'findings.url': ('https://ex.test/job/zzz', ['卡片網址', 'job/zzz', '不是這一輪查的卡']),
               'findings.source_ref': ('email:madeup', ['來源代號', 'email:madeup', '程式沒給它這個來源']),
               'findings.source_type': ('application_record', ['來源種類', 'application_record', 'email(程式照']),
-              'findings.date': ('2026-09-09', ['日期', '2026-09-09', '原文裡沒有這一天']),
+              'findings.date': ('2026-02-31', ['日期', '2026-02-31', 'YYYY-MM-DD']),
               'findings.subject': ('錄取通知', ['標題', '錄取通知', '原文裡沒有']),
               'findings.link': ('https://mail.google.com/mail/u/0/#all/other99', ['原文連結', 'other99',
                                                                                  'email:thr001 那一封']),
@@ -227,9 +221,15 @@ FLOWS = {
               'job_ids.id': ('zzz999', ['職缺代號', 'zzz999', '應徵紀錄裡沒有這個代號']),
               'job_ids.url': ('https://www.104.com.tw/job/zzz999', ['職缺連結', 'zzz999', '應徵紀錄裡沒有這個職缺']),
               'job_ids.platform': ('linkedin', ['平台', 'linkedin', '程式讀了 104']),
-              'job_ids.applied_at': ('2026-08-15', ['應徵日期', '2026-08-15', '沒有這一天']),
+              'job_ids.applied_at': ('2026-02-31', ['應徵日期', '2026-02-31', 'YYYY-MM-DD']),
               'inaccessible.jobs': (['https://ex.test/job/zzz'], ['影響到的卡', 'job/zzz', '不是這一輪查的卡'])},
-        judged={'findings.kind': 'interview', 'findings.todo': '回覆可面談時段'}),
+        judged={'findings.kind': 'interview', 'findings.todo': '回覆可面談時段',
+                'findings.date': '2026-09-03', 'job_ids.applied_at': '2026-09-01'}),
+    'profile_review': dict(
+        honest={'status': 'complete', 'reason': '重要內容完整', 'quotes': {MINE: '目前履歷內容'}},
+        truth=lambda: gate.Truth(given={MINE: '目前履歷內容'}),
+        lies={'quotes': ({MINE: '沒有出現的內容'}, ['指定頁面', '引用'])},
+        judged={'status': 'complete'}),
 }
 
 
@@ -280,19 +280,16 @@ class LyingAgent(unittest.TestCase):
                 self.assertTrue(hasattr(getattr(mod, cls), name), where)
 
     def test_every_checked_cell_of_every_sheet_has_a_lie(self):
-        lies = {'fill': LIES, 'submit': SUBMIT_LIES, 'pre_submit': PRE_SUBMIT_LIES}
+        lies = {'fill': LIES, 'submit': SUBMIT_LIES}
         lies.update({kind: flow['lies'] for kind, flow in FLOWS.items()})
         for kind, table in gate.SHEETS.items():
             checked = {n for n, c in table.items() if c.how in (gate.CHECK, gate.DECIDED)}
             missing = checked - set(lies[kind]) - set(ELSEWHERE) - {n.split(':')[1] for n in ELSEWHERE
                                                                       if n.startswith(kind + ':')}
-            if kind == 'pre_submit':
-                missing -= {'delivery.method'}     # 投遞方式那一格就是逐位元組比附件(profile_attachments 那一條測)
             self.assertEqual(missing, set(), f'{kind} 這幾格沒有說謊的測試')
 
-    def test_submit_and_pre_submit_lies_are_stopped(self):
-        for kind, honest, lies, page in (('submit', SUBMIT_HONEST, SUBMIT_LIES, THANKS),
-                                         ('pre_submit', PRE_SUBMIT_HONEST, PRE_SUBMIT_LIES, None)):
+    def test_submit_lies_are_stopped(self):
+        for kind, honest, lies, page in (('submit', SUBMIT_HONEST, SUBMIT_LIES, THANKS),):
             self.assertEqual(gate.inspect(kind, copy.deepcopy(honest), self.truth(page)).problems, [], kind)
             for name, (lie, words) in lies.items():
                 with self.subTest(kind=kind, cell=name):
@@ -301,6 +298,14 @@ class LyingAgent(unittest.TestCase):
                     said = '\n'.join(gate.inspect(kind, sheet, self.truth(page)).problems)
                     for w in words:
                         self.assertIn(w, said)
+
+    def test_submit_quote_can_span_visible_lines_but_must_match_the_page(self):
+        page = dict(THANKS, lines=['應徵成功', '感謝您的申請，我們會與您聯絡。'])
+        sheet = dict(SUBMIT_HONEST, confirm_text='應徵成功\n\n感謝您的申請，我們會與您聯絡。')
+        self.assertEqual(gate.inspect('submit', sheet, self.truth(page)).problems, [])
+        sheet['confirm_text'] = '應徵成功\n\n已安排面試。'
+        self.assertTrue(any('頁面上沒有這句話' in problem
+                            for problem in gate.inspect('submit', sheet, self.truth(page)).problems))
 
     def test_every_checked_cell_is_lied_about_once_and_each_lie_is_stopped(self):
         checked = {n for n, c in gate.FILL.items() if c.how in (gate.CHECK, gate.DECIDED)}
@@ -359,7 +364,11 @@ class OtherFlowsLie(unittest.TestCase):
 
     def test_judgments_are_marked_and_never_become_facts(self):
         """程式核對不了的判斷(職缺關了沒、信算拒絕還是面試…):放在 judged,不在 facts,程式不能拿它當事實用。"""
-        judged = {kind: flow['judged'] for kind, flow in FLOWS.items() if flow.get('judged')}
+        flows = dict(FLOWS, fill={'honest': HONEST, 'truth': lambda: gate.Truth(URL, page=PAGE, decision=DECISION),
+                                'judged': {'posting.same_job': True, 'submitted': False}},
+                     submit={'honest': SUBMIT_HONEST, 'truth': lambda: gate.Truth(URL, page=THANKS),
+                             'judged': {'submitted': True}})
+        judged = {kind: flow['judged'] for kind, flow in flows.items() if flow.get('judged')}
         for kind, table in gate.SHEETS.items():
             for name, cell in table.items():
                 if cell.how == gate.JUDGED:
@@ -367,8 +376,8 @@ class OtherFlowsLie(unittest.TestCase):
         for kind, cells in judged.items():
             for name, value in cells.items():
                 value, *variant = value if isinstance(value, tuple) else (value,)
-                sheet = FLOWS[kind]['variants'][variant[0]] if variant else FLOWS[kind]['honest']
-                verdict = gate.inspect(kind, copy.deepcopy(sheet), FLOWS[kind]['truth']())
+                sheet = flows[kind]['variants'][variant[0]] if variant else flows[kind]['honest']
+                verdict = gate.inspect(kind, copy.deepcopy(sheet), flows[kind]['truth']())
                 with self.subTest(kind=kind, cell=name):
                     head, _, sub = name.partition('.')
                     if head in (gate.ROWS.get(kind) or {}):
@@ -376,8 +385,10 @@ class OtherFlowsLie(unittest.TestCase):
                         self.assertEqual(row.judged.get(sub), value)
                         self.assertNotIn(sub, row.facts)
                     else:
-                        self.assertEqual(verdict.judged.get(name), value)
-                        self.assertNotIn(name, verdict.facts)
+                        judgments = verdict.judged.get(head, {}) if sub else verdict.judged
+                        facts = verdict.facts.get(head, {}) if sub else verdict.facts
+                        self.assertEqual(judgments.get(sub or name), value)
+                        self.assertNotIn(sub or name, facts)
 
     def test_feedback_from_one_card_is_not_a_repeated_problem(self):
         sheet = {'reports': [{'issue': '成果', 'recommendation': 'x', 'feedback_ids': ['f1', 'f3']}]}
@@ -388,6 +399,49 @@ class OtherFlowsLie(unittest.TestCase):
         flow = FLOWS['posted_at']
         sheet = {'dates': [{'url': A, 'posted_at': '2026-09-17', 'source': 'Updated'}]}
         self.assertEqual(gate.inspect('posted_at', sheet, flow['truth']()).problems, [])
+
+
+class ReadSaysWhatWentWrong(unittest.TestCase):
+    def test_malformed_sheet_is_not_reported_as_missing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as out:
+            self.assertEqual(gate.read(out, 'profile_review'), (None, '沒有寫出 profile-review.json'))
+            def wrote(text):
+                with open(gate.path(out, 'profile_review'), 'w', encoding='utf-8') as f:
+                    f.write(text)
+                return gate.read(out, 'profile_review')
+            # 物件完整、只多打收尾括號(2026-10-04、10-05 104 實測):意思不變,照收
+            self.assertEqual(wrote('{"status": "complete", "quotes": {}}}'), ({'status': 'complete', 'quotes': {}}, ''))
+            # 後面接了別的東西、或被截斷:講寫壞了,不說成沒寫
+            for broken in ('{"status": "complete"} 補充說明', '{"status": "complete", "quotes": {'):
+                sheet, why = wrote(broken)
+                self.assertIsNone(sheet)
+                self.assertIn('寫壞了', why)
+
+
+class CardUrl(unittest.TestCase):
+    def test_extra_query_from_the_site_is_still_the_same_job_but_the_job_id_must_stay(self):
+        import gate_apply as ga
+        truth = gate.Truth(url='https://www.example.test/job/8i7j7')
+        self.assertIsNone(ga._card_url('https://www.example.test/job/8i7j7?apply=form', {}, truth))
+        self.assertTrue(ga._card_url('https://www.example.test/job/other', {}, truth))
+        truth = gate.Truth(url='https://boards.example.test/acme/jobs?gh_jid=1')
+        self.assertIsNone(ga._card_url('https://boards.example.test/acme/jobs?gh_jid=1&src=x', {}, truth))
+        self.assertTrue(ga._card_url('https://boards.example.test/acme/jobs?gh_jid=2', {}, truth))
+
+
+class ReviewQuotes(unittest.TestCase):
+    def test_quote_may_skip_around_but_every_line_must_be_on_the_page(self):
+        import gate_apply as ga
+        page = '陳亞力\n學歷\n淡江大學\n求職條件\n錄取後一個月可上班\n希望地點\n台北市'
+        truth = gate.Truth(given={'https://p/1': page})
+        sheet = {'status': 'complete'}
+        self.assertIsNone(ga._review_quotes({'https://p/1': '陳亞力\n錄取後一個月可上班\n台北市'}, sheet, truth))  # 跳著摘
+        self.assertTrue(ga._review_quotes({'https://p/1': '陳亞力\n錄取後兩週可上班'}, sheet, truth))           # 編出來的那行擋
+        self.assertTrue(ga._review_quotes({'https://p/1': '  \n '}, sheet, truth))
+        # agent 用「」標每一段、用 … 省略中間:記號不算引用內容
+        self.assertIsNone(ga._review_quotes({'https://p/1': '「陳亞力\n學歷」\n「求職條件…台北市」'}, sheet, truth))
+        self.assertTrue(ga._review_quotes({'https://p/1': '「陳亞力…錄取後兩週可上班」'}, sheet, truth))
 
 
 class FlowsUseTheGate(unittest.TestCase):
@@ -490,7 +544,6 @@ class NoBypass(unittest.TestCase):
              patch.object(ps, 'decided', return_value=dict(DECISION, profile_kind='custom')):
             said = {kind: [run.prompt_for(stage, URL, job, fb, self.id(), door=door)[0] for stage in stages]
                     for kind, stages in (('fill', ('fill', 'fix')), ('submit', ('submit',)))}
-            said['pre_submit'] = [run.pre_submit_prompt(URL, job, fb, self.id(), '/tmp/x', door, after_fill=False)[0]]
         for kind, prompts in said.items():
             table = gate.SHEETS[kind]
             known = set(table) | {n.split('.')[0] for n in table} | {i for c in table.values() for i in c.items}
@@ -544,13 +597,14 @@ class NoBypass(unittest.TestCase):
 
     def test_every_other_flow_is_covered(self):
         """7 種流程每一種都有交件單登記、說謊測試和指示測試(新加一種流程就要補齊)。"""
-        flows = set(gate.SHEETS) - {'fill', 'pre_submit', 'submit'}
+        apply_flows = {'fill', 'submit', 'profile_review'}
+        flows = set(gate.SHEETS) - apply_flows
         # 7 種流程:查應徵進度、準備履歷、客製版、找缺(找、判)、職缺關了沒、刊登日期、分類建議
         self.assertEqual(flows, {'reply', 'prepare', 'customize', 'research_search', 'research_judge', 'link_status',
                                  'posted_at', 'suggest_cats'})
-        self.assertEqual(flows, set(FLOWS))
+        self.assertEqual(flows, set(FLOWS) - {'profile_review'})
         self.assertEqual(flows, set(self.other_prompts()))
-        self.assertEqual(flows, set(gate.FILES) - {'fill', 'pre_submit', 'submit'})
+        self.assertEqual(flows, set(gate.FILES) - apply_flows)
 
 
 if __name__ == '__main__':

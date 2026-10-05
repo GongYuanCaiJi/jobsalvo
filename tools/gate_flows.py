@@ -9,11 +9,9 @@ import datetime
 import os
 import re
 import sys
-import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cf            # noqa: E402
-import posted_age              # noqa: E402
 import prefs                   # noqa: E402
 import profile_sync as ps      # noqa: E402
 import reply_run               # noqa: E402
@@ -37,6 +35,7 @@ def _in_given(said, row, truth):
 
 
 def _posted_date(said, row, truth):
+    """日期意思由 Agent 判讀；程式只驗日曆格式與來源引用。"""
     if not str(said or '').strip():
         return None                                   # 沒給日期:當成確認不了(流程照舊記原因)
     try:
@@ -44,15 +43,14 @@ def _posted_date(said, row, truth):
             raise ValueError
     except ValueError:
         return '要寫成 YYYY-MM-DD'
-    seen = posted_age.dates_in(truth.given, truth.fetched_on)
-    if str(said) in seen or '--' + str(said)[5:] in seen:
-        return None
-    return '程式給它的那幾行裡沒有這一天' + (f'(看得到的是 {"、".join(sorted(seen)[:4])})' if seen else '(一個日期都沒有)')
+    if not str(row.get('source') or '').strip():
+        return '要附原文中的日期說明'
+    return _in_given(row['source'], row, truth)
 
 
 POSTED_AT = {
     'dates.url': Cell(CHECK, '職缺網址', '這一輪交給它的其中一個網址', _given_key),
-    'dates.posted_at': Cell(CHECK, '刊登日期', '程式給它的那幾行裡看得到這一天(各種寫法都認;「3 天前」照程式抓頁那天算)',
+    'dates.posted_at': Cell(JUDGED, '刊登日期', 'Agent 依指定原文與抓頁日理解日期；程式驗 ISO 格式與引用',
                             _posted_date),
     'dates.source': Cell(CHECK, '日期欄位的名稱', '程式給它的那幾行裡逐字看得到', _in_given),
     'inaccessible.url': Cell(CHECK, '職缺網址', '這一輪交給它的其中一個網址', _given_key),
@@ -80,8 +78,9 @@ LINK_STATUS = {
 def _regex(said, row, truth):
     """比對規則:看板用它比對職稱和內文,要是寫得出來的正規表示式(空的只有「其他」可以,那一類程式自己加)。"""
     try:
-        re.compile(str(said or ''), re.I)
-    except re.error as e:
+        import settings_api
+        settings_api.compile_match(str(said or ''))
+    except (re.error, ValueError) as e:
         return f'不是正規表示式({str(e)[:60]})'
     return None
 
@@ -219,28 +218,18 @@ def _risk(said, row, truth):
     return None if all(q and q in seen for q in quotes) else '它引的那句 JD 原文和程式提醒裡都沒有'
 
 
-def _numbers(text):
-    return {n.replace(',', '') for n in re.findall(r'\d[\d,]{2,}', unicodedata.normalize('NFKC', str(text or '')))
-            if len(n.replace(',', '')) >= 3}
-
-
 def _card_summary(said, row, truth):
-    """卡上的摘要是 agent 讀 JD 寫的(卡上標明);會拿來判斷的那幾格要在 JD 原文裡看得到:
-    截止日、刊登日寫了日期就要是 JD 上的某一天,薪資寫的數字要是 JD 上有的數字。"""
-    said = said if isinstance(said, dict) else {}
+    """摘要、日期與金額是 Agent 判斷；程式核對它附的 JD 原文。"""
+    if not isinstance(said, dict):
+        return '摘要要是物件'
+    has_details = any(str(said.get(k) or '').strip() not in ('', '無', '未公開', '查無')
+                      for k in ('deadline', 'posted', 'salary'))
+    if not has_details:
+        return None
     if not truth.given:
-        return None if not any(str(said.get(k) or '').strip() not in ('', '無', '未公開', '查無')
-                               for k in ('deadline', 'posted', 'salary')) else UNUSED
-    seen = posted_age.dates_in(truth.given)
-    bad = []
-    for key, name in (('deadline', '截止日'), ('posted', '刊登日')):
-        days = posted_age.dates_in(said.get(key))
-        if days and not days & (seen | {'--' + d[5:] for d in seen if not d.startswith('--')}):
-            bad.append(f'{name} {said.get(key)} JD 原文裡沒有這一天')
-    stray = _numbers(said.get('salary')) - _numbers(truth.given)
-    if stray:
-        bad.append(f'薪資 {said.get("salary")} 的 {"、".join(sorted(stray)[:3])} JD 原文裡沒有')
-    return '；'.join(bad) or None
+        return UNUSED
+    quote = str(said.get('quote') or '').strip()
+    return None if quote and norm(quote) in norm(truth.given) else '日期／薪資摘要要附指定 JD 的逐字引用 quote'
 
 
 RESEARCH_SEARCH = {
@@ -271,8 +260,8 @@ RESEARCH_JUDGE = {
     'jobs.lang': Cell(JUDGED, '語言', 'JD 是哪種語言是 agent 判斷;只核對是設定裡的語言', _jd_lang),
     'jobs.pick_why': Cell(WORDS, '挑選理由', '卡上照原文給人看'),
     'jobs.cat': Cell(JUDGED, '類別', '分在哪一類是 agent 判斷:他可以改'),
-    'jobs.card': Cell(JUDGED, '卡片摘要', '是 agent 讀 JD 寫的摘要(卡上標明);截止日、刊登日、薪資數字要在 JD 原文裡',
-                      _card_summary, items=('fit', 'co', 'loc', 'deadline', 'salary', 'bar', 'posted', 'ammo')),
+    'jobs.card': Cell(JUDGED, '卡片摘要', 'Agent 讀 JD 寫的摘要；日期與薪資解釋須附原文引用',
+                      _card_summary, items=('fit', 'co', 'loc', 'deadline', 'salary', 'bar', 'posted', 'ammo', 'quote')),
 }
 
 # 查應徵進度:程式複製的信和平台應徵紀錄全文(Truth.texts {來源代號: 全文})、這一輪的卡(Truth.cards)、
@@ -322,9 +311,7 @@ def _reply_date(said, row, truth):
     text = _source_text(row, truth)
     if not text:
         return UNUSED
-    seen = posted_age.dates_in(text)
-    d = str(said)[:10]
-    return None if d in seen or '--' + d[5:] in seen else '程式複製的那一封(那一頁)原文裡沒有這一天'
+    return None                                      # 日期含義交 Agent；source_ref 與引用由其他格核對
 
 
 def _reply_link(said, row, truth):
@@ -390,9 +377,11 @@ def _record_date(said, row, truth):
         return None
     if not text:
         return UNUSED
-    seen = posted_age.dates_in(text)
-    d = str(said)[:10]
-    return None if d in seen or '--' + d[5:] in seen else '程式複製的平台應徵紀錄裡沒有這一天'
+    try:
+        datetime.date.fromisoformat(str(said)[:10])
+    except ValueError:
+        return '要寫成 YYYY-MM-DD'
+    return None                                      # 日期含義交 Agent；紀錄身分仍由程式核對
 
 
 REPLY = {
@@ -402,7 +391,7 @@ REPLY = {
                                 required='交件單「來源代號」:agent 沒寫 source_ref,程式對不到是哪一個來源,這一則不收'),
     'findings.source_type': Cell(DECIDED, '來源種類', '程式照來源代號自己認(agent 不用寫;寫了要一樣)', _source_type),
     'findings.source': Cell(WORDS, '來源名稱', '只給人看'),
-    'findings.date': Cell(CHECK, '日期', '程式複製的那一封(那一頁)原文裡看得到這一天', _reply_date),
+    'findings.date': Cell(JUDGED, '日期', 'Agent 理解指定原文的日期；程式驗日曆格式與來源', _reply_date),
     'findings.subject': Cell(CHECK, '標題', '程式複製的原文裡逐字看得到', _in_source),
     'findings.summary': Cell(WORDS, '摘要', '卡上照原文給人看'),
     'findings.link': Cell(CHECK, '原文連結', '信要是 source_ref 那一封;平台紀錄要在那個平台的網站上', _reply_link),
@@ -414,7 +403,7 @@ REPLY = {
     'job_ids.id': Cell(CHECK, '職缺代號', '程式複製的平台應徵紀錄裡看得到(才拿來標已投遞)', _record_id),
     'job_ids.url': Cell(CHECK, '職缺連結', '連結裡的職缺代號在程式複製的平台應徵紀錄裡看得到', _record_url),
     'job_ids.platform': Cell(CHECK, '平台', '程式讀了應徵紀錄的平台之一', _record_platform),
-    'job_ids.applied_at': Cell(CHECK, '應徵日期', '程式複製的平台應徵紀錄裡看得到這一天', _record_date),
+    'job_ids.applied_at': Cell(JUDGED, '應徵日期', 'Agent 理解平台原文的日期；程式驗日曆格式與紀錄身分', _record_date),
     'job_ids.title': Cell(WORDS, '職稱', '只給人看,不拿來配對'),
     'inaccessible.source': Cell(WORDS, '進不去的來源', '照原文放進回報'),
     'inaccessible.reason': Cell(WORDS, '進不去的原因', '照原文放進回報'),

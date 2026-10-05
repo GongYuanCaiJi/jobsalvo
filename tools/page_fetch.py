@@ -21,12 +21,11 @@ UA = 'Mozilla/5.0 (compatible; jobsalvo/1)'
 READER_ROOT = 'https://r.jina.ai'
 RETRIES = 2
 RETRY_WAIT = 3
-TIMEOUTS = {'direct': 20, 'reader': 45, 'chrome': 60}
-# 連結檢查一次抓好幾個缺(board_status 開 6 條);直接抓、閱讀代理很輕,但退到無頭 Chrome 那一步
-# 每個缺都是一整個 Chrome(加上它的 gpu/renderer 子行程和一個代理),6 個一起開電腦會被拖垮。
-# 同一時間最多開這麼多個,其他排隊。
-CHROME_FALLBACK_WORKERS = 2
-_CHROME_SLOTS = threading.BoundedSemaphore(CHROME_FALLBACK_WORKERS)
+TIMEOUTS = {'direct': 20, 'reader': 45}
+# 連結檢查一次抓好幾個缺(board_status 開 6 條);直接抓、閱讀代理很輕,退到 agent 的瀏覽器(ego)那一步
+# 每個缺開一個工作區跑 JS,同一時間最多開這麼多個,其他排隊。
+EGO_FALLBACK_WORKERS = 2
+_EGO_SLOTS = threading.BoundedSemaphore(EGO_FALLBACK_WORKERS)
 MAX_BYTES = 5 * 1024 * 1024
 API_ROOTS = {
     '104': 'https://www.104.com.tw/job/ajax/content',
@@ -458,31 +457,25 @@ def _greenhouse(url):
                       http_status=status)
 
 
-def _chrome(url, pinned_ip=''):
-    with _CHROME_SLOTS:                  # 先排到位子才開代理和 Chrome
-        return _chrome_now(url, pinned_ip)
+def _ego(url):
+    with _EGO_SLOTS:                     # 先排到位子才開工作區
+        return _ego_now(url)
 
 
-def _chrome_now(url, pinned_ip=''):
-    """經受控代理(固定 IP、擋內網)用共用的瀏覽器讀一頁(tools/browser.py:不再每頁開一整個 Chrome)。"""
-    import browser
-    from page_proxy import PublicFetchProxy
-    pinned_ip = pinned_ip or _assert_public_url(url)   # 沒給就自己查:代理拿到空的 IP 會默默連不上
-    with PublicFetchProxy(_assert_public_url, url, pinned_ip) as proxy:
-        try:
-            text = browser.page_text(url, proxy.url, TIMEOUTS['chrome'])
-        except TimeoutError as error:
-            raise TimeoutError('headless Chrome timed out') from error
-        except Exception as error:
-            raise RuntimeError(f'headless Chrome could not load the page: {str(error)[:300]}') from error
-    text = text.strip()
+def _ego_now(url):
+    """要跑 JS 才有字的頁:在 agent 的瀏覽器(ego)開一個暫時的工作區讀,讀完就收(跟使用者在自己的瀏覽器點開職缺一樣)。
+    網址在 fetch() 已確認是公開網址;載完後最後停在的網址也要是公開的(被導去內網、本機就不收)。"""
+    import chrome_door
+    page = chrome_door.EgoDoor().read_pages([url])[url]
+    _assert_public_url(str(page.get('url') or url))
+    text = str(page.get('text') or '').strip()
     if not text:
-        raise RuntimeError('headless Chrome returned no readable text')
-    return PageResult(url, 'ok', text=text, via='chrome')
+        raise RuntimeError('ego returned no readable text')
+    return PageResult(url, 'ok', text=text, via='ego', title=str(page.get('title') or ''))
 
 
 # 好幾個缺一起抓:大多時間在等網路,一個一個抓的話,一個打不開的頁(逾時加重試最多四分鐘)會卡住後面全部。
-# 無頭 Chrome 那一步另外有 _CHROME_SLOTS 限制同時幾個,電腦不會被拖垮。
+# ego 那一步另外有 _EGO_SLOTS 限制同時幾個,電腦不會被拖垮。
 FETCH_WORKERS = 6
 
 
@@ -530,7 +523,7 @@ def fetch(url):
             except Exception as error:  # noqa: BLE001 — 換下一條路抓;每一條的原因照實放進結果
                 errors.append(f'{via}: {type(error).__name__}: {str(error)[:180]}')
         routes = (('direct', lambda url: _direct(url, pinned_ip)),
-                  ('reader', _reader), ('chrome', lambda url: _chrome(url, pinned_ip)))
+                  ('reader', _reader), ('ego', _ego))
         for via, route in routes:
             try:
                 result = route(parts.geturl())
@@ -549,7 +542,7 @@ def fetch(url):
 def main(argv=None):
     """給沒有瀏覽器的 agent 用(#287):`python3 page_fetch.py <網址>`,印出程式抓到的文字;抓不到照實說每條路敗在哪。"""
     import argparse
-    ap = argparse.ArgumentParser(description='抓一個網頁的文字(直接抓 → 閱讀代理 → 無頭 Chrome)')
+    ap = argparse.ArgumentParser(description='抓一個網頁的文字(直接抓 → 閱讀代理 → agent 的瀏覽器 ego)')
     ap.add_argument('url')
     result = fetch(ap.parse_args(argv).url)
     if result.readable:

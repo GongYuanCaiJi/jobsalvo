@@ -16,7 +16,6 @@ import os, re, sys, copy, subprocess, hashlib, contextlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config as cf
-import chrome_bin
 
 UPLOAD_DIRS = ('resume/', 'custom/')
 UPLOAD_EXT = ('.pdf', '.md', '.markdown', '.css', '.txt', '.docx', '.doc', '.rtf', '.odt', '.png', '.jpg', '.jpeg')
@@ -125,7 +124,7 @@ def create_skill(name, content, kind=''):
 
 
 def get():
-    import agent_chrome
+    import chrome_door
     import doctor
     import prefs
     prefs.ensure_note()
@@ -134,7 +133,7 @@ def get():
     render_warnings = markdown_warnings()
     return {
         'settings': cf.user_settings(),
-        'effective': dict({k: C[k] for k in ('board', 'agent', 'browser', 'resume', 'search', 'research', 'replies')},
+        'effective': dict({k: C[k] for k in ('board', 'agent', 'resume', 'search', 'research', 'replies')},
                           flow=dict(cf.DEFAULTS.get('flow') or {}, **(C.get('flow') or {}))),
         'texts': {'preferences_custom': preferences_custom, 'preferences_agent': preferences_agent,
                   'apply_rules': _read(cf.APPLY_RULES)},
@@ -147,11 +146,8 @@ def get():
         ],
         'home': cf.HOME,
         # 最近一次實際連上的時間(跟 Claude 那一列一樣);以前只記了外掛身分、沒記時間的,講「連接過」
-        'browser_ok': (agent_chrome.conf().get('codex_checked') or True) if agent_chrome._mine() else '',
-        'agent_chrome_made': os.path.isdir(os.path.join(agent_chrome.data_dir(), 'Default')),
-        'chrome_profiles': chrome_bin.profiles(),
+        **chrome_door.settings_status(),
         # 只講「上次按連接時確認看得到」的時間:沒按過或沒確認過就是還沒連接,不拿「記過編號」當成連得上
-        'claude_paired': agent_chrome.conf().get('claude_checked') or '',
         'doctor': doctor.check_environment(),
         'service': os.path.exists(__import__('install_service').plist_path()),
         'render_warnings': render_warnings,
@@ -461,14 +457,8 @@ def _check(settings):
                     bad.append(f'第 {i} 個 agent 瀏覽器能力格式不對')
                 if entry.get('runtime') == 'command-code' and entry.get('browser') is True:
                     bad.append(f'第 {i} 個 Command Code agent 目前不支援瀏覽器')
-                # Haiku 過不了 Claude in Chrome 的權限檢查(回「requires permission」):選了每次填表都會失敗
-                if (entry.get('runtime') == 'claude-code' and entry.get('browser') is True
-                        and 'haiku' in str(entry.get('model') or '').lower()):
-                    bad.append(f'第 {i} 個 agent 用 Claude 操作 Chrome 時不能選 Haiku(Claude in Chrome 會擋):模型改成 Sonnet、Opus 或留空')
                 if entry.get('runtime') == 'codex' and entry.get('speed', 'standard') not in ('standard', 'fast'):
                     bad.append(f'第 {i} 個 Codex agent 速度要選標準或快速')
-            if sum(1 for e in agents if isinstance(e, dict) and e.get('browser') is True) > 1:
-                bad.append('只能有一個 agent 可使用 Chrome')
     research = settings.get('research') or {}
     if not isinstance(research, dict):
         bad.append('找缺與判斷設定格式不對')

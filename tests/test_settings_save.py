@@ -71,6 +71,14 @@ class SettingsSave(unittest.TestCase):
         self.assertTrue(sa.save({'settings': s}))
         self.assertNotIn('replies', self.saved())
 
+    def test_both_supported_agents_can_use_the_shared_browser_sequentially(self):
+        settings = {'agent': {'agents': [
+            {'id': 'a', 'runtime': 'codex', 'model': '', 'effort': 'high', 'browser': True},
+            {'id': 'b', 'runtime': 'claude-code', 'model': 'haiku', 'effort': 'high', 'browser': True},
+        ]}}
+        self.assertEqual(sa._check(settings), [])
+        self.assertEqual([a['browser'] for a in cf.migrate_settings(settings)['agent']['agents']], [True, True])
+
     def test_defaults_he_never_set_are_not_frozen_into_the_file(self):
         # 存一次設定就把當時的預設值整份寫進 jobsalvo.json:之後產品改預設(更新跟 main),他拿不到
         with open(os.path.join(self.home, cf.NAME), 'w', encoding='utf-8') as f:
@@ -78,7 +86,7 @@ class SettingsSave(unittest.TestCase):
         cf.reload(self.home)
         page = self.page()
         w = copy.deepcopy(page['settings'])          # 跟 board.js cfgLoad 一樣:這幾塊從實際生效的值(含預設)起頭
-        for k in ('agent', 'browser', 'search', 'replies', 'flow'):
+        for k in ('agent', 'search', 'replies', 'flow'):
             w[k] = copy.deepcopy(page['effective'][k])
         w.setdefault('board', {}).update(categories=copy.deepcopy(page['effective']['board']['categories']),
                                          tags=copy.deepcopy(page['effective']['board']['tags']))

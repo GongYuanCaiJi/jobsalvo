@@ -67,7 +67,7 @@ class Outcomes(unittest.TestCase):
 
 
 class BrowserCapability(unittest.TestCase):
-    def test_application_agent_keeps_the_cua_plugin_enabled(self):
+    def test_application_agent_disables_native_browser_plugins_and_uses_ego(self):
         agent = {'id': 'browser', 'runtime': 'codex', 'model': '', 'effort': 'low', 'browser': True}
         with tempfile.TemporaryDirectory(prefix='agent-browser-config-') as d:
             config = os.path.join(d, 'config.toml')
@@ -80,10 +80,10 @@ class BrowserCapability(unittest.TestCase):
                 argv, _ = ar.argv_for(agent, 'TASK', '/repo',
                                       browser=ar.apply_overrides(), chrome=True)
 
-        self.assertNotIn('plugins.unified-computer-use@openai-bundled.enabled=false', argv)
+        self.assertIn('plugins.unified-computer-use@openai-bundled.enabled=false', argv)
         self.assertIn('plugins.pdf@openai-primary-runtime.enabled=false', argv)
 
-    def test_reading_pages_enables_chrome_without_using_application_rules(self):
+    def test_browser_work_uses_ego_rules_without_an_override_list(self):
         with patch.object(ar, '_runtime', return_value=('codex', '')) as runtime, \
              patch.object(ar, 'lean', return_value=['CHROME-PLUGIN-ENABLED']) as lean:
             argv, cwd = ar.argv_for('main', 'TASK', '/repo', chrome=True)
@@ -93,8 +93,8 @@ class BrowserCapability(unittest.TestCase):
         self.assertIn('CHROME-PLUGIN-ENABLED', argv)
         lean.assert_called_once_with(True)
         runtime.assert_called()
-        self.assertIn('【抓網頁鐵律】', prompt)
-        self.assertNotIn('【瀏覽器鐵律(代投)】', prompt)
+        self.assertIn('ego-browser nodejs', prompt)
+        self.assertNotIn('【抓網頁鐵律】', prompt)
 
 class LeanParity(unittest.TestCase):
     def test_codex_and_claude_both_skip_personal_memory(self):
@@ -384,18 +384,15 @@ class ClaudeCodeRuntime(unittest.TestCase):
         self.assertNotIn('--disallowedTools', argv)
         self.assertEqual(again[again.index('--resume') + 1], 'S1')
         self.assertEqual(cwd, '/repo')
-        # 代投:Claude in Chrome(--chrome),Chrome 動作另外要允許規則;codex 的外掛開關(browser)對它沒意義
-        with patch.object(ar, 'claude_paired_device', return_value='dev-agent'):
-            browse, _ = ar.argv_for(agent, 'TASK', '/repo', chrome=True, browser=['x'])
-            rules = ar.prompt_stdin(agent, 'TASK', browser=['x'], chrome=True)
-        self.assertIn('--chrome', browse)
+        # 代投:兩家都用 ego-browser 指令;codex 的外掛開關(browser)對它沒意義,也不載入 Claude in Chrome
+        browse, _ = ar.argv_for(agent, 'TASK', '/repo', chrome=True, browser=['x'])
+        rules = ar.prompt_stdin(agent, 'TASK', browser=['x'], chrome=True)
+        self.assertIn('--no-chrome', browse)
         self.assertNotIn('x', browse)
         self.assertIn('--no-chrome', argv)                      # 不用瀏覽器的工作不載入 Chrome 工具
-        allow = json.loads(browse[browse.index('--settings') + 1])['permissions']['allow']
-        self.assertEqual(allow, ['mcp__claude-in-chrome', 'ClaudeInChromeDomain(*)'])
-        self.assertIn('dev-agent', rules)                       # 只准用配對過的那個(agent 專用的 Chrome)
-        self.assertIn('markHandoff()', rules)                   # 指示裡 Codex 的說法有對照表
-        self.assertIn('file_upload', rules)
+        self.assertNotIn('permissions', json.loads(browse[browse.index('--settings') + 1]))
+        self.assertIn('ego-browser nodejs', rules)
+        self.assertNotIn('markHandoff()', rules)
 
     def test_launch_feeds_the_prompt_through_stdin(self):
         agent = {'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': False}
@@ -525,7 +522,7 @@ class NoChromeOutsideApply(unittest.TestCase):
                 apply_argv, _ = ar.argv_for(agent, 'TASK', '/repo', chrome=True, browser=ar.apply_overrides())
         for name in ('chrome@openai-bundled', 'computer-use@openai-bundled', 'unified-computer-use@openai-bundled'):
             self.assertIn(f'plugins.{name}.enabled=false', argv)
-            self.assertNotIn(f'plugins.{name}.enabled=false', apply_argv)   # 代投照舊留著
+            self.assertIn(f'plugins.{name}.enabled=false', apply_argv)
 
     def test_claude_without_chrome_has_no_claude_in_chrome(self):
         agent = {'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}
@@ -555,6 +552,18 @@ class AgentName(unittest.TestCase):
 class CodexDispatch(unittest.TestCase):
     """#109:prompt 走 stdin、成敗看事件、對話 id 從事件拿。"""
     AGENT = {'id': 'cx', 'runtime': 'codex', 'model': '', 'effort': 'high', 'browser': True}
+
+    def test_native_final_output_keeps_effort_and_resume(self):
+        agent = dict(self.AGENT, effort='max')
+        for sid in (None, 'S1'):
+            argv, _cwd = ar.argv_for(agent, 'private prompt', '/repo', resume=sid,
+                                     output_last_message='/tmp/fill.json')
+            self.assertEqual(argv[argv.index('--output-last-message') + 1], '/tmp/fill.json')
+            self.assertIn('model_reasoning_effort="max"', argv)
+            self.assertEqual(argv[-1], '-')
+            self.assertNotIn('private prompt', argv)
+            if sid:
+                self.assertEqual(argv[2:4], ['resume', sid])
 
     def test_prompt_is_fed_on_stdin_not_argv(self):
         with patch.object(ar, 'codex_bin', return_value='/bin/codex'):

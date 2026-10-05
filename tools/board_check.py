@@ -1534,9 +1534,6 @@ def flow_off(home):
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
     data['flow'] = dict(shot.FLOW_OFF)
-    # agent 的 Chrome 用副本自己的資料夾(當成還沒建過):設定頁畫的是第一次設定的樣子,也碰不到真的那一個
-    data['browser'] = {**(data.get('browser') or {}),
-                       'data_dir': os.path.join(home, 'agent-chrome'), 'state': os.path.join(home, 'agent-chrome.json')}
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -2453,15 +2450,7 @@ CHECKS.append((
       var m=document.getElementById('rzmodal');
       if(location.href!==n0)bad.push('點了換頁了(該在看板彈窗開)');
       if(!m||m.style.display!=='flex'||!m.querySelector('img.rzm-pg'))bad.push('截得到的時候彈窗裡沒有那張圖');
-      if(m&&/上一輪填好、改好時/.test(m.textContent))bad.push('當場截的圖,彈窗卻說是填好時截的');
       if(m)m.querySelector('.rzm-x').click(); await T.sleep(200);
-      // 用 Claude、agent 的 Chrome 正在跑代投或查應徵進度:伺服器先給那一頁填好時截的圖(X-Shot-At),彈窗要講是幾點截的、跑完再按
-      window.fetch=function(u){if(String(u).indexOf('/api/live?')===0)return Promise.resolve(new Response(blob,{status:200,headers:{'Content-Type':'image/png','X-Refresh':'0','X-Shot-At':String(Math.floor(Date.now()/1000))}})); return of.apply(this,arguments);};
-      T.card(P.id).querySelector('a[data-apshot]').click(); await T.sleep(500); window.fetch=of;
-      m=document.getElementById('rzmodal');
-      if(!m.querySelector('img.rzm-pg'))bad.push('Chrome 忙時給的填好時的圖沒顯示');
-      if(!/上一輪填好、改好時/.test(m.textContent)||!/\d\d:\d\d/.test(m.textContent))bad.push('給的是填好時截的圖,彈窗沒講是幾點截的(會當成現在的頁面)');
-      m.querySelector('.rzm-x').click(); await T.sleep(200);
       window.fetch=function(u){if(String(u).indexOf('/api/live?')===0)return Promise.resolve(new Response('x',{status:404})); return of.apply(this,arguments);};
       T.card(P.id).querySelector('a[data-apshot]').click(); await T.sleep(500); window.fetch=of;
       m=document.getElementById('rzmodal');
@@ -2591,17 +2580,15 @@ def human_check_ship_case(board):
 
 PRE['human_check_ship_case'] = human_check_ship_case
 CHECKS.append((
-    '網站要真人驗證、agent 填不了的卡:照實講,並給「🌐 在我的瀏覽器打開」(開那個職缺頁,讓他自己投)',
+    '網站要本人登入或驗證、agent 停下的卡:照實講要他做什麼,並給「👀」讓他把那一頁叫到面前接手(#371 接手)',
     r"""
       var bad=[]; document.querySelector('[data-tab="ship"]').click(); T.sync(); await T.sleep(900);
       [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
       await T.sleep(300);
       var c=T.card(P.id); if(!c)return '找不到那張卡';
-      if(!/真人驗證/.test(c.textContent))bad.push('卡上沒講是網站要真人驗證');
-      var a=c.querySelector('a[data-humancheck]');
-      if(!a)bad.push('沒有「🌐 在我的瀏覽器打開」');
-      else{if(a.getAttribute('href')!==P.id)bad.push('打開的不是這個職缺頁:'+a.getAttribute('href'));
-        if(a.getAttribute('target')!=='_blank')bad.push('不是開在新分頁(會把看板換掉)');}
+      if(!/本人登入或驗證/.test(c.textContent))bad.push('卡上沒講網站要本人登入或驗證');
+      if(!/修改/.test(c.textContent))bad.push('沒講處理完按「修改」接著填');
+      if(!c.querySelector('a[data-apshot],[data-livego]'))bad.push('沒有「👀」可以把那一頁叫到面前接手');
       document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
       return bad.join('；');
     """,
@@ -2975,126 +2962,45 @@ CHECKS.append((
 
 
 CHECKS.append((
-    '設定頁:agent 的 Chrome 從哪個設定檔複製,從清單選(顯示 Chrome 上看到的名字、裝了哪個擴充功能;可以不複製),存的是資料夾名',
-    r"""
-      var bad=[], f0=window.fetch;
-      // 這台機器的 Chrome 設定檔換成假的兩個(CI 上沒有 Chrome 設定檔;本機也不拿真的名字來比)
-      window.fetch=function(u,o){var r=f0.apply(this,arguments);
-        if(String(u)!=='/api/settings'||(o&&o.method==='POST'))return r;
-        return r.then(function(x){return x.json();}).then(function(d){
-          d.chrome_profiles=[{dir:'Profile 7',name:'工作用',ext:['codex']},{dir:'Default',name:'個人',ext:[]}];
-          return new Response(JSON.stringify(d),{headers:{'Content-Type':'application/json'}});});};
-      try{
-      document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
-      document.querySelector('[data-tab="cfg"]').click(); await T.idle();
-      var ag=document.querySelector('details[data-fold="cfg:agent"]'); if(!ag.open)ag.querySelector('summary').click(); await T.sleep(200);
-      var sel=document.querySelector('select[data-cf="browser.profile"]');
-      if(!sel)return '設定檔還是要自己打字,不是選單';
-      var txt=[].map.call(sel.options,function(o){return o.textContent;}).join('|');
-      if(!/工作用\(已裝 Codex 擴充功能\)/.test(txt))bad.push('選項沒顯示名字和擴充功能:'+txt);
-      if(/chrome:\/\/version/.test(ag.textContent))bad.push('說明還叫人去 chrome://version 抄資料夾名');
-      if(![].some.call(sel.options,function(o){return o.value==='';}))bad.push('沒有「不複製」可以選');
-      if(/新增一個設定檔|右上角新增/.test(ag.textContent))bad.push('說明還叫人在自己的 Chrome 裡新增設定檔(agent 現在是自己一個 Chrome)');
-      var v0=sel.value; sel.value='Profile 7'; sel.dispatchEvent(new Event('change',{bubbles:true})); await T.sleep(100);
-      if(!document.getElementById('cfg-save').classList.contains('dirty'))bad.push('選了設定檔存檔列沒亮');
-      sel=document.querySelector('select[data-cf="browser.profile"]'); if(sel){sel.value=v0; sel.dispatchEvent(new Event('change',{bubbles:true}));}
-      if(document.querySelector('[data-cfb="browser.show_window"],[data-cf="browser.tool"]'))bad.push('還有「叫到我面前」或「操作方式」這種會讓 agent 的 Chrome 跳出來的選項');
-      } finally { window.fetch=f0; document.querySelector('[data-tab="none"]').click(); await T.sleep(300); }
-      return bad.join('；');
-    """,    'no_setup', {'fresh_page': True},   # 設定頁第一次打開才讀 /api/settings:重新載入頁面,假的設定檔清單才接得上
-))
-
-
-CHECKS.append((
-    '設定頁:只能一個 agent 用 Chrome;新增的 agent 不會也勾上;只畫勾了的那一家的「連接」',
+    '設定頁 ego:兩家依序使用共用工作區,不再配對外掛或複製設定檔',
     r"""
       var bad=[];
-      try{
-      document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
       document.querySelector('[data-tab="cfg"]').click(); await T.idle();
-      var ag=document.querySelector('details[data-fold="cfg:agent"]'); if(!ag.open)ag.querySelector('summary').click(); await T.sleep(200);
-      var boxes=function(){return [].slice.call(document.querySelectorAll('[data-cfa-browser]'));};
-      var checked=function(){return boxes().filter(function(x){return x.checked;}).length;};
-      document.querySelector('[data-cfagentadd]').click(); await T.sleep(200);
-      if(checked()>1)bad.push('新增的 agent 也自動勾了「用它操作 Chrome」:勾了 '+checked()+' 個');
-      var last=boxes()[boxes().length-1]; last.click(); await T.sleep(200);
-      if(checked()!==1||!boxes()[boxes().length-1].checked)bad.push('勾另一個之後不是只剩它一個:勾了 '+checked()+' 個');
-      var rt=document.querySelectorAll('[data-cfa-runtime]'); var sel=rt[rt.length-1];
-      sel.value='claude-code'; sel.dispatchEvent(new Event('change',{bubbles:true})); await T.sleep(200);
-      if(!document.querySelector('[data-cfbrowser="claude"]'))bad.push('勾的是 Claude,卻沒有「連接 Claude」');
-      if(document.querySelector('[data-cfbrowser="setup"]'))bad.push('勾的是 Claude,還畫「連接 Codex」(讓人以為兩個都要連)');
-      var ag2=document.querySelector('details[data-fold="cfg:agent"]');
-      if(/用 Claude 代投也要連/.test(ag2.textContent))bad.push('還寫著用 Claude 也要連 Codex');
-      boxes()[boxes().length-1].click(); await T.sleep(200);
-      if(checked()!==0)bad.push('取消勾選後還有勾著的');
-      if(!/還沒有 agent 勾/.test(document.querySelector('details[data-fold="cfg:agent"]').textContent))bad.push('一個都沒勾時沒提醒填表會停著');
-      } finally { document.querySelector('[data-tab="none"]').click(); await T.sleep(300); }
+      var ag=document.querySelector('details[data-fold="cfg:agent"]'); if(!ag.open)ag.querySelector('summary').click();
+      if(!ag.textContent.includes('ego'))bad.push('沒有 ego 說明');
+      if(document.querySelector('select[data-cf="browser.profile"]'))bad.push('還要求複製 Chrome 設定檔');
+      if(document.querySelector('[data-cfbrowser="claude"]'))bad.push('還要求分家配對');
+      document.querySelector('[data-cfagentadd]').click(); await T.sleep(150);
+      var boxes=()=>[].slice.call(document.querySelectorAll('[data-cfa-browser]'));
+      var first=boxes()[0],last=boxes().at(-1);if(!first.checked)first.click();
+      boxes().at(-1).click(); await T.sleep(150);
+      if(!boxes()[0].checked||!boxes().at(-1).checked)bad.push('不能兩家依序使用 ego');
+      var rt=document.querySelectorAll('[data-cfa-runtime]');var sel=rt[rt.length-1];
+      sel.value='claude-code';sel.dispatchEvent(new Event('change',{bubbles:true}));await T.sleep(150);
+      if(!document.querySelector('[data-cfbrowser="setup"]'))bad.push('沒有共用檢查 ego');
+      document.querySelector('[data-tab="none"]').click(); await T.sleep(100);
       return bad.join('；');
-    """,    'no_setup', {'fresh_page': True},
+    """, 'no_setup', {'fresh_page':True},
 ))
-
 
 CHECKS.append((
-    '設定頁「🔌 連接 Codex」:有填好等他核對的頁時,先問他(那幾頁會不見);他不確定就不關,確定了才帶 force 再送',
+    '設定頁 ego:未完成第一次匯入就說原因,檢查期間按鈕停用',
     r"""
-      var bad=[], f0=window.fetch, c0=window.confirm, sent=[], asked=[], answer=false;
-      window.fetch=function(u,o){
-        if(String(u)==='/api/settings/browser'){var b=JSON.parse(o.body); sent.push(b);
-          return Promise.resolve(new Response(JSON.stringify(b.force?{ok:true,msg:'連上了'}:
-            {ok:false,confirm:true,msg:'還有 2 頁填好等你核對,這幾頁會不見。確定要連接嗎?'}),
-            {status:b.force?200:409,headers:{'Content-Type':'application/json'}}));}
-        var r=f0.apply(this,arguments);
-        if(String(u)!=='/api/settings'||(o&&o.method==='POST'))return r;
-        return r.then(function(x){return x.json();}).then(function(d){   // 勾的是 Codex,才有「連接 Codex」
-          d.effective.agent.agents=[{id:'codex',runtime:'codex',model:'',effort:'max',speed:'standard',browser:true}];
-          return new Response(JSON.stringify(d),{headers:{'Content-Type':'application/json'}});});};
-      window.confirm=function(m){asked.push(m); return answer;};
-      try{
-      document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
-      document.querySelector('[data-tab="cfg"]').click(); await T.idle();
-      var ag=document.querySelector('details[data-fold="cfg:agent"]'); if(!ag.open)ag.querySelector('summary').click(); await T.sleep(200);
-      var btn=document.querySelector('[data-cfbrowser="setup"]'); if(!btn)return '勾 Codex 卻沒有「連接 Codex」';
-      btn.click(); await T.sleep(600);
-      if(asked.length!==1||!/不見/.test(asked[0]||''))bad.push('有等他的頁,沒先問他就連接');
-      if(sent.length!==1||sent[0].force)bad.push('他沒確定,卻還是送出了關掉重開:'+JSON.stringify(sent));
-      btn=document.querySelector('[data-cfbrowser="setup"]');
-      if(!btn||btn.disabled)bad.push('他不確定之後,連接按鈕沒恢復');
-      answer=true; sent=[]; asked=[]; btn.click(); await T.sleep(600);
-      if(sent.length!==2||sent[0].force||!sent[1].force)bad.push('他確定之後沒帶 force 再送一次:'+JSON.stringify(sent));
-      } finally { window.fetch=f0; window.confirm=c0; document.querySelector('[data-tab="none"]').click(); await T.sleep(300); }
-      return bad.join('；');
-    """,    'no_setup', {'fresh_page': True},
-))
-
-
-CHECKS.append((
-    '設定頁「🔌 連接 Codex」那一列:✅ 寫最近一次確認連得上的日期(不是記過就算連上);連接中寫最多一分半(實際要等那麼久)',
-    r"""
-      var bad=[], f0=window.fetch;
-      window.fetch=function(u,o){
-        if(String(u)==='/api/settings/browser')return new Promise(function(){});      // 連接中:一直不回
-        var r=f0.apply(this,arguments);
-        if(String(u)!=='/api/settings'||(o&&o.method==='POST'))return r;
-        return r.then(function(x){return x.json();}).then(function(d){
-          d.effective.agent.agents=[{id:'codex',runtime:'codex',model:'',effort:'max',speed:'standard',browser:true}];
-          d.browser_ok='2026-09-29T17:06:02';
+      var bad=[],f0=window.fetch;
+      window.fetch=function(u,o){if(String(u)==='/api/settings/browser')return new Promise(()=>{});
+        var r=f0.apply(this,arguments);if(String(u)!=='/api/settings'||(o&&o.method==='POST'))return r;
+        return r.then(x=>x.json()).then(d=>{d.ego={ok:false,installed:true,imported:false,reason:'ego 尚未完成第一次匯入'};
           return new Response(JSON.stringify(d),{headers:{'Content-Type':'application/json'}});});};
       try{
-      document.querySelector('[data-tab="none"]').click(); await T.sleep(200);
-      document.querySelector('[data-tab="cfg"]').click(); await T.idle();
-      var ag=document.querySelector('details[data-fold="cfg:agent"]'); if(!ag.open)ag.querySelector('summary').click(); await T.sleep(200);
-      var btn=document.querySelector('[data-cfbrowser="setup"]'); if(!btn)return '勾 Codex 卻沒有「連接 Codex」';
-      var row=btn.closest('.cfg-row').textContent;
-      if(!/9\/29 確認連得上/.test(row))bad.push('Codex 那一列沒寫最近一次確認連得上的日期:'+row.slice(0,60));
-      if(/已連接/.test(row))bad.push('還寫「已連接」(只是記過,外掛斷線也這樣寫)');
-      btn.click(); await T.sleep(300);
-      btn=document.querySelector('[data-cfbrowser="setup"]');
-      if(!/一分半/.test(btn.textContent))bad.push('連接中的按鈕寫「'+btn.textContent+'」,實際最多要等一分半');
-      } finally { window.fetch=f0; document.querySelector('[data-tab="none"]').click(); await T.sleep(300); }
+        document.querySelector('[data-tab="cfg"]').click(); await T.idle();
+        var ag=document.querySelector('details[data-fold="cfg:agent"]');if(!ag.open)ag.querySelector('summary').click();
+        if(!ag.textContent.includes('尚未完成第一次匯入'))bad.push('沒有講未匯入');
+        var btn=document.querySelector('[data-cfbrowser="setup"]');btn.click();await T.sleep(150);
+        if(!btn.disabled||!btn.textContent.includes('檢查中'))bad.push('檢查中按鈕沒停用');
+      }finally{window.fetch=f0;document.querySelector('[data-tab="none"]').click();await T.sleep(100);}
       return bad.join('；');
-    """,    'no_setup', {'fresh_page': True},
+    """, 'no_setup', {'fresh_page':True},
 ))
-
 
 CHECKS.append((
     '幽靈職缺:判斷看出來的,卡片上標「👻 可能是幽靈職缺」和理由',
@@ -3364,10 +3270,11 @@ def confirmed_submission_evidence_case(board):
         'url': url, 'source_ref': source_ref, 'source_type': 'email',
         'source': 'Gmail 合成確認信', 'date': '2026-09-21',
         'summary': '合成確認信', 'link': 'https://mail.google.com/mail/u/0/#all/board-check',
-        'kind': 'confirm',
+        'kind': 'confirm', 'quote': '確認已收到此次應徵',
     }
     result = rr.parse_result(
         {'checked': [url], 'findings': [finding]}, [url], source_types={source_ref: 'email'},
+        texts={source_ref: '2026-09-21 確認已收到此次應徵'},
     )
     bd.set_fb(lambda fb: rr.apply_findings(fb, result.findings), live=board, by='board_check')
     return {'id': url, 'source_ref': source_ref}
@@ -4321,12 +4228,15 @@ def auto_prep_tried_case(board):
     parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     jobs = parsed['data']['jobs']
+    # 要的是「沒產出」的準備卡:別條檢查(例如履歷預覽)可能已經在某張準備卡放了履歷,挑那張就會顯示已產出
     prep = [j['id'] for j in jobs if (fb.get(j['id']) or {}).get('app') == 'prep'
-            and not (fb.get(j['id']) or {}).get('rm') and not j.get('prep_note')]
+            and not (fb.get(j['id']) or {}).get('rm') and not j.get('prep_note')
+            and not (j.get('resume') or {}).get('variants')]
     if not prep:
         # 前面「跑準備區」那條會把整區推去待你決定:自己放一張還沒進流程的卡進來
         spare = next((j['id'] for j in jobs if not (fb.get(j['id']) or {}).get('app')
-                      and not (fb.get(j['id']) or {}).get('rm') and not j.get('prep_note')), None)
+                      and not (fb.get(j['id']) or {}).get('rm') and not j.get('prep_note')
+                      and not (j.get('resume') or {}).get('variants')), None)
         if not spare:
             raise ValueError('示範看板沒有可以放進準備區的卡')
         bd.set_fb(lambda f: f.setdefault(spare, {}).__setitem__('app', 'prep'), live=board, by='board_check')
@@ -4498,7 +4408,7 @@ def _filled(state='parked', **apply):
 
 def next_step_case(board):
     """可投遞裡幾張狀態各不同的卡,看卡上、「這一頁要你處理的」、「🚀 填表進度」、📣 回報講的一不一致。"""
-    from agent_chrome import GONE
+    from chrome_door import GONE
     cards = [
         _filled('nopage', tab_id='', issues=['agent 的 Chrome 沒連上']),           # 0 沒填成、頁面也不在
         _filled('stale', stale='履歷換過了,網頁上傳的還是舊的,先讓 agent 重填'),     # 1 上傳的是舊檔
@@ -4563,7 +4473,7 @@ APPLY_CHECKS.append((
 def fill_limit_case(board):
     """只開自動填表、上限 1 張:一張填好停著等他(已經滿了)、一張頁面不見了、一張新卡;
     舊卡(開啟當下就在的)兩張:一張還沒填過(按鈕要算它)、一張頁面不見了(按鈕不算它)。"""
-    from agent_chrome import GONE
+    from chrome_door import GONE
     gone = _filled('gone', tab_id='', issues=[GONE])
     cards = [_filled(), gone, {'app': 'ship'}, {'app': 'ship'}, dict(gone)]
 

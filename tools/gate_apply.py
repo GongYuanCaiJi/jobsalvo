@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-gate_apply —— 幫你填表那幾張交件單(填表、修改的 fill.json、送出前核對的 pre-submit.json、送出的 submit.json)
+gate_apply —— 幫你填表那幾張交件單(填表、修改的 fill.json、送出的 submit.json)
 每一格登記的核對方式,和程式自己讀那一頁的判斷(還停在申請表、送出了沒、頁面變了沒)。入口在 gate。
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import agent_chrome            # noqa: E402
 import apply_tab               # noqa: E402
 import profile_sync as ps      # noqa: E402
-from gate_cells import CHECK, DECIDED, UNUSED, WORDS, Cell, Truth, norm, same_url, short  # noqa: E402
+from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm, same_url, short  # noqa: E402
 
 def _card_url(said, sheet, truth):
-    return None if same_url(said, truth.url) else truth.url
+    """同一張職缺:路徑相同,卡片網址原有的參數都在(職缺編號可能就在參數裡);agent 多帶的參數(例如 ?apply=form)不算換了職缺。"""
+    from urllib.parse import urlsplit, parse_qsl
+    if same_url(said, truth.url):
+        return None
+    a, b = urlsplit(str(said or '').split('#')[0]), urlsplit(str(truth.url or '').split('#')[0])
+    same_page = (a.netloc, a.path.rstrip('/')) == (b.netloc, b.path.rstrip('/'))
+    return None if same_page and set(parse_qsl(b.query)) <= set(parse_qsl(a.query)) else truth.url
 
 
 def _tab(said, sheet, truth):
@@ -170,26 +176,33 @@ def _fields(said, sheet, truth):
 
 
 def _not_sent_in_fill(said, sheet, truth):
-    """填表那一輪說已經送出:程式讀那一頁,還停在申請表就不是真的。"""
-    if said is not True:
-        return None
-    if truth.page is None:
-        return UNUSED                  # 程式沒讀到那一頁:這一格這一次不收;讀不到的原因在「分頁」那一格講過
-    if still_form(truth.page, sheet.get('tab_url') or truth.url):
-        return '頁面還停在申請表'
-    return None
+    """保留違規送出宣稱；不能以表單外觀否定它。證據不足由主線進 unsure。"""
+    if said is False and not (sheet.get('clicked') is True or sheet.get('confirm_url') or sheet.get('confirm_text')):
+        return None  # 正常填表、未操作送出，不需要送出結果證據
+    return _submitted(said, sheet, truth)
 
 
 def _submitted(said, sheet, truth):
-    """送出那一輪說送出了:程式讀那一頁,還停在申請表(或跳出真人驗證)就是沒送出。讀不到的不在這裡判(apply_run 照截圖和說法)。"""
-    state, why = after_send(truth.page, truth.form_url or '')
-    return why if said is True and state == NOT_SENT else None
+    """結果意思由 Agent 判讀；程式核對本輪引用來源，未知不當未送出。"""
+    if said is None:
+        return None
+    if type(said) is not bool:
+        return 'submitted 要是 true、false 或 null'
+    if truth.page is None:
+        return '讀不到本輪結果頁面，無法核實送出結果'
+    if not str(sheet.get('reason') or '').strip():
+        return '要說明這次結果 reason'
+    if not str(sheet.get('confirm_url') or '').strip() or not str(sheet.get('confirm_text') or '').strip():
+        return '要附本輪結果頁網址與逐字引用'
+    if said and sheet.get('clicked') is False:
+        return '已送出與沒有按送出互相矛盾'
+    return _confirm_url(sheet['confirm_url'], sheet, truth) or _confirm_text(sheet['confirm_text'], sheet, truth)
 
 
 def _confirm_text(said, sheet, truth):
     if not str(said or '').strip() or truth.page is None:
         return None
-    return None if norm(said) in truth.text() else '頁面上沒有這句話'
+    return None if norm(said) in norm(truth.text()) else '頁面上沒有這句話'
 
 
 def _confirm_url(said, sheet, truth):
@@ -203,7 +216,7 @@ def _board_tab(said, sheet, truth):
 
 
 def _problems(said, sheet, truth):
-    return [f'卡住:{agent_chrome.explain_blocked(p)}' for p in (said if isinstance(said, list) else [said] if said else [])] or None
+    return [f'卡住:{p}' for p in (said if isinstance(said, list) else [said] if said else [])] or None
 
 
 def _delivery_required(truth):
@@ -211,9 +224,8 @@ def _delivery_required(truth):
     return truth.job is not None and ps.NO_DELIVERY
 
 
-FIELD_ITEMS = ('q', 'value', 'src', 'k', 'why', 'zh', 'kind', 'pj', 'pjw', 'bank_q', 'v')
+FIELD_ITEMS = ('q', 'value', 'src', 'k', 'why', 'zh', 'kind', 'pj', 'pjw', 'bank_q', 'v', 'choice', 'name', 'source_hash')
 FILE_ITEMS = ('name', 'path')
-EQUIV_ITEMS = ('master', 'platform', 'why', 'not_shown')
 _TAB_GONE = '填好的分頁沒有留在他的 Chrome(他要在真的頁面上檢查)'
 
 FILL = {
@@ -224,17 +236,15 @@ FILL = {
     'tab_url': Cell(CHECK, '分頁網址', '程式讀到的那一頁網址', _tab_url),
     'posting.title': Cell(CHECK, '頁面上的職稱', '程式讀到的那一頁上有這幾個字(才拿來改卡片名字)', _on_page),
     'posting.company': Cell(CHECK, '頁面上的公司', '程式讀到的那一頁上有這幾個字', _on_page),
-    'posting.same_job': Cell(CHECK, '是不是同一個缺', '說不是就停(它沒填,沒有東西可以收)', _same_job),
+    'posting.same_job': Cell(JUDGED, '是不是同一個缺', 'Agent 理解頁面與指定職缺；說不是就停', _same_job),
     'profile.needed': Cell(WORDS, '要不要平台履歷', '只給人看;用不用平台履歷看程式讀到的申請頁'),
-    'profile.updated': Cell(WORDS, '改了平台履歷哪幾段', '只給人看;程式之後自己讀回來跟原始履歷比'),
+    'profile.updated': Cell(WORDS, '改了平台履歷哪幾段', '只給人看；程式另交當前原稿與讀回頁面供 Agent 判讀'),
     'profile.url': Cell(CHECK, '平台履歷全文頁', '這個平台的網址;程式登記過就要是那一份;沒登記過,程式讀回來跟原始履歷比才收',
                         _fixed_location),
     'profile.edit': Cell(CHECK, '平台履歷編輯頁', '這個平台的網址', _platform_url),
     'profile.name': Cell(CHECK, '平台履歷名稱', '程式記過就要一樣;沒記過,在那一份的頁面上看到才記(profile_sync.check)',
                          _profile_name),
     'profile.application_history_url': Cell(CHECK, '應徵紀錄頁', '這個平台的網址', _platform_url),
-    'profile.equivalents': Cell(CHECK, '平台用自己說法寫的格子', '程式讀回那一份平台履歷,字真的在頁面上才收'
-                                '(profile_sync.accept_equivalents,在 apply_run.profile_after)', items=EQUIV_ITEMS),
     'profile.note': Cell(WORDS, '平台履歷備註', '只給人看'),
     'delivery.method': Cell(CHECK, '投遞方式', '程式讀到的申請頁:選了平台履歷就要是 platform_profile,而且是該選的那一份;'
                             '直接上傳的,申請表收到的檔逐位元組跟這張卡的檔比', _delivery,
@@ -256,7 +266,9 @@ FILL = {
     'platform_notes': Cell(WORDS, '平台做法', '存起來,下一輪標成「參考」附在指示裡'),
     'platform_notes_remove': Cell(WORDS, '不對的平台做法', '從參考裡拿掉那一句'),
     'fixed': Cell(WORDS, '改了哪幾格', '只給人看(修改那一輪)'),
-    'submitted': Cell(CHECK, '已送出', '填表那一輪不准送出;說送了,程式讀那一頁,還停在申請表就不是真的', _not_sent_in_fill),
+    'submitted': Cell(JUDGED, '已送出', '填表不准送出；有宣稱就核實或禁止重送，不以表單外觀推論', _not_sent_in_fill),
+    'clicked': Cell(WORDS, '有沒有按下送出', '有操作宣稱就核實或禁止重送'),
+    'reason': Cell(WORDS, '送出結果說明', '只給人看；有送出宣稱時必須說明'),
     'confirm_url': Cell(CHECK, '確認頁網址', '程式讀到的那一頁網址', _confirm_url),
     'confirm_text': Cell(CHECK, '確認頁的字', '程式讀到的那一頁上有這句話', _confirm_text),
     'fixed_profile.url': Cell(CHECK, '固定平台履歷', '程式登記的那一份', _fixed_location),
@@ -264,67 +276,57 @@ FILL = {
                                       items=FILE_ITEMS),
 }
 
-PRE_SUBMIT = {
-    'delivery.method': Cell(CHECK, '投遞方式', '要跟核准時一樣;平台履歷上的附件、申請表收到的檔逐位元組跟這張卡該附的檔比'
-                            '(profile_sync.check_attachments)', _profile_attachments,
-                            required=_delivery_required),
-    'delivery.profile_kind': FILL['delivery.profile_kind'],
-    'delivery.profile_url': FILL['delivery.profile_url'],
-    'profile_attachments': Cell(CHECK, '平台履歷上的附件', '下載回來(或算雜湊)逐位元組跟這張卡該附的檔比(在「投遞方式」那一格一起比)',
-                                items=FILE_ITEMS),
-    'fixed_profile.url': FILL['fixed_profile.url'],
-    'fixed_profile.attachments': Cell(CHECK, '固定平台履歷上的附件', '同上,跟固定版該附的檔比', items=FILE_ITEMS),
-    'uploaded_files': Cell(CHECK, '申請表收到的檔', '同上,直接上傳的逐位元組跟這張卡的檔比', items=FILE_ITEMS),
-    'uploaded_from': FILL['uploaded_from'],
-    'upload_readback': FILL['upload_readback'],
-    'problems': FILL['problems'],
-    'notes': FILL['notes'],
-}
-
 SUBMIT = {
-    'submitted': Cell(CHECK, '送出成功', '程式讀按完送出後的那一頁:還停在申請表就是沒送出', _submitted),
+    'submitted': Cell(JUDGED, '送出結果', 'Agent 判讀本輪结果；程式核對引用來源', _submitted, required='沒有 submitted 結果'),
     'clicked': Cell(WORDS, '有沒有按下送出', '只當證據給人看;送出沒有看它判斷'),
     'confirm_url': Cell(CHECK, '確認頁網址', '程式讀到的那一頁網址,而且是這張卡的網站', _confirm_url),
     'confirm_text': Cell(CHECK, '確認頁的字', '程式讀到的那一頁上有這句話', _confirm_text),
     'tab_id': Cell(CHECK, '分頁', '看板上記的那一頁', _board_tab),
     'problems': Cell(WORDS, '卡住的地方', '只給人看'),
     'notes': FILL['notes'],
+    'reason': Cell(WORDS, '送出結果說明', '說明 sent／not_sent／unknown', required='沒有 reason 結果說明'),
+}
+
+
+def _review_status(said, sheet, truth):
+    return None if said in ('complete', 'issues', 'unknown') else 'status 只能是 complete、issues 或 unknown'
+
+
+def _review_reason(said, sheet, truth):
+    return None if isinstance(said, str) and said.strip() else 'reason 要是非空文字'
+
+
+def _review_quotes(said, sheet, truth):
+    if sheet.get('status') != 'complete':
+        return None
+    if not truth.given or not isinstance(said, dict):
+        return '沒有本輪指定頁面的引用'
+    def quoted(quote, text):
+        # 引用可以跳著摘(2026-10-04 104:agent 把好幾段接成一段),但每一行都要在那一頁讀得到,不准編
+        # 行首行尾的「」/引號是 agent 標引用的記號;中間用 … 省略的,每一段各自要讀得到
+        parts = [norm(part.strip(' \t「」『』"“”\'')) for line in quote.splitlines()
+                 for part in re.split(r'…|\.\.\.', line)]
+        parts = [p for p in parts if p]
+        return bool(parts) and all(p in norm(text) for p in parts)
+    missing = [url for url, text in truth.given.items()
+               if not isinstance(said.get(url), str) or not quoted(said[url], text)]
+    return '指定頁面缺少可驗引用：' + '、'.join(missing) if missing else None
+
+
+PROFILE_REVIEW = {
+    'status': Cell(JUDGED, '履歷內容是否完整', 'Agent 對本輪指定原稿與讀回內容的判斷', _review_status, required='沒有 status 判讀結果'),
+    'reason': Cell(WORDS, '判讀說明', '保留給人核對', _review_reason, required='沒有 reason 判讀說明'),
+    'quotes': Cell(CHECK, '各頁引用', '每一份指定讀回頁面上的逐字引用', _review_quotes, required='沒有 quotes 引用'),
 }
 
 
 # ---- 程式自己讀的那一頁 ----
 
-def still_form(page, form_url=''):
-    """這一頁還是申請表:網址還是填好的那一頁(給了才比),而且表單欄位還在。"""
-    if not (page or {}).get('fields'):
-        return False
-    return not form_url or same_url(page.get('url'), form_url)
 
 
 # 送出成功的字(給 agent 的送出指示也照這幾句):程式讀到的那一頁上有其中一句,而且已經不是申請表,就是送出了
-SENT_WORDS = ('Application submitted', 'Thank you', '已送出', '應徵成功')
-NOT_SENT, SENT, FORM_STILL = 'not_sent', 'sent', 'form_still'
 
 
-def after_send(page, form_url='', before=None):
-    """按了送出之後程式讀到的那一頁,程式自己判斷(不看 agent 說什麼):
-    (NOT_SENT, 原因) 還停在申請表(表單還在、或跳出真人驗證);(SENT, 那一句) 申請表不見了,頁面上有送出成功的字;
-    (FORM_STILL, 原因) 網址換了,申請表的格子還在:不算送出了(agent 說成功也不算),也不確定沒送出;
-    ('', '') 程式判斷不了(讀不到、換了頁卻沒有成功的字)。
-    before:驗收時核對過的那一頁(seen 記的);給了就看那幾格還在不在,沒給就要一格都沒有才算申請表不見了。
-    (申請表頁首常寫「Thank you for your interest」:網址變了、表單還在,不能因為這句算送出了)"""
-    if page is None:
-        return '', ''
-    human = apply_tab.human_check(page)
-    if human or still_form(page, form_url):
-        return NOT_SENT, ('跳出真人驗證,' if human else '') + '按了送出,頁面還停在申請表:沒送出'
-    was = {label for label, _value in (before or {}).get('fields') or [] if label}
-    now = {label for label, _value in seen(page)['fields'] if label}
-    if (was & now) if was else now:
-        return FORM_STILL, '按了送出,網址換了,可是申請表的格子還在,不算送出成功'
-    text = Truth(page=page).text()
-    hit = next((w for w in SENT_WORDS if norm(w) in text), '')
-    return (SENT, hit) if hit else ('', '')
 
 
 def _key(field):

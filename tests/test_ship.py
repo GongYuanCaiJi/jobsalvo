@@ -22,6 +22,7 @@ import ship  # noqa: E402
 import source_sync  # noqa: E402
 import pdf_tools  # noqa: E402
 import settings_api  # noqa: E402
+import chrome_door  # noqa: E402
 
 
 def _snapshot(url, name=None):
@@ -71,6 +72,16 @@ class PackageReconcile(unittest.TestCase):
         self._write_board()
         self.manifest = os.path.join(self.home, 'reconcile-hashes.json')
         reconcile.MANIFEST = self.manifest
+        if self._testMethodName == 'test_markdown_and_style_are_rendered_to_pdf_before_delivery':
+            self.enterContext(mock.patch.object(chrome_door, 'ego_bin', _env.REAL_EGO_BIN))
+        else:
+            # 套件測試驗來源漂移、快取、複製和合併;實際排版在明確啟用的 ego 整合測試驗。
+            def rendered(source, output, style_path=None, lang=''):
+                text = pathlib.Path(source).read_text()
+                if style_path:
+                    text += pathlib.Path(style_path).read_text()
+                _env.tiny_pdf(output, text.encode('ascii', 'replace').decode())
+            self.enterContext(mock.patch.object(source_sync.markdown_pdf, 'render', side_effect=rendered))
 
     def tearDown(self):
         reconcile.MANIFEST = self.old_manifest
@@ -309,6 +320,7 @@ class PackageReconcile(unittest.TestCase):
         self.assertEqual(failed, [])
         self.assertIsNone(ship.folder(self.url))
 
+    @unittest.skipUnless(os.environ.get('JOBSALVO_EGO_INTEGRATION') == '1', '真 ego 排版需明確啟用')
     def test_markdown_and_style_are_rendered_to_pdf_before_delivery(self):
         source = os.path.join(self.home, 'resume', 'source.md')
         style = os.path.join(self.home, 'resume', 'style.css')

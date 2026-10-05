@@ -166,23 +166,17 @@ class TemporaryCopy(unittest.TestCase):
             external = os.path.join(source, 'preference-note.md')
             with open(external, 'w', encoding='utf-8') as target:
                 target.write('synthetic note')
-            state = os.path.join(source, 'agent-state.json')
-            with open(state, 'w', encoding='utf-8') as target:
-                target.write('session state must not be copied')
             settings = {
                 'paths': {'preference_note': external, 'tmp': '.realdata-check-tmp'},
-                'browser': {'state': state},
             }
 
             copied = realdata_check._redirect_absolute_inputs(home, settings)
 
             self.assertEqual(copied, 1)
             self.assertFalse(os.path.isabs(settings['paths']['preference_note']))
-            self.assertFalse(os.path.isabs(settings['browser']['state']))
             clone_note = os.path.join(home, settings['paths']['preference_note'])
             with open(clone_note, encoding='utf-8') as target:
                 self.assertEqual(target.read(), 'synthetic note')
-            self.assertFalse(os.path.exists(os.path.join(home, settings['browser']['state'])))
             self.assertEqual(realdata_check.outside(home, settings), [])
 
 

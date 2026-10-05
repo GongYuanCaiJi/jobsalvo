@@ -5,7 +5,7 @@
 import datetime, json, os, tempfile, unittest
 from unittest import mock
 import _env  # noqa: F401
-import agent_chrome
+import chrome_door
 import autopilot as ap
 import board_doc as bd
 import delivery_state as ds
@@ -193,12 +193,9 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(run(data('a'), fb)['fill'])
 
     def test_page_gone_is_refilled_once(self):
-        # agent 的 Chrome 關過:那一頁不在了。卡住的卡平常等他,但頁面不見不是他要處理的事,自動重填
+        # 那一頁的工作區被關掉了:卡住的卡平常等他,但頁面不見不是他要處理的事,自動重填
         fb = {'__auto__': auto(), 'a': {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-01-05T09:00:00', 'tab_id': '7'}}}
-        with mock.patch('agent_chrome.pid', return_value=None):
-            gone = agent_chrome.gone_pages(fb)
-        self.assertEqual(gone, ['a'])
-        agent_chrome.mark_gone(fb, gone)
+        self.assertTrue(ds.try_fire(fb, 'a', 'page_lost', issues=[chrome_door.GONE]))
         p = run(data('a'), fb)
         self.assertEqual(p['fill'], 'a')
         fb['__auto__']['tried'] = p['tried']
@@ -353,7 +350,7 @@ class PilotStepTest(unittest.TestCase):
                                         jobs[1]: {'app': 'ship', 'ds': 'parked', 'apply': dict(page, runtime='claude-code')}}),
                   live=self.board)
         claude = {'agent': {'agents': [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]}}
-        with mock.patch.dict(cf.C, claude), mock.patch('agent_chrome.gone_pages', return_value=[]), \
+        with mock.patch.dict(cf.C, claude), mock.patch('chrome_door.gone_pages', return_value=[]), \
              mock.patch.object(ap, 'flow', return_value=dict(CFG, auto_prep=False, auto_advance=False, auto_fill=False,
                                                              replies_at='')):
             self.pilot(real=True).step()

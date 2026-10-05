@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -67,7 +68,7 @@ SYNTHETIC_PROFILE_TEXT = (
     'GitHub or portfolio URL: https://example.invalid/test\n'
     'Nationality: Taiwan\n'
     'Visa sponsorship: No\n'
-    'Security or risk experience: 3 years'
+    'Professional security or risk experience: 3 years'
 )
 CUSTOM_RESUME = make_pdf(SYNTHETIC_PROFILE_TEXT)
 OLD_VERSION = make_pdf('Acceptance-only old version')
@@ -190,7 +191,7 @@ def _sanitize_acceptance_home(runtime_home):
     old_paths.extend((settings.get('paths') or {}).values())
     for value in old_paths:
         _remove_clone_path(runtime_home, value)
-    for name in ('resume', 'prepare', 'ship', 'custom', 'summaries', 'company-cache',
+    for name in ('resume', 'prepare', 'ship', 'custom', 'summaries', 'company-cache', 'acceptance-state',
                  '.research', 'research', '.acceptance-inputs'):
         _remove_clone_path(runtime_home, name)
 
@@ -365,6 +366,7 @@ class ProfileAcceptance:
         self.modules = None
         self.original_attachments = None
         self.original_profile_registry = None
+        self.original_profile_read = None
 
     def say(self, message):
         self.log.append(message)
@@ -436,6 +438,15 @@ class ProfileAcceptance:
             SUPPORT, CUSTOM_RESUME, OLD_VERSION, SYNTHETIC_PROFILE_TEXT,
         )
         self.server = FakePlatformProfile(scenarios=scenarios).start()
+        self.original_profile_read = ps.read
+
+        def fixture_read(platform, lang, variant, *args, **kwargs):
+            read_url = kwargs.get('read_url') or (ps.where(platform, lang, variant) or {}).get('read') or ''
+            if urllib.parse.urlsplit(read_url).netloc == urllib.parse.urlsplit(self.server.url('normal')).netloc:
+                kwargs['test_allow_local'] = True
+            return self.original_profile_read(platform, lang, variant, *args, **kwargs)
+
+        ps.read = fixture_read
         self.lang = (cf.LANGS or ['en'])[0]
         cf.ATTACHMENTS = [{
             'id': 'acceptance-support', 'name': 'support.pdf', 'enabled': True,
@@ -598,12 +609,37 @@ class ProfileAcceptance:
         return '、'.join(categories) or '未分類程式核對'
 
     def run_case(self, case):
+        import chrome_door
+        counts = {}
+        try:
+            with chrome_door.test_workspaces() as counts:
+                self._run_case(case)
+        finally:
+            self.results.setdefault(case, {})['workspace_counts'] = counts
+            self.check(case, '情境結束後自己的工作區全部收掉,數量回到原本',
+                       counts.get('returned_to_baseline'), counts,
+                       public_evidence=f'工作區 {counts.get("before_count")} → {counts.get("after_count")};'
+                                       f'收尾錯誤 {len(counts.get("errors", []))} 個')
+
+    def _run_case(self, case):
         apply_run = self.modules['apply_run']
         profile_sync = self.modules['ps']
         profile_sync.remember(
             profile_sync.profile_key(self.jobs[case]), self.lang,
             self.acceptance_resume_id, self.server.profile_url(case, 'fixed'),
         )
+        # 這個假平台用名稱顯示選取結果;和已登記的真實平台一樣,先由程式讀到名稱才記。
+        fixed = self.server.scenarios[case]['profiles']['fixed']
+        import evidence as browser_evidence
+        with browser_evidence.opened('profile_probe', 'read', [self.jobs[case]], self.board) as probe:
+            _entry, _page, problem = profile_sync.read(
+                profile_sync.profile_key(self.jobs[case]), self.lang, self.acceptance_resume_id,
+                board=self.board, name=fixed['name'], test_allow_local=True,
+            )
+            if _page:
+                probe.page(_page, '確認假平台固定履歷名稱')
+        if problem:
+            raise RuntimeError('假平台固定履歷名稱無法讀回:' + problem)
         started = time.time()
         self.say(f'\n開始 agent 情境:{case}')
         try:
@@ -622,6 +658,17 @@ class ProfileAcceptance:
         evidence['fixed_unchanged'] = self._fixed_unchanged(
             evidence['fixed_before'], evidence['fixed_after'],
         )
+        import chrome_door
+        record = evidence['apply']
+        screenshot = os.path.join(self.out, case + '.png')
+        try:
+            with browser_evidence.opened('apply_check', 'live', [self.jobs[case]], self.board):
+                door = chrome_door.for_card(record)
+                door.shot(record.get('session'), record.get('tab_id'), screenshot)
+            self.check(case, '程式在該卡的 ego 分頁取得有效截圖', True, screenshot,
+                       public_evidence=os.path.basename(screenshot))
+        except (chrome_door.NotNow, chrome_door.Unreachable, OSError) as error:
+            self.check(case, '程式在該卡的 ego 分頁取得有效截圖', False, str(error))
         self.results[case] = evidence
         self.say(f'完成情境:{case}；apply_run={run_ok}')
 
@@ -662,24 +709,18 @@ class ProfileAcceptance:
         if 'extra-old' in result:
             extra = result['extra-old']
             extra_apply = extra['apply']
-            extra_events = extra['events']
-            downloaded_old = any(e.get('action') == 'DOWNLOAD' and e.get('name') == 'old-version.pdf'
-                                 and e.get('ok') for e in extra_events)
-            extra_issues = ' '.join(map(str, extra_apply.get('issues') or []))
-            self.check('平台多出舊版', 'agent 回報舊版；沒有刪除；程式擋下核准',
-                       self._has_report(extra) and downloaded_old and not self._delete_events(extra)
-                       and extra['fixed_unchanged'] and not extra_apply.get('ok')
-                       and ('多出' in extra_issues or 'old-version.pdf' in extra_issues),
-                       f'{self._report_evidence(extra)}；舊版下載 sha256='
-                       f'{next((e.get("sha256") for e in extra_events if e.get("name") == "old-version.pdf"), None)}；'
-                       f'刪除事件={len(self._delete_events(extra))}；核准狀態 ok={extra_apply.get("ok")}；'
-                       f'程式問題={extra_issues[:220]}',
-                       public_evidence=(
-                           f'舊版下載成功={downloaded_old}；刪除事件={len(self._delete_events(extra))}；'
-                           f'固定版不變={extra["fixed_unchanged"]}；程式列出舊版問題='
-                           f'{"多出" in extra_issues or "old-version.pdf" in extra_issues}；'
-                           f'核准 ok={extra_apply.get("ok")}'
-                       ))
+            removed = [event for event in self._delete_events(extra)
+                       if event.get('action') == 'DELETE_ATTACHMENT' and event.get('ok')]
+            fixed = self.server.scenarios['extra-old']['profiles']['fixed']
+            files = fixed['attachments']
+            mirrored = len(files) == 1 and sha256(files[0]['content']) == sha256(SUPPORT)
+            profile_url = (extra_apply.get('delivery') or {}).get('profile_url')
+            matched = bool(self.modules['ps'].attachment_check(profile_url).get('matched'))
+            self.check('平台多出舊版', '固定履歷依本機鏡像移除舊版,重新下載核對後放行',
+                       bool(removed) and mirrored and matched and extra_apply.get('ok'),
+                       f'{self._report_evidence(extra)}；刪除事件={len(removed)}；'
+                       f'平台只剩本機附件={mirrored}；附件核對 matched={matched}',
+                       public_evidence=f'刪除事件={len(removed)}；平台鏡像一致={mirrored}；附件核對 matched={matched}')
 
         if 'download-error' in result:
             download = result['download-error']
@@ -689,8 +730,8 @@ class ProfileAcceptance:
             download_url = (download_apply.get('delivery') or {}).get('profile_url')
             download_cache = self.modules['ps'].attachment_check(download_url)
             download_matched = bool(download_cache.get('matched'))
-            self.check('下載失敗', 'agent 照實回報；失敗下載未被當成一致',
-                       self._has_report(download) and failed_downloads and not download_matched
+            self.check('下載失敗', '程式照實回報；失敗下載未被當成一致',
+                       any(r.get('msg') for r in download['reports']) and failed_downloads and not download_matched
                        and not download_apply.get('ok'),
                        f'{self._report_evidence(download)}；失敗下載=' +
                        ', '.join(f'{e.get("name")} HTTP {e.get("status")}' for e in failed_downloads)
@@ -770,18 +811,19 @@ class ProfileAcceptance:
                 'where': (item['apply'].get('where') or ''),
                 'tab_id': (item['apply'].get('tab_id') or ''),
                 'session': (item['apply'].get('session') or ''),
+                'workspace': (item['apply'].get('workspace') or {}),
             }
             for case, item in result.items()
         }
-        self.check('派真 agent', f'{len(cases)} 種情境都由專用 Chrome 留下操作分頁',
+        self.check('派真 agent', f'{len(cases)} 種情境都由ego 工作區留下操作分頁',
                    len(result) == len(cases) and all(
-                       value['where'] == 'chrome' and value['tab_id'] and value['session']
+                       value['where'] == 'ego' and value['workspace'] and value['tab_id'] and value['session']
                        for value in chrome_records.values()
                    ),
                    json.dumps(chrome_records, ensure_ascii=False),
                    public_evidence=(
-                       '有 Agent Chrome tab 與 session 的情境='
-                       + str(sum(bool(value['where'] == 'chrome' and value['tab_id'] and value['session'])
+                       '有 ego 工作區、分頁與對話的情境='
+                       + str(sum(bool(value['where'] == 'ego' and value['workspace'] and value['tab_id'] and value['session'])
                                  for value in chrome_records.values()))
                        + f'/{len(cases)}'
                    ))
@@ -831,6 +873,11 @@ class ProfileAcceptance:
         return passed == len(checks)
 
     def finish(self):
+        if self.modules:
+            import evidence
+            root = evidence.root(self.board)
+            if os.path.isdir(root):
+                shutil.copytree(root, os.path.join(self.out, 'evidence'), dirs_exist_ok=True)
         if self.server:
             self.server.stop()
         if self.modules:
@@ -841,6 +888,8 @@ class ProfileAcceptance:
                 self.modules['cf'].ATTACHMENTS = self.original_attachments
             if self.original_profile_registry is not None:
                 self.modules['ps'].REG = self.original_profile_registry
+            if self.original_profile_read is not None:
+                self.modules['ps'].read = self.original_profile_read
         for key, value in self.env_before.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -862,7 +911,7 @@ def _write_public_summary(out, checks):
     passed = sum(bool(item.get('ok')) for item in checks)
     lines = [
         f'# 假平台履歷附件驗收 {datetime.datetime.now():%Y-%m-%d %H:%M}', '',
-        f'{passed}/{len(checks)} 條通過。保留合成事件與副本邊界摘要；agent 對話、表單內容和原始伺服器事件留在自動清除的暫存目錄。',
+        f'{passed}/{len(checks)} 條通過。保留合成事件與副本邊界摘要；合成頁面的 agent 紀錄、截圖與伺服器事件保留在 run/。',
         '',
     ]
     for item in checks:
@@ -883,7 +932,7 @@ def main(argv=None):
                         help='只跑指定驗收情境，可重複；預設跑全部')
     parser.add_argument('--out', default=os.path.join(
         '/tmp', 'apply-profile-accept-' + time.strftime('%m%d-%H%M%S'),
-    ), help='只寫入無個資摘要的輸出資料夾')
+    ), help='保留合成資料的驗收紀錄、截圖與摘要')
     args = parser.parse_args(argv)
     source_home = _source_home(args.source_home)
     if not source_home:
@@ -909,7 +958,7 @@ def main(argv=None):
             _clone_home(source_home, runtime_home)
             os.environ['JOBSALVO_HOME'] = runtime_home
             run = ProfileAcceptance(
-                os.path.join(temporary, 'run'), source_home, source_board,
+                os.path.join(public_out, 'run'), source_home, source_board,
                 source_ship, runtime_home,
             )
             try:

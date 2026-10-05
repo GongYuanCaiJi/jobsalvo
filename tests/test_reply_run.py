@@ -35,12 +35,13 @@ class Findings(unittest.TestCase):
             'checked': [U, other],
             'findings': [
                 {'url': U, 'source': 'gmail', 'date': DAY, 'summary': '拒絕通知', 'source_ref': 'email:reason1',
-                 'link': 'https://mail.example/reason', 'kind': 'reject', 'reason': reason},
+                 'link': 'https://mail.example/reason', 'kind': 'reject', 'quote': '技能要求尚未符合', 'reason': reason},
                 {'url': other, 'source': 'gmail', 'date': DAY, 'summary': '制式拒絕通知', 'source_ref': 'email:tmpl1',
-                 'link': 'https://mail.example/template', 'kind': 'reject', 'reason': ''},
+                 'link': 'https://mail.example/template', 'kind': 'reject', 'quote': '制式拒絕通知', 'reason': ''},
             ],
         }
-        parsed = rr.parse_result(data, [U, other], source_types={'email:reason1': 'email', 'email:tmpl1': 'email'})
+        parsed = rr.parse_result(data, [U, other], source_types={'email:reason1': 'email', 'email:tmpl1': 'email'},
+                                 texts={'email:reason1': reason + '\n' + DAY, 'email:tmpl1': '制式拒絕通知\n' + DAY})
         fb = {U: {'app': 'sent'}, other: {'app': 'sent'}}
         rr.apply_findings(fb, parsed.findings, DAY)
         self.assertEqual(fb[U]['replies']['items'][0]['reason'], reason)
@@ -290,56 +291,24 @@ class AgentResults(unittest.TestCase):
         self.assertNotIn('"source_type"', prompt)      # 來源是信還是平台紀錄,程式照 source_ref 自己認(#317)
         self.assertIn('"quote"', prompt)
 
-    def test_claude_only_hands_every_source_to_the_browser_agent(self):
-        """只裝 Claude Code(#225):不碰 Codex 外掛,信箱和平台頁都交給 Claude 在它的 Chrome 裡讀。"""
-        from unittest.mock import patch
-        import agent_chrome
-        import fake_chrome as fc
-        jobs, fb = {U: {'target': 'Security Engineer · Acme'}}, {U: {'app': 'sent', 'sent_at': DAY}}
-        runs = []
-
-        def fake_run(prompt, log, home, **kw):
-            runs.append((prompt, kw))
-            return rr.ar.AgentResult('failed', reason='test_stop')
-
-        door = fc.FakeChrome('claude-code', agent_id='cc', not_now={'read_pages'})
-        with fc.installed(door), \
-             patch.object(rr, 'load', return_value=(jobs, fb)), \
-             patch.object(rr, 'waiting', return_value=[U]), \
-             patch.object(rr, 'mailbox', return_value=('https://mail.google.com/mail/u/0/', True)), \
-             patch.object(agent_chrome, 'close_if_idle'), \
-             patch.object(rr.agent_report, 'report'), \
-             patch.object(rr.ar, 'run', side_effect=fake_run), \
-             patch('sys.argv', ['reply_run.py', '--board', '/tmp/board.html']):
-            rr.main()
-        self.assertEqual(len(runs), 1)
-        prompt, kw = runs[0]
-        self.assertTrue(kw['browser_required'])
-        self.assertFalse(kw['web'])
-        self.assertIsNone(kw['agent_id'])
-        self.assertEqual([c[0] for c in door.calls[:2]], ['ready', 'read_pages'])   # 用它的門路;程式讀不到就交給它
-        self.assertIn('現在做不到 read_pages', prompt)                              # 補查清單照實講為什麼
-
-    def test_replies_use_the_same_agent_chrome_as_every_other_job(self):
-        # 查應徵進度挑哪一家要跟填表一樣(設定裡第一個用 Chrome 的那一個)。以前只看「有沒有勾了 Chrome 的 Codex」:
+    def test_replies_use_the_same_agent_as_every_other_job(self):
+        # 查應徵進度挑哪一家要跟填表一樣(設定裡第一個用瀏覽器的那一個)。以前只看「有沒有勾了瀏覽器的 Codex」:
         # 排第一的是 Claude、後面也有一個勾了的 Codex 時,填表用 Claude、查應徵進度卻用 Codex
         from unittest.mock import patch
-        import config as cf
-        import agent_chrome
+        import chrome_door
+        import fake_door as fc
         jobs, fb = {U: {'target': 'Security Engineer · Acme'}}, {U: {'app': 'sent', 'sent_at': DAY}}
-        agents = [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True},
-                  {'id': 'cx', 'runtime': 'codex', 'model': '', 'effort': 'max', 'browser': True}]
-        with patch.dict(cf.C, {'agent': {'agents': agents}}), \
+        claude, codex = fc.FakeDoor('claude-code', agent_id='cc', up=(False, '看不到')), fc.FakeDoor('codex', agent_id='cx')
+        with fc.installed(claude, codex), \
              patch.object(rr, 'load', return_value=(jobs, fb)), \
              patch.object(rr, 'waiting', return_value=[U]), \
-             patch.object(agent_chrome, 'ensure', side_effect=AssertionError('填表用的是 Claude,查應徵進度也要用它')), \
-             patch.object(agent_chrome, 'wait_claude', return_value=(False, '看不到')) as claude, \
-             patch.object(agent_chrome, 'close_if_idle'), \
+             patch.object(chrome_door, 'close_if_idle'), \
              patch.object(rr.agent_report, 'report'), \
              patch.object(rr.jobrun, 'write'), \
              patch('sys.argv', ['reply_run.py', '--board', '/tmp/board.html']):
             self.assertEqual(rr.main(), 1)
-        claude.assert_called_once()
+        self.assertEqual([c[0] for c in claude.calls], ['ready'])
+        self.assertEqual(codex.calls, [])
 
     def test_findings_and_104_ids_are_validated_against_the_copied_sources(self):
         other = 'https://jobs.example/2'
@@ -387,7 +356,8 @@ class AgentResults(unittest.TestCase):
              'source': 'Gmail', 'date': DAY, 'summary': 'Application received',
              'link': 'https://mail.google.com/thread/1', 'kind': 'confirm'},
         ]}
-        parsed = rr.parse_result(raw, [U, other, third], source_types={'email:thread-001': 'email'})
+        parsed = rr.parse_result(raw, [U, other, third], source_types={'email:thread-001': 'email'},
+                                 texts={'email:thread-001': 'Application received\n' + DAY})
         self.assertEqual(parsed.findings[U][0]['source_type'], 'email')
         self.assertTrue(parsed.findings[U][0]['_source_verified'])
         self.assertNotIn(other, parsed.findings)
@@ -402,7 +372,7 @@ class AgentResults(unittest.TestCase):
         rr.apply_findings(fb, parsed.findings, DAY)
         self.assertNotIn('ev', fb[U])
 
-    def test_specific_gmail_fallback_message_clears_marker_after_url_validation(self):
+    def test_specific_gmail_fallback_url_alone_does_not_clear_marker(self):
         fallback_sources = [{
             'source_ref': 'email:search', 'source_type': 'email', 'source': 'Gmail',
             'reason': '程式讀不到 Gmail 搜尋頁', 'need': '用 agent 專用 Chrome 補查', 'jobs': [U],
@@ -417,11 +387,12 @@ class AgentResults(unittest.TestCase):
         finding = parsed.findings[U][0]
         self.assertEqual(finding['source_type'], 'email')
         self.assertEqual(finding['source_ref'], 'email:thread-001')
-        self.assertTrue(finding['_source_verified'])
+        self.assertFalse(finding['_source_verified'])
+        self.assertTrue(finding['unverified'])
 
         fb = {U: {'app': 'sent', 'ev': '只有送出頁證據'}}
         rr.apply_findings(fb, parsed.findings, DAY)
-        self.assertNotIn('ev', fb[U])
+        self.assertIn('ev', fb[U])
 
     def test_a_reply_from_a_source_the_program_never_read_is_marked_unverified(self):
         """agent 補查、程式沒讀到全文的來源:核對不了原文,那一則標 unverified(卡上照實講「程式沒讀到原文」)。"""
@@ -516,13 +487,11 @@ class MainRun(unittest.TestCase):
 
 
     def run_main(self, delivery=None, *, chrome_up=(True, ''), close_error=None, fb=None, unavailable=(),
-                 argv=(), program_reads=True, log_lines=(), reread=None, real_run=False, result=('completed', 0)):
-        """program_reads:設定裡用 Chrome 的那一家程式自己讀得到頁(假的 Codex)還是讀不到(假的 Claude)。"""
-        import json, tempfile, agent_chrome
-        import fake_chrome as fc
+                 argv=(), log_lines=(), reread=None, real_run=False, result=('completed', 0)):
+        import json, tempfile, chrome_door
+        import fake_door as fc
         from unittest.mock import patch
-        self.door = (fc.FakeChrome('codex', up=chrome_up, need='按「🔌 連接 Codex」') if program_reads else
-                     fc.FakeChrome('claude-code', up=chrome_up, not_now={'read_pages'}, need='按「🔌 連接 Claude」'))
+        self.door = fc.FakeDoor('codex', up=chrome_up, need='打開 ego lite')
         d = self.enterContext(tempfile.TemporaryDirectory(prefix='reply-main-'))
         fb = fb if fb is not None else {U: {'app': 'sent', 'sent_at': '2026-09-01'}}
         jobs = {u: {'id': u, 'target': 'Engineer · Acme', 'company': 'Acme'} for u in fb if u.startswith('http')}
@@ -556,7 +525,7 @@ class MainRun(unittest.TestCase):
              patch.object(rr, '_read_pages', side_effect=lambda urls, *a, **k: {u: (reread or {}).get(u, {}) for u in urls}), \
              patch.object(rr, 'collect_sources', return_value=(
                  {'gmail': {'threads': [MAIL]}, 'application_records': []}, list(unavailable))), \
-             patch.object(agent_chrome, 'close_if_idle', side_effect=close_error), \
+             patch.object(chrome_door, 'close_if_idle', side_effect=close_error), \
              patch.object(rr.jobrun, 'write', side_effect=lambda _p, data: self.statuses.append(data)), \
              patch.object(rr.agent_report, 'report', side_effect=lambda *a, **k: self.reports.append((a, k))), \
              patch.object(rr.bd, 'set_fb', side_effect=fake_set_fb), \
@@ -660,13 +629,11 @@ class MainRun(unittest.TestCase):
         self.assertIn('📮 已投出', need)
         self.assertIn('看紀錄', need)
 
-    def test_chrome_not_up_tells_him_the_button_that_exists_now(self):
-        """agent 的 Chrome 沒起來:回報要叫他按現在真的有的「🔌 連接 Codex」,不是已經廢掉的「agent 設定檔」(ADR 0003)。"""
-        code, _fb = self.run_main(chrome_up=(False, '還沒連接 agent 的 Chrome'))
+    def test_browser_not_up_tells_him_what_to_do(self):
+        """agent 的瀏覽器沒準備好:回報照門路講的要做什麼。"""
+        code, _fb = self.run_main(chrome_up=(False, 'ego 指令連不上'))
         self.assertEqual(code, 1)
-        need = self.reports[-1][1]['need']
-        self.assertNotIn('設定檔', need)
-        self.assertIn('連接 Codex', need)
+        self.assertIn('打開 ego lite', self.reports[-1][1]['need'])
 
 
 SEARCH = 'https://mail.google.com/mail/u/0/#search/' + 'after%3A2026%2F01%2F01%20(%22Acme%22)'
@@ -674,7 +641,7 @@ THREAD = 'https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th=abc123def
 
 
 def gmail_pages(threads=('abc123def',), bodies=('Thanks for applying',)):
-    """程式自己讀到的 Gmail 搜尋頁和列印檢視(完整的一頁,跟 agent_chrome.read_pages 回的一樣)。"""
+    """程式自己讀到的 Gmail 搜尋頁和列印檢視(完整的一頁,跟門路的 read_pages 回的一樣)。"""
     n = len(threads)
     search = {'url': SEARCH, 'title': 'Search results - Gmail', 'readyState': 'complete',
               'text': f'Inbox\n1–{n} of {n}\n' + '\n'.join(f'mail {t}' for t in threads) if n else 'No messages matched your search',
@@ -687,46 +654,29 @@ def gmail_pages(threads=('abc123def',), bodies=('Thanks for applying',)):
     return pages
 
 
-def claude_log(pages):
-    """Claude 那一輪的 stream-json 紀錄:它在每一頁跑程式給的那支唯讀函式(先拿長度、再分段)。"""
-    import fake_chrome as fc
-    return fc.claude_lines([c for page in pages for c in fc.js_calls_for_self_read(rr._VERIFY_WHOLE, rr._digest(page))],
-                           tab_context=False)
-
-
 class VerifiedFallback(unittest.TestCase):
-    """#289 決定 2:程式讀不到、交給 agent 補查的來源,agent 說「查過了」不夠;程式核實過那個來源真的讀完了,
-    那幾張卡才推論沒下文。Codex:程式跑完自己再讀一次;只用 Claude:Claude 在每一頁跑程式給的唯讀函式,
-    程式從紀錄拿工具的回傳(跟代投核對頁面同一套),不採信它的轉述。"""
+    """#289 決定 2:程式讀不到、交給 agent 補查的來源,agent 說「查過了」不夠;程式跑完自己再讀一次,
+    核實過那個來源真的讀完了,那幾張卡才推論沒下文。"""
     run_main = MainRun.run_main
     OLD = {U: {'app': 'sent', 'sent_at': '2026-01-02'}}
     GMAIL = {'source_ref': 'email:search', 'source_type': 'email', 'url': SEARCH, 'source': 'Gmail',
-             'reason': '只裝 Claude Code:程式讀不了', 'need': '用 agent 專用 Chrome 補查 Gmail', 'jobs': [U]}
+             'reason': '程式讀的時候還沒登入', 'need': '用 agent 的瀏覽器補查 Gmail', 'jobs': [U]}
 
     def fb(self):
         return {U: dict(self.OLD[U])}
 
-    def test_claude_saying_checked_without_a_verified_read_is_not_ghosted(self):
-        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
-                                 program_reads=False)
+    def test_agent_saying_checked_without_a_verified_read_is_not_ghosted(self):
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL])
         self.assertEqual(code, 0)
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
-        self.assertEqual(fb[U]['replies']['at'], rr.today())          # 查過日期照樣往前推,下一輪搜尋範圍才會縮
+        self.assertNotIn('at', fb[U]['replies'])  # 未核實不能縮小下一輪搜尋範圍
         self.assertIn('沒核實', self.statuses[-1]['msg'])
 
-    def test_claude_read_verified_from_its_own_tool_results_is_ghosted(self):
-        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
-                                 program_reads=False, log_lines=claude_log(gmail_pages().values()))
-        self.assertEqual(code, 0)
-        self.assertEqual(fb[U].get('oc'), 'ghost')
-        self.assertEqual(self.statuses[-1]['phase'], 'done')
-        self.assertIn('String(' + rr._VERIFY_WHOLE + '.length)', self.prompt)                  # prompt 交代它跑哪一支
-
-    def test_claude_skipping_one_mail_on_the_search_page_is_not_enough(self):
+    def test_one_mail_missing_from_the_programs_reread_is_not_enough(self):
         pages = gmail_pages(threads=('abc123def', 'zzz999yyy'))
         pages.pop('https://mail.google.com/mail/u/0/?ui=2&view=pt&search=all&th=zzz999yyy')
         code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
-                                 program_reads=False, log_lines=claude_log(pages.values()))
+                                 reread=pages)
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
 
     def test_codex_fallback_is_verified_by_the_program_reading_it_again(self):
@@ -741,21 +691,20 @@ class VerifiedFallback(unittest.TestCase):
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
         self.assertIn('沒核實', self.statuses[-1]['msg'])
 
-    def test_more_results_than_one_page_is_not_ghosted_but_the_checked_date_moves_on(self):
-        """搜尋結果一頁放不下(1–50 of 234):核實不了,不推論沒下文;但查過日期要往前推,
-        不然下一輪又從送出日搜起、又放不下,永遠卡住。"""
+    def test_partial_search_keeps_the_checked_date_to_avoid_missing_older_replies(self):
+        """搜尋結果一頁放不下，不能縮小下一輪搜尋範圍、漏掉未讀的舊信。"""
         pages = gmail_pages()
         pages[SEARCH]['text'] = 'Inbox\n1–1 of 234\nmail abc123def'
         code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
-                                 program_reads=False, log_lines=claude_log(pages.values()))
+                                 reread=pages)
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
-        self.assertEqual(fb[U]['replies']['at'], rr.today())
+        self.assertNotIn('at', fb[U]['replies'])
 
     def test_a_source_without_a_page_the_program_can_check_never_infers_ghost(self):
         """不是 Gmail 的信箱、公司名沒有能搜的字:程式核實不了,只能照回音改,不推論沒下文。"""
         other = dict(self.GMAIL, url='https://outlook.office.com/mail/', reason='設定的信箱不是 Gmail')
         code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[other],
-                                 program_reads=False, log_lines=claude_log(gmail_pages().values()))
+                                 reread=gmail_pages())
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
 
 
@@ -911,13 +860,14 @@ class SourceCapture(unittest.TestCase):
         self.assertEqual(self.collect({'text': '0-0 of 0', 'anchors': []})[1], [])
 
     def test_gmail_readiness_requires_complete_result_page_and_loaded_thread(self):
-        import agent_chrome
+        import chrome_door
         from unittest import mock
         one = [{'href': rr.GMAIL + '#all/thread-001'}]
         for page, ready in (({'text': '1-50 of 100', 'anchors': one}, False),           # 只列了一部分
                             ({'text': '1-1 of 1', 'anchors': one}, True),
                             ({'text': '0-0 of 0', 'anchors': []}, True),
                             ({'text': 'No conversations match your search', 'anchors': []}, True),
+                            ({'text': '會話群組\n找不到與你的搜尋條件相符的郵件。建議你在寄件者…', 'anchors': []}, True),   # 繁中介面
                             ({'text': '1-2 封，共 2 封', 'anchors': one + [{'href': rr.GMAIL + '#all/thread-002'}]}, True)):
             with self.subTest(search=page['text']):
                 self.assertEqual(rr._gmail_search_ready(dict(page, readyState='complete')), ready)
@@ -935,7 +885,7 @@ class SourceCapture(unittest.TestCase):
                             (thread('Message one\nMessage two', 2, ['Message one', 'Message two']), True)):
             with self.subTest(thread=page):
                 self.assertEqual(rr._gmail_thread_ready(page), ready)
-        with mock.patch.object(agent_chrome, 'read_pages', return_value={}) as read_pages:
+        with mock.patch.object(chrome_door.EgoDoor, 'read_pages', return_value={}) as read_pages:
             rr._read_pages(['https://mail.google.com/mail/u/0/'], ready=rr._gmail_thread_ready,
                            settle=2)
         read_pages.assert_called_once_with(['https://mail.google.com/mail/u/0/'], None,
@@ -1037,7 +987,7 @@ class Mailbox(unittest.TestCase):
                 return rr.parse_result(raw, [U], source_types=types).findings[U][0]
         got = parse('https://outlook.office.com/mail/inbox/id/AAQkAGI2')
         self.assertEqual(got['source_type'], 'email')
-        self.assertTrue(got['_source_verified'])
+        self.assertFalse(got['_source_verified'])  # 正確信箱連結仍不是已捕獲的信件原文
         self.assertTrue(got['source_ref'].startswith('email:'))
         for link in ('https://outlook.office.com.attacker.example/mail/inbox/id/AAQk', 'https://outlook.office.com/mail/'):
             with self.subTest(link=link):

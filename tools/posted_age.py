@@ -94,10 +94,10 @@ def prompt_for(jobs, urls, out, fetched=None):
         f'職缺與頁面文字:\n{cards}\n\n'
         f'把結果寫入 {out},格式如下:\n'
         '{"dates":[{"url":"原網址","posted_at":"YYYY-MM-DD",'
-        '"source":"頁面上日期欄位的名稱,照上面那幾行逐字抄"}],'
+        '"source":"頁面上的日期說明,包含欄位名稱與日期文字,照原文逐字抄"}],'
         '"inaccessible":[{"url":"原網址","reason":"無法讀取的原因",'
         '"need":"本人要做的事;不需要本人處理就寫空字串"}]}\n'
-        '程式會拿你寫的日期和欄位名稱跟上面那幾行比,對不上的不收。'
+        '日期意思由你判讀；程式驗日曆格式與 source 是否來自這個網址的原文。'
         '每個網址只能出現在 dates 或 inaccessible 其中一處。dates 只列能確認日期的網址;其他網址都要在 inaccessible 說明原因。只寫這份 JSON 檔,不要改看板,最後一行印 @@DONE@@。\n'
     )
 
@@ -131,7 +131,7 @@ def parse_result(data, urls, fetched=None):
             continue
         if url in dates or url in unconfirmed:
             raise ValueError(f'dates 裡有重複網址:{url}')
-        value = str(row.facts.get('posted_at') or '').strip()
+        value = str(row.judged.get('posted_at') or '').strip()
         if not value:
             unconfirmed[url] = {'url': url, 'reason': 'agent 沒有提供可確認的刊登日期', 'need': ''}
             continue

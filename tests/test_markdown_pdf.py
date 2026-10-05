@@ -1,8 +1,8 @@
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -11,6 +11,7 @@ import markdown_html  # noqa: E402
 import markdown_pdf  # noqa: E402
 import pdf_tools  # noqa: E402
 import settings_api  # noqa: E402
+import chrome_door  # noqa: E402
 
 
 def _html(source, output, lang=''):
@@ -31,6 +32,10 @@ class OutputPath(unittest.TestCase):
 
 
 class MarkdownPdf(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(chrome_door, 'ego_bin', _env.REAL_EGO_BIN))
+
+    @unittest.skipUnless(os.environ.get('JOBSALVO_EGO_INTEGRATION') == '1', '真 ego 排版需明確啟用')
     def test_markdown_prints_with_chrome_and_user_css_controls_page_size(self):
         with tempfile.TemporaryDirectory(prefix='markdown-pdf-') as directory:
             source = os.path.join(directory, 'resume.md')
@@ -171,20 +176,12 @@ class MarkdownPdf(unittest.TestCase):
             self.assertIn('still code', rendered)
             self.assertIn('&lt;!-- kept indented code --&gt;- still code', rendered)
 
-    def test_browser_that_cannot_start_fails_fast(self):
-        """開不了瀏覽器(例如沒裝 Playwright)時,排隊的工作馬上拿到錯誤,不乾等到逾時。"""
-        code = ("import sys, time; sys.modules['playwright'] = None; import browser; t = time.time()\n"
-                "try:\n    browser.run(lambda b: 1, 60)\nexcept Exception as e:\n    print('ERR', round(time.time() - t))")
-        done = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=90,
-                              env=dict(os.environ, PYTHONPATH=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools')))
-        self.assertTrue(done.stdout.startswith('ERR'), done.stdout + done.stderr[-300:])
-        self.assertLess(int(done.stdout.split()[1]), 10)
-
+    @unittest.skipUnless(os.environ.get('JOBSALVO_EGO_INTEGRATION') == '1', '真 ego 排版需明確啟用')
     def test_printing_cannot_reach_the_network(self):
         """排 PDF 只准讀本機檔:原稿裡的網址圖片不能真的去連(會洩漏在看誰的履歷,也會被卡住)。"""
         import http.server
         import threading
-        import browser
+        import chrome_door
         hits = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -203,7 +200,7 @@ class MarkdownPdf(unittest.TestCase):
                 with open(html, 'w', encoding='utf-8') as f:
                     f.write(f'<p>x</p><img src="http://127.0.0.1:{server.server_address[1]}/leak.png">')
                 out = os.path.join(directory, 'out.pdf')
-                browser.print_pdf(html, out, timeout=60)
+                chrome_door.EgoDoor().print_pdf(html, out, timeout=60)
                 with open(out, 'rb') as f:
                     self.assertEqual(f.read(5), b'%PDF-')
         finally:

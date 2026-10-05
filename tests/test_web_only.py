@@ -147,35 +147,29 @@ class WebOnly(tb.HttpBase):
             if threading.current_thread() is threading.main_thread():
                 mine.append(a)
             return Mock(returncode=0, stdout='', stderr='')
-        with patch('chrome_bin.find', return_value='/fake/chrome'), \
-                patch.object(doctor.shutil, 'which', side_effect=lambda name: f'/fake/{name}' if name in installed else None), \
-                patch('agent_chrome.conf', return_value={}), \
-                patch('agent_run.claude_paired_device', return_value=None), \
+        with patch.object(doctor.shutil, 'which', side_effect=lambda name: f'/fake/{name}' if name in installed else None), \
                 patch('subprocess.run', side_effect=spawned):
             results = {}
             for name, agents, expected_runtimes, browser_ok in cases:
                 result = doctor.check_environment(agents)
                 checks = {item['key']: item for item in result['checks']}
                 results[name] = (result, checks)
-                self.assertEqual(set(checks), {'python', 'chrome', 'git', 'agent', 'packages', 'browser_agent'} | expected_runtimes
-                                 | ({'agent_chrome'} if browser_ok else set())
-                                 | ({'codex_sites'} if any(a['runtime'] == 'codex' and a['browser'] for a in agents) else set()))
+                self.assertEqual(set(checks), {'python', 'git', 'agent', 'packages', 'browser_agent'} | expected_runtimes
+                                 | ({'ego'} if browser_ok else set()))
                 self.assertTrue(checks['python']['ok'])
-                self.assertTrue(checks['chrome']['ok'])
                 self.assertTrue(all(checks[key]['ok'] for key in expected_runtimes))
                 self.assertEqual(checks['browser_agent']['ok'], browser_ok)
                 self.assertEqual(result['ok'], True)  # 瀏覽器功能是提醒,不擋找缺
                 self.assertNotIn('codex_login', checks)
             self.assertIn('幫你填表與查應徵進度無法使用', results['only_command_code'][1]['browser_agent']['detail'])
             self.assertIn('找缺不受影響', results['no_browser_agent'][1]['browser_agent']['detail'])
-            # 有會用 Chrome 的 agent、但 agent 專用的 Chrome 還沒連過:講清楚要打開 agent 的 Chrome、裝外掛、按連接
-            chrome_row = results['only_codex'][1]['agent_chrome']
-            self.assertFalse(chrome_row['ok'])
-            self.assertFalse(chrome_row['required'])
-            for step in ('打開 agent 的 Chrome', 'Codex 的擴充功能', '連接'):
-                self.assertIn(step, chrome_row['fix'])
-            # Claude Code 勾了可使用 Chrome 也算有瀏覽器 agent;還沒配對時教學連結要看得到
-            self.assertIn('docs/agent-chrome.md', results['claude_code_with_chrome'][1]['agent_chrome']['fix'])
+            # 有會用瀏覽器的 agent、但 ego 還沒裝:講清楚缺什麼、怎麼補,兩家一樣(不擋找缺)
+            for name in ('only_codex', 'claude_code_with_chrome'):
+                ego_row = results[name][1]['ego']
+                self.assertFalse(ego_row['ok'])
+                self.assertFalse(ego_row['required'])
+                self.assertIn('沒有安裝', ego_row['detail'])
+                self.assertIn('安裝 ego lite', ego_row['fix'])
             # 不派 agent 跑一次(那會花額度,額度是使用者自己的事):只准讀本機的登入狀態
             # (資料夾版本紀錄那一列只用 git 讀本機 repo 狀態,不花額度)
             agent_calls = [argv for argv in mine if os.path.basename(argv[0][0]) != 'git']
@@ -304,49 +298,27 @@ class WebOnly(tb.HttpBase):
 
     def test_apply_or_replies_prompt_for_a_live_browser_only_when_needed(self):
         with patch.object(bs, 'is_real', return_value=True), \
-             patch('agent_chrome.configured', return_value=False):
+             patch('chrome_door.configured', return_value=False):
             code, raw, _ = self.req('/api/run/replies', {})
         self.assertEqual(code, 409, raw)
         self.assertTrue(json.loads(raw)['needs_browser'])
 
-    def test_eye_on_a_page_lost_to_a_chrome_restart_marks_the_card_for_refill(self):
-        # 👀 截不到、而且 agent 的 Chrome 是在這張填好之後才開的:那一頁一定不在了,卡上改成要重填(不再寫「填好了」)
-        import agent_chrome, datetime
+    def test_eye_on_a_page_whose_workspace_is_gone_marks_the_card_for_refill(self):
+        # 👀 截不到、而且那張卡的工作區已經不在 ego 裡:那一頁一定不在了,卡上改成要重填(不再寫「填好了」)
+        import chrome_door
         u = 'https://jobs.example/1'
-        fb = {u: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-09-29T14:00:00', 'tab_id': '7'}}}
-        wrote = []
-
-        def rewrite(fn, live=None, by=''):          # 看板檔唯一的寫入(#308):在鎖內照現在的看板算、改
-            out = fn({'fb': fb})
-            if out is not bs.bd.SKIP:
-                wrote.append(fb)
-            return out
-        filled = datetime.datetime.fromisoformat('2026-09-29T14:00:00').timestamp()
+        fb = {u: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-09-29T14:00:00', 'tab_id': '7:p1',
+                                                            'workspace': {'id': 7, 'name': 'w', 'page': 'p1'}}}}
         with patch.object(bs, 'is_real', return_value=True), \
-             patch.object(bs.bd, 'rewrite', side_effect=rewrite), \
-             patch.object(agent_chrome, 'pid', return_value=5):
-            with patch.object(agent_chrome, 'started_at', return_value=filled - 60):
-                self.assertFalse(bs.page_gone(u))                 # Chrome 從填好前就開著:可能只是一時沒連上,不動
-            with patch.object(agent_chrome, 'started_at', return_value=filled + 60):
+             patch('board_doc.load', return_value={'fb': json.dumps(fb)}), \
+             patch.object(chrome_door, 'close_if_idle'), \
+             patch.object(bs.bd, 'set_fb', side_effect=lambda fn, live=None, by='': fn(fb)):
+            with patch.object(chrome_door, 'gone_pages', return_value=[]):
+                self.assertFalse(bs.page_gone(u))                 # 工作區還在:可能只是一時截不到,不動
+            with patch.object(chrome_door, 'gone_pages', return_value=[u]):
                 self.assertTrue(bs.page_gone(u))
-        a = wrote[-1][u]['apply']
-        self.assertEqual(wrote[-1][u]['ds'], 'gone')
-        self.assertIn('要重填', a['issues'][0])
-        self.assertEqual(a['tab_id'], '')
-
-    def test_closed_agent_chrome_does_not_block_a_new_run(self):
-        # 每批做完都會把 agent 的 Chrome 關掉:開跑前只看連接設定過了沒,Chrome 沒在跑由流程自己開(以前一關就再也開不了跑)
-        import agent_chrome
-        with patch.object(agent_chrome, 'pid', return_value=None), \
-             patch.object(agent_chrome, '_mine', return_value=True), \
-             patch.object(agent_chrome, '_codex_ready', return_value=True):
-            self.assertTrue(agent_chrome.configured())
-            self.assertFalse(agent_chrome.connected())
-        claude = {'agent': {'agents': [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]}}
-        with patch.dict(cf.C, claude), patch.object(agent_chrome, 'conf', return_value={'claude_device': 'dev-1'}):
-            self.assertTrue(agent_chrome.configured())                 # 只裝 Claude:不要求 Codex
-        with patch.dict(cf.C, claude), patch.object(agent_chrome, 'conf', return_value={}):
-            self.assertFalse(agent_chrome.configured())
+        self.assertEqual(fb[u]['ds'], 'gone')
+        self.assertIn('要重填', fb[u]['apply']['issues'][0])
 
     def test_preference_note_keeps_his_rules_and_agent_assumptions_distinct(self):
         import tempfile

@@ -963,6 +963,20 @@ class ResearchPipeline(unittest.TestCase):
         self.assertNotIn('不要拿「像不像他喜歡過的」當判準', deep)
         self.assertIn('不要拿「像不像他喜歡過的」當判準', wide)
 
+    def test_judge_can_cite_the_old_cards_it_was_shown(self):
+        # 給 agent 看的相似舊卡表態,程式核對引用時也要拿得到(2026-10-05 加職缺實測:引用那幾行被當成找不到,卡片全空)
+        import prefs
+        fb, jobs = prefs_load(self.path)
+        cs = prefs.cards(fb, jobs)
+        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': 'JD'}]
+        text, cites = self.rs.judge_prompt(b, cs, '/o', 'deep')
+        shown = text[text.index('他對相似舊職缺的表態:'):].split('\n')[1]
+        self.assertTrue(shown.strip())
+        self.assertTrue(any(shown in src for src in cites['J1']['sources']['偏好筆記']))
+        # 偏好筆記裡記著他的原話:標成「使用者原話」引用也找得到(2026-10-05 找缺實測)
+        self.assertTrue(any(prefs.without_tracking(prefs.ensure_note())[:20] in src
+                            for src in cites['J1']['sources']['使用者原話']))
+
     def _stop_run(self, fake_agent, finishing, pending, **kw):
         """跑一輪找缺(假 agent、假抓頁),finishing() 為真 = 他按了停止;kw 照樣交給 research.run(time_up、tally…)。"""
         from unittest.mock import patch
@@ -1315,6 +1329,27 @@ class ResearchPipeline(unittest.TestCase):
             {'JD 原文': ['工作內容包含平台維運'], '使用者原話': [], '偏好筆記': []})
         self.assertTrue(bad)
         self.assertEqual(invalid[0]['citation'], '管理五百台主機')
+
+        # 前面標舊卡代號、用 ｜ 跳著摘(2026-10-05 加職缺實測):每一段都在同一份材料裡就收;拼一段編出來的就擋
+        note = '[c139] 喜歡、加進準備區｜AI Agent Engineer · 甲公司｜公司在做什麼:做 multi-agent 系統。'
+        _rows, bad = self.rs.checked_reasons(
+            [{'text': '同型舊卡被標喜歡', 'citation': 'c139：喜歡、加進準備區｜做 multi-agent 系統。', 'basis': '偏好筆記'}],
+            {'JD 原文': [], '使用者原話': [], '偏好筆記': [note]})
+        self.assertFalse(bad)
+        _rows, bad = self.rs.checked_reasons(
+            [{'text': '同型舊卡被標喜歡', 'citation': 'c139：喜歡、加進準備區｜做交易策略', 'basis': '偏好筆記'}],
+            {'JD 原文': [], '使用者原話': [], '偏好筆記': [note]})
+        self.assertTrue(bad)
+        # 只剩格式符號的引用不算有引用(審查 #376)
+        _rows, bad = self.rs.checked_reasons(
+            [{'text': '他要能制定規則', 'citation': '**', 'basis': '偏好筆記'}],
+            {'JD 原文': [], '使用者原話': [], '偏好筆記': ['- **他要的是「讓我制定規則」**']})
+        self.assertTrue(bad)
+        # 筆記用 Markdown 粗體標的原話,agent 引用時拿掉 **:字一樣就收
+        _rows, bad = self.rs.checked_reasons(
+            [{'text': '他要能制定規則', 'citation': '他要的是「讓我制定規則」,不要純監控。', 'basis': '偏好筆記'}],
+            {'JD 原文': [], '使用者原話': [], '偏好筆記': ['- **他要的是「讓我制定規則」**,不要純監控。']})
+        self.assertFalse(bad)
 
     def test_incomplete_feedback_note_does_not_advance_checkpoint(self):
         from copy import deepcopy

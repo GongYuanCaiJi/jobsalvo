@@ -69,13 +69,6 @@ DEFAULTS = {
             {'id': 'primary', 'runtime': 'codex', 'model': '', 'effort': 'max', 'speed': 'standard', 'browser': True},
         ],
     },
-    'browser': {
-        # agent 專用的 Chrome:自己一個資料夾、自己一個程序,跟你的 Chrome 分開(docs/adr/0003)。
-        'data_dir': '~/Library/Application Support/jobsalvo/agent-chrome',
-        # 第一次建 agent 的 Chrome 時,從你 Chrome 的哪個設定檔複製登入狀態和擴充功能(選填)。
-        'profile': '',                  # 預設不複製:要複製由他在設定頁選(以前預設「Agent」是作者自己的設定檔名,別人選到的是不相干的設定檔)
-        'state': '~/.cache/jobsalvo/agent-chrome.json',
-    },
     'resume': {
         'prepare_dir': 'prepare',       # 跑準備區每個職缺一夾,agent 寫 fill.json
         'ship_dir': 'ship',             # 可投遞夾:每個職缺一夾,代投上傳的檔都在這裡
@@ -145,16 +138,9 @@ def _dump(f, settings):
 
 
 def migrate_settings(settings, home=None):
-    """補上新設定該有的欄位、守住只准一個 agent 開 Chrome。"""
+    """補上新設定該有的欄位。瀏覽器工作仍依清單順序逐一派工。"""
     settings = copy.deepcopy(settings) if isinstance(settings, dict) else {}
-    # 同一時間只准一個 agent 用 agent 的 Chrome(兩個 AI 搶同一個瀏覽器會互相干擾):勾了好幾個的,只留最上面那個
-    agents = (settings.get('agent') or {}).get('agents') if isinstance(settings.get('agent'), dict) else None
-    if isinstance(agents, list):
-        first = True
-        for a in agents:
-            if isinstance(a, dict) and a.get('browser') is True:
-                a['browser'] = first
-                first = False
+    settings.pop('browser', None)   # 舊的 agent Chrome 設定(資料夾、設定檔、狀態檔);agent 的瀏覽器改成 ego(docs/adr/0006)
     resume = settings.get('resume')
     if not isinstance(resume, dict):
         return settings
@@ -252,8 +238,6 @@ def _apply(cfg):
     g['PORT'] = int(cfg['board']['port'])
     g['SANDBOX_PORT'] = int(cfg['board']['sandbox_port'])
     g['AGENT'] = 'Agent'                  # 看板和 prompt 裡怎麼稱呼它(固定,不給改)
-    g['BROWSER_STATE'] = path(cfg['browser']['state'])
-    g['BROWSER_DIR'] = path(cfg['browser']['data_dir'])
     g['PREPARE_DIR'] = path(cfg['resume']['prepare_dir'])
     g['SHIP_DIR'] = path(cfg['resume']['ship_dir'])
     g['LANGS'] = list(cfg['resume']['langs'])

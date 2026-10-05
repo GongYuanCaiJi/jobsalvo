@@ -60,6 +60,17 @@ button{margin-top:20px;padding:10px 18px;font:inherit}</style></head><body>
   document.addEventListener('visibilitychange',function(){send('vis');});
   document.getElementById('app').addEventListener('submit',function(){send('submit');},true);
   window.addEventListener('pagehide',function(){send('hide');});
+  if(document.getElementById('app').hidden){
+    var loginPoll=setInterval(function(){
+      fetch('/login-status').then(function(r){return r.json();}).then(function(s){
+        if(s.logged_in){
+          document.getElementById('app').hidden=false;
+          document.getElementById('login-gate').remove();
+          clearInterval(loginPoll);send('login');
+        }
+      }).catch(function(){});
+    },500);
+  }
   setInterval(function(){send('tick');},3000);
   send('load');
 })();
@@ -82,8 +93,9 @@ def _field_html(name, q, kind):
 
 
 class FakeForm:
-    def __init__(self, port=0, upload_fields=1, upload_slots=None):
+    def __init__(self, port=0, upload_fields=1, upload_slots=None, requires_login=False, sso=False):
         self.log, self.lock = [], threading.Lock()
+        self.logged_in = not requires_login
         self.upload_slots = list(upload_slots) if upload_slots is not None else [
             ('resume', 'Resume/CV')
         ] + [(f'attachments-{i}', 'Additional documents')
@@ -110,10 +122,35 @@ class FakeForm:
                 job = (parse_qs(u.query).get('job') or [''])[0]
                 if u.path == '/apply':
                     srv._add({'ev': 'GET', 'job': job})
-                    return self._send(200, PAGE.replace('{job}', job).replace(
+                    page = PAGE.replace('{job}', job).replace(
                         '{upload_fields}', ''.join(_field_html(name, label, 'file')
                                                    for name, label in srv.upload_slots)).replace(
-                        '{fields}', ''.join(_field_html(*f) for f in srv.fields)))
+                        '{fields}', ''.join(_field_html(*f) for f in srv.fields))
+                    if len(srv.upload_slots) == 1:
+                        page = page.replace('<form id="app"',
+                            '<p>Resume/CV accepts one combined PDF containing the resume and supporting documents.</p>'
+                            '<form id="app"')
+                    if not srv.logged_in:
+                        login = ('<label>密碼<input type="password" autocomplete="off"></label>'
+                                 '<button type="button" id="google">用 Google 繼續 — Continue with Google</button>'
+                                 '<div id="provider"></div><script>'
+                                 'document.getElementById("google").onclick=async()=>{'
+                                 'document.getElementById("provider").innerHTML=await (await fetch("/sso")).text();'
+                                 'document.getElementById("authorize").onclick=async()=>{'
+                                 'await fetch("/sso/authorize",{method:"POST"});};};</script>'
+                                 if sso else '<p>此關卡只有本人能完成驗證碼，沒有已登入的 SSO 帳號可用。</p>')
+                        page = page.replace('<form id="app"',
+                            '<section id="login-gate"><h2>Sign in required — 請本人登入</h2>'
+                            + login +
+                            '</section><form id="app" hidden')
+                    return self._send(200, page)
+                if u.path == '/login-status':
+                    return self._send(200, json.dumps({'logged_in': srv.logged_in}), 'application/json')
+                if u.path == '/sso' and sso:
+                    srv._add({'ev': 'SSO-account'})
+                    return self._send(200, '<h3>Google 帳號已登入：acceptance@example.test</h3>'
+                                      '<p>授權本機假申請頁使用此帳號登入。</p>'
+                                      '<button type="button" id="authorize">繼續並完成授權</button>')
                 if u.path == '/thanks':
                     srv._add({'ev': 'GET-thanks', 'job': job})
                     return self._send(200, THANKS)
@@ -122,6 +159,10 @@ class FakeForm:
             def do_POST(self):
                 u = urlparse(self.path)
                 body = self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                if u.path == '/sso/authorize' and sso:
+                    srv.logged_in = True
+                    srv._add({'ev': 'SSO-authorized'})
+                    return self._send(204, b'')
                 if u.path == '/beacon':
                     try:
                         d = json.loads(body.decode() or '{}')
@@ -131,6 +172,8 @@ class FakeForm:
                     srv._add(d)
                     return self._send(204, b'')
                 if u.path == '/submit':
+                    if not srv.logged_in:
+                        return self._send(401, 'Sign in required')
                     job = (parse_qs(u.query).get('job') or [''])[0]
                     msg = email.parser.BytesParser(policy=email.policy.default).parsebytes(
                         b'Content-Type: ' + self.headers.get('Content-Type', '').encode() + b'\r\n\r\n' + body)
@@ -158,12 +201,18 @@ class FakeForm:
     def url(self, job):
         return f'http://127.0.0.1:{self.port}/apply?job={job}'
 
+    def login(self):
+        """驗收程式模擬本人完成登入;原頁透過輪詢解鎖,不重新載入。"""
+        self.logged_in = True
+        self._add({'ev': 'LOGIN'})
+
     def start(self):
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         return self
 
     def stop(self):
         self.httpd.shutdown()
+        self.httpd.server_close()
 
     def events(self, since=0.0):
         with self.lock:

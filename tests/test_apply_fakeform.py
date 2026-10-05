@@ -25,6 +25,40 @@ def _submit(server, job, files):
 
 
 class FakeFormUploads(unittest.TestCase):
+    def test_a_signed_in_google_account_can_authorize_without_a_password_or_human_unlock(self):
+        server = FakeForm(requires_login=True, sso=True).start()
+        try:
+            page = urllib.request.urlopen(server.url('sso')).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+            self.assertIn('用 Google 繼續', page)
+            self.assertIn('type="password"', page)
+            root = server.url('sso').split('/apply?')[0]
+            account = urllib.request.urlopen(root + '/sso').read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+            self.assertIn('已登入', account)
+            self.assertFalse(server.logged_in)
+            with urllib.request.urlopen(urllib.request.Request(root + '/sso/authorize', data=b'', method='POST')):  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+                pass
+            self.assertTrue(server.logged_in)
+            self.assertEqual([e['ev'] for e in server.events()], ['GET', 'SSO-account', 'SSO-authorized'])
+            self.assertFalse(server.submits())
+        finally:
+            server.stop()
+
+    def test_login_blocks_submission_until_the_human_unlocks_the_same_page(self):
+        server = FakeForm(requires_login=True).start()
+        try:
+            page = urllib.request.urlopen(server.url('login')).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+            self.assertIn('id="app" hidden', page)
+            with self.assertRaises(urllib.error.HTTPError) as denied:
+                _submit(server, 'login', [])
+            self.assertEqual(denied.exception.code, 401)
+            self.assertFalse(server.submits())
+            server.login()
+            status_url = server.url('login').replace('/apply?', '/login-status?')
+            self.assertIn(b'"logged_in": true', urllib.request.urlopen(status_url).read())  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+            self.assertEqual(sum(e['ev'] == 'GET' for e in server.events()), 1)
+        finally:
+            server.stop()
+
     def test_one_upload_field_receives_only_the_combined_pdf(self):
         server = FakeForm().start()
         try:

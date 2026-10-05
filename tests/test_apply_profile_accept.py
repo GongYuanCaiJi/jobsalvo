@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
@@ -10,6 +11,22 @@ import apply_profile_accept as acceptance
 
 
 class AcceptanceIsolation(unittest.TestCase):
+    def test_each_case_finishes_its_own_space_when_the_case_raises(self):
+        import chrome_door
+        run_id = 'edfa36e2-3223-44d1-885a-e10c139c49b0'
+        user = {'id': 1, 'name': 'user-space', 'ownership': 'user'}
+        ours = {'id': 2, 'name': f'jobsalvo-test-{run_id}-card', 'ownership': 'agent'}
+        run = acceptance.ProfileAcceptance('/tmp/out', '/tmp/source', '/tmp/source/board',
+                                           '/tmp/source/ship', '/tmp/runtime')
+        with patch.object(chrome_door.uuid, 'uuid4', return_value=run_id), \
+                patch.object(chrome_door.EgoDoor, 'workspaces', side_effect=[[user], [user, ours], [user]], create=True), \
+                patch.object(chrome_door.EgoDoor, 'release') as release, \
+                patch.object(run, '_run_case', side_effect=ValueError('驗收例外'), create=True):
+            with self.assertRaisesRegex(ValueError, '驗收例外'):
+                run.run_case('normal')
+        release.assert_called_once_with(None, None)
+        self.assertTrue(run.results['normal']['workspace_counts']['returned_to_baseline'])
+
     def setUp(self):
         self.temporary = self.enterContext(tempfile.TemporaryDirectory(prefix='profile-accept-test-'))
         self.source = os.path.join(self.temporary, 'source')

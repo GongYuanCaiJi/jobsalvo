@@ -126,11 +126,12 @@ class AgentHasNoBoardLocation(unittest.TestCase):
         with mock.patch.object(apply_run.ship, 'folder', return_value=''), \
                 mock.patch.object(apply_run.ship, 'read_info', return_value={}), \
                 mock.patch.object(apply_run.fr, 'shared_text', return_value=''):
-            for stage in ('fill', 'fix'):
-                prompt, _out = apply_run.prompt_for(stage, U, {'id': U}, fb, self.copy, door=chrome_door.current())
-                self.assertIn('form_record.py', prompt)
-                self.assertNotIn(self.copy, prompt)
-                self.assertNotIn('--board', prompt)
+            for runtime in ('codex', 'claude-code'):
+                for stage in ('fill', 'fix'):
+                    prompt, _out = apply_run.prompt_for(stage, U, {'id': U}, fb, self.copy, door=chrome_door.of(runtime))
+                    self.assertIn('最後直接回傳一個完整交件 JSON' if runtime == 'codex' else 'form_record.py', prompt)
+                    self.assertNotIn(self.copy, prompt)
+                    self.assertNotIn('--board', prompt)
 
 
 class ToolsOnlyTakeAllowedEvents(unittest.TestCase):
@@ -203,19 +204,6 @@ class SneakedEditsAreCaught(unittest.TestCase):
         sneak(self.board, confirm_behind_the_back)
         with self.assertRaises(bd.Tampered):
             apply_run.load(self.board)
-
-    def test_readers_of_the_agent_chrome_do_not_trust_a_sneaked_board(self):
-        # 偷改成「停著的頁」:關 Chrome 時保護哪幾頁、要允許哪些網站、👀 讀哪一頁,都不能照改過的內容
-        import agent_chrome
-        import apply_tab
-
-        def parked(fb):
-            fb[U].update(ds='parked', app='ship', apply={'stage': 'fill', 'tab_id': '7', 'session': 's', 'runtime': 'codex'})
-        sneak(self.board, parked)
-        self.assertIsNone(agent_chrome.held_tabs(self.board))            # 讀不到:當成全部都要保護
-        self.assertEqual(agent_chrome.codex_sites_needed(self.board)['uploads'], [])
-        with self.assertRaises(bd.Tampered):
-            apply_tab._lookup(U, self.board)
 
     def test_the_agent_tool_reports_it_and_changes_nothing(self):
         sneak(self.board, lambda fb: fb[U].__setitem__('n', '偷寫的'))

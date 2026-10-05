@@ -48,7 +48,7 @@ class Customization(unittest.TestCase):
         fb = {url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'}
               for url in (self.url, self.other_url)}
         _env.make_board(self.board, fb, jobs=jobs)
-        # 職缺頁由程式先抓好給 agent(#287);測試不連網、不開無頭 Chrome
+        # 職缺頁由程式先抓好給 agent(#287);測試不連網、不開瀏覽器
         import page_fetch
         self.page = page_fetch.PageResult(self.url, 'ok', text='JD-TEXT: build secure systems', via='direct')
         fetch = mock.patch.object(page_fetch, 'fetch', side_effect=lambda _url: self.page)

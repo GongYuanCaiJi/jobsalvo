@@ -18,7 +18,7 @@ import agent_run as ar        # noqa: E402
 import apply_run as run       # noqa: E402
 import delivery_state as ds   # noqa: E402
 import chrome_door            # noqa: E402
-import fake_chrome as fc      # noqa: E402
+import fake_door as fc      # noqa: E402
 
 U = 'https://jobs.lever.co/x/1'
 T = run.today()
@@ -69,6 +69,7 @@ def loaded(jobs, fb, d):
     """run_one 讀到的看板是 (jobs, fb)、指示寫在 d、寫回看板直接改 fb。"""
     with patch.object(run, 'load', return_value=(jobs, fb)), \
          patch.object(run, 'prompt_for', return_value=('prompt', d)), \
+         patch.object(run.fr, 'record_fill', return_value=[]), \
          patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)):
         yield
 
@@ -77,12 +78,79 @@ class Approval(unittest.TestCase):
     def test_not_approved_is_refused(self):
         self.assertEqual(fr.approval_problem(board(), U, OKST), '還沒確認送出')
 
+    def test_workspace_is_saved_before_the_agent_starts_and_survives_startup_failure(self):
+        fb = board()
+        workspace = {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}
+        fake = fc.FakeDoor(prepared={'workspace': workspace, 'tab_id': '42:p1', 'page': FORM_PAGE})
+        observed = []
+        def unavailable(*args, **kwargs):
+            observed.append(copy.deepcopy((fb[U].get('apply') or {}).get('workspace')))
+            return ar.AgentResult('unavailable', reason='startup', agent_id='primary')
+        with tempfile.TemporaryDirectory() as out, fc.installed(fake), loaded({U: {'id': U}}, fb, out), \
+             patch.object(ar, 'run', side_effect=unavailable), \
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+            ok, _message = run._run_one('fill', U, '/tmp/board.html')
+        self.assertFalse(ok)
+        self.assertEqual(observed, [workspace])
+        self.assertEqual(fb[U]['apply']['workspace'], workspace)
+
+    def test_filled_card_keeps_the_program_workspace_instead_of_the_claimed_binding(self):
+        fb = board()
+        workspace = {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}
+        fake = fc.FakeDoor(prepared={'workspace': workspace, 'tab_id': '42:p1', 'page': FORM_PAGE})
+        result = {'tab_id': '42:p1', 'workspace': {'id': 99, 'name': 'untrusted', 'page': 'p1'}}
+        with tempfile.TemporaryDirectory() as out, fc.installed(fake), loaded({U: {'id': U}}, fb, out), \
+             patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, agent_id='primary')), \
+             patch.object(ar, 'session_id', return_value='S1'), patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', return_value=([], result)), \
+             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+            run._run_one('fill', U, '/tmp/board.html')
+        self.assertEqual(fb[U]['apply']['workspace'], workspace)
+
     def test_approved_snapshot_is_valid_until_an_answer_changes(self):
         fb = board()
         confirm(fb)
         self.assertIsNone(fr.approval_problem(fb, U, OKST))
         fb['__ans__'][0]['v'] = 'ROC'                        # 核准之後他(或我)改了答案
         self.assertIn('要重新確認送出', fr.approval_problem(fb, U, OKST))
+
+    def test_approval_binds_the_workspace_even_when_the_page_handle_is_unchanged(self):
+        fb = board()
+        confirm(fb)
+        fb[U]['apply']['workspace'] = {'id': 42, 'name': 'jobsalvo-first', 'page': 'p1'}
+        fb[U]['approve'] = fr.approval(fb, U)
+        self.assertIsNone(fr.approval_problem(fb, U, OKST))
+        fb[U]['apply']['workspace']['reader'] = 'p2'
+        self.assertIsNone(fr.approval_problem(fb, U, OKST))
+        fb[U]['apply']['workspace']['name'] = 'jobsalvo-another'
+        self.assertIn('要重新確認送出', fr.approval_problem(fb, U, OKST))
+
+    def test_switching_agent_family_keeps_the_page_without_resuming_the_other_clis_session(self):
+        fb = board()
+        park(fb)
+        workspace = {'id': 42, 'name': 'jobsalvo-first', 'page': 'p1'}
+        fb[U]['apply'].update(workspace=workspace, tab_id='42:p1')
+        fake = fc.FakeDoor(runtime='claude-code', agent_id='claude')
+        with tempfile.TemporaryDirectory() as out, fc.installed(fake), loaded({U: {'id': U}}, fb, out), \
+             patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, agent_id='claude')) as launch, \
+             patch.object(ar, 'session_id', return_value='CLAUDE-NEW'), patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', return_value=([], {'tab_id': '42:p1'})), \
+             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+            run._run_one('fix', U, '/tmp/board.html')
+        self.assertIsNone(launch.call_args.kwargs['resume'])
+        self.assertEqual(fb[U]['apply']['workspace'], workspace)
+        self.assertEqual(fb[U]['apply']['session'], 'CLAUDE-NEW')
+        self.assertEqual(fb[U]['apply']['runtime'], 'claude-code')
+
+    def test_exhausted_screenshot_warmup_is_not_retried_again_by_the_caller(self):
+        fake = fc.FakeDoor(not_now={'shot'})
+        with tempfile.TemporaryDirectory() as out, patch.object(run.time, 'sleep'):
+            run.shoot('S1', out, 'fill', fake, tab_id='42:p1')
+            with open(os.path.join(out, 'shot-error.txt')) as report:
+                self.assertIn('NotNow', report.read())
+        self.assertEqual(len([c for c in fake.calls if c[0] == 'shot']), 1)
 
     def test_pending_or_untranslated_answers_block_submission(self):
         fb = board()
@@ -160,35 +228,6 @@ class Eligible(unittest.TestCase):
         self.assertEqual(run.eligible(jobs, fb, 'fix', status=OKST), [U])
 
 
-class TabRemembersItsChrome(unittest.TestCase):
-    """記分頁編號時一起記它是哪一個 agent Chrome 程序開的:agent_chrome.gone_pages 靠它判斷那一頁還在不在
-    (以前比最後寫紀錄的時間,改表失敗、送出前擋下都會把時間換新,Chrome 重開過也抓不到)。"""
-
-    def test_fill_record_carries_the_chrome_with_the_tab(self):
-        prev = {'tab_id': '5', 'chrome': {'pid': 9, 'start': 1000.0}}
-        rec = run.fill_record('fix', prev, {}, ['x'], 'S1', 'fill.png')
-        self.assertEqual((rec['tab_id'], rec['chrome']), ('5', prev['chrome']))     # 沿用舊分頁,也沿用它是哪個 Chrome 開的
-        rec = run.fill_record('fix', prev, {'tab_id': '7', 'chrome': {'pid': 12, 'start': 2000.0}}, [], 'S1', 'fill.png')
-        self.assertEqual((rec['tab_id'], rec['chrome']), ('7', {'pid': 12, 'start': 2000.0}))
-
-    def test_a_filled_tab_is_stamped_with_the_chrome_running_now(self):
-        fb = board()
-        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        now = {'pid': 9, 'start': 1000.0}
-        with tempfile.TemporaryDirectory(prefix='apply-stamp-') as directory, \
-             fc.installed(fc.FakeChrome('claude-code', agent_id='a'), chrome_id=now), \
-             loaded(jobs, fb, directory), \
-             patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='a')), \
-             patch.object(ar, 'session_id', return_value='S9'), \
-             patch.object(run, 'shoot'), \
-             patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
-             patch.object(run, '_profile_check_after_fill', return_value=[]), \
-             patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
-            run.run_one('fill', U, '/tmp/board.html')
-        self.assertEqual((fb[U]['apply']['tab_id'], fb[U]['apply'].get('chrome')), ('7', now))
-        self.assertEqual(fb[U]['apply']['runtime'], 'claude-code')     # 也記下是哪一家開的(之後都找它)
-
-
 class Checks(unittest.TestCase):
     def setUp(self):
         self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='applyrun-'))
@@ -198,6 +237,86 @@ class Checks(unittest.TestCase):
         with open(p, 'w' if obj is not None else 'wb') as f:
             f.write(json.dumps(obj) if obj is not None else b'png')
         return p
+
+    def test_prepared_application_allows_its_required_profile_and_authorization_pages(self):
+        prepared = {'workspace': {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'},
+                    'tab_id': '42:p1', 'page': {'url': U, 'fields': [], 'lines': []}}
+        for runtime in ('codex', 'claude-code'):
+            with self.subTest(runtime=runtime):
+                prompt, _ = run.prompt_for('fill', U, {'id': U}, board(), '/tmp/board.html',
+                                           prepared=prepared, door=chrome_door.of(runtime))
+                self.assertIn('同一工作區內可另開必要分頁', prompt)
+                self.assertIn('履歷同步、附件管理與登入授權', prompt)
+                self.assertIn('其他卡與使用者的分頁不要動', prompt)
+                self.assertIn('不要另開分頁重做申請表', prompt)
+                self.assertNotIn('其他分頁不要動', prompt)
+
+    def test_login_and_resume_try_an_already_signed_in_provider_before_requesting_credentials(self):
+        for runtime in ('codex', 'claude-code'):
+            for stage in ('fill', 'fix'):
+                with self.subTest(runtime=runtime, stage=stage):
+                    prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
+                                               door=chrome_door.of(runtime))
+                    self.assertIn('Continue with Google', prompt)
+                    self.assertIn('Sign in with Apple', prompt)
+                    self.assertIn('已登入', prompt)
+                    self.assertIn('完成授權', prompt)
+                    self.assertIn('要輸入密碼、二步驗證或驗證碼時才停下', prompt)
+                    self.assertIn('一鍵帶入只是捷徑', prompt)
+                    self.assertNotIn('需要登入、遇到驗證碼、頁面要密碼:停下', prompt)
+                    self.assertNotIn('遇到登入、密碼或真人驗證,停下', prompt)
+
+    def test_the_current_sso_rule_takes_precedence_over_an_old_stop_at_login_instruction(self):
+        rules = os.path.join(self.d, 'apply-rules.md')
+        with open(rules, 'w', encoding='utf-8') as output:
+            output.write('需要登入、遇到驗證碼、頁面要密碼:停下。')
+        with patch.object(run.cf, 'APPLY_RULES', rules):
+            prompt, _ = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
+                                       door=chrome_door.current())
+        self.assertIn('本輪登入規則優先於舊填表做法及平台筆記', prompt)
+
+    def test_fill_and_login_resume_follow_the_users_import_rules_before_batch_fill(self):
+        rules = os.path.join(self.d, 'apply-rules.md')
+        with open(rules, 'w', encoding='utf-8') as output:
+            output.write('表單有 Apply with LinkedIn 就先用;帶入的現職保留。')
+        with patch.object(run.cf, 'APPLY_RULES', rules):
+            for stage in ('fill', 'fix'):
+                with self.subTest(stage=stage):
+                    prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
+                                               door=chrome_door.current())
+                    self.assertIn('表單有 Apply with LinkedIn 就先用;帶入的現職保留。', prompt)
+                    self.assertNotIn('不為可選資料開外部授權頁', prompt)
+                    self.assertIn('先完成使用者要求的資料帶入', prompt)
+                    self.assertIn('使用者明確要求保留的帶入值依其規則保留', prompt)
+
+    def test_fix_after_a_login_barrier_gets_the_current_upload_paths(self):
+        folder = os.path.join(self.d, 'Acceptance-' + run.card.card_id_from_url(U))
+        os.makedirs(folder)
+        for name in ('resume.pdf', 'support.pdf', 'merged.pdf'):
+            with open(os.path.join(folder, name), 'wb') as output:
+                output.write(b'local upload fixture')
+        with open(os.path.join(folder, 'ship.json'), 'w') as output:
+            json.dump({'files': ['resume.pdf', 'support.pdf'], 'merged': 'merged.pdf'}, output)
+        with patch.object(run, 'SHIP_ROOT', self.d):
+            prompt, _out = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
+                                         note='本人已完成登入,接著填', door=chrome_door.current())
+        for name in ('resume.pdf', 'support.pdf', 'merged.pdf'):
+            self.assertIn(os.path.join(folder, name), prompt)
+        self.assertIn('k="nat"', prompt)
+        self.assertIn('Taiwan', prompt)
+        self.assertIn(fr.answer_fingerprint(board()['__ans__'][0]), prompt)
+
+    def test_normal_form_files_can_be_ready_before_submit_without_claiming_a_server_upload(self):
+        for runtime in ('codex', 'claude-code'):
+            for stage in ('fill', 'fix'):
+                with self.subTest(runtime=runtime, stage=stage):
+                    prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
+                                               door=chrome_door.of(runtime))
+                    self.assertIn('檔案欄已選妥', prompt)
+                    self.assertIn('非同步上傳', prompt)
+                    self.assertIn('不可為了確認傳送而按送出', prompt)
+                    self.assertNotIn('讀回確認網站已收到檔', prompt)
+                    self.assertNotIn('只有申請表實際收到的檔名', prompt)
 
     def test_agent_process_gets_its_selected_board_without_changing_parent(self):
         # agent 拿到的是代號、不是看板檔的位置(#307);代號對回的是這一輪選的那一份
@@ -219,6 +338,116 @@ class Checks(unittest.TestCase):
     def page(self, **vals):
         return {'url': U + '/apply', 'fields': [{'name': k, 'value': v} for k, v in vals.items()]}
 
+    def test_radio_display_answer_belongs_to_its_question(self):
+        import apply_tab
+        q = 'How did you hear about this opening?'
+        answer = 'Company career page'
+        fb = {'__ans__': [{'k': 'source', 'v': answer}],
+              U: {'form': {'f': [{'q': q, 'src': 'bank', 'k': 'source'}]}}}
+        choice = {'type': 'radio', 'name': 'source', 'label': answer, 'value': answer,
+                  'shown': answer, 'context': q + '\nLinkedIn\n' + answer}
+        page = {'url': U, 'fields': [choice], 'lines': [answer]}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        page['fields'].append(dict(choice, name='other', context='Preferred channel?\n' + answer))
+        choice.update(value='LinkedIn', shown='LinkedIn')
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 別題同值不算。
+        choice.update(value='', shown=None)
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 沒選,可見選項也不算。
+        choice.update(value=answer, shown=answer, context='')
+        page['fields'].append({'type': 'textarea', 'label': 'Other notes', 'value': answer})
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 讀不到題目關聯不算。
+        choice['context'] = q + '\n' + answer
+        fb['__ans__'][0]['v'] = 'Do not choose Company career page; choose LinkedIn'
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 答案庫變了要擋。
+        fb['__ans__'][0]['v'] = answer
+        choice.update(value='', shown=None)
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 單語也不能採信全頁選項文字。
+
+    def test_bank_value_differing_without_choice_is_sent_back_at_handoff(self):
+        q = 'How did you hear about our job opening?'
+        entry = {'k': 'src', 'q': '來源', 'v': '公司徵才頁 / Company career page', 'at': '2026-09-20'}
+        fb = {'__ans__': [entry]}
+        field = {'q': q, 'src': 'bank', 'k': 'src', 'value': 'Company career page'}
+        with self.assertRaisesRegex(ValueError, 'choice'):   # 忘了附對應:交件就退回,不等最後驗收擋
+            fr.apply_record(fb, U, 'Lever', fr.fields_from_fill({'fields': [field]}))
+        self.assertNotIn('form', fb.get(U, {}))
+        field['value'] = '公司徵才頁 / Company career page'   # 跟原文一樣不用對應
+        fr.apply_record(fb, U, 'Lever', fr.fields_from_fill({'fields': [field]}))
+        self.assertNotIn('page_value', fb[U]['form']['f'][0])
+        field['value'] = '<redacted>'                         # 外掛遮掉的值讀不到,不能拿來比
+        fr.apply_record(fb, U, 'Lever', fr.fields_from_fill({'fields': [field]}))
+
+    def test_native_choice_mapping_keeps_bank_source_and_field_binding(self):
+        import apply_tab
+        q = 'How did you learn about this opportunity?'
+        entry = {'k': 'source', 'q': '來源', 'v': '公司徵才頁', 'at': '2026-09-20'}
+        fb = {'__ans__': [entry]}
+        field = {'q': q, 'src': 'bank', 'k': 'source', 'value': 'Example Career Page',
+                 'choice': {'name': 'question_17', 'source_hash': fr.answer_fingerprint(entry),
+                            'why': '公司名稱標示的徵才頁與原稿公司徵才頁同義'}}
+        before = dict(entry)
+        fr.apply_record(fb, U, 'Example', fr.fields_from_fill({'fields': [field]}))
+        self.assertEqual({k: v for k, v in entry.items() if k != 'qs'}, before)
+        native = {'name': 'question_17', 'label': q + ' *', 'type': 'text', 'value': '',
+                  'shown': 'Example Career Page', 'choiceControl': True}
+        page = {'url': U, 'fields': [native]}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        native['name'] = ''                      # 程式用題目綁控制項,不靠 agent 給的 name
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        native['choiceControl'] = False          # 一般文字欄不能用選項對應
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        native['choiceControl'] = True
+        native['label'] = 'Preferred channel?'
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        native['label'] = q
+        native['shown'] = 'LinkedIn'
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        native['shown'] = 'Example Career Page'
+        entry['redo'] = '2026-10-02'
+        fb[U]['form']['f'][0]['choice']['source_hash'] = fr.answer_fingerprint(entry)
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        entry.pop('redo')
+        fb[U]['form']['f'][0]['choice']['source_hash'] = fr.answer_fingerprint(entry)
+        fb[U]['form']['f'][0]['choice']['why'] = ''
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        fb[U]['form']['f'][0]['choice']['why'] = field['choice']['why']
+        entry['v'] = 'LinkedIn'
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+
+    def test_complete_question_binding_and_fix_source_version(self):
+        import apply_tab
+        entry = {'k': 'name', 'q': 'Name', 'v': 'Alex Chen', 'zh': '陳亞力'}
+        choice = {'name': 'company', 'value': 'Alex Chen', 'source_hash': fr.answer_fingerprint(entry), 'why': 'test'}
+        field = {'q': 'Name', 'src': 'bank', 'k': 'name', 'choice': choice, 'refill': True}
+        fb = {'__ans__': [entry], U: {'form': {'f': [field]}}}
+        page = {'url': U, 'fieldContexts': True, 'fields': [
+            {'name': 'name', 'label': 'Name', 'value': ''},
+            {'name': 'company', 'label': 'Company name', 'value': 'Alex Chen'}]}
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        field.pop('choice')
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        old_hash = fr.answer_fingerprint(entry)
+        entry['v'] = 'New value'
+        changed = run.changed_fields(fb, U)['Name']
+        self.assertEqual(changed['k'], 'name')
+        self.assertEqual(changed['source_hash'], fr.answer_fingerprint(entry))
+        self.assertNotEqual(changed['source_hash'], old_hash)
+
+    def test_choice_does_not_override_contact_or_plain_text(self):
+        import apply_tab
+        entry = {'k': 'email', 'q': 'Contact email', 'v': 'approved@example.test', 'zh': 'approved@example.test'}
+        choice = {'name': 'email', 'value': 'other@example.test', 'source_hash': fr.answer_fingerprint(entry), 'why': 'test'}
+        fb = {'__ans__': [entry], U: {'form': {'f': [{'q': 'Contact email', 'src': 'bank', 'k': 'email', 'choice': choice}]}}}
+        native = {'name': 'email', 'label': 'Contact email', 'type': 'email', 'value': choice['value']}
+        page = {'url': U, 'fieldContexts': True, 'fields': [native]}
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        native['choiceControl'] = True
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+        native.update(type='text', choiceControl=False, value='Different text')
+        entry.update(v='Original text', zh='原文')
+        choice.update(value='Different text', source_hash=fr.answer_fingerprint(entry))
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+
     def test_upload_blocked_by_codex_says_which_file_to_edit(self):
         # Codex 回「could not complete the permission request」:卡上照實講是網站沒被允許、要改哪個檔
         t0 = time.time() - 1
@@ -226,7 +455,7 @@ class Checks(unittest.TestCase):
         self.write('fill.json', {'fields': [], 'submitted': False, 'tab_id': '7', 'tab_url': U + '/apply', 'handoff': True,
                                  'problems': ['jobs.lever.co: could not complete the permission request to upload files']})
         bad = ' '.join(run.check_fill(board(), U, self.d, t0, 'S1', reader=lambda s, t: self.page())[0])
-        self.assertIn('~/.codex/browser/config.toml', bad)
+        self.assertIn('could not complete the permission request', bad)
 
     def test_fill_output_is_checked_against_the_bank(self):
         t0 = time.time() - 1
@@ -336,19 +565,19 @@ class Checks(unittest.TestCase):
         # Lever 傳完會把上傳欄清空,檔名改顯示在標籤上:這樣也算傳上去了
         lever = {'url': U + '/apply', 'fields': [{'type': 'file', 'value': [], 'label': 'Resume/CV CV'}, {'value': 'Alex Chen'}, {'value': 'Taiwan'}]}
         self.assertEqual(apply_tab.page_problems(lever, fb, U, ['cv.pdf']), [])
-        # 外掛把 email / tel 欄位讀成空的(藏個資,頁面上其實有值):長得像 email、電話的答案不拿它判錯,其他照抓
+        # 程式讀到空的 email 必須擋住;不再套外掛藏個資的例外。
         hid = {'url': U + '/apply', 'fields': [{'type': 'email', 'value': ''}, {'type': 'text', 'value': 'Someone'}]}
         fb2 = board()
         fb2[U]['form']['f'].append({'q': 'Email', 'src': 'rz', 'v': 'you@example.com'})
         probs = apply_tab.page_problems(hid, fb2, U)
-        self.assertFalse([p for p in probs if 'Email' in p])
+        self.assertTrue([p for p in probs if 'Email' in p])
         self.assertTrue([p for p in probs if 'Full name' in p])
         # 中文表單填的是中文翻譯,也算對上;下拉選單看顯示的字
         zh = {'url': U + '/apply', 'fields': [{'value': 'Alex Chen'}, {'value': '2', 'shown': '台灣'}]}
         self.assertEqual(apply_tab.page_problems(zh, fb, U), [])
-        # Greenhouse:Email 欄是一般文字框,外掛一樣讀成空的;國碼選單只顯示「+44」(答案是 United Kingdom (+44))
+        # Greenhouse 的 Email 即使是一般文字框也必須有實際值。
         gh = {'url': U + '/apply', 'fields': [
-            {'type': 'text', 'label': 'Email', 'value': ''}, {'value': 'Alex Chen'},
+            {'type': 'text', 'label': 'Email', 'value': 'you@example.com'}, {'value': 'Alex Chen'},
             {'type': 'text', 'label': 'Country', 'value': '', 'shown': '+44'}]}
         fb3 = board()
         fb3[U]['form']['f'] = [{'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'},
@@ -359,9 +588,11 @@ class Checks(unittest.TestCase):
         gh['fields'][2]['shown'] = '+81'
         self.assertIn('Country', ' '.join(apply_tab.page_problems(gh, fb3, U)))
         gh['fields'][2]['shown'] = '+44'
-        # 外掛把電話讀成「<redacted>」:讀不到就不判;但國碼選單的「+44」不能讓電話冒充對上
+        # 電話讀不到或不同都要擋住;國碼選單不能充當電話。
         gh['fields'].append({'type': 'tel', 'label': 'Phone', 'value': '<redacted>'})
         fb3[U]['form']['f'].append({'q': 'Phone', 'src': 'rz', 'v': '+44 7700 900000'})
+        self.assertIn('Phone', ' '.join(apply_tab.page_problems(gh, fb3, U)))
+        gh['fields'][-1]['value'] = '+44 7700 900000'
         self.assertEqual(apply_tab.page_problems(gh, fb3, U), [])
         gh['fields'][-1] = {'type': 'text', 'label': 'Mobile', 'value': 'Alex Chen'}
         self.assertIn('Phone', ' '.join(apply_tab.page_problems(gh, fb3, U)))
@@ -369,7 +600,8 @@ class Checks(unittest.TestCase):
         fb4 = board()
         fb4[U]['form']['f'] = [{'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'},
                                {'q': '選擇履歷', 'src': 'rz', 'v': '紅隊｜中文'}]
-        p104 = {'url': U + '/apply', 'fields': [{'value': 'Alex Chen'}], 'lines': ['選擇履歷', '紅隊｜中文', '預覽履歷']}
+        p104 = {'url': U + '/apply', 'fields': [{'label': 'Full name', 'value': 'Alex Chen'}],
+                'fieldContexts': True, 'lines': ['選擇履歷', '紅隊｜中文', '預覽履歷']}
         self.assertEqual(apply_tab.page_problems(p104, fb4, U), [])
         p104['lines'] = ['選擇履歷', '紅隊｜English', '預覽履歷']
         self.assertIn('選擇履歷', ' '.join(apply_tab.page_problems(p104, fb4, U)))
@@ -385,11 +617,11 @@ class Checks(unittest.TestCase):
         self.write('fill.json', {'fields': [], 'submitted': False, 'tab_id': '1234', 'tab_url': U + '/apply',
                                  'handoff': True, 'uploaded': []})
         self.write('fill.png')
-        door = fc.FakeChrome('claude-code', not_now={'read_page'})
+        door = fc.FakeDoor('claude-code', not_now={'read_page'})
         bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', door=door, log=['fill.log'])[0])
         self.assertEqual(door.calls, [('read_page', 'S1', '1234', ['fill.log'])])
         self.assertIn('讀不到', bad)
-        door = fc.FakeChrome('codex', page={'url': U + '/apply', 'fields': [{'name': 'name', 'value': 'Alex Chen'},
+        door = fc.FakeDoor('codex', page={'url': U + '/apply', 'fields': [{'name': 'name', 'value': 'Alex Chen'},
                                                                             {'name': 'nat', 'value': 'Taiwan'}]})
         self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', door=door)[0], [])
         self.assertIn('讀不到', ' '.join(run.check_fill(fb, U, self.d, t0, 'S1')[0]))    # 不知道是哪一家開的:讀不到
@@ -404,8 +636,10 @@ class Checks(unittest.TestCase):
         self.write('submit.json', {'submitted': True, 'confirm_text': ''})
         self.write('submit.png')
         self.assertFalse(run.check_submit(self.d, t0)[0])
-        self.write('submit.json', {'submitted': True, 'confirm_text': 'Application submitted'})
-        self.assertTrue(run.check_submit(self.d, t0)[0])
+        page = {'url': U + '/thanks', 'lines': ['Application submitted'], 'fields': []}
+        self.write('submit.json', {'submitted': True, 'reason': '本次申請已收到',
+                                  'confirm_url': page['url'], 'confirm_text': 'Application submitted'})
+        self.assertTrue(run.check_submit(self.d, t0, U, page)[0])
 
 
 class Dispatch(unittest.TestCase):
@@ -432,7 +666,7 @@ class Dispatch(unittest.TestCase):
         self.assertIn('plugins.other@x.enabled=false', ov)
         self.assertIn('plugins.chrome@openai-bundled.enabled=false', ov)
         self.assertFalse(any('plugins."' in x for x in ov))
-        self.assertNotIn('plugins.chrome@openai-bundled.enabled=false', ar.apply_overrides())
+        self.assertIn('plugins.chrome@openai-bundled.enabled=false', ar.apply_overrides())
 
     def test_apply_uses_the_codex_chrome_plugin_and_never_playwright(self):
         ov = ar.apply_overrides()
@@ -441,8 +675,8 @@ class Dispatch(unittest.TestCase):
         argv, cwd = ar.argv_for('main', 'P', '/repo', browser=ov, chrome=True)
         self.assertEqual([os.path.basename(argv[0])] + argv[1:2], ['codex', 'exec'])
         self.assertTrue(ar.prompt_stdin('main', 'P', browser=ov, chrome=True).startswith(ar.apply_rule('codex')))   # 換成代投的鐵律
-        self.assertIn('extensionInstanceId', ar.apply_rule('codex'))  # 只准用 agent 專用的那個 Chrome,用固定身分認
-        self.assertIn('computer use', ar.APPLY_RULE)                  # 點螢幕會搶他的畫面,規矩裡禁止
+        self.assertIn('ego-browser', ar.apply_rule('codex'))
+        self.assertEqual(ar.apply_rule('codex'), ar.apply_rule('claude-code'))
         with self.assertRaises(ValueError):
             ar.argv_for('alt', 'P', '/repo', browser=ov, chrome=True)
 
@@ -462,7 +696,7 @@ class Dispatch(unittest.TestCase):
         calls = []
         outcome = ar.AgentResult('failed', 1, 42, agent_id='browser-two')
         with tempfile.TemporaryDirectory(prefix='apply-agent-pin-') as d, \
-             fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
+             fc.installed(fc.FakeDoor('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
              loaded(jobs, fb, d), \
              patch.object(run.agent_report, 'report'), \
              patch.object(ar, 'run', side_effect=lambda *args, **kwargs: calls.append(kwargs) or outcome):
@@ -492,7 +726,7 @@ class Dispatch(unittest.TestCase):
             return SimpleNamespace(ok=True, status='completed', agent_id='browser-two')
 
         with tempfile.TemporaryDirectory(prefix='apply-wrapup-') as directory, \
-             fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
+             fc.installed(fc.FakeDoor('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
              loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
@@ -511,12 +745,12 @@ class Dispatch(unittest.TestCase):
         self.assertIn('不要送出', wrap['prompt'])
 
     def test_fill_handed_to_the_other_vendor_gets_its_own_prompt_and_chrome_check(self):
-        # #288:填表第一家(Codex)額度用完、換手到 Claude:prompt 照 Claude 的門路重組(不帶程式替 Codex 開好的分頁、
-        # 加上它要多交代的那一段),Chrome 檢查改做 Claude 的。以前照第一家組的,換手後卡上寫填表卡住
+        # #288:填表第一家(Codex)額度用完、換手到 Claude:prompt 照 Claude 那一家重組(它自己開頁),
+        # 瀏覽器檢查改做 Claude 的。以前照第一家組的,換手後卡上寫填表卡住
         fb = board()
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        codex = fc.FakeChrome('codex', prepared={'tab_id': '5', 'page': {}})
-        claude = fc.FakeChrome('claude-code', agent_id='cc', tail='\n【填完、改完的最後一步】')
+        codex = fc.FakeDoor('codex', prepared={'tab_id': '5', 'page': {}})
+        claude = fc.FakeDoor('claude-code', agent_id='cc')
         got = []
 
         def prompt_for(stage, url, j, fb_, board_, note='', profile=None, attachment_download_dir=None, prepared=None,
@@ -527,7 +761,7 @@ class Dispatch(unittest.TestCase):
             got.append(prompt)
             got.append(kw['prepare']({'id': 'primary', 'runtime': 'codex'}))
             got.append(kw['prepare']({'id': 'cc', 'runtime': 'claude-code'}))
-            claude.up = (False, 'Claude 90 秒內看不到 agent 的 Chrome')
+            claude.up = (False, 'ego 指令連不上')
             with self.assertRaises(ar.AgentStartError):
                 kw['prepare']({'id': 'cc', 'runtime': 'claude-code'})
             return SimpleNamespace(ok=True, status='completed', agent_id='cc')
@@ -550,7 +784,6 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(got[0], 'FILL prepared=yes for codex')           # 第一家 Codex:程式先開好申請頁
         self.assertEqual(got[1], got[0])                                  # 同一家不重做
         self.assertTrue(got[2].startswith('FILL prepared=no for claude-code'))   # 換手那一家照它自己的門路組
-        self.assertIn('【填完、改完的最後一步】', got[2])
         self.assertEqual([c[0] for c in codex.calls if c[0] in ('ready', 'open_for_agent')], ['ready', 'open_for_agent'])
         self.assertEqual([c[0] for c in claude.calls if c[0] in ('ready', 'open_for_agent')],
                          ['ready', 'open_for_agent', 'ready'])
@@ -572,7 +805,7 @@ class Dispatch(unittest.TestCase):
         fix_result = {'delivery': None, 'fixed': ['Summary'], 'tab_id': '7'}
 
         with tempfile.TemporaryDirectory(prefix='apply-profile-fix-') as directory, \
-             fc.installed(fc.FakeChrome('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
+             fc.installed(fc.FakeDoor('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
              loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', return_value=outcome), \
              patch.object(ar, 'session_id', return_value='S1'), \
@@ -605,7 +838,6 @@ class Dispatch(unittest.TestCase):
             shown = run.preview('fill', U, '/tmp/board.html')
             door = chrome_door.current()
             p, _ = run.prompt_for('fill', U, jobs[U], fb, '/tmp/board.html', door=door)
-            p += door.task_tail('fill')
         finally:
             run.load = real
         # 同一份看板底下比才有意義:那句「自己決定派幾隻」是看板上的開關決定的
@@ -619,7 +851,7 @@ class Dispatch(unittest.TestCase):
         finally:
             run.load = real
 
-    def test_fill_prompt_distinguishes_single_and_multiple_upload_fields(self):
+    def test_upload_manifest_supplies_card_paths_and_requires_merged(self):
         directory = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-uploads-'))
         merged = os.path.join(directory, 'merged.pdf')
         resume = os.path.join(directory, 'resume.pdf')
@@ -631,15 +863,13 @@ class Dispatch(unittest.TestCase):
             'files': ['resume.pdf', 'letter.pdf'],
             'merged': 'merged.pdf',
         })
-        self.assertIn('只有一個上傳欄:只上傳合併版', rule)
-        self.assertIn('恰好兩個上傳欄、標籤是 Resume 與 Cover Letter', rule)
-        self.assertIn('Cover Letter 留空', rule)
-        self.assertIn('不可把履歷另存或拼成求職信', rule)
-        self.assertIn('除上述兩槽特例外', rule)
-        self.assertIn('有兩個以上上傳欄:不要上傳合併版', rule)
+        self.assertIn('申請頁核准的上傳檔', rule)
+        self.assertNotIn('不要上傳合併版', rule)
         self.assertIn(merged, rule)
         self.assertIn(resume, rule)
         self.assertIn(attachment, rule)
+        os.unlink(merged)
+        self.assertIn('停止並回報', run._upload_rule(directory, {'files': ['resume.pdf'], 'merged': 'merged.pdf'}))
 
     def test_without_the_same_agent_nothing_is_fixed_or_sent(self):
         """那段對話找不回來:不改、不送,核准作廢(他核准的是那一頁,新的 agent 找不回來)。"""
@@ -668,15 +898,12 @@ class SubmitOutcomes(unittest.TestCase):
         self.fb[U]['apply'] = {'session': 'S1', 'tab_id': '7', 'runtime': 'codex'}
         confirm(self.fb)
         self.jobs = {U: {'id': U, 'target': 'X'}}
-        self.door = fc.FakeChrome('codex', page=copy.deepcopy(FORM_PAGE))
+        self.door = fc.FakeDoor('codex', page=copy.deepcopy(FORM_PAGE))
         self._chrome = fc.installed(self.door)
         self._chrome.__enter__()
 
     def tearDown(self):
         self._chrome.__exit__(None, None, None)
-
-    def released(self):
-        return [c[1:] for c in self.door.calls if c[0] == 'release']
 
     def test_confirmation_evidence_wins_over_answers_edited_during_send(self):
 
@@ -699,7 +926,8 @@ class SubmitOutcomes(unittest.TestCase):
                  patch.object(run.agent_report, 'report') as report, \
                  patch.object(run.agent_report, 'resolve'), \
                  patch.object(run.ship, 'folder', return_value=self.d), \
-                 patch.object(run.ship, 'read_info', return_value={}):
+                 patch.object(run.ship, 'read_info', return_value={}), \
+                 patch.object(chrome_door, 'close_if_idle') as closed:
                 ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
             self.assertTrue(ok)
             self.assertEqual(self.fb[U]['app'], 'sent')
@@ -708,7 +936,7 @@ class SubmitOutcomes(unittest.TestCase):
             self.assertIn('Nationality', sent['not_sent_questions'])
             self.assertIn('Nationality', msg)
             self.assertTrue(any('Nationality' in call.args[1] for call in report.call_args_list))
-            self.assertEqual(self.released(), [('S1', '7')])          # 送出成功:照開那一頁的那一家放掉
+            closed.assert_called_once()                               # 送出成功:那一頁的工作區排入收尾
         finally:
             run.bd.set_fb = original
 
@@ -772,7 +1000,6 @@ class SubmitOutcomes(unittest.TestCase):
         self.assertEqual(self.fb[U]['app'], 'ship')
         self.assertEqual(self.fb[U]['apply']['submit_fail']['runner_outcome'], 'failed')
         check.assert_not_called()
-        self.assertEqual(self.released(), [])
         self.assertTrue(report.called)
 
     def test_the_checklist_is_run_again_the_moment_sending_starts(self):
@@ -798,13 +1025,15 @@ class SubmitOutcomes(unittest.TestCase):
     def test_a_confirmation_page_on_another_site_is_not_proof(self):
         """agent 回報送出成功,確認頁網址卻不是這張卡的網站 → 送出結果不明,不當成已送出(修正 19)。"""
         with open(os.path.join(self.d, 'submit.json'), 'w', encoding='utf-8') as f:
-            json.dump({'submitted': True, 'confirm_url': 'https://other-company.example/thanks', 'confirm_text': 'Thanks'}, f)
+            json.dump({'submitted': True, 'reason': '本次申請已收到',
+                       'confirm_url': 'https://other-company.example/thanks', 'confirm_text': 'Thanks'}, f)
         with open(os.path.join(self.d, 'submit.png'), 'wb') as f:
             f.write(b'png')
-        ok, res = run.check_submit(self.d, 0, 'https://jobs.lever.co/x/1')
+        page = {'url': 'https://other-company.example/thanks', 'lines': ['Thanks'], 'fields': []}
+        ok, res = run.check_submit(self.d, 0, 'https://jobs.lever.co/x/1', page)
         self.assertFalse(ok)
         self.assertIn('不是這張卡的網站', res['problems'][-1])
-        self.assertTrue(run.check_submit(self.d, 0, 'https://www.other-company.example/job/1')[0])
+        self.assertTrue(run.check_submit(self.d, 0, 'https://www.other-company.example/job/1', page)[0])
         self.assertEqual(run._site('https://www.104.com.tw/job/1'), '104.com.tw')
 
     def test_missing_confirmation_evidence_keeps_the_tab_and_marks_submit_failed(self):
@@ -823,186 +1052,8 @@ class SubmitOutcomes(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.fb[U]['app'], 'ship')
         self.assertTrue(self.fb[U]['apply']['submit_fail']['clicked'])
-        self.assertEqual(self.released(), [])
         self.assertTrue(report.called)
 
-
-
-class ProfileReadWhenTheProgramCannotOpenIt(unittest.TestCase):
-    """#288:程式自己開不了頁的那一家(Claude),平台上存好的履歷也要讀回核對:填表前照實說現在做不到、這一輪由 agent 讀給程式;
-    填完、送出前的核對從它那一輪的紀錄拿。程式自己讀得到的那一家(Codex)照舊由程式讀。用假的 agent 的 Chrome 走完整個流程。"""
-    READ = 'https://pda.104.com.tw/profile/preview?vno=1'
-
-    def setUp(self):
-        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-claude-profile-'))
-
-    def profile_page(self, url=None):
-        return {'url': url or self.READ, 'title': '我的履歷', 'text': '工作經歷 ' + 'x' * 2500, 'links': ['https://ex.test/p']}
-
-    def _fill(self, door):
-        """跑一次填表(外面全換成假的),回 profile_check 收到的 reader、profile_after 收到的 reader、派出去的 prompt。"""
-        fb = board()
-        delivery = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': self.READ}
-        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        seen = {}
-
-        def agent(prompt, log, home, board_path, **kw):
-            seen['prompt'], seen['log'] = prompt, log
-            return SimpleNamespace(ok=True, status='completed', agent_id=door.agent_id)
-
-        def pre(url, board_path, delivery=None, reported=None, reader=None):
-            seen['pre_reader'] = reader
-            return None
-
-        def after(url, res, board_path=None, reader=None):
-            seen['after_reader'] = reader
-            return []
-        with fc.installed(door), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
-             patch.object(run, '_run_agent', side_effect=agent), \
-             patch.object(ar, 'session_id', return_value='S9'), \
-             patch.object(run, 'shoot'), \
-             patch.object(run, 'check_fill', return_value=([], {'tab_id': '7', 'delivery': delivery})), \
-             patch.object(run, 'profile_check', side_effect=pre), \
-             patch.object(run, 'profile_after', side_effect=after), \
-             patch.object(run, '_profile_check_after_fill', return_value=[]), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
-             patch.object(run.agent_report, 'report'), \
-             patch.object(run.agent_report, 'resolve'):
-            run.run_one('fill', U, '/tmp/board.html')
-        return seen
-
-    def test_the_fill_checks_the_profile_from_the_run_it_just_did(self):
-        door = fc.FakeChrome('claude-code', pages={self.READ: self.profile_page()}, from_log={'read_profile'},
-                             tail='\n照【讀平台履歷給程式】讀給程式')
-        seen = self._fill(door)
-        self.assertEqual(seen['after_reader'](self.READ), self.profile_page())
-        self.assertEqual(door.calls[-1], ('read_profile', self.READ, [seen['log']]))   # 從這一輪的紀錄拿
-        # 填表前程式讀不到:照實講現在做不到(由 agent 在這一輪讀給程式),不叫他改用 Codex
-        with self.assertRaises(chrome_door.NotNow):
-            seen['pre_reader'](self.READ)
-        self.assertIn('讀平台履歷給程式', seen['prompt'])                  # 最後再提醒一次,跟填表頁的自讀一樣
-        codex = fc.FakeChrome('codex', pages={self.READ: self.profile_page()})
-        seen = self._fill(codex)
-        self.assertEqual(seen['pre_reader'](self.READ), self.profile_page())   # 程式自己開頁讀,填表前就讀得到
-        self.assertNotIn('讀平台履歷給程式', seen['prompt'])
-
-    def test_submit_rereads_the_profile_in_a_check_round_before_sending(self):
-        # 送出前要再核對一次平台履歷。程式讀得到的那一家由程式讀;讀不到的那一家叫回同一段對話讀一次(送出前的核對那一輪),
-        # 程式從那一輪的紀錄拿結果比,對不上就不送。附件用現在的檔核對過就不再下載
-        fb = board()
-        delivery = {'method': 'platform_profile', 'profile_kind': 'fixed', 'profile_url': self.READ}
-        fb[U]['apply'] = {'session': 'S1', 'tab_id': '7', 'agent_id': 'cc', 'runtime': 'claude-code', 'delivery': delivery}
-        confirm(fb)
-        jobs = {U: {'id': U, 'target': 'X'}}
-        door = fc.FakeChrome('claude-code', agent_id='cc', pages={self.READ: self.profile_page()}, from_log={'read_profile'})
-        calls, checked = [], []
-
-        def agent(prompt, log, home, board_path, **kw):
-            calls.append((os.path.basename(log), prompt))
-            return SimpleNamespace(ok=True, status='completed', agent_id='cc')
-
-        def check(url, board_path, delivery=None, reported=None, reader=None):
-            checked.append(reader(self.READ))
-            return ({'read': self.READ, 'edit': self.READ}, [{'where': '經歷', 'missing': ['x']}], '')
-        with fc.installed(door), \
-             patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
-             patch.object(run, 'out_dir', return_value=self.d), \
-             patch.object(run, '_run_agent', side_effect=agent), \
-             patch.object(ar, 'session_id', return_value='S1'), \
-             patch.object(run, 'profile_check', side_effect=check), \
-             patch('profile_sync.profile_attachments_fresh', return_value=True), \
-             patch('profile_sync.where', return_value={'read': self.READ, 'edit': self.READ}), \
-             patch.object(run, '_pick', return_value=('zh', 'general')), \
-             patch('profile_sync.attachment_step', return_value=''), \
-             patch('profile_sync.check_attachments', side_effect=AssertionError('附件核對過了,不用再下載')), \
-             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
-             patch.object(run.agent_report, 'report'), \
-             patch.object(run.agent_report, 'resolve'):
-            ok, message = run.run_one('submit', U, '/tmp/board.html')
-        self.assertEqual(checked, [self.profile_page()])
-        self.assertEqual(door.calls[-1][-1], [os.path.join(self.d, 'submit-check.log')])   # 從核對那一輪的紀錄拿
-        self.assertEqual([c[0] for c in calls], ['submit-check.log'])     # 對不上:送出那一輪沒派
-        self.assertIn(self.READ, calls[0][1])                              # 叫它讀的是要核對的那一份
-        self.assertFalse(ok)
-        self.assertIn('經歷', message)
-
-
-class TabRead(unittest.TestCase):
-    def test_a_retry_hint_from_the_extension_is_retried(self):
-        # 外掛偶爾回「Retry the browser command.」:讀一次就放棄,整張填好的表會被判沒填好
-        import apply_tab
-        calls = []
-
-        class FakeTab:
-            def __init__(self, _session, _tab):
-                calls.append(1)
-                if len(calls) == 1:
-                    raise RuntimeError('Unable to load browser request-header policy. Retry the browser command.')
-
-            def js(self, _code):
-                return json.dumps({'url': 'https://example.test/apply', 'fields': []})
-
-            def end_turn(self, keep=()):
-                pass
-
-            def close(self):
-                pass
-
-        with patch.object(apply_tab, 'Tab', FakeTab), patch.object(time, 'sleep', lambda _s: None):
-            self.assertEqual(apply_tab.read('S1', '7')['url'], 'https://example.test/apply')
-        self.assertEqual(len(calls), 2)
-
-    def test_the_screenshot_retries_the_same_way(self):
-        # 截圖以前沒有重試:碰到同一句暫時錯誤就沒有圖,填好的表被判「沒有這一輪的截圖」
-        import apply_tab
-        calls = []
-
-        class FakeTab:
-            def __init__(self, _session, _tab):
-                calls.append(1)
-                if len(calls) == 1:
-                    raise RuntimeError('Unable to load browser request-header policy. Retry the browser command.')
-
-            def call(self, _code):
-                return '', [b'PNG']
-
-            def end_turn(self, keep=()):
-                pass
-
-            def close(self):
-                pass
-
-        out = os.path.join(self.enterContext(tempfile.TemporaryDirectory(prefix='shot-')), 'fill.png')
-        with patch.object(apply_tab, 'Tab', FakeTab), patch.object(time, 'sleep', lambda _s: None):
-            apply_tab.shot('S1', '7', out)
-        with open(out, 'rb') as f:
-            self.assertEqual(f.read(), b'PNG')
-        self.assertEqual(len(calls), 2)
-
-    def test_every_extension_call_resends_on_the_retry_hint(self):
-        # 放在最底層:開分頁、關分頁這些不經過 read/shot 的呼叫也要重送(修改那一輪收分頁時碰到一次就整輪中斷)
-        import apply_tab
-        s = apply_tab.Session.__new__(apply_tab.Session)
-        s.meta = {}
-        replies = [{'result': {'isError': True, 'content': [
-                        {'type': 'text', 'text': 'Unable to load browser request-header policy. Retry the browser command.'}]}},
-                   {'result': {'content': [{'type': 'text', 'text': 'ok'}]}}]
-        with patch.object(s, '_rpc', side_effect=lambda *a, **k: replies.pop(0), create=True), \
-                patch.object(time, 'sleep', lambda _s: None):
-            self.assertEqual(s.js('1'), 'ok')
-        self.assertEqual(replies, [])
-
-    def test_other_errors_are_not_retried(self):
-        import apply_tab
-
-        def broken(_session, _tab):
-            raise LookupError('拿不到那個分頁')
-
-        with patch.object(apply_tab, 'Tab', broken), self.assertRaises(LookupError):
-            apply_tab.read('S1', '7')
 
 
 def filled(state='confirmed', **apply):
@@ -1023,7 +1074,7 @@ class RoundInProgress(unittest.TestCase):
 
     def _stopped(self, stage, fb, chrome=None):
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        chrome = chrome or fc.FakeChrome()
+        chrome = chrome or fc.FakeDoor()
         seen = {}
 
         def agent(*_a, **_k):
@@ -1070,8 +1121,7 @@ class RoundInProgress(unittest.TestCase):
         # 頁面不見了,自動流程重填一次;那一輪 Chrome 沒連上就失敗。以前失敗會把 apply.at 換新,
         # 下一次看又是一把新記號,同一張卡一輪接一輪重派(回報每輪多一筆)
         import autopilot as ap
-        import agent_chrome
-        fb = filled('gone', tab_id='', issues=[agent_chrome.GONE])
+        fb = filled('gone', tab_id='', issues=[chrome_door.GONE])
         fb['__auto__'] = {'since': '2026-01-01T00:00:00', 'skip': [], 'tried': [], 'seen': {}}
         data = {'jobs': [{'id': U}], 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}}
         cfg = {'auto_fill': True}
@@ -1081,7 +1131,7 @@ class RoundInProgress(unittest.TestCase):
         first = plan()
         self.assertEqual(first['fill'], U)
         fb['__auto__']['tried'] = first['tried']
-        down = fc.FakeChrome(up=(False, 'agent 的 Chrome 沒連上'))
+        down = fc.FakeDoor(up=(False, 'agent 的 Chrome 沒連上'))
         with patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
              patch.object(run, 'profile_check', return_value=None), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
@@ -1116,7 +1166,7 @@ class WriteBackKeepsWhatOthersMarked(unittest.TestCase):
              patch.object(run, 'check_fill', return_value=([], res)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             fc.installed(fc.FakeChrome()):
+             fc.installed(fc.FakeDoor()):
             return run.run_one(stage, U, '/tmp/board.html')
 
     def test_a_resume_change_during_the_refill_is_not_wiped_by_its_result(self):
@@ -1143,6 +1193,30 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
     """重填、修改只收「代投」自己的回報:客製流程、可投遞夾建置那些不是填表解決的,不能寫成「作廢」「已經解決」。
     送出沒確認成功要他確認過才收;送出前平台履歷比對沒過,重填、改好了就算解決。"""
 
+    def test_login_popup_reports_its_website_and_keeps_the_application_page_for_resume(self):
+        fb = board()
+        workspace = {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}
+        fake = fc.FakeDoor(prepared={'workspace': workspace, 'tab_id': '42:p1', 'page': FORM_PAGE})
+        action = {'page': 'p2', 'site': 'www.linkedin.com', 'need': '在 www.linkedin.com 完成登入'}
+        fake.human_action = lambda: action
+        result = {'tab_id': '42:p1', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
+        with tempfile.TemporaryDirectory() as directory, fc.installed(fake), \
+             loaded({U: {'id': U, 'target': 'Example · Engineer'}}, fb, directory), \
+             patch.object(run, 'profile_check', return_value=None), \
+             patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
+             patch.object(ar, 'session_id', return_value='S2'), patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', return_value=(['LinkedIn 登入尚未完成'], result)), \
+             patch.object(run.agent_report, 'report') as report:
+            ok, _ = run.run_one('fill', U, '/tmp/board.html')
+        self.assertFalse(ok)
+        self.assertEqual(ds.state(fb[U]), 'stuck')
+        self.assertEqual(fb[U]['apply']['tab_id'], '42:p1')
+        self.assertEqual(fb[U]['apply']['workspace']['page'], 'p1')
+        self.assertEqual(fb[U]['apply']['workspace'].get('handoff_page'), 'p2')
+        self.assertIn('在 www.linkedin.com 完成登入', '\n'.join(fb[U]['apply']['issues']))
+        self.assertIn('在 www.linkedin.com 完成登入', report.call_args.kwargs['need'])
+        self.assertIn('修改', report.call_args.kwargs['need'])
+
     def test_other_flows_and_uncertain_submits_stay_open(self):
         import agent_report
         fb = filled('stuck')
@@ -1159,7 +1233,7 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
              patch.object(ar, 'session_id', return_value='S2'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], res)), \
-             fc.installed(fc.FakeChrome()):
+             fc.installed(fc.FakeDoor()):
             self.assertTrue(run.run_one('fill', U, '/tmp/board.html')[0])
         still = sorted(it['msg'] for it in fb['__inbox__'] if not it.get('done'))
         self.assertEqual(still, ['可投遞夾本輪建置失敗', '沒有可收下的客製版', '送出沒確認成功:沒看到成功頁面'])
@@ -1186,10 +1260,11 @@ class RetypedMarksOnly(unittest.TestCase):
              patch.object(ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', side_effect=checking), \
+             patch.object(run.fr, 'record_fill', return_value=[]), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             fc.installed(fc.FakeChrome()):
+             fc.installed(fc.FakeDoor()):
             self.assertTrue(run.run_one('fix', U, '/tmp/board.html')[0])
         self.assertEqual(fb[U]['form']['f'][1].get('refill'), 1)
         confirm(fb)
@@ -1207,9 +1282,10 @@ class RetypedMarksOnly(unittest.TestCase):
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], res)), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+             patch.object(run.fr, 'record_fill', return_value=[]), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
-             fc.installed(fc.FakeChrome()):
+             fc.installed(fc.FakeDoor()):
             self.assertTrue(run.run_one('fix', U, '/tmp/board.html')[0])
         self.assertNotIn('refill', fb[U]['form']['f'][1])
 
@@ -1237,7 +1313,8 @@ class SubmittedWhileFilling(unittest.TestCase):
     def test_it_is_recorded_as_sent_and_reported(self):
         fb = filled('stuck')
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        res = {'tab_id': '7', 'handoff': True, 'submitted': True, 'confirm_text': 'Application received'}
+        res = {'tab_id': '7', 'handoff': True, 'submitted': True, 'submit_claimed': True,
+               'confirm_text': 'Application received'}
         with tempfile.TemporaryDirectory(prefix='apply-violation-') as directory, \
              loaded(jobs, fb, directory), \
              patch.object(run, 'profile_check', return_value=None), \
@@ -1248,13 +1325,34 @@ class SubmittedWhileFilling(unittest.TestCase):
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.agent_report, 'report') as report, \
              patch.object(run.agent_report, 'resolve'), \
-             fc.installed(fc.FakeChrome()):
+             fc.installed(fc.FakeDoor()):
             ok, msg = run.run_one('fill', U, '/tmp/board.html')
         self.assertFalse(ok)
         m = fb[U]
         self.assertEqual((ds.state(m), m['app'], m['sent_by']), ('sent', 'sent', 'agent'))
         self.assertIn('違規', m['apply']['sent']['note'])
         self.assertTrue(report.called)
+
+    def test_explicit_unknown_from_check_fill_goes_to_unsure_and_cannot_be_refilled(self):
+        fb = filled('stuck')
+        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
+        with tempfile.TemporaryDirectory(prefix='apply-unknown-') as directory, loaded(jobs, fb, directory):
+            with open(os.path.join(directory, 'fill.json'), 'w') as f:
+                json.dump({'submitted': None, 'clicked': False, 'reason': '無法確認本次是否已收到'}, f)
+            checked = run.check_fill(fb, U, directory, 0)
+            self.assertTrue(checked[1]['submit_claimed'])
+            with patch.object(run, 'profile_check', return_value=None), \
+                 patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
+                 patch.object(ar, 'session_id', return_value='S2'), patch.object(run, 'shoot'), \
+                 patch.object(run, 'check_fill', return_value=checked), \
+                 patch.object(run.ship, 'read_info', return_value={}), \
+                 patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'), \
+                 fc.installed(fc.FakeDoor()):
+                ok, _message = run.run_one('fill', U, '/tmp/board.html')
+        self.assertFalse(ok)
+        self.assertEqual(ds.state(fb[U]), 'unsure')
+        self.assertFalse(ds.allowed(fb[U], 'fill_start'))
+        self.assertFalse(ds.allowed(fb[U], 'fix_start'))
 
 
 class AgentThatNeverStarted(unittest.TestCase):
@@ -1271,8 +1369,8 @@ class AgentThatNeverStarted(unittest.TestCase):
             called.append(kw)
             return outcome or ar.AgentResult('failed', 1, 42, agent_id=kw.get('agent_id'))
         with tempfile.TemporaryDirectory(prefix='apply-gone-agent-') as directory, \
-             fc.installed(fc.FakeChrome('codex', page=copy.deepcopy(FORM_PAGE)),
-                          fc.FakeChrome('claude-code', agent_id='cc', page=copy.deepcopy(FORM_PAGE)), agents=agents), \
+             fc.installed(fc.FakeDoor('codex', page=copy.deepcopy(FORM_PAGE)),
+                          fc.FakeDoor('claude-code', agent_id='cc', page=copy.deepcopy(FORM_PAGE)), agents=agents), \
              patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
              patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
              patch.object(run, '_run_agent', side_effect=agent), \
@@ -1344,25 +1442,27 @@ class PreparedPageIsNotReloaded(unittest.TestCase):
     """程式先開好的申請頁,agent 接手時不准重新載入(#229:驗收時同一頁被載入兩次)。"""
 
     def test_prompt_says_do_not_reload(self):
-        step = run.prepared_step({'tab_id': 'T9', 'page': {'title': 'Apply', 'url': 'https://jobs.example/apply',
-                                                            'fields': [], 'lines': []}}, 'INST')
+        step = run.prepared_step({'workspace': {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'},
+                                  'tab_id': '42:p1', 'page': {'title': 'Apply', 'url': 'https://jobs.example/apply',
+                                                           'fields': [], 'lines': []}})
         self.assertIn('不要重新載入', step)
         self.assertIn('不要另開分頁', step)
+        self.assertIn('taskSpace(42)', step)
+        self.assertIn('task.page("p1")', step)
+        self.assertIn('42:p1', step)
 
-    def test_upload_is_prepared_like_the_download(self):
-        # 上傳前 Codex 會先問「允許嗎?」,網站不在允許清單上就卡住;超過 js 預設的 30 秒 REPL 被重置,
-        # 申請表那一頁沒交接過就接不回來(下載那條 7bd8cb5 已經這樣修,上傳沒有)
-        step2 = run.FILL.split('\n2. ', 1)[1].split('\n3. ', 1)[0]
-        self.assertIn('markHandoff', step2)
-        self.assertLess(step2.index('markHandoff'), step2.index('filechooser'))    # 上傳之前先交接
-        self.assertIn('timeout_ms: 120000', step2)
-        self.assertIn('permission request', step2)                                 # 被擋就停下照抄那句話
+    def test_shared_prompts_use_ego_without_extension_workarounds(self):
+        prompt = run.FILL + run.FIX + run.SUBMIT + run.BATCH_FILL + run.OPEN_STEP
+        for obsolete in ('markHandoff', 'cua.', 'getByLabel', 'setChecked', 'curl multipart', '外掛'):
+            self.assertNotIn(obsolete, prompt)
+        self.assertIn('snapshot', run.BATCH_FILL)
+        self.assertIn('check', run.BATCH_FILL)
 
     def test_prompt_tells_the_truth_about_the_old_tabs(self):
-        # 程式是拿這張以前的分頁重新載入(接不回來才另開),舊的沒關;以前跟 agent 說「以前的分頁也關了」
-        step = run.prepared_step({'tab_id': 'T9', 'page': {}}, 'INST')
+        step = run.prepared_step({'workspace': {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'},
+                                  'tab_id': '42:p1', 'page': {}})
         self.assertNotIn('關了', step)
-        self.assertIn('其他分頁不要動', step)
+        self.assertIn('其他卡與使用者的分頁不要動', step)
 
 
 if __name__ == '__main__':
@@ -1392,7 +1492,8 @@ class PauseDoesNotEatTheTimeLimit(unittest.TestCase):
 
         with patch.object(run, 'SP', sp), patch.object(ar, '_eligible_agents',
                                                        return_value=([{'id': 'a', 'runtime': 'codex'}], '')), \
-             patch.object(ar, '_record'), patch.object(ar, '_stop_tree'):
+             patch.object(ar, '_record'), patch.object(ar, '_stop_tree'), \
+             patch.object(ar, 'argv_for', return_value=(['/fake/codex'], None)):
             out = run._run_agent('p', os.path.join(sp, 'fill.log'), sp, os.path.join(sp, 'b.html'),
                                  timeout=0.3, launcher=lambda *a, **k: Agent())
         self.assertEqual(out.status, 'completed', '暫停的時間不算進填表時限')
@@ -1409,7 +1510,8 @@ class PauseDoesNotEatTheTimeLimit(unittest.TestCase):
 
         with patch.object(run, 'SP', sp), patch.object(ar, '_eligible_agents',
                                                        return_value=([{'id': 'a', 'runtime': 'codex'}], '')), \
-             patch.object(ar, '_record'), patch.object(ar, '_stop_tree'):
+             patch.object(ar, '_record'), patch.object(ar, '_stop_tree'), \
+             patch.object(ar, 'argv_for', return_value=(['/fake/codex'], None)):
             out = run._run_agent('p', os.path.join(sp, 'fill.log'), sp, os.path.join(sp, 'b.html'),
                                  timeout=0.2, launcher=lambda *a, **k: Agent())
         self.assertEqual(out.status, 'timeout')
@@ -1458,7 +1560,7 @@ class LateResult(unittest.TestCase):
             ds.fire(fb, U, 'platform_found', by='platform', sent_at=T, rec='104:abc:' + T)   # 平台對帳找到了
             return SimpleNamespace(ok=True, status='completed', agent_id='a')
         with tempfile.TemporaryDirectory(prefix='apply-late-') as directory, \
-             fc.installed(fc.FakeChrome('claude-code', agent_id='a')), \
+             fc.installed(fc.FakeDoor('claude-code', agent_id='a')), \
              loaded(jobs, fb, directory), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
@@ -1469,3 +1571,24 @@ class LateResult(unittest.TestCase):
             run.run_one('fill', U, '/tmp/board.html')
         self.assertEqual(ds.state(fb[U]), 'sent')
         self.assertIn('fill_ok', [h.get('event') for h in fb[U].get('history') or [] if h.get('late')])
+    def test_native_record_errors_repair_once_and_still_block_on_failure(self):
+        for errors, expected_ok in (([None], True), ([ValueError('bad source'), None], True),
+                                    ([ValueError('bad source'), ValueError('still bad')], False)):
+            with self.subTest(errors=len(errors), expected_ok=expected_ok):
+                fb = filled('parked')
+                jobs = {U: {'id': U, 'target': 'X'}}
+                result = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
+                with tempfile.TemporaryDirectory() as directory, loaded(jobs, fb, directory), \
+                     fc.installed(fc.FakeDoor()), \
+                     patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')) as agent, \
+                     patch.object(ar, 'session_id', return_value='S1'), \
+                     patch.object(run.fr, 'record_fill', side_effect=errors) as record, \
+                     patch.object(run, 'shoot'), \
+                     patch.object(run, 'check_fill', return_value=([], result)), \
+                     patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
+                    ok, _message = run.run_one('fix', U, '/tmp/board.html')
+                    self.assertEqual(ok, expected_ok)
+                    self.assertEqual(record.call_count, len(errors))
+                    self.assertEqual(agent.call_count, len(errors))
+                    self.assertEqual(agent.call_args.kwargs['output_last_message'], os.path.join(directory, 'fill.json'))
+                    self.assertEqual(agent.call_args.kwargs['resume'], 'S1')
