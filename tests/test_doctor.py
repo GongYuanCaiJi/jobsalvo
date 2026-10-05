@@ -151,6 +151,29 @@ class FolderHistoryRow(unittest.TestCase):
             self.assertTrue(row is None or row['ok'])
             _, row = self.history_row(os.path.join(home, 'not-created-yet'))
             self.assertTrue(row is None or row['ok'])
+class Firewall(unittest.TestCase):
+    """手機走 Tailscale 連看板:防火牆擋掉時,本機連得到、Tailscale 位址連不到(#295)。用假的連線,不碰真的網路。"""
+
+    def test_only_blocks_when_localhost_answers_but_tailscale_does_not(self):
+        cases = [
+            ({'100.64.0.1': True, '127.0.0.1': True}, False, '兩邊都連得到'),
+            ({'100.64.0.1': False, '127.0.0.1': True}, True, '只有 Tailscale 位址連不到:被擋'),
+            ({'100.64.0.1': False, '127.0.0.1': False}, False, '看板沒在跑:不下結論'),
+        ]
+        for reach, blocked, why in cases:
+            problem = doctor.firewall_problem('100.64.0.1', 8899, answers=lambda h, p: reach[h])
+            self.assertEqual(bool(problem), blocked, (why, problem))
+
+
+    def test_fix_unblocks_the_entry_actually_listed_not_the_running_version(self):
+        # 實測:3.14 被擋時,清單上擋掉的那一條寫的是 3.11 的路徑;對 3.14 的路徑下 --unblockapp 沒有作用
+        listed = ('1 : /Applications/Other.app \n             (Allow incoming connections)\n'
+                  '2 : /u/python/cpython-3.11/bin/python3.11 \n             (Block incoming connections)\n')
+        fix = doctor.firewall_fix('/u/python/cpython-3.14/bin/python3.14', read=lambda: listed)
+        self.assertIn('--unblockapp /u/python/cpython-3.11/bin/python3.11', fix)
+        self.assertNotIn('python3.14', fix)
+        fix = doctor.firewall_fix('/u/python/cpython-3.14/bin/python3.14', read=lambda: '')
+        self.assertIn('--add /u/python/cpython-3.14/bin/python3.14', fix)
 
 
 class Coverage(unittest.TestCase):

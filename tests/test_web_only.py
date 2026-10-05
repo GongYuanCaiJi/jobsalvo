@@ -172,7 +172,8 @@ class WebOnly(tb.HttpBase):
                 self.assertIn('安裝 ego lite', ego_row['fix'])
             # 不派 agent 跑一次(那會花額度,額度是使用者自己的事):只准讀本機的登入狀態
             # (資料夾版本紀錄那一列只用 git 讀本機 repo 狀態,不花額度)
-            agent_calls = [argv for argv in mine if os.path.basename(argv[0][0]) != 'git']
+            # 防火牆那一項讀本機的 Tailscale 位址(只讀、不花額度,#295)
+            agent_calls = [argv for argv in mine if os.path.basename(argv[0][0]) not in ('git', 'Tailscale', 'tailscale')]
             self.assertTrue(all(tuple(argv[0][1:]) in (('login', 'status'), ('auth', 'status')) for argv in agent_calls), mine)
             self.assertTrue(all(argv[0][1] in ('rev-parse', 'remote', 'log') for argv in mine
                                 if os.path.basename(argv[0][0]) == 'git'), mine)

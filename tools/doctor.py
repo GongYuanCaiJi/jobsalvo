@@ -39,6 +39,55 @@ NOT_CHECKED = {
 CHECKED = {'git', 'codex', 'claude', 'command-code', 'uv', 'ego-browser'}
 
 
+FIREWALL = '/usr/libexec/ApplicationFirewall/socketfilterfw'
+
+
+def _answers(host, port):
+    """連 host:port 拿一次看板首頁的回應;連不上、連上被切斷都回 False。"""
+    import http.client
+    try:
+        c = http.client.HTTPConnection(host, port, timeout=5)
+        c.request('HEAD', '/')
+        c.getresponse()
+        c.close()
+        return True
+    except (OSError, http.client.HTTPException):
+        return False
+
+
+def firewall_problem(ip, port, answers=_answers):
+    """看板開給手機(Tailscale)時,macOS 防火牆有沒有擋掉看板。回 None 或一句原因。
+    不看防火牆清單:uv 的 Python 沒有正式身分,清單上的路徑對不上實際放行的那一支(3.14 會沿用 3.11 那一條),照清單判斷會誤報。
+    改成實際連:這台 Mac 連自己的 Tailscale 位址會經過防火牆,被擋就是連上就被切斷;本機 127.0.0.1 不經過防火牆。"""
+    if answers(ip, port):
+        return None
+    if not answers('127.0.0.1', port):
+        return None   # 看板本身沒在跑,沒辦法判斷
+    return '本機連得到看板,走 Tailscale 位址就連不到:多半是 Mac 防火牆擋掉了跑看板的 Python,手機會連不上'
+
+
+def _blocked_pythons(read=None):
+    """防火牆清單裡設成擋掉的 Python。uv 的 Python 沒有正式身分,好幾個版本共用清單上的同一條,
+    路徑可能是別的版本(實測:3.14 被擋時,清單上擋掉的那一條寫的是 3.11 的路徑;對 3.14 的路徑下解除沒有作用)。"""
+    import re
+    try:
+        out = read() if read else subprocess.run([FIREWALL, '--listapps'], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [p for p, v in re.findall(r'^\s*\d+\s*:\s*(.+?)\s*\n\s*\((Allow|Block) incoming connections\)', out or '', re.M)
+            if v == 'Block' and os.path.basename(p).startswith('python')]
+
+
+def firewall_fix(exe, read=None):
+    """給他貼的解法:清單上有擋掉的 Python 就解除那幾條(解除要對清單上的路徑);沒有就把這一支加進去並允許。"""
+    blocked = _blocked_pythons(read)
+    lines = ([f'sudo {FIREWALL} --unblockapp {shlex.quote(p)}' for p in blocked] if blocked else
+             [f'sudo {FIREWALL} --add {shlex.quote(exe)}', f'sudo {FIREWALL} --unblockapp {shlex.quote(exe)}'])
+    return ('在畫面下方的終端機一次貼一行、按 Enter;出現 Password: 就打開機密碼(畫面不會顯示,照打再按 Enter):\n'
+            + '\n'.join(lines) + '\n做完重新整理手機上的看板。'
+            '或到「系統設定 → 網路 → 防火牆 → 選項」,把 Python 那一條改成「允許連入連線」。')
+
+
 def _runtime_path(runtime, which=None):
     import agent_run
     which = which or shutil.which      # 呼叫時才取:寫成預設值會在定義時綁死,測試換不掉
@@ -186,6 +235,19 @@ def check_environment(agents=None):
         'detail': ('已經裝好(uv)' if ready else '還沒準備好:這台電腦沒有 uv' if not uv else '還沒準備好:還沒跑過 uv sync'),
         'fix': '' if ready else ('裝 uv:brew install uv,再重新啟動看板。' if not uv else '在程式資料夾跑 uv sync,再重新啟動看板。'),
     })
+
+    # 手機走 Tailscale 連看板:macOS 防火牆會安靜擋掉跑看板的 Python(換 Python 版本後實際發生過,手機只會轉圈)
+    if sys.platform == 'darwin' and os.path.isfile(venv):
+        import board_server
+        ip = board_server.tailscale_ip()
+        if ip:
+            exe = os.path.realpath(venv)
+            problem = firewall_problem(ip, cf.PORT)
+            checks.append({
+                'key': 'firewall', 'label': '手機連得到看板(Mac 防火牆)', 'ok': not problem, 'required': False,
+                'detail': problem or '從 Tailscale 位址連得到看板(看板沒在跑時不檢查)',
+                'fix': '' if not problem else firewall_fix(exe),
+            })
 
     # 設定勾了會用 Chrome、而且那一種真的能用才算(以前只看設定:沒裝任何 agent 也寫「已設定」)
     import chrome_door
