@@ -165,10 +165,10 @@ class Accept:
         import apply_tab
         err = ''
         try:
-            session, tab, door = apply_tab._lookup(self.url, self.board)
+            tab, door = apply_tab._lookup(self.url, self.board)
             import evidence
             with evidence.opened('apply_check', 'live', [self.url], self.board):
-                door.shot(session, tab, os.path.join(self.out, name + '.png'))
+                door.shot(tab, os.path.join(self.out, name + '.png'))
         except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;截不到照實印進驗收紀錄
             err = str(e)[:120]
             self.say(f'  (截不到 {name}:{err})')
@@ -226,7 +226,7 @@ class Accept:
                 '📣' in dom['inbox'] and '回報' in dom['inbox'] and '127.0.0.1' in dom['inbox']
                 and '登入' in dom['inbox'], path)
         with evidence.opened('apply_check', '看板通知驗收', [self.url], self.board):
-            self.board_door.shot(None, opened['tab_id'], os.path.join(self.out, '0-看板通知.png'))
+            self.board_door.shot(opened['tab_id'], os.path.join(self.out, '0-看板通知.png'))
         actor('await page.click(' + json.dumps('css=[data-inboxgo=' + json.dumps(self.url) + '] >> nth=0') + ');')
         selector = 'article[data-fid=' + json.dumps(self.url) + ']'
         dom = actor('console.log("@@acceptance-board@@"+JSON.stringify(await page.evaluate(selector=>'
@@ -237,7 +237,7 @@ class Accept:
         self.ok('登入', '回報能開到同一張卡,卡上寫明網站與接手動作',
                 '127.0.0.1' in dom['card'] and '登入' in dom['card'] and dom['eye'], dom)
         with evidence.opened('apply_check', '看板卡片驗收', [self.url], self.board):
-            self.board_door.shot(None, opened['tab_id'], os.path.join(self.out, '0-看板卡片.png'))
+            self.board_door.shot(opened['tab_id'], os.path.join(self.out, '0-看板卡片.png'))
         actor('await page.click(' + json.dumps('css=' + selector + ' [data-apshot]') + ');')
 
     # ---- 1 填表 ----
@@ -269,7 +269,7 @@ class Accept:
             self.keep_shot('0-等待本人登入', '登入')
             import chrome_door, board_server
             door = chrome_door.for_card(a)
-            blocked = door.read_page(self.sid, a.get('tab_id'))
+            blocked = door.read_page(a.get('tab_id'))
             self.ok('登入', '程式不把登入後方的隱藏表單當成已填欄位', not blocked.get('fields'))
             board_server.STATE = self.board
             self.board_http = board_server.ThreadingHTTPServer(('127.0.0.1', 0), board_server.H)

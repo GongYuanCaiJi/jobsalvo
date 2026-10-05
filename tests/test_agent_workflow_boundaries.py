@@ -43,7 +43,7 @@ class Responsibilities(unittest.TestCase):
         self.calls = []
         self.fingerprint = 'current'
         self.door = SimpleNamespace(agent_id='original-agent', runtime='codex', native_json_output=True,
-                                    profile_reader=lambda logs, board: lambda url: copy.deepcopy(self.pages[url]))
+                                    profile_reader=lambda board: lambda url: copy.deepcopy(self.pages[url]))
         for target, value in (
             ('apply_run.load', lambda board: (self.jobs, self.fb)),
             ('apply_run.out_dir', lambda url, board: str(self.out)),

@@ -63,18 +63,18 @@ class FakeDoor:
     def fetch_rule(self):
         return f'【{self.runtime} 的取檔方式】'
 
-    def profile_reader(self, logs=None, board=None):
-        return lambda read_url: self.read_profile(read_url, logs, board)
+    def profile_reader(self, board=None):
+        return lambda read_url: self.read_profile(read_url, board)
 
     def resume(self):
         self._can('resume')
 
-    def read_page(self, session, tab_id, logs=None):
-        self._can('read_page', session, tab_id, logs)
+    def read_page(self, tab_id):
+        self._can('read_page', tab_id)
         return self.page
 
-    def read_profile(self, read_url, logs=None, board=None):
-        self._can('read_profile', read_url, logs)
+    def read_profile(self, read_url, board=None):
+        self._can('read_profile', read_url)
         if read_url not in self.pages:
             raise LookupError(f'假的門路沒有 {read_url}')
         return self.pages[read_url]
@@ -94,14 +94,14 @@ class FakeDoor:
             files.append({'name': item['name'], 'path': path})
         return {'files': files, 'problems': []}
 
-    def shot(self, session, tab_id, out):
-        self._can('shot', session, tab_id)
+    def shot(self, tab_id, out):
+        self._can('shot', tab_id)
         with open(out, 'wb') as f:
             f.write(b'PNG')
         return out
 
-    def release(self, session, tab_id):
-        self._can('release', session, tab_id)
+    def release(self, tab_id):
+        self._can('release', tab_id)
 
     def hand_off(self):
         self._can('hand_off')

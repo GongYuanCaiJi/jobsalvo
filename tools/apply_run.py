@@ -738,7 +738,7 @@ def _take_confirmed(fb, platform):
                 continue       # 材料不在或對不上:這一項下次判讀會再問一次,不當成已確認
 
 
-def _review_profile(url, board, sid, door, delivery=None, logs=None, status=None):
+def _review_profile(url, board, sid, door, delivery=None, status=None):
     """每次新讀回；完整輸入沒變才沿用已核對的 Agent 判讀。"""
     import hashlib
     import apply_tab
@@ -778,8 +778,8 @@ def _review_profile(url, board, sid, door, delivery=None, logs=None, status=None
     _drop_old(out, UNSOURCED_FILE)
     pages = {}
 
-    def capture(current_logs):
-        reader = door.profile_reader(current_logs, board)
+    def capture():
+        reader = door.profile_reader(board)
         problems = []
         for target, _path, kind in targets:
             _entry, page, problem = ps.read(platform, lang, variant, board, reader=reader,
@@ -790,7 +790,7 @@ def _review_profile(url, board, sid, door, delivery=None, logs=None, status=None
                 pages[target] = page
         return problems
 
-    bad = capture(logs)
+    bad = capture()
     if bad:
         return bad
     try:
@@ -1065,12 +1065,12 @@ def _cleanup_downloads(download_dir, report, job, fb, url):
 
 
 def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
-               attachment_download_dir=None, door=None, log=None, tab_id=None):
+               attachment_download_dir=None, door=None, tab_id=None):
     """程式自己對一遍 agent 填的結果。回 (問題清單, 核對過的交件單);問題清單空的就是沒事。
     交件單只經安檢門(gate)進來:程式直接去讀它留在他 Chrome 裡的那一頁(不經過 agent),每一格跟頁面、紀錄、檔案比,
     分頁在不在、是不是還是填好的那一頁(沒被送出、沒換頁)、答案庫的每個答案是不是真的在頁面上、上傳的檔是不是真的選上了。
     door:填這一輪的那一家(chrome_door);各家用自己家的門路讀那一頁,驗收標準一樣。
-    log:這一輪的紀錄。tab_id:程式自己開好給它的那一頁(有才給)。
+    tab_id:程式自己開好給它的那一頁(有才給)。
     回的交件單只有核對過的格子;分頁、分頁網址、交接照它說的也放著(記下是哪一頁,之後 👀、重填找得到)。"""
     import gate
     bad = []
@@ -1091,7 +1091,7 @@ def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
         try:
             if not (reader or door):
                 raise LookupError('不知道這一頁是哪一家開的')
-            page = read_page(lambda: reader(sid, read_tab) if reader else door.read_page(sid, read_tab, log),
+            page = read_page(lambda: reader(read_tab) if reader else door.read_page(read_tab),
                              '驗收', shot=os.path.join(out, 'fill.png'))
         except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫進這張的問題(看板回報)
             why = str(e)[:80] or type(e).__name__
@@ -1129,13 +1129,13 @@ def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
     return bad, res   # notes 是不影響填表的觀察,不算問題
 
 
-def _picked_problem(url, job, fb, sid, res, door, logs):
+def _picked_problem(url, job, fb, sid, res, door):
     """填完後程式自己讀留著的那一頁,核對選的平台履歷是不是該選的那一份(profile_sync.picked_problem)。"""
     import profile_sync as ps
     if not (sid and res.get('tab_id')):
         return '程式讀不到填好的那一頁,沒核對選的是哪一份平台履歷'
     try:
-        page = read_page(lambda: door.read_page(sid, res['tab_id'], logs), '核對選的平台履歷')
+        page = read_page(lambda: door.read_page(res['tab_id']), '核對選的平台履歷')
     except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫成這張的問題(卡被擋)
         return f'程式讀不到填好的那一頁,沒核對選的是哪一份平台履歷({str(e)[:80]})'
     return ps.picked_problem(page, job, fb, url)
@@ -1278,9 +1278,9 @@ def page_now_problems(fb, url, job, page):
     return out
 
 
-def recheck_page(url, board, why, door=None, logs=None):
+def recheck_page(url, board, why, door=None):
     """確認送出前、送出前:程式自己讀那一頁,跟驗收時核對過的樣子比(page_now_problems)。回問題清單(空的就是沒變)。
-    door:開那一頁的那一家(沒給照卡上記的);logs:程式自己讀不到頁的那一家,剛跑完那一輪的紀錄(沒給就是這一刻讀不到,照實記)。
+    door:開那一頁的那一家(沒給照卡上記的)。
     讀到的那一頁記進這張卡的證據(read_page)。"""
     import chrome_door
     jobs, fb = load(board)
@@ -1296,7 +1296,7 @@ def recheck_page(url, board, why, door=None, logs=None):
         # 分頁編號每個 Chrome 程序從頭數:Chrome 重開過,記著的編號可能剛好是別張卡的頁,不能拿它去比(apply_tab._lookup 同一條)
         return [ds.GONE]
     try:
-        page = read_page(lambda: door.read_page(a.get('session'), a['tab_id'], logs), why)
+        page = read_page(lambda: door.read_page(a['tab_id']), why)
     except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫成這張的問題(不放行)
         return [f'程式讀不到那一頁,沒辦法核對頁面變了沒({str(e)[:80]})']
     bad = page_now_problems(fb, url, jobs.get(url) or {'id': url}, page)
@@ -1331,7 +1331,7 @@ def shoot(sid, out, stage, door, tab_id=None):
     if not (tid and (sid or getattr(door, 'workspace', None))):
         return
     try:
-        door.shot(sid, tid, os.path.join(out, ('submit' if stage == 'submit' else 'fill') + '.png'))
+        door.shot(tid, os.path.join(out, ('submit' if stage == 'submit' else 'fill') + '.png'))
     except Exception as e:  # noqa: BLE001 — 各門路的錯誤照實留在證據,截不到就不能通過截圖驗收
         with open(os.path.join(out, 'shot-error.txt'), 'a', encoding='utf-8') as fh:
             fh.write(f'{stage}:{type(e).__name__}: {str(e)[:300]}\n')
@@ -1634,7 +1634,6 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
     _drop_old(out, 'submit.json' if stage == 'submit' else 'fill.json')
     t0 = time.time()
     log = os.path.join(out, stage + '.log')
-    logs_before = []
 
     def prepare(agent):
         """填表第一家不能用、換手到另一家(Codex↔Claude):照那一家的門路重做 Chrome 檢查、重組 prompt(#288)。
@@ -1662,7 +1661,6 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         # 填完、交接了分頁,卻在寫交件檔前被砍掉,整輪就白做了(2026-09-26 一張 104 就是這樣)。
         # 叫回同一段對話,只把目前結果寫下來;程式照常驗收,沒做完的會列在卡上。
         wrap_sid = ar.session_id(log)
-        logs_before = [log]                       # 從紀錄讀頁的那一家,結果可能在前一輪的紀錄裡(收尾那一輪不一定再讀)
         log = os.path.join(out, stage + '-wrapup.log')
         outcome = _run_agent(
             WRAPUP.format(out=out), log, cf.HOME, board,
@@ -1736,7 +1734,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
     if stage in ('fill', 'fix'):
         bad, res = check_fill(
             fb, url, out, t0, sid, job=jobs[url],
-            attachment_download_dir=attachment_download_dir, door=used, log=logs_before + [log],
+            attachment_download_dir=attachment_download_dir, door=used,
             # 程式自己開好給它的那一頁(做得到的那一家):讀這一頁核對,它說的分頁要是這一個
             tab_id=apply_of(fb, url).get('tab_id') if used.workspace else
                    (prepared or {}).get('tab_id') if stage == 'fill' and used is door else None,
@@ -1765,15 +1763,15 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         delivery = ps.delivery_for(jobs[url], fb, url, reported)
         checked_result = dict(res, delivery=delivery) if delivery else res
         if delivery.get('method') == 'platform_profile':
-            bad += profile_after(url, checked_result, board, reader=used.profile_reader(logs_before + [log], board))
+            bad += profile_after(url, checked_result, board, reader=used.profile_reader(board))
             # 固定版這一輪才登記到位置的,記進卡上的要是登記好的那一份
             checked_result = dict(res, delivery=ps.delivery_for(jobs[url], fb, url, reported))
             # 程式自己讀申請頁,看選的是不是該選的那一份;選錯就停在這裡,不拿錯的那一份去比附件(#313)
-            picked = _picked_problem(url, jobs[url], fb, sid, res, used, logs_before + [log])
+            picked = _picked_problem(url, jobs[url], fb, sid, res, used)
             if picked:
                 bad = [picked] + [b for b in bad if b != picked]
             if not bad:
-                bad += _review_profile(url, board, sid, used, checked_result['delivery'], logs=[log], status=status)
+                bad += _review_profile(url, board, sid, used, checked_result['delivery'], status=status)
         if not sid:
             bad.insert(0, '沒拿到 agent 那段對話的 id,之後叫不回同一隻 agent')
         if rnd:
@@ -1844,7 +1842,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
     after, after_why = None, ''
     if sid and tab:
         try:
-            after = read_page(lambda: used.read_page(sid, tab, [log]), '送出後', shot=os.path.join(out, 'submit.png'))
+            after = read_page(lambda: used.read_page(tab), '送出後', shot=os.path.join(out, 'submit.png'))
         except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到就照截圖和它說的判斷(判斷不了才是送出結果不明)
             after_why = str(e)[:80]
     ok, res = check_submit(out, t0, apply_of(fb, url).get('tab_url') or url, page=after, page_why=after_why, tab_id=tab,

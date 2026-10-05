@@ -119,7 +119,7 @@ def close_if_idle(board=None):
         door = EgoDoor()
         door.workspace = w
         try:
-            receipt = door.release(None, f'{w.get("id")}:{w.get("page")}')
+            receipt = door.release(f'{w.get("id")}:{w.get("page")}')
         except Unreachable:
             completed.append(item)
         except (NotNow, OSError, ValueError) as e:
@@ -262,7 +262,7 @@ def test_workspaces(keep=None):
                     if space.get('ownership') != 'agent':
                         door.resume()  # 使用者明確授權驗收收掉自己的測試交接頁。
                     # 收尾回條留著:工作區沒收掉時(保留了幾個沒 label 的分頁)查得到原因
-                    counts['finished'].append(dict(space, receipt=door.release(None, None)))
+                    counts['finished'].append(dict(space, receipt=door.release(None)))
                 except NotNow as error:
                     counts['errors'].append({'workspace': space, 'reason': str(error)})
                 except Unreachable as error:
@@ -304,9 +304,9 @@ class EgoDoor:
         self.native_json_output = runtime == CODEX
         self.workspace = None
 
-    def profile_reader(self, logs=None, board=None):
+    def profile_reader(self, board=None):
         """給 profile_sync.check 的讀頁函式(讀取網址 → 頁面)。"""
-        return lambda read_url: self.read_profile(read_url, logs, board)
+        return lambda read_url: self.read_profile(read_url, board)
 
     @staticmethod
     def workspaces():
@@ -410,11 +410,11 @@ class EgoDoor:
             )
         return script
 
-    def read_page(self, session, tab_id, logs=None):
+    def read_page(self, tab_id):
         import apply_tab
         return _ego(self._task(tab_id) + f'return await page.evaluate({apply_tab.PAGE_FN});')
 
-    def shot(self, session, tab_id, out):
+    def shot(self, tab_id, out):
         import evidence
         out = os.path.abspath(out)
         with contextlib.suppress(FileNotFoundError):
@@ -483,7 +483,7 @@ class EgoDoor:
                     os.unlink(temporary)
         finally:
             if opened or self.workspace:
-                self.release(None, (opened or {}).get('tab_id'))
+                self.release((opened or {}).get('tab_id'))
 
     def read_pages(self, urls, board=None, ready=None, settle=0):
         import apply_tab
@@ -522,7 +522,7 @@ class EgoDoor:
             data['_ready'] = bool((ready or (lambda p: len(p.get('text', '')) > 200))(data))
         return result['pages']
 
-    def read_profile(self, read_url, logs=None, board=None):
+    def read_profile(self, read_url, board=None):
         return self.read_pages([read_url], board, settle=2)[read_url]
 
     def download_attachments(self, read_url, directory):
@@ -572,7 +572,7 @@ class EgoDoor:
             item.update(path=candidate, size=len(content), sha256=hashlib.sha256(content).hexdigest())
         return result
 
-    def release(self, session, tab_id):
+    def release(self, tab_id):
         # 收尾只發生在這張卡送出、移除、頁面不見之後:他接手過也收(不然工作區永遠留著)
         receipt = _ego(self._task(tab_id, page=False, take_back=True) + 'return await task.finish({keep:[]});')
         self.workspace = None

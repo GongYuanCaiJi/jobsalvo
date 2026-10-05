@@ -454,7 +454,7 @@ class Checks(unittest.TestCase):
         self.write('fill.png')
         self.write('fill.json', {'fields': [], 'submitted': False, 'tab_id': '7', 'tab_url': U + '/apply', 'handoff': True,
                                  'problems': ['jobs.lever.co: could not complete the permission request to upload files']})
-        bad = ' '.join(run.check_fill(board(), U, self.d, t0, 'S1', reader=lambda s, t: self.page())[0])
+        bad = ' '.join(run.check_fill(board(), U, self.d, t0, 'S1', reader=lambda t: self.page())[0])
         self.assertIn('could not complete the permission request', bad)
 
     def test_fill_output_is_checked_against_the_bank(self):
@@ -465,15 +465,15 @@ class Checks(unittest.TestCase):
         good = self.page(name='Alex Chen', nat='Taiwan', cv=['cv.pdf'])
         self.write('fill.png')
         self.write('fill.json', ok)
-        self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: good)[0], [])
+        self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda t: good)[0], [])
         self.write('fill.json', dict(ok, fields=[{'q': 'Nationality', 'value': 'ROC', 'k': 'nat'}], submitted=True))
-        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: good)[0])
+        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda t: good)[0])
         self.assertNotIn('常用答案是', bad)          # 頁面上是對的:以頁面為準,agent 回報寫法不同不算錯
         self.assertIn('已送出', bad)
         wrong = self.page(name='Alex Chen', nat='ROC', cv=['cv.pdf'])
-        self.assertTrue(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: wrong)[0])   # 頁面上真的錯
+        self.assertTrue(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda t: wrong)[0])   # 頁面上真的錯
 
-        def unreadable(_s, _t):
+        def unreadable(_t):
             raise RuntimeError('tab gone')
         bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=unreadable)[0])
         self.assertIn('常用答案是', bad)              # 讀不到頁面時才退回比 agent 回報的值
@@ -491,7 +491,7 @@ class Checks(unittest.TestCase):
         self.write('fill.png')
         self.write('fill.json', ok)
         good = self.page(name='Alex Chen', nat='Taiwan', cv=['cv.pdf'])
-        self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: good)[0], [])
+        self.assertEqual(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda t: good)[0], [])
 
     def test_a_form_recorded_in_an_earlier_round_the_same_day_does_not_count(self):
         # 同一天第二次填:agent 這一輪沒跑 form_record,不能拿早上那一輪記的表單當成這一輪的
@@ -517,7 +517,7 @@ class Checks(unittest.TestCase):
         page = self.page(name='Alex Chen', nat='Taiwan')
 
         problems = run.check_fill(
-            fb, U, self.d, t0, 'S1', reader=lambda _session, _tab: page,
+            fb, U, self.d, t0, 'S1', reader=lambda _tab: page,
         )[0]
 
         self.assertEqual(problems, [])
@@ -551,7 +551,7 @@ class Checks(unittest.TestCase):
             raise LookupError('Tab 7 not found')
         self.assertIn('讀不到', ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=gone)[0]))
         wrong = self.page(name='Alex Chen', nat='ROC', cv=[])
-        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda s, t: wrong)[0])
+        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', reader=lambda t: wrong)[0])
         self.assertIn('Nationality', bad)
         self.assertIn('上傳欄裡沒有 cv.pdf', bad)
         # 頁面上裝不了擋送出(Codex 外掛不准改頁面),只能事後查:網址換了、欄位不見了 = 可能被送出了
@@ -611,15 +611,15 @@ class Checks(unittest.TestCase):
         self.assertIn('上傳欄裡沒有 other.pdf', ' '.join(apply_tab.page_problems(gh2, fb, U, ['other.pdf'])))
 
     def test_the_page_is_read_through_the_family_that_filled_it(self):
-        """填這張的那一家用它自己的門路讀那一頁(帶這一輪的紀錄),驗收標準每一家一樣:讀不到就不算填好。"""
+        """填這張的那一家用它自己的門路讀那一頁,驗收標準每一家一樣:讀不到就不算填好。"""
         t0 = time.time() - 1
         fb = board()
         self.write('fill.json', {'fields': [], 'submitted': False, 'tab_id': '1234', 'tab_url': U + '/apply',
                                  'handoff': True, 'uploaded': []})
         self.write('fill.png')
         door = fc.FakeDoor('claude-code', not_now={'read_page'})
-        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', door=door, log=['fill.log'])[0])
-        self.assertEqual(door.calls, [('read_page', 'S1', '1234', ['fill.log'])])
+        bad = ' '.join(run.check_fill(fb, U, self.d, t0, 'S1', door=door)[0])
+        self.assertEqual(door.calls, [('read_page', '1234')])
         self.assertIn('讀不到', bad)
         door = fc.FakeDoor('codex', page={'url': U + '/apply', 'fields': [{'name': 'name', 'value': 'Alex Chen'},
                                                                             {'name': 'nat', 'value': 'Taiwan'}]})

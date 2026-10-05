@@ -24,7 +24,7 @@ class AcceptanceIsolation(unittest.TestCase):
                 patch.object(run, '_run_case', side_effect=ValueError('驗收例外'), create=True):
             with self.assertRaisesRegex(ValueError, '驗收例外'):
                 run.run_case('normal')
-        release.assert_called_once_with(None, None)
+        release.assert_called_once_with(None)
         self.assertTrue(run.results['normal']['workspace_counts']['returned_to_baseline'])
 
     def setUp(self):

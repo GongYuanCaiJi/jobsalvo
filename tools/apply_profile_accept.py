@@ -664,7 +664,7 @@ class ProfileAcceptance:
         try:
             with browser_evidence.opened('apply_check', 'live', [self.jobs[case]], self.board):
                 door = chrome_door.for_card(record)
-                door.shot(record.get('session'), record.get('tab_id'), screenshot)
+                door.shot(record.get('tab_id'), screenshot)
             self.check(case, '程式在該卡的 ego 分頁取得有效截圖', True, screenshot,
                        public_evidence=os.path.basename(screenshot))
         except (chrome_door.NotNow, chrome_door.Unreachable, OSError) as error:

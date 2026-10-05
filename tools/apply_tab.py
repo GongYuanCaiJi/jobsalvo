@@ -149,7 +149,7 @@ PROFILE_FN = """() => {
 
 
 def _lookup(url, board=None):
-    """看板上這張卡記的那段對話、分頁,和開那一頁的那一家的門路(chrome_door.for_card:沒記到、那一家不能用了丟 Unreachable)。"""
+    """看板上這張卡記的分頁,和開那一頁的那一家的門路(chrome_door.for_card:沒記到、那一家不能用了丟 Unreachable)。"""
     import board_doc as bd
     fb = json.loads(bd.load(board)['fb'])
     a = (fb.get(url) or {}).get('apply') or {}
@@ -159,8 +159,7 @@ def _lookup(url, board=None):
     if chrome_door.gone_pages({url: fb[url]}):
         # 分頁編號每個 Chrome 程序從頭數:Chrome 重開過,記著的編號可能剛好是別張卡的頁,不能拿它去截、去讀
         raise LookupError(chrome_door.GONE)
-    import chrome_door
-    return a.get('session'), a['tab_id'], chrome_door.for_card(a)
+    return a['tab_id'], chrome_door.for_card(a)
 
 
 
@@ -347,11 +346,11 @@ def main():
     try:
         import evidence
         with evidence.opened('apply_check', a.cmd, [a.url], a.board):
-            sid, tid, door = _lookup(a.url, a.board)
+            tid, door = _lookup(a.url, a.board)
             if a.cmd == 'read':
-                print(json.dumps(door.read_page(sid, tid), ensure_ascii=False, indent=1))
+                print(json.dumps(door.read_page(tid), ensure_ascii=False, indent=1))
             else:
-                door.shot(sid, tid, a.out or 'tab.png')
+                door.shot(tid, a.out or 'tab.png')
                 print(a.out or 'tab.png')
     except Exception as e:  # noqa: BLE001 — 指令列最外層:原因照實印出、結束碼 2(看板的 👀 照結束碼講)
         print(f'看不到那一頁:{e}', file=sys.stderr)

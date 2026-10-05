@@ -51,7 +51,7 @@ class SharedBrowser(unittest.TestCase):
                 patch.object(cd.EgoDoor, 'release') as release:
             cd.EgoDoor().print_pdf(str(source), str(output))
         self.assertEqual(output.read_bytes(), content)
-        release.assert_called_once_with(None, '42:p1')
+        release.assert_called_once_with('42:p1')
 
     def test_failed_pdf_keeps_the_previous_file_and_releases_its_own_workspace(self):
         source, output = Path(self.tmp, 'resume.html'), Path(self.tmp, 'resume.pdf')
@@ -64,7 +64,7 @@ class SharedBrowser(unittest.TestCase):
             with self.assertRaisesRegex(cd.NotNow, 'PDF'):
                 cd.EgoDoor().print_pdf(str(source), str(output))
         self.assertEqual(output.read_bytes(), b'%PDF-previous')
-        release.assert_called_once_with(None, '42:p1')
+        release.assert_called_once_with('42:p1')
 
     def test_both_agents_receive_the_same_browser_rules(self):
         codex, claude = cd.of('codex'), cd.of('claude-code')
@@ -153,7 +153,7 @@ class SharedBrowser(unittest.TestCase):
             ]):
                 door = cd.of(runtime)
                 opened = door.open_for_agent(PAGE['url'])
-                self.assertEqual(door.read_page('conversation', opened['tab_id'], ['missing.log']), PAGE)
+                self.assertEqual(door.read_page(opened['tab_id']), PAGE)
 
     def test_program_screenshot_is_a_file_in_the_requested_directory(self):
         path = Path(self.tmp) / 'shots' / 'fill.png'
@@ -165,7 +165,7 @@ class SharedBrowser(unittest.TestCase):
             door = cd.of('claude-code')
             opened = door.open_for_agent(PAGE['url'])
         with patch('subprocess.run', side_effect=screenshot_command):
-            saved = door.shot('conversation', opened['tab_id'], str(path))
+            saved = door.shot(opened['tab_id'], str(path))
         self.assertEqual(Path(saved).read_bytes()[:8], b'\x89PNG\r\n\x1a\n')
 
     def test_cold_page_screenshot_retries_until_success_and_records_each_attempt(self):
@@ -181,7 +181,7 @@ class SharedBrowser(unittest.TestCase):
             path.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
             return response(str(path))
         with patch('subprocess.run', side_effect=capture), patch.object(evidence, 'active', return_value=record):
-            self.assertEqual(door.shot(None, '42:p1', str(path)), str(path))
+            self.assertEqual(door.shot('42:p1', str(path)), str(path))
         attempts = [call.kwargs for call in record.note.call_args_list if call.args[0] == 'shot_attempt']
         self.assertEqual([a['attempt'] for a in attempts], [1, 2, 3, 4])
         self.assertEqual([a['ok'] for a in attempts], [False, False, False, True])
@@ -196,7 +196,7 @@ class SharedBrowser(unittest.TestCase):
         path.write_bytes(b'\x89PNG\r\n\x1a\nold image')
         with patch('subprocess.run', return_value=failed_response('CDP request timed out: Page.captureScreenshot')) as command:
             with self.assertRaisesRegex(cd.NotNow, '6 次'):
-                door.shot(None, '42:p1', str(path))
+                door.shot('42:p1', str(path))
         self.assertEqual(command.call_count, 6)
         self.assertFalse(path.exists())
 
@@ -205,7 +205,7 @@ class SharedBrowser(unittest.TestCase):
         door.workspace = dict(WORKSPACE)
         with patch('subprocess.run', return_value=failed_response('connection unavailable')) as command:
             with self.assertRaisesRegex(cd.NotNow, 'connection unavailable'):
-                door.shot(None, '42:p1', str(Path(self.tmp) / 'offline.png'))
+                door.shot('42:p1', str(Path(self.tmp) / 'offline.png'))
         self.assertEqual(command.call_count, 1)
 
     def test_failed_screenshot_does_not_leave_a_file_that_could_be_mistaken_for_evidence(self):
@@ -217,7 +217,7 @@ class SharedBrowser(unittest.TestCase):
             return response(str(path))
         with patch('subprocess.run', side_effect=broken_image):
             with self.assertRaisesRegex(cd.NotNow, '有效頁面截圖'):
-                door.shot(None, '42:p1', str(path))
+                door.shot('42:p1', str(path))
         self.assertFalse(path.exists())
 
     def test_profile_reader_keeps_fields_links_and_readiness_in_the_cards_workspace(self):
@@ -252,7 +252,7 @@ class SharedBrowser(unittest.TestCase):
              patch('subprocess.run', return_value=response(PAGE)):
             door = cd.for_card({'runtime': 'codex', 'agent_id': 'old', 'session': 'old-conversation',
                                 'workspace': WORKSPACE, 'tab_id': '42:p1'})
-            self.assertEqual(door.read_page('old-conversation', '42:p1'), PAGE)
+            self.assertEqual(door.read_page('42:p1'), PAGE)
         self.assertEqual(door.agent_id, 'cc')
 
     def test_downloaded_attachment_hash_is_computed_from_the_saved_remote_bytes(self):
@@ -287,7 +287,7 @@ class SharedBrowser(unittest.TestCase):
         ]):
             door = cd.of('codex')
             opened = door.open_for_agent(PAGE['url'])
-            receipt = door.release('conversation', opened['tab_id'])
+            receipt = door.release(opened['tab_id'])
         self.assertEqual(receipt['retained'], ['p3'])
 
     def test_disconnected_browser_does_not_erase_a_parked_card(self):
@@ -313,7 +313,7 @@ class SharedBrowser(unittest.TestCase):
         door = cd.of('codex')
         door.workspace = dict(WORKSPACE)
         with patch('subprocess.run', return_value=response({'closedSpace': True})) as run:
-            door.release(None, '42:p1')
+            door.release('42:p1')
         script = run.call_args.kwargs.get('input') or ''
         self.assertIn('takeOverTaskSpace', script)
         self.assertNotIn('正由使用者接手', script)
@@ -446,7 +446,7 @@ class NativeLoginHandoff(unittest.TestCase):
                       'document.querySelector(".select-resume .text-region").innerText="Wrong profile";'
                       'document.querySelector("textarea").value="Known fixed profile";});')
             subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            page = door.read_page(None, opened['tab_id'])
+            page = door.read_page(opened['tab_id'])
             problems = apply_tab.page_problems(page, fb, PAGE['url'])
             self.assertTrue(any('選擇履歷' in problem for problem in problems), problems)
             self.assertTrue(any('自我推薦信' in problem for problem in problems), problems)
@@ -474,7 +474,7 @@ class NativeLoginHandoff(unittest.TestCase):
                       'document.querySelector(".multiselect__single").innerText="Wrong profile";'
                       'document.querySelector("textarea").value="Known fixed profile";});')
             subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            page = door.read_page(None, opened['tab_id'])
+            page = door.read_page(opened['tab_id'])
             problems = apply_tab.page_problems(page, fb, PAGE['url'])
             self.assertTrue(any('選擇履歷' in problem for problem in problems), problems)
             self.assertTrue(any('自我推薦信' in problem for problem in problems), problems)
@@ -517,7 +517,7 @@ class NativeLoginHandoff(unittest.TestCase):
             script = (f'const task=await taskSpace({opened["workspace"]["id"]});'
                       'await task.page("p1").fill("css=section:first-child textarea","Wrong recommendation");')
             subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            page = door.read_page(None, opened['tab_id'])
+            page = door.read_page(opened['tab_id'])
             self.assertTrue(apply_tab.page_problems(page, fb, PAGE['url']))
         self.assertTrue(counts['returned_to_baseline'], counts)
 
@@ -544,7 +544,7 @@ class NativeLoginHandoff(unittest.TestCase):
             self.assertEqual(receipt['page'], 'p2')
             self.assertEqual(door.workspace['page'], 'p1')
             door.resume()
-            self.assertEqual(door.read_page(None, application['tab_id'])['title'], '')
+            self.assertEqual(door.read_page(application['tab_id'])['title'], '')
         self.assertTrue(counts['returned_to_baseline'], counts)
 
 
