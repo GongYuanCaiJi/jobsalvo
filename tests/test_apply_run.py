@@ -522,6 +522,66 @@ class Checks(unittest.TestCase):
 
         self.assertEqual(problems, [])
 
+    def test_a_one_click_apply_page_with_only_a_send_button_is_not_treated_as_submitted(self):
+        fb = board()
+        import apply_tab
+        nothing = apply_tab.page_problems({'url': U + '/apply', 'fields': [], 'lines': []}, fb, U)
+        self.assertIn('沒有任何欄位', ' '.join(nothing))                       # 什麼都沒有:可能送出了,要人看
+        one_click = apply_tab.page_problems({'url': U + '/apply', 'fields': [], 'lines': [],
+                                             'submits': ['Send Application']}, fb, U)
+        self.assertNotIn('沒有任何欄位', ' '.join(one_click))                  # 還看得到送出鍵:就是停在送出前
+
+    def test_question_text_with_required_mark_and_counter_is_the_same_question(self):
+        import apply_tab
+        field = {'label': '', 'context': '您是否已詳閱職缺描述？*(16/1500)'}   # 必填記號、字數計數器不是題目
+        self.assertTrue(apply_tab._same_question('您是否已詳閱職缺描述？', field))
+        self.assertFalse(apply_tab._same_question('您是否可以出差？', field))
+
+    def test_a_rich_text_editor_is_read_as_a_field(self):
+        import apply_tab, subprocess
+        script = """
+const body = {tagName: 'BODY', isContentEditable: false};
+const editor = {tagName: 'DIV', id: '', name: '', isContentEditable: true, parentElement: body, innerText: '您好,我是候選人',
+  getClientRects: () => [{}], matches: () => false, getAttribute: () => null, hasAttribute: () => false, closest: () => null,
+  previousElementSibling: null, querySelectorAll: () => [{getClientRects: () => []}]};   // 編輯器裡藏著同步用的 textarea
+global.CSS = {escape: s => s};
+global.getComputedStyle = () => ({display: 'block', visibility: 'visible'});
+global.location = {href: 'https://jobs.example.test/apply'};
+global.document = {title: 't', body: {innerText: '求職信'}, links: [], querySelector: () => null,
+  querySelectorAll: sel => sel.includes('contenteditable') ? [editor] : []};
+const r = (READER)();
+if (!r.fields.some(f => f.value === '您好,我是候選人' && f.type === 'textarea')) throw new Error(JSON.stringify(r.fields));
+""".replace('READER', apply_tab.PAGE_FN)
+        result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_text_answer_carrying_an_option_mapping_is_checked_as_text(self):
+        import apply_tab
+        fb = board()
+        fb[U]['form']['f'][1]['choice'] = {'value': 'Taiwan', 'why': '格式不同'}       # 文字格卻帶了選項對應
+        page = {'url': U + '/apply', 'lines': [], 'fieldContexts': True, 'fields': [
+            {'label': 'Full name', 'value': 'Alex Chen', 'type': 'text'},
+            {'label': 'Nationality', 'value': 'Taiwan', 'type': 'textarea'}]}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+
+    def test_a_downloaded_readback_stands_in_for_a_visible_file_name(self):
+        import gate_apply, gate
+        page = {'url': U + '/apply', 'fields': [], 'lines': [], 'submits': ['送出']}
+        truth = gate.Truth(U, {}, board(), page=page)
+        sheet = {'delivery': {'method': 'direct_upload'}, 'upload_readback': 'downloaded',
+                 'uploaded_files': [{'name': 'merged.pdf', 'path': '/tmp/x/merged.pdf'}]}
+        self.assertIsNone(gate_apply._uploaded(['merged.pdf'], sheet, truth))    # 下載回來的位元組由程式比
+        self.assertTrue(gate_apply._uploaded(['merged.pdf'], dict(sheet, upload_readback='unavailable'), truth))
+
+    def test_an_answer_on_an_earlier_step_of_a_multi_step_form_is_not_called_wrong(self):
+        import apply_tab
+        fb = board()
+        last_step = {'url': U + '/apply', 'fieldContexts': True, 'lines': ['Years in security?'], 'fields': [
+            {'label': '', 'context': 'Years in security?', 'value': '3', 'type': 'textarea'}]}
+        self.assertEqual(apply_tab.page_problems(last_step, fb, U), [])     # 國籍在前一步:這一頁沒有這一題
+        same_page = dict(last_step, lines=['Nationality'], fields=[{'label': 'Nationality', 'value': 'Japan', 'type': 'text'}])
+        self.assertTrue(apply_tab.page_problems(same_page, fb, U))           # 題目就在這一頁,答案不對:照樣擋
+
     def test_a_page_that_is_another_job_blocks_approval(self):
         """agent 打開申請頁判斷不是這張卡的缺(或關了):不算填好,核准按不下去。"""
         t0 = time.time() - 1

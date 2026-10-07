@@ -169,6 +169,28 @@ class Step(unittest.TestCase):
             self.assertIn('逐段核對', step(None))              # 沒記過上次那一版:整份對一遍
             self.assertIn('逐段核對', step('\n'.join(f'第 {i} 行' for i in range(60))))   # 大改:整份對一遍
 
+    def test_a_platform_resume_that_is_a_file_is_checked_by_its_bytes(self):
+        url = 'https://www.cake.me/companies/x/jobs/1'
+        with tempfile.TemporaryDirectory() as d:
+            folder = os.path.join(d, 'ship'); os.makedirs(folder)
+            with open(os.path.join(folder, 'merged.pdf'), 'wb') as f:
+                f.write(b'%PDF same bytes')
+            def door(content):
+                def fetch(_u, dest):
+                    with open(dest, 'wb') as f:
+                        f.write(content)
+                    return dest
+                return type('Door', (), {'fetch_file': staticmethod(fetch)})()
+            file_url = 'https://pdfs.cake.me/user_pdfs/abc.pdf'
+            self.assertTrue(ps.is_file_url(file_url))
+            self.assertFalse(ps.is_file_url('https://www.cake.me/me/resume'))
+            with patch.object(run.ship, 'folder', return_value=folder), patch.object(ps, 'remember_name') as named:
+                self.assertEqual(run._file_profile_problems(url, file_url, door(b'%PDF same bytes'), '平台上的履歷',
+                                                            'cake', 'zh', 'general', 'merged.pdf'), [])
+                named.assert_called_once()                        # 檔名就是平台上那一份的名稱
+                bad = run._file_profile_problems(url, file_url, door(b'%PDF other'), '平台上的履歷', 'cake', 'zh', 'general')
+                self.assertIn('都不一樣', bad[0])
+
 class Equivalents(unittest.TestCase):
     """平台用自己說法寫的格子:agent 回報「母稿這一格 ＝ 頁面上這幾個字」,程式驗過才記,以後照記下的比。"""
     def setUp(self):

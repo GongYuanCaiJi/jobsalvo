@@ -139,6 +139,9 @@ def _uploaded(said, sheet, truth):
         return None
     if truth.page is None:
         return UNUSED                  # 程式沒讀到那一頁:這一格這一次不收;讀不到的原因在「分頁」那一格講過
+    readback = {x.get('name') for x in sheet.get('uploaded_files') or [] if isinstance(x, dict)}
+    if sheet.get('upload_readback') == 'downloaded' and set(names) <= readback:
+        return None     # 申請表收到的檔下載回來了,由程式逐位元組比(profile_sync);頁面不顯示檔名不算沒上傳
     return apply_tab.upload_problems(truth.page, names) or None
 
 

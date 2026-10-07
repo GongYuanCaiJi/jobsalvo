@@ -733,6 +733,8 @@ def read(platform, lang, variant, board=None, reader=None, test_allow_local=Fals
     read_url = w['read']
     if not same_platform_url(read_url, platform, allow_local=test_allow_local):
         return w, [], '讀取網址不安全'
+    if is_file_url(read_url):       # 一份檔:內容由程式下載逐位元組比(apply_run._file_profile_problems),這裡不讀文字
+        return w, {'url': read_url, 'file': True, 'text': ''}, ''
     if reader is None:                                    # 沒給就用現在用 Chrome 的那一家自己開頁讀
         import chrome_door
         door = chrome_door.current()
@@ -805,6 +807,14 @@ def _sha_file(path):
             return hashlib.file_digest(f, 'sha256').hexdigest()
     except OSError:
         return None
+
+
+FILE_EXT = ('.pdf', '.doc', '.docx')
+
+
+def is_file_url(value):
+    """平台上存的「履歷」是一份檔(不是頁面):核對靠下載下來逐位元組比,不讀文字。"""
+    return urlsplit(str(value or '')).path.lower().endswith(FILE_EXT)
 
 
 def _safe_page_url(value):
@@ -1383,7 +1393,7 @@ def attachment_step(job, fb, url, download_dir, door, force=False, verify_profil
         )
     request += (
         '\n若 delivery.method=direct_upload,或這張卡有客製文件而回報 no_profile,'
-        '請把申請表實際收到的每個檔下載到同一暫存資料夾,在 uploaded_files 回報 '
+        f'請把申請表實際收到的每個檔下載到這個暫存資料夾:{download_dir or "(本輪沒有,寫 upload_readback unavailable)"},在 uploaded_files 回報 '
         '{"uploaded_files":[{"name":"申請表上傳檔名","path":"暫存資料夾內的完整路徑"}]}。'
         '不可用本機來源檔複製冒充上傳結果。平台上傳後只顯示檔名、沒有下載回來的入口時(例如 Greenhouse),'
         'uploaded_files 留空清單、寫 "upload_readback":"unavailable",並在 uploaded_from 回報你放進上傳欄的本機檔 '

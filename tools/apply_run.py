@@ -134,6 +134,11 @@ RULES = """規矩:
   先用 agent 瀏覽器已登入的帳號登入並完成授權;登入頁同時有密碼欄也不能直接交給使用者。
   「Apply with LinkedIn」這類一鍵帶入只是捷徑:能用已登入帳號完成就用;要輸入密碼就不用它、關掉那個登入頁,改填申請頁上的一般表單,不用回報。
   只有不登入就投不了、而且要輸入密碼、二步驗證或驗證碼時才停下,照【回報】寫明網站與需要本人做的事。
+- 申請頁沒有要填的欄位、只剩最後的送出確認(一鍵應徵)時,停在那個確認畫面就是填好了:不按送出,也不要寫成卡住;
+  tab_id 寫那個確認畫面所在的頁。
+- 平台從帳號帶入、頁面上只顯示成文字不能編輯的資料(姓名、Email、電話等)不是申請表的格子:不要列進 fields。
+- 指定的平台履歷在申請表上選不到、但申請表能直接上傳檔時,照上傳規則直接上傳、delivery 寫 direct_upload,不算卡住;
+  這時平台履歷和它的附件也不用同步。
   登入／授權的彈窗鏈(帶入資料、SSO、選帳號、同意)步驟固定:在同一段腳本裡依序做完,每一步先存 waitForEvent("popup") 或
   waitForURL 的 promise 再點,等到下一頁的按鈕或回到申請表就接著做,最後才印快照;不要每換一頁就結束腳本另開一回合觀察。
   中途某一步等不到預期畫面,才停下觀察那一頁再決定。
@@ -213,7 +218,7 @@ FILL = """你是代投 agent。這一輪只做「填好、不送出」,送出要
      新答案          "src": "bank", "zh": 中文(英文答案必附), "why": 依據,
                      "kind": "txt"(短文)/"op"(意見)/"pick"(選項)/"val"(數字日期)/"ck"(勾選), "pj": 1(這缺專用) 或 0, "pjw": 理由,
                      "bank_q": 這題的通用問法(選填;表單問法很特別時給)
-    {{"url": ..., "platform": ..., "tab_id": "程式指定的工作區編號:Page 標籤", "tab_url": "那個分頁現在的網址", "handoff": true,
+    {{"url": ..., "platform": ..., "tab_id": "申請表最後所在那一頁的 工作區編號:Page 標籤(申請表開在同一工作區的新分頁就寫那一頁)", "tab_url": "那個分頁現在的網址", "handoff": true,
     "posting": {{"title": "頁面上的職稱", "company": "頁面上的公司", "same_job": true/false}},
     "profile": {{"needed": true/false, "updated": ["改了哪幾段"], "url": "看得到全文的固定版(程式不知道在哪時才要)", "edit": "編輯頁", "name": "平台上這份的名稱(程式要你寫時才要)", "application_history_url": "可讀的應徵紀錄頁(有就填)", "note": "..."}},
     "uploaded": ["申請表檔案欄已選妥或非同步上傳完成的檔名;平台履歷管理頁的附件只寫在 profile_attachments"], "uploaded_files": [{{"name": "申請表上傳檔名", "path": "下載檔完整路徑"}}], "upload_readback": "downloaded 或 unavailable(平台讀不回上傳檔時)", "uploaded_from": [{{"name": "申請表上顯示的檔名", "path": "交給 setFiles 的完整路徑(讀不回時才填)"}}], "fields": [{{"q": "表單上的題目", "value": "頁面上現在的值", "src": "rz/bank/skip", "k": "答案庫的 k(有才給)"}}],
@@ -420,11 +425,11 @@ def profile_step(url, decision, master, profile=None):
                     f'要選平台上存好的履歷時,選{which}(固定版)，逐段核對目前原始履歷 {master}；'
                     '真的缺少或失真才修改存檔，分欄或媒體呈現不同不代表缺漏。'
                     '把它看得到全文的網址寫進 profile.url、編輯頁寫進 profile.edit。'
-                    + name_ask)
+                    + PROFILE_FILE_NOTE + name_ask)
         return (f'這個平台({plat})要在平台上存一份履歷、投遞時選那一份:這張用{which},固定版。程式還不知道它在哪。'
                 f'打開平台上那一份，依目前原始履歷 {master} 判斷資訊是否完整與有無失真；真正缺漏或失真才改並存檔，'
                 '分欄、順序、改寫或媒體呈現不同不單獨構成修改理由。把「看得到全文的那一頁」網址寫進輸出的 '
-                'profile.url、編輯頁寫進 profile.edit。存檔後程式會讀回指定頁面交你判讀內容。' + name_ask)
+                'profile.url、編輯頁寫進 profile.edit。存檔後程式會讀回指定頁面交你判讀內容。' + PROFILE_FILE_NOTE + name_ask)
     head = (f'這張用 {plat} 上{which}的平台履歷,固定版:{fixed}'
             + (f'(平台上叫「{decision["name"]}」)' if decision.get('name') else '')
             + '。申請頁要選平台履歷時就選這一份,不要選別份,也不要照以前的紀錄選;程式填完後會自己讀申請頁核對選的是哪一份。'
@@ -447,7 +452,7 @@ def profile_step(url, decision, master, profile=None):
                        + PROFILE_VALUE_RULES + PROFILE_HOW_NOTE + '不要停下來問。存檔後程式會讀回這一份交判讀。')
     return head + (f'逐段核對目前原始履歷 {master}，新增或修改的內容也要同步並存檔；'
                    '判斷資訊是否保留，平台欄位、文字與連結呈現不同不代表缺漏；'
-                   + PROFILE_VALUE_RULES + PROFILE_HOW_NOTE +
+                   + PROFILE_VALUE_RULES + PROFILE_HOW_NOTE + PROFILE_FILE_NOTE +
                    '只有同一項寫得更細(原稿寫區、平台寫完整地址)才保留不動;原稿根本沒寫到的平台欄位(例如平台要求的希望職稱、職類)不動。'
                    '不要停下來問。'
                    '存檔後程式會另讀回這一份，交你判讀是否完整；不要用字串比對清單決定哪些內容能改。')
@@ -459,6 +464,9 @@ SAME_MEANING = ('「跟原稿一樣」的定義:值(日期、期間、數字、�
                 '「兩週內」對「兩週」,不選更早或更晚的);同一項寫得更細(原稿寫區、平台寫完整地址)也算一樣。')
 PROFILE_VALUE_RULES = SAME_MEANING + '不一樣的照原稿改,清單多的拿掉、少的補上;固定選項選完讀回確認。'
 # 平台自己做的選單(地點、日期)要試好幾次才改得動;試出來的做法記成這個平台的筆記,下一次直接照做(platform_notes)
+# 有些平台的「履歷」只是一份上傳的檔(不是一格一格的欄位):換成本機現在這一份就是同步,內容由程式下載逐位元組比
+PROFILE_FILE_NOTE = ('平台上存的若是履歷檔(不是可編輯的欄位),上傳本機目前這一份就是同步,不用讀檔案內容逐段比對;'
+                     '程式會下載逐位元組核對。')
 PROFILE_HOW_NOTE = ('改過的每一格,把在這個平台上怎麼改得動、存得到(按哪裡、選單怎麼選、要等什麼)各寫一句進 platform_notes,'
                     '下次直接照做;【這個平台以前學到的】已經有、而且照做有效的就不用再寫。')
 SOURCE_CHANGES_MAX = 40     # 改的行數超過這麼多就當成大改,整份對一遍比較穩
@@ -491,7 +499,7 @@ def profile_check(url, board=None, reader=None, name=None):
         return ps.where(platform, lang, var), [], f'讀回出錯({str(e)[:80]})'
 
 
-def profile_after(url, res, board=None, reader=None):
+def profile_after(url, res, board=None, reader=None, door=None):
     """登記固定履歷來源並驗讀回來源；內容意思在 _review_profile 判讀。
     res['delivery'] 是程式認的那一份(profile_sync.delivery_for:固定版還是客製版、哪一份都是程式決定的)。
     客製網址不能當固定版登記。"""
@@ -526,6 +534,10 @@ def profile_after(url, res, board=None, reader=None):
     label = '固定平台履歷' if profile_kind == 'custom' else '平台上的履歷'
     if pr.get('application_history_url'):
         ps.remember_application_history(platform, pr['application_history_url'])
+    file_profile = (ps.where(platform, lang, var) or {}).get('read')
+    if ps.is_file_url(file_profile):
+        return _file_profile_problems(url, file_profile, door, label, platform, lang, var,
+                                      pr.get('name') if profile_kind == 'fixed' else None)
     result = profile_check(url, board, reader=reader,
                            name=pr.get('name') if profile_kind == 'fixed' else None)
     w, _page, prob = result or (None, [], '')
@@ -533,6 +545,27 @@ def profile_after(url, res, board=None, reader=None):
         return [f'{label}({platform} {lang}/{var})程式不知道在哪,沒辦法讀回來驗']
     if prob:
         return [f'{label}讀不回來驗:{prob}']
+    return []
+
+
+def _file_profile_problems(url, file_url, door, label, platform, lang, var, name=None):
+    """平台上存的履歷是一份檔(平台的履歷庫):用這張卡的工作區下載下來,跟可投遞夾裡的檔逐位元組比。"""
+    import profile_sync as ps
+    if door is None or not hasattr(door, 'fetch_file'):
+        return [f'{label}是平台上存的一份檔,這一輪沒有門路下載核對']
+    folder = ship.folder(url, root=SHIP_ROOT)
+    local = {ps._sha_file(os.path.join(folder, n)) for n in os.listdir(folder)
+             if n.lower().endswith(ps.FILE_EXT)} if folder and os.path.isdir(folder) else set()
+    with tempfile.TemporaryDirectory(prefix='jobsalvo-profile-file-') as d:
+        try:
+            got = door.fetch_file(file_url, os.path.join(d, 'profile' + os.path.splitext(file_url.split('?')[0])[1]))
+        except Exception as e:  # noqa: BLE001 — 下載不到就照實寫,不當成核對過
+            return [f'{label}是平台上存的一份檔,下載不到核對({str(e)[:80]})']
+        digest = ps._sha_file(got)
+    if not digest or digest not in local:
+        return [f'{label}是平台上存的一份檔,下載回來跟可投遞夾裡的檔都不一樣']
+    if name:     # 一份檔的「名稱」就是平台上顯示的檔名;申請頁選的是不是它,程式之後讀申請頁核對
+        ps.remember_name(platform, lang, var, str(name).strip()[:80])
     return []
 
 
@@ -760,6 +793,8 @@ def _review_profile(url, board, sid, door, delivery=None, status=None):
     fixed = ps.where(platform, lang, variant)
     if not fixed:
         return ['程式不知道固定平台履歷在哪，不能核實內容']
+    if ps.is_file_url(fixed['read']) and delivery.get('profile_kind') != 'custom':
+        return []     # 平台存的是一份檔:填完時已下載逐位元組比過(_file_profile_problems),沒有文字可判讀
     targets = [(fixed['read'], cf.master(variant, lang), '固定版')]
     if delivery.get('profile_kind') == 'custom':
         custom_url = delivery.get('profile_url')
@@ -1086,6 +1121,12 @@ def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
                           or os.path.getmtime(os.path.join(out, 'fill.png')) < t0):
         bad.append('沒有這一輪的截圖')
     page, why, claimed = None, '', str(sheet.get('tab_id') or '')
+    # 申請表常開在新分頁(外部招募網站、彈出視窗):agent 說的那一頁在這張卡自己的工作區裡,就改綁那一頁再讀
+    if tab_id and claimed and claimed != str(tab_id) and door and hasattr(door, 'follow_page'):
+        try:
+            tab_id = door.follow_page(claimed)
+        except Exception as e:  # noqa: BLE001 — 不是這張卡工作區裡的頁:照原本那一頁核對,分頁那一格會列出不一致
+            why = str(e)[:80]
     read_tab = tab_id or claimed
     if sid and read_tab:
         try:
@@ -1330,6 +1371,13 @@ def shoot(sid, out, stage, door, tab_id=None):
     tid = (tab_id or gate.claimed_tab(out, 'submit')) if stage == 'submit' else (gate.claimed_tab(out, 'fill') or tab_id)
     if not (tid and (sid or getattr(door, 'workspace', None))):
         return
+    if stage != 'submit' and hasattr(door, 'follow_page'):
+        # 申請表留在同一工作區的另一頁:先改綁那一頁再截(不然截圖找不到那一頁,驗收就少了截圖)
+        try:
+            tid = door.follow_page(tid)
+        except Exception as e:  # noqa: BLE001 — 改綁不了就截原本那一頁;原因留在證據
+            with open(os.path.join(out, 'shot-error.txt'), 'a', encoding='utf-8') as fh:
+                fh.write(f'follow:{type(e).__name__}: {str(e)[:200]}\n')
     try:
         door.shot(tid, os.path.join(out, ('submit' if stage == 'submit' else 'fill') + '.png'))
     except Exception as e:  # noqa: BLE001 — 各門路的錯誤照實留在證據,截不到就不能通過截圖驗收
@@ -1763,7 +1811,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
         delivery = ps.delivery_for(jobs[url], fb, url, reported)
         checked_result = dict(res, delivery=delivery) if delivery else res
         if delivery.get('method') == 'platform_profile':
-            bad += profile_after(url, checked_result, board, reader=used.profile_reader(board))
+            bad += profile_after(url, checked_result, board, reader=used.profile_reader(board), door=used)
             # 固定版這一輪才登記到位置的,記進卡上的要是登記好的那一份
             checked_result = dict(res, delivery=ps.delivery_for(jobs[url], fb, url, reported))
             # 程式自己讀申請頁,看選的是不是該選的那一份;選錯就停在這裡,不拿錯的那一份去比附件(#313)

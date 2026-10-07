@@ -291,6 +291,10 @@ def test_workspaces(keep=None):
                 os.environ['JOBSALVO_BROWSER_TEST_RUN'] = previous
 
 
+# 讀頁之前等文件有 body:有些網站載完(domcontentloaded)又把整份文件換掉,那一瞬間 body 是空的(2026-10-06 LinkedIn)
+BODY_READY = 'await page.waitForFunction(() => document.body, undefined, {timeout: 15000}).catch(() => null);\n'
+
+
 class EgoDoor:
     """agent 的瀏覽器(ego lite)的門路。Codex、Claude 兩個 CLI 共用;runtime 只用於選 agent 和接回對話。"""
     live_refresh = 4             # 看板 👀 幾秒後自動再截
@@ -333,6 +337,8 @@ class EgoDoor:
             '上傳用要寄的檔案的完整路徑;下載在同一段腳本存到程式指定的暫存資料夾。'
             '不清 cookie、快取或儲存區,不讀取憑證;不操作使用者本人的 Chrome、桌面或其他工作區。'
             '不開 App、不用桌面指令。'
+            '輸入文字用 fill 或 keyboard.insertText;不用 keyboard.paste(它在 Mac 上送出真的 ⌘V,ego 會當成使用者在操作,'
+            '把工作區轉給他,這一輪就停了)。'
             '登入與授權依本輪規矩先試已登入帳號的 SSO;確實需要本人處理時照【回報】寫明網站與要做的事;'
             '保留工作區與頁面,使用者按 👀 接手,按「修改」後才繼續。'
             '本輪規則優先於 skill 的自動交接建議:不得呼叫 task.handOff 或 takeOverTaskSpace;程式指定的工作區也不要 finish,'
@@ -370,7 +376,7 @@ class EgoDoor:
     def open_for_agent(self, url, old_tab=None, on_open=None):
         import apply_tab
         if self.workspace is not None:
-            return _ego(self._task(old_tab) + f'const data=await page.evaluate({apply_tab.PAGE_FN});\n'
+            return _ego(self._task(old_tab) + BODY_READY + f'const data=await page.evaluate({apply_tab.PAGE_FN});\n'
                         'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
         name = _workspace_name()
         opened = _ego(
@@ -384,8 +390,34 @@ class EgoDoor:
             on_open(opened)
         return _ego(self._task() +
                     f'await page.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}});\n'
-                    f'const data=await page.evaluate({apply_tab.PAGE_FN});\n'
+                    + BODY_READY + f'const data=await page.evaluate({apply_tab.PAGE_FN});\n'
                     'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
+
+    def fetch_file(self, url, dest):
+        """用這張卡的工作區(帶著登入)把一份檔下載到 dest:先開那個檔的網址,同一個來源再取一次真的位元組。"""
+        dest = os.path.abspath(dest)
+        script = self._task(page=False) + (
+            'const pg = await task.newPage();\n'
+            'try {\n'
+            f'await pg.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}}).catch(() => null);\n'
+            f'const r = await pg.fetch({json.dumps(url)}, {{saveAs:{json.dumps(dest)},credentials:"include",timeout:30000}});\n'
+            'return {ok:r.ok,status:r.status,type:r.headers["content-type"]||""};\n'
+            '} finally { await pg.close(); }\n')
+        result = _ego(script, timeout=90)
+        if not result.get('ok') or 'text/html' in result.get('type', ''):
+            raise NotNow(f'下載回傳 {result.get("status")} {result.get("type")}(可能要登入)')
+        return dest
+
+    def follow_page(self, tab_id):
+        """agent 把申請表留在這張卡工作區裡的另一頁(新分頁、彈出視窗):改綁那一頁。不是這個工作區的頁丟 NotNow。"""
+        w = self.workspace
+        space, _, label = str(tab_id).partition(':')
+        if not isinstance(w, dict) or space != str(w.get('id')) or not label:
+            raise NotNow('agent 說的頁面不在這張卡的工作區裡')
+        _ego(self._task(page=False) + f'if (!(await task.tabs()).some(t => t.label==={json.dumps(label)})) '
+             'throw new Error("頁面不見了");\nreturn true;')
+        w['page'] = label
+        return f'{w["id"]}:{label}'
 
     def _task(self, tab_id=None, page=True, take_back=False):
         """核對數字、名稱、Page 三者;不把重用的工作區編號綁到另一張卡。"""
@@ -412,7 +444,7 @@ class EgoDoor:
 
     def read_page(self, tab_id):
         import apply_tab
-        return _ego(self._task(tab_id) + f'return await page.evaluate({apply_tab.PAGE_FN});')
+        return _ego(self._task(tab_id) + BODY_READY + f'return await page.evaluate({apply_tab.PAGE_FN});')
 
     def shot(self, tab_id, out):
         import evidence

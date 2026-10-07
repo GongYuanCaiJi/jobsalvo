@@ -343,6 +343,22 @@ assert.notDeepEqual(first.fields, second.fields);
         result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_page_readers_survive_a_document_without_body(self):
+        # 有些網站載完又整份換掉,那一瞬間 body 是空的(2026-10-06 LinkedIn):讀頁不能整支壞掉
+        for fn in (apply_tab.PAGE_FN, apply_tab.PROFILE_FN):
+            script = """
+global.location = {href: 'https://jobs.example.test/1'};
+global.NodeFilter = {SHOW_TEXT: 4};
+global.getComputedStyle = () => ({display: 'block', visibility: 'visible'});
+global.document = {title: 't', readyState: 'interactive', body: null, documentElement: {innerText: '職缺標題'},
+  links: [], querySelector: () => null, querySelectorAll: () => [], getElementById: () => null,
+  createTreeWalker: () => ({nextNode: () => null})};
+const r = (READER)();
+if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文件裡的字');
+""".replace('READER', fn)
+            result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_source_hash_and_pdf_text_share_the_same_captured_bytes(self):
         import hashlib
         pdf = Path(self.home) / 'original.pdf'

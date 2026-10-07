@@ -41,6 +41,21 @@ class SharedBrowser(unittest.TestCase):
         skill.write_text('ego-browser')
         self.enterContext(patch.object(cd, 'EGO_SKILL', str(skill)))
 
+    def test_agents_are_told_not_to_send_native_keystrokes(self):
+        # keyboard.paste 在 Mac 送真的 ⌘V,ego 當成使用者接手(2026-10-06 Cake 實測):規則要叫它改用 insertText
+        rule = cd.EgoDoor().apply_rule()
+        self.assertIn('keyboard.insertText', rule)
+        self.assertIn('不用 keyboard.paste', rule)
+
+    def test_the_card_follows_its_form_into_another_page_of_its_own_workspace_only(self):
+        door = cd.EgoDoor()
+        door.workspace = {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}
+        with patch.object(cd, '_ego', return_value=True):
+            self.assertEqual(door.follow_page('42:p2'), '42:p2')      # 申請表開在新分頁:改綁那一頁
+            self.assertEqual(door.workspace['page'], 'p2')
+            with self.assertRaises(cd.NotNow):
+                door.follow_page('7:p1')                              # 別的工作區的頁:不收
+
     def test_local_pdf_is_written_from_egos_bytes_and_its_own_workspace_is_released(self):
         source, output = Path(self.tmp, 'resume.html'), Path(self.tmp, 'resume.pdf')
         source.write_text('<p>PDF fixture</p>')

@@ -62,14 +62,20 @@ PAGE_FN = r"""() => {
     return text;
   };
   const fields = [];
-  document.querySelectorAll('input,select,textarea,' + selectedValue).forEach(el => {
+  // 富文字編輯器(求職信常用 contenteditable 的區塊,不是 textarea)也是一格
+  document.querySelectorAll('input,select,textarea,[contenteditable]:not([contenteditable=false]),[role=textbox],' + selectedValue).forEach(el => {
+    if (el.isContentEditable && el.parentElement && el.parentElement.isContentEditable) return;   // 編輯器裡面的子區塊不另算
+    // 外框裡面有看得到的真輸入格:算那一格就好(藏起來的 textarea 是編輯器自己同步用的,不算)
+    if (!['INPUT', 'TEXTAREA'].includes(el.tagName) && el.querySelectorAll
+        && Array.from(el.querySelectorAll('input,textarea')).some(c => c.getClientRects().length)) return;
     if (['hidden', 'password', 'submit', 'button', 'image', 'reset'].includes(el.type)) return;
     const style = getComputedStyle(el);
     if (!el.getClientRects().length || style.display === 'none' || style.visibility === 'hidden') return;
     // 上傳欄:外掛這邊拿不到 el.files(undefined),只拿得到 value「C:\\fakepath\\檔名」;
     // 以前只看 files,檔明明選上了也讀成空的,每一張都被判「上傳欄裡沒有」。value 只有第一個檔名。
     const customSelect = el.matches(selectedValue);
-    const v = customSelect ? el.innerText.trim() : el.type === 'file' ? (el.files ? Array.from(el.files).map(f => f.name)
+    const editor = (el.isContentEditable || el.getAttribute('role') === 'textbox') && !['INPUT', 'TEXTAREA'].includes(el.tagName);
+    const v = editor ? el.innerText.trim() : customSelect ? el.innerText.trim() : el.type === 'file' ? (el.files ? Array.from(el.files).map(f => f.name)
                                             : (el.value ? [el.value.split(/[\\/]/).pop()] : []))
             : (el.type === 'checkbox' || el.type === 'radio') ? (el.checked ? (el.value || 'on') : '')
             : el.value;
@@ -79,14 +85,15 @@ PAGE_FN = r"""() => {
     const shown = customSelect ? v : el.type === 'radio' ? (el.checked ? lab(el) : undefined)
                 : el.tagName === 'SELECT' && el.selectedOptions[0] ? el.selectedOptions[0].text
                 : box ? box.innerText.trim().slice(0, 200) : undefined;
-    fields.push({label: lab(el), name: el.name || el.id || '', type: customSelect ? 'select-one' : el.type || el.tagName.toLowerCase(), value: v, shown,
+    fields.push({label: lab(el), name: el.name || el.id || '', type: customSelect ? 'select-one' : editor ? 'textarea' : el.type || el.tagName.toLowerCase(), value: v, shown,
                  context: el.type !== 'radio' || el.checked ? fieldContext(el) : undefined,
                  choiceControl: customSelect || ['radio', 'checkbox'].includes(el.type) || el.tagName === 'SELECT'
                    || (combo && ['text', 'search'].includes(el.type) && el.getAttribute('aria-expanded') === 'false' && Boolean(shown))});
   });
   // 頁面上看得到的短文字行(去掉圖示字):104「選擇履歷」這種選單不是表單欄位,選好的值只是一行字;
   // Greenhouse 上傳完把上傳欄拿掉、只用文字顯示檔名
-  const lines = document.body.innerText.split('\n')
+  // 換頁的那一瞬間 document.body 可能還是空的(2026-10-06 LinkedIn 載完又換掉整份文件):讀不到就當沒有字,不要整支壞掉
+  const lines = ((document.body || document.documentElement).innerText || '').split('\n')
     .map(s => s.replace(/[\ue000-\uf8ff]/g, '').replace(/[×✕]\s*$/, '').trim())
     .filter(s => s && s.length <= 120).slice(0, 1500);
   const shownFiles = lines.filter(s => /\.(pdf|docx?|rtf|odt|txt)$/i.test(s)).slice(0, 30);
@@ -94,7 +101,11 @@ PAGE_FN = r"""() => {
   const profileLinks = Array.from(new Set(Array.from(document.links).map(a => a.href).filter(h => {
     try { const q = new URL(h).searchParams; return ID_PARAMS.some(k => q.has(k)); } catch (e) { return false; }
   }))).slice(0, 20);
-  return {url: location.href, title: document.title, fields, shownFiles, lines, profileLinks, fieldContexts: true};
+  // 還按得到的送出鍵(表單或對話框裡、沒停用):一鍵應徵那種沒有欄位、只剩「送出」的頁,看得到它就是還沒送出
+  const submits = Array.from(document.querySelectorAll('button,input[type=submit],[role=button]'))
+    .filter(el => el.getClientRects().length && !el.disabled && (el.type === 'submit' || el.closest('form,dialog,[role=dialog]')))
+    .map(el => (el.innerText || el.value || '').trim()).filter(Boolean).slice(0, 10);
+  return {url: location.href, title: document.title, fields, shownFiles, lines, profileLinks, submits, fieldContexts: true};
 }""".replace('ID_PARAMS', json.dumps(sorted(set(ID_PARAMS.values()))))
 
 PROFILE_FN = """() => {
@@ -130,7 +141,8 @@ PROFILE_FN = """() => {
   const emailBodies = emailMessages.map(el => (el.innerText || el.textContent || '').trim());
   // 收起來的內容(「更多」、摺疊區)常已在 DOM 裡只是沒畫出來;innerText 讀不到,判讀就說「無法確認」。
   // 把沒畫出來的文字接在後面(跳過程式碼類標籤),不靠各網站的按鈕名稱。
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const body = document.body || document.documentElement;
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
   const collapsed = [];
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const p = n.parentElement, s = (n.nodeValue || '').trim();
@@ -138,7 +150,7 @@ PROFILE_FN = """() => {
     collapsed.push(s);
   }
   return {url: location.href, title: document.title, readyState: document.readyState,
-    text: document.body.innerText + (collapsed.length ? '\\n' + collapsed.join('\\n') : ''),
+    text: (body.innerText || '') + (collapsed.length ? '\\n' + collapsed.join('\\n') : ''),
     emailThreadPrintView,
     emailMessageCount: emailMessages.length,
     emailBodies,
@@ -229,10 +241,19 @@ def human_check(page):
     return any(w in text for w in HUMAN_CHECK_WORDS)
 
 
+# 題目後面常跟著必填記號和字數計數器(「…？*(18/1500)」、「0/500」),不是題目的一部分
+_TAIL = __import__('re').compile(r'[\s*＊]*(?:[(（]?\s*\d+\s*/\s*\d+\s*[)）]?)?[\s*＊]*$')
+
+
+def fr_nq(s):
+    import form_record as fr
+    return fr._nq(s)
+
+
 def _same_question(q, field):
     import form_record as fr
     text = [field.get('label')] + str(field.get('context') or '').splitlines()
-    return bool(fr._nq(q)) and any(fr._nq(q) == fr._nq(line) for line in text)
+    return bool(fr._nq(q)) and any(fr._nq(q) == fr._nq(_TAIL.sub('', str(line or ''))) for line in text)
 
 
 def page_problems(page, fb, url, uploaded=(), tab_url=None):
@@ -258,7 +279,7 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
         return [HUMAN_CHECK]
     if tab_url and not gate_cells.same_url(page.get('url'), tab_url):
         return [f'那一頁已經不是填好的申請表了(現在是 {str(page.get("url"))[:80]}),可能被送出了,要人看']
-    if not page.get('fields'):
+    if not page.get('fields') and not page.get('submits'):
         return ['那一頁上沒有任何欄位(可能被送出了、或換頁了),要人看']
     bad = []
     bank = {e.get('k'): e for e in fb.get('__ans__', [])}
@@ -266,7 +287,8 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
         if x.get('src') == 'bank':
             e = bank.get(x.get('k')) or {}
             want = [w for w in (_norm(e.get('v')), _norm(e.get('zh'))) if w]
-            if 'choice' in x:
+            # 選項對應只對真的選項控制項有意義;文字格(求職信)帶了 choice 也照文字核對
+            if 'choice' in x and any(f.get('choiceControl') and _same_question(x.get('q'), f) for f in page.get('fields') or []):
                 import form_record as fr
                 choice = x.get('choice')
                 q = _norm(x.get('q'))
@@ -293,6 +315,9 @@ def page_problems(page, fb, url, uploaded=(), tab_url=None):
             continue
         q = _norm(x.get('q'))
         scoped = [f for f in page.get('fields') or [] if _same_question(x.get('q'), f)]
+        if (page.get('fieldContexts') and not scoped and x.get('src') in ('bank', 'rz')
+                and not any(fr_nq(x.get('q')) == fr_nq(_TAIL.sub('', str(line))) for line in page.get('lines') or [])):
+            continue   # 分好幾步的表單:這一題在前一步,停下來的這一頁上沒有這一題,讀不到不等於填錯
         values, display, text_lines = vals, shown, lines
         if page.get('fieldContexts') or any(f.get('type') == 'radio' for f in page.get('fields') or []):
             values = {_norm(v) for f in scoped for v in (f.get('value'), f.get('shown')) if _norm(v)}
