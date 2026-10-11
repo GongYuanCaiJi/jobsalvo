@@ -42,7 +42,7 @@ jobs:
       - name: 安裝相依套件(uv 照 pyproject.toml / uv.lock,含開發用的 Playwright)
         run: |
           uv sync --frozen
-          sudo apt-get install -y -qq poppler-utils   # 不是 Mac,PDF 預覽改用 pdftoppm
+          sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils   # 不是 Mac,PDF 預覽改用 pdftoppm
       - name: 讓無頭 Chrome 開得起來
         # Ubuntu 24.04 預設限制一般使用者建立 namespace,Chrome 會開不起來或卡住。
         run: |

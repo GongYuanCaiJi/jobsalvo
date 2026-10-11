@@ -77,7 +77,9 @@ def run(urls, board, browser_required=True, run_agent=None):
         rd = os.path.join(rs.DIR, 'rounds', time.strftime('%Y%m%d-%H%M%S') + '-add')
         os.makedirs(rd, exist_ok=True)
         try:
-            res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add', board=board)
+            # 他撥了「愛派幾隻就派幾隻」:跟找缺一樣,判斷那幾批同時跑
+            res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add', board=board,
+                           par=bool(fb.get('__agentfree__')))
         except ar.AgentRunError as e:
             agent_error = f'判斷沒有完成:{e}'
             _report(agent_error, '在「貼網址加入」按「看紀錄」確認後再重試', board)

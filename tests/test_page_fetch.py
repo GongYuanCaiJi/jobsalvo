@@ -89,6 +89,10 @@ class PageFetchRoutes(unittest.TestCase):
             '/blocked': (403, None, b''),
             '/gone404': (404, None, b''),
             '/gone410': (410, None, b''),
+            '/title-only': (200, HTML, b'<html><head><title>JobSite Remote Hiring</title></head>'
+                                       b'<body><div id="app"></div><script src="/app.js"></script></body></html>'),
+            '/tg/jobchan/12?embed=1&mode=tme': (200, HTML, b'<html><body><div class="tgme_widget_message_text js-message_text" dir="auto">'
+                                                    b'#Hiring Security Engineer<br/>Remote, review exchange risk controls.</div></body></html>'),
             '/script': (200, HTML, b'<html><head><script>setTimeout(function(){'
                                    b"document.body.innerText='Dynamic job content';},200);"
                                    b'</script></head><body></body></html>'),
@@ -151,6 +155,43 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertEqual(result.via, 'reader')
         self.assertIn('active role handles expired credentials', result.text)
         self.assertEqual(self.requests, ['/blocked', '/reader/http://127.0.0.1:%d/blocked' % self.server.server_port])
+
+    def test_page_with_only_its_title_falls_back_to_reader(self):
+        import page_fetch
+
+        with patch.object(page_fetch, 'READER_ROOT', self.base + '/reader'), \
+             patch.object(page_fetch, 'RETRY_WAIT', 0):
+            result = page_fetch.fetch(self.base + '/title-only')
+
+        self.assertEqual(result.via, 'reader')
+        self.assertIn('active role handles expired credentials', result.text)
+
+    def test_title_only_page_is_unreadable_on_every_route(self):
+        import page_fetch
+
+        for via in ('direct', 'reader', 'ego', 'telegram'):
+            shell = page_fetch.PageResult('https://ex.test/a', 'ok', text=' JobSite  Remote Hiring\n', title='JobSite Remote Hiring', via=via)
+            self.assertFalse(shell.readable, via)
+        one_line_post = page_fetch.PageResult('https://t.me/c/1', 'ok', text='#Hiring Engineer', via='telegram')
+        self.assertTrue(one_line_post.readable)
+
+    def test_reader_keeps_only_the_markdown_content(self):
+        import page_fetch
+
+        with patch.object(page_fetch, '_request', return_value=(
+                200, '', 'text/plain', 'utf-8',
+                b'Title: JobSite\n\nURL Source: https://ex.test/a\n\nMarkdown Content:\n')):
+            shell = page_fetch._reader('https://ex.test/a')
+        self.assertEqual((shell.title, shell.text), ('JobSite', ''))
+        self.assertFalse(shell.readable)
+
+    def test_telegram_post_text_comes_from_the_official_embed(self):
+        result = self._api_fetch('telegram', 'https://t.me/jobchan/12', '/tg')
+
+        self.assertEqual(result.status, 'ok')
+        self.assertEqual(result.via, 'telegram')
+        self.assertIn('Security Engineer\nRemote, review exchange risk controls.', result.text)
+        self.assertEqual(self.requests, ['/tg/jobchan/12?embed=1&mode=tme'])
 
     def test_only_direct_404_and_410_are_hard_closed(self):
         import page_fetch
@@ -336,7 +377,7 @@ class PageFetchRoutes(unittest.TestCase):
 
     def _public_dns(self, host, port, *args, **kwargs):
         if host in ('jobs.lever.co', 'www.104.com.tw', 'jobs.ashbyhq.com',
-                    'boards.greenhouse.io', 'job-boards.eu.greenhouse.io'):
+                    'boards.greenhouse.io', 'job-boards.eu.greenhouse.io', 't.me'):
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
                      '', ('8.8.8.8', port))]
         return ORIGINAL_GETADDRINFO(host, port, *args, **kwargs)

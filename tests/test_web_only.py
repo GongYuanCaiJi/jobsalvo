@@ -656,6 +656,24 @@ class AddJobReal(unittest.TestCase):
             research.DIR = old_dir
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_judge_batches_run_together_when_he_lets_them(self):
+        """他撥了「愛派幾隻就派幾隻」,貼網址加入的判斷也同時跑;沒撥就一批一批。"""
+        import tempfile, add_job, research, page_fetch
+        for on in (1, 0):
+            with self.subTest(agentfree=on):
+                d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+                make_board(p, {'__agentfree__': on})
+                seen = {}
+                def judge(cands, *_a, **kw):
+                    seen['par'] = kw.get('par')
+                    return {}
+                ok = page_fetch.PageResult('https://ex.test/a', 'ok', text='JD', title='T', via='direct', http_status=200)
+                with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                     patch.object(page_fetch, 'fetch', return_value=ok), \
+                     patch.object(research, 'judge', side_effect=judge):
+                    add_job.run(['https://ex.test/a'], p)
+                self.assertIs(seen['par'], bool(on))
+
     def test_a_url_already_on_the_board_but_removed_says_where_it_is(self):
         """貼的網址板上已經有、但在「🗑 已移除」:要講它在已移除、怎麼放回來,不是只說「都已經有了」。"""
         import tempfile, add_job

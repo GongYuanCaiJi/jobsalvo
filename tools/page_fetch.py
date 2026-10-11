@@ -32,6 +32,7 @@ API_ROOTS = {
     'lever': 'https://api.lever.co/v0/postings',
     'ashby': 'https://api.ashbyhq.com/posting-api/job-board',
     'greenhouse': 'https://boards-api.greenhouse.io/v1/boards',
+    'telegram': 'https://t.me',
 }
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -53,7 +54,9 @@ class PageResult:
 
     @property
     def readable(self):
-        return self.status == 'ok' and bool(self.text.strip())
+        # 每條抓頁路共用這一個判斷:只剩 <title> 的頁(要跑 JS 才有內容)不算讀到,往下一條路退
+        body = ' '.join(self.text.split())
+        return self.status == 'ok' and bool(body) and body != ' '.join(self.title.split())
 
 
 class _VisibleText(HTMLParser):
@@ -370,6 +373,10 @@ def _reader(url):
     title = ''
     if text.startswith('Title:'):
         title = text.splitlines()[0][len('Title:'):].strip()
+    # 閱讀代理的格式是 Title / URL Source / Markdown Content 三段:只拿內文,空殼頁才判得出來沒讀到
+    head, sep, content = text.partition('Markdown Content:')
+    if sep and head.startswith('Title:'):
+        text = content.strip()
     return PageResult(url, 'ok', text=text, via='reader', title=title,
                       http_status=status)
 
@@ -457,6 +464,32 @@ def _greenhouse(url):
                       http_status=status)
 
 
+def _telegram(url):
+    """Telegram 公開頻道/群組的單則貼文:貼文頁本身只有外框,內文在官方嵌入版(?embed=1)。"""
+    parts = urllib.parse.urlsplit(url)
+    if (parts.hostname or '').lower() not in ('t.me', 'telegram.me'):
+        return None
+    path = [part for part in parts.path.split('/') if part]
+    if path and path[0] == 's':
+        path = path[1:]
+    if len(path) < 2 or not path[-1].isdigit():
+        return None
+    endpoint = f"{API_ROOTS['telegram'].rstrip('/')}/{path[0]}/{path[-1]}?embed=1&mode=tme"
+    status, _final_url, _content_type, charset, body = _request(endpoint, TIMEOUTS['direct'])
+    if not 200 <= status < 300:
+        raise RuntimeError(f'Telegram embed HTTP {status}')
+    match = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+                      _decode(body, charset), re.S)
+    if not match:
+        return None     # 私人群、貼文被刪:嵌入版沒有內文,交給後面的路照實回報讀不到
+    text, _title = _visible_text(re.sub(r'<br\s*/?>', '\n', match.group(1)))
+    if not text:
+        return None
+    lines = text.splitlines()
+    return PageResult(url, 'ok', text=text, via='telegram', title=lines[0][:120] if len(lines) > 1 else '',
+                      http_status=status)
+
+
 def _ego(url):
     with _EGO_SLOTS:                     # 先排到位子才開工作區
         return _ego_now(url)
@@ -513,7 +546,7 @@ def fetch(url):
         except Exception as error:  # noqa: BLE001 — 查不到位址、不是公開網址:原因照實放進這一頁的結果
             return PageResult(parts.geturl(), 'unknown', errors=(f'target blocked: {str(error)[:180]}',))
         for via, route in (('104', _104), ('lever', _lever),
-                           ('ashby', _ashby), ('greenhouse', _greenhouse)):
+                           ('ashby', _ashby), ('greenhouse', _greenhouse), ('telegram', _telegram)):
             try:
                 result = route(parts.geturl())
                 if result and result.status == 'closed':
