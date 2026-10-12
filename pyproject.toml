@@ -5,7 +5,7 @@ name = "jobsalvo"
 version = "0"
 requires-python = ">=3.11"
 dependencies = [
-    "Markdown==3.10.3",          # 履歷 Markdown 轉 PDF
+    "Markdown==3.11",          # 履歷 Markdown 轉 PDF
     "pypdf==6.19.0",             # 讀 PDF 頁數、比對頁面
 ]
 
