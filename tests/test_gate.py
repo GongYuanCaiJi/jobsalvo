@@ -173,7 +173,8 @@ FLOWS = {
                                    'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投',
                                    'quote': '月薪 50,000 起。應徵截止 2026/10/31。'}}]},
         variants={'ghost': {'jobs': [{'id': 'J1', 'keep': False, 'risk': {'kind': 'ghost', 'why': '刊登已經 200 天'}}]},
-                  'old': {'jobs': [{'id': 'J1', 'variant': 'general', 'lang': 'zh', 'pick_why': '舊的寫法'}]}},
+                  'old': {'jobs': [{'id': 'J1', 'variant': 'general', 'lang': 'zh', 'pick_why': '舊的寫法'}]},
+                  'missing': {'jobs': [{'id': 'J1', 'missing': '網站首頁,沒有職缺內容', 'keep': False}]}},
         truth=lambda: gate.Truth(
             given={'J1': '資料工程師 好公司 負責資料管線。月薪 50,000 起。應徵截止 2026/10/31。'},
             cites={'J1': {'c1', 'c2'}},
@@ -192,7 +193,7 @@ FLOWS = {
               'jobs.risk': ({'kind': 'scam', 'why': '要先匯保證金'}, ['詐騙或幽靈缺', '保證金', '都沒有']),
               'jobs.card': ({'deadline': '2026-12-01', 'salary': '月薪 90,000', 'quote': '原文沒有這一句'},
                             ['卡片摘要', '指定 JD', 'quote'])},
-        judged={'jobs.keep': True, 'jobs.fit': 4, 'jobs.cat': '工程', 'jobs.resume': 'general', 'jobs.lang': 'zh',
+        judged={'jobs.missing': ('網站首頁,沒有職缺內容', 'missing'), 'jobs.keep': True, 'jobs.fit': 4, 'jobs.cat': '工程', 'jobs.resume': 'general', 'jobs.lang': 'zh',
                 'jobs.variant': ('general', 'old'), 'jobs.risk': ({'kind': 'ghost', 'why': '刊登已經 200 天'}, 'ghost'),
                 'jobs.card': {'fit': '管線經驗對上', 'co': '做電商', 'loc': '台北', 'deadline': '2026-10-31',
                               'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投',

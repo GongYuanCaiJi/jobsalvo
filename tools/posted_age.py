@@ -349,8 +349,7 @@ def main(argv=None):
     agent_report.resolve_from('刊登日期', '後來那一輪查刊登日期跑完了', started, live=board)
     _report(inaccessible, board)
     for url, why in wrong:          # 安檢門擋下的:講清楚哪一格、agent 說什麼、實際是什麼
-        agent_report.report('刊登日期', f'agent 交的刊登日期跟頁面對不上,這一張這一輪不寫:{why}',
-                            need='不用你處理:下一輪會重查;要查原因先打開那張卡的證據', job=url, live=board)
+        print(f'{url}:agent 交的刊登日期跟頁面對不上,這一張這一輪不寫(下一輪會重查):{why}')
 
     write_board_dates()
     got = sum(1 for url in jobs if cache.get(url, {}).get('posted_at'))

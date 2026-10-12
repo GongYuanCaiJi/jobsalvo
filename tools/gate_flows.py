@@ -17,7 +17,7 @@ import profile_sync as ps      # noqa: E402
 import reply_run               # noqa: E402
 import research                # noqa: E402
 import sync_sent               # noqa: E402
-from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm, quoted  # noqa: E402
+from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm, quoted, words  # noqa: E402
 
 def _given_key(said, row, truth):
     """這一列是誰(網址、代號):要是這一輪程式交給它的其中一個。"""
@@ -25,13 +25,13 @@ def _given_key(said, row, truth):
 
 
 def _in_given(said, row, truth):
-    """agent 說是原文的字:程式交給它的那一列原文裡要逐字看得到(空白、全形半形、大小寫不算)。
+    """agent 說是原文的字:程式交給它的那一列原文裡要逐字看得到(gate_cells.words:標點、空白、全形半形、大小寫不算)。
     「查無」這類佔位字跟沒寫一樣(research.blank)。程式沒有原文可以比(沒抓到頁面):核對不了,這一格不用。"""
     if research.blank(said):
         return None
     if not truth.given:
         return UNUSED
-    return None if norm(said) in norm(truth.given) else '程式給它的原文裡沒有這段字'
+    return None if words(said) and words(said) in words(truth.given) else '程式給它的原文裡沒有這段字'
 
 
 def _posted_date(said, row, truth):
@@ -133,7 +133,7 @@ def _in_jd(said, sheet, truth):
     text = _card_text(truth)
     if not text:
         return UNUSED                  # 程式沒給它原文:核對不了,這一格不用
-    return None if norm(said) in norm(text) else '程式給它的 JD 原文裡沒有這段字'
+    return None if words(said) and words(said) in words(text) else '程式給它的 JD 原文裡沒有這段字'
 
 
 def _resume_pick(said, sheet, truth):
@@ -243,6 +243,7 @@ RESEARCH_SEARCH = {
 
 RESEARCH_JUDGE = {
     'jobs.id': Cell(CHECK, '職缺代號', '這一批交給它的其中一個(J1、J2…)', _given_key),
+    'jobs.missing': Cell(JUDGED, '頁面上看不到這個職缺', '是 agent 判斷:這張不加卡,它看到的是什麼照原文告訴他'),
     'jobs.title': Cell(CHECK, '頁面上的職稱', '程式給它的 JD 原文裡逐字看得到(才拿來當卡片名字)', _in_given),
     'jobs.company': Cell(CHECK, '頁面上的公司', '程式給它的 JD 原文裡逐字看得到', _in_given),
     'jobs.keep': Cell(JUDGED, '要不要送到他眼前', '送不送是 agent 判斷:卡上標明、附理由,他可以移除'),
@@ -297,7 +298,7 @@ def _in_source(said, row, truth):
     text = _source_text(row, truth)
     if not text:
         return UNUSED
-    return None if norm(said) in norm(text) else '程式複製的那一封(那一頁)原文裡沒有這段字'
+    return None if words(said) and words(said) in words(text) else '程式複製的那一封(那一頁)原文裡沒有這段字'
 
 
 def _reply_date(said, row, truth):

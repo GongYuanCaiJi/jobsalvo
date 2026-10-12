@@ -104,7 +104,7 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
                 # agent 都不能用(額度用完、限流、要重新登入):等得到,不加空卡,存成待寫,之後接著寫
                 n = rs.pending_save(cands, pending_path())
                 msg = f'{n} 張還沒寫卡片:agent 都不能用({e})'
-                _report(msg, '不用你處理:每隔一小時會自動接著寫;要馬上試就再按一次「貼網址加入」', board)
+                print(msg + ';每隔一小時會自動接著寫')
                 st({'phase': 'waiting', 't0': t0, 'finished_at': time.time(), 'added': 0, 'n': n, 'msg': msg})
                 return 0
             agent_error = f'判斷沒有完成:{e}'
@@ -113,23 +113,26 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
     src = {'round': time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), 'mode': 'add', 'via': 'manual'}
     empty = {'keep': False, 'fit': 0, 'why': 'agent 無法讀取職缺頁,請確認網址與登入狀態',
              'cite': [], 'bad_cite': [], 'cat': '其他', 'card': {}}
-    entries = []
+    entries, unseen = [], [(url, '確定已下架') for url in gone]
     for candidate in cands:
         result = res.get(candidate['url']) or empty
-        if not agent_error and result.get('wrong'):     # 安檢門擋下:卡照樣加(他自己貼的),摘要不用、原因照實講
-            _report('agent 交的判斷跟職缺頁對不上,卡片摘要沒寫:' + '；'.join(result['wrong'][:2])[:300],
-                    '不用你處理:卡已經加了;要查原因先打開那張卡的證據', board, job=candidate['url'])
-        elif not agent_error and not result.get('readable'):
-            _report(f'agent 無法確認職缺頁內容:{candidate["url"]}',
-                    '確認職缺網址;要登入才看得到的職缺頁程式讀不到,請自己打開看', board, job=candidate['url'])
+        if result.get('missing'):             # 頁面內文看不到這個職缺(首頁、列表、別的職缺):不加卡,它看到什麼一起講
+            unseen.append((candidate['url'], '頁面上看不到這個職缺:' + result['missing']))
+            continue
+        # 卡照樣加(他自己貼的),摘要沒寫成的原因寫在卡上;原因細節在那張卡的證據(回報只放要他做的事)
+        if result.get('wrong'):
+            result = dict(result, why='摘要沒寫成:agent 交了兩次都跟職缺頁對不上')
+            print(f"{candidate['url']}:" + '；'.join(result['wrong'])[:300])
+        elif not result.get('readable') and not result.get('why'):
+            result = dict(result, why='摘要沒寫成:程式讀不到這一頁(要登入或要跑 JS),請自己打開看')
         entry = rs.job_entry(candidate, result, src)
         entry['chan'] = '直投'
         entries.append(entry)
     added = rs.add_entries(entries, board) if entries else 0
-    if gone:
-        _report(f'{len(gone)} 個網址確定已下架(HTTP 404/410 或官方資料端點),沒有加:' + '、'.join(gone[:3]),
-                '確認網址對不對', board)
-    msg = f'加進待評估 {added} 張' + (f',{len(gone)} 張已下架沒加' if gone else '')
+    if unseen:                                # 沒加的一輪講一次:他貼的網址不能默默不見
+        _report(f'{len(unseen)} 個網址沒有加成卡:' + '；'.join(f'{u}({why})' for u, why in unseen[:5])[:600],
+                '要的話自己打開看;真的是職缺就再貼一次', board)
+    msg = f'加進待評估 {added} 張' + (f',{len(unseen)} 張沒加(已下架或頁面上看不到職缺)' if unseen else '')
     if agent_error:
         msg += f';{agent_error}'
     st({'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': added, 'n': len(cands) + len(gone), 'msg': msg})

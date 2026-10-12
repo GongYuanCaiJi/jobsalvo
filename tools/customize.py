@@ -368,8 +368,7 @@ def process_feedback_reports(board, path, feedback_ids=(), report_writer=None):
         covered = set()
         for row in verdict.rows.get('reports', []):
             if not row.ok:            # 安檢門擋下:這一則不收,講清楚哪一格、agent 說什麼、實際是什麼
-                writer('客製回饋', 'agent 交的跨卡回饋整理對不上,這一則不收:' + '；'.join(row.problems)[:300],
-                       '不用你處理:那幾則回饋留著,下一輪再整理', live=board)
+                print('agent 交的跨卡回饋整理對不上,這一則不收(回饋留著,下一輪再整理):' + '；'.join(row.problems)[:300])
                 continue
             issue = str(row.judged.get('issue') or '').strip()
             recommendation = str(row.facts.get('recommendation') or '').strip()

@@ -645,7 +645,7 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
             '偏好筆記': [note_text] + [prefs.render(nb) for nb in shown],
         })
     parts += [f'把結果寫成一個 JSON 檔到 {out}(只寫這個檔,其他都不要改):\n',
-              '[{"id":"J1","title":"頁面上的職稱","company":"頁面上的公司","keep":true,"fit":4,'
+              '[{"id":"J1","missing":"","title":"頁面上的職稱","company":"頁面上的公司","keep":true,"fit":4,'
               '"cite":["c12"],"why":"一句結論",'
               '"risk":{"kind":"scam / ghost / 空字串","why":"一句說明,把頁面上的字或程式提醒逐字放在「」裡;沒有就空字串"},'
               '"reasons":[{"text":"一段理由","citation":"逐字引用偏好筆記條目、舊卡原話或 JD 原文(程式會逐字比對);跳過中間的字要用 … 隔開,不要自己接句子;引用不到寫「筆記裡沒有相關的」",'
@@ -658,6 +658,8 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
               '"ammo":"打法:直投或找誰;不指定附件,附件由程式照勾選組",'
               '"quote":"有日期或薪資時，附指定 JD 的逐字引用；查不到就不要猜"}}, ...]\n',
               '每段理由都要有引用和根據類型;引用不到時寫「筆記裡沒有相關的」。引用必須能在本輪給你的筆記、相似舊卡原話或 JD 摘錄中逐字找到。\n',
+              '程式給的職缺頁內文裡看不到這個職缺時(內文是網站首頁、職缺列表、別的職缺,或只有選單),'
+              'missing 寫一句你看到的是什麼,這張其他格留空;看得到這個職缺就留空字串。\n',
               'title、company 逐字抄 JD 原文；日期與薪資單位由你依 JD 理解，並附 card.quote。程式核對原文引用與 cite 的舊卡代號,'
               '對不上的那一張這一輪不進板。\n',
               'keep = 要不要送到他眼前。fit 1-5:5 = 他幾乎一定會喜歡,1 = 他一定不要。',
@@ -714,118 +716,171 @@ def _write_answers(out, batch, answers):
         json.dump({'jobs': rows}, f, ensure_ascii=False)
 
 
+def _inspect(rd, out, batch, cites, resumes, rnd):
+    """這一批的交件單過安檢門,回每一列(row.c 是那一張候選)。沒寫出來、寫到一半:這批沒有判斷。"""
+    import evidence
+    import gate
+    sheet, _missing = gate.read(rd, 'research_judge', where=out)
+    ids = {f'J{i + 1}': c for i, c in enumerate(batch)}
+    with evidence.activated(rnd):         # 安檢門的比對結果記進同一輪
+        verdict = gate.inspect('research_judge', sheet or {'jobs': []}, gate.Truth(
+            given={k: (c.get('jd') if 'jd' in c else c.get('jd_excerpt')) or '' for k, c in ids.items()},
+            cites={k: v['ids'] for k, v in cites.items()},
+            sources={k: v['sources'] for k, v in cites.items()},
+            flags={k: list(c.get('flag') or []) for k, c in ids.items()},
+            resumes=resumes))
+    rows = [row for row in verdict.rows.get('jobs', []) if row.key in ids]
+    for row in rows:
+        row.c = ids[row.key]
+    return rows
+
+
+def fix_note(rows):
+    """重交:告訴它上一次哪幾張、哪一格對不上(安檢門的原話),只交這幾張。"""
+    return ('\n\n【重交】你上一次交的判斷裡,下面這幾張跟程式給的材料對不上:\n'
+            + ''.join(f'- {row.key}:' + '；'.join(row.problems) + '\n' for row in rows)
+            + '照上面的格式只交這幾張(代號不變)。引用從上面程式給的材料逐字抄;'
+            '頁面內文看不到這個職缺就寫 missing。\n')
+
+
 def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', par=False,
           launch_all=None, resumes=None, selection_signature=None, finishing=None, board=None, answers=None):
     """用程式提供的 JD 文字判斷;判斷階段固定不開瀏覽器。他按了停止(finishing)就不再派下一批,
     已經判完的照常回傳;被停掉的那一批沒有結果,呼叫的人把它存回待判。
+    安檢門擋下的那幾張,把對不上的地方告訴它、重交一次;還是對不上的回 wrong(原因照安檢門的原話)。
+    agent 說頁面內文看不到這個職缺的回 missing(它看到的是什麼),不算判過。
     answers:外面已經照交件單格式判好的(網址 → 一列,例如別的 agent 讀過 JD 了):不派 agent,
-    直接當這一批的交件單,照樣過安檢門(引用要在程式這一輪給的材料裡逐字找得到)。
+    直接當這一批的交件單,照樣過安檢門(引用要在程式這一輪給的材料裡逐字找得到),不重交。
     證據(#315):每一批記進那一批每一張卡的證據夾(指示、動作紀錄、交件單)。"""
     finishing = finishing or (lambda: False)
     import agent_run as ar
     import evidence
+    import gate
     browser_required = False
     resumes = prefs.checked_resumes(resumes)
     signature = selection_signature or prefs.resume_selection_signature(resumes)
     empty_feedback_signature = prefs.feedback_signature('')
-    res = {}
+    res, failed = {}, {}
     batches = [cands[i:i + BATCH] for i in range(0, len(cands), BATCH)]
-    prepared, batch_round = [], {}
+    prepared = []
     for bi, b in enumerate(batches):
         out = os.path.join(rd, f'judge_{bi}.json')
         p, cites = judge_prompt(b, cs, out, mode, resumes)
         with open(os.path.join(rd, f'judge_{bi}.prompt.txt'), 'w', encoding='utf-8') as f:
             f.write(p)
         prepared.append((bi, b, out, p, cites))
-    if par and len(prepared) > 1 and answers is None:
-        if on_batch: on_batch(0, len(batches), par=True)
-        rounds = [evidence.Round('research', f'judge_{bi}', [c.get('url') for c in b], board)
-                  for bi, b, _o, _p, _c in prepared]
-        batch_round.update({bi: r for (bi, _b, _o, _p, _c), r in zip(prepared, rounds)})
+
+    def take(bi, row, cites):
+        c = row.c
+        missing = str(row.judged.get('missing') or '').strip()
+        if missing:               # 頁面內文看不到這個職缺(首頁、列表、別的職缺):它看到什麼照原文,不算判過
+            res[c['url']] = {'keep': False, 'readable': False, 'missing': missing[:200], 'fit': 0, 'why': '',
+                             'cite': [], 'bad_cite': [], 'reasons': [], 'cat': '其他', 'bad_evidence': False,
+                             'card': {}, 'resume': {}, 'risk': None}
+            failed.pop(c['url'], None)
+            return
+        if not row.ok:            # 安檢門擋下:這一張不進板、也不算判過
+            res[c['url']] = {'keep': False, 'readable': False, 'wrong': row.problems, 'fit': 0, 'why': '',
+                             'cite': [], 'bad_cite': [], 'reasons': [], 'cat': '其他',
+                             'bad_evidence': any('理由的引用' in p for p in row.problems),
+                             'card': {}, 'resume': {}, 'risk': None}
+            failed[c['url']] = (bi, row)
+            return
+        failed.pop(c['url'], None)
+        x, said = row.facts, row.judged     # 核對過的事實、agent 判斷(送不送、合不合適、類別、履歷、摘要)
+        # 職稱沒寫等於沒確認到頁面,不送到他眼前;公司沒寫不能蓋掉找缺時已經知道的
+        title = '' if blank(x.get('title')) else str(x['title']).strip()
+        if title:
+            c['title'] = title
+        if not blank(x.get('company')):
+            c['company'] = str(x['company']).strip()
         try:
-            outcome = (launch_all or _launch_all)([(p, os.path.join(rd, f'judge_{bi}.out'), rnd) for (bi, _b, _o, p, _c), rnd
-                                                   in zip(prepared, rounds)], browser_required)
+            fit = max(1, min(5, int(round(float(said.get('fit') or 0)))))
+        except (TypeError, ValueError):
+            fit = 0
+        resume_id = str(said.get('resume') or said.get('variant') or '').strip()
+        lang = str(said.get('lang') or '').strip()
+        pick_why = str(x.get('pick_why') or '').strip()
+        selection = {
+            'selection_signature': signature,
+            'feedback_signature': empty_feedback_signature,
+        }
+        if prefs.valid_resume_pick(resume_id, lang, resumes) and pick_why:
+            selection.update(recommend=resume_id, lang=lang, pick_why=pick_why)
+        reasons, _bad = checked_reasons(x.get('reasons'), cites[row.key]['sources'])
+        risk = said.get('risk') if isinstance(said.get('risk'), dict) else {}
+        risk = {'kind': str(risk.get('kind') or '').strip(), 'why': str(risk.get('why') or '').strip()[:300]}
+        scam = risk['kind'] == 'scam'
+        summary = said.get('card') if isinstance(said.get('card'), dict) else {}
+        res[c['url']] = {'keep': bool(said.get('keep')) and bool(title) and not scam,   # 詐騙徵兆:一律不送
+                         'fit': fit, 'why': (f"疑似詐騙:{risk['why']}" if scam else str(x.get('why') or '')),
+                         'risk': risk if risk['kind'] in ('scam', 'ghost') else None,
+                         'cite': [str(k) for k in (x.get('cite') or [])], 'bad_cite': [],
+                         'reasons': reasons, 'bad_evidence': False,
+                         'cat': said.get('cat') if said.get('cat') in CATS else '其他',
+                         'readable': bool(title) and c.get('page_status') != 'unknown',
+                         'card': dict(summary, by=gate.JUDGED) if summary else {},
+                         'resume': selection}
+
+    def launch(jobs):
+        """jobs:[(bi, 這一批, 交件單, 指示, 證據那一輪)]。同時派(他撥了愛派幾隻)或一批一批派。"""
+        try:
+            if par and len(jobs) > 1:
+                ar.require_success((launch_all or _launch_all)(
+                    [(p, out[:-5] + '.out', rnd) for _bi, _b, out, p, rnd in jobs], browser_required))
+            else:
+                for bi, _b, out, p, rnd in jobs:
+                    if finishing():
+                        break
+                    if on_batch: on_batch(bi, len(batches))
+                    with evidence.activated(rnd):
+                        ar.require_success(run_agent(p, out[:-5] + '.out', browser_required))
         finally:
-            for (_bi, _b, out, _p, _c), rnd in zip(prepared, rounds):
+            for _bi, _b, out, _p, rnd in jobs:
                 rnd.handoff(out)
+
+    first = [(bi, b, out, p, evidence.Round('research', f'judge_{bi}', [c.get('url') for c in b], board))
+             for bi, b, out, p, _c in prepared]
+    if answers is not None:
+        for bi, b, out, _p, rnd in first:
+            with evidence.activated(rnd):
+                _write_answers(out, b, answers)
+            rnd.handoff(out)
+    else:
+        if par and len(first) > 1 and on_batch: on_batch(0, len(batches), par=True)
         try:
-            ar.require_success(outcome)
+            launch(first)
         except ar.AgentRunError:
             if not finishing():
-                raise                             # 收工時被停掉的那幾批只是沒有結果,判完的照讀
-    for bi, b, out, p, cites in prepared:
-        if not par:
-            if finishing():
-                break
-            if on_batch: on_batch(bi, len(batches))
-            try:
-                with evidence.opened('research', f'judge_{bi}', [c.get('url') for c in b], board) as rnd:
-                    batch_round[bi] = rnd         # 安檢門核對這一批的比對結果記進同一輪
-                    try:
-                        if answers is not None:
-                            _write_answers(out, b, answers)
-                        else:
-                            ar.require_success(run_agent(p, os.path.join(rd, f'judge_{bi}.out'), browser_required))
-                    finally:
-                        rnd.handoff(out)
-            except ar.AgentRunError:
-                if finishing():
-                    break                         # 正在判的這一批被停掉;前面判完的照常回傳
-                raise
-        import gate
-        sheet, _missing = gate.read(rd, 'research_judge', where=out)   # 這一批沒寫出來(或寫到一半):這批沒有判斷
-        ids = {f'J{i + 1}': c for i, c in enumerate(b)}
-        with (evidence.activated(batch_round[bi]) if bi in batch_round else contextlib.nullcontext()):
-            verdict = gate.inspect('research_judge', sheet or {'jobs': []}, gate.Truth(
-                given={k: (c.get('jd') if 'jd' in c else c.get('jd_excerpt')) or '' for k, c in ids.items()},
-                cites={k: v['ids'] for k, v in cites.items()},
-                sources={k: v['sources'] for k, v in cites.items()},
-                flags={k: list(c.get('flag') or []) for k, c in ids.items()},
-                resumes=resumes))
-        for row in verdict.rows.get('jobs', []):
-            c = ids.get(row.key)
-            if c is None:
-                continue
-            if not row.ok:            # 安檢門擋下:這一張不進板、也不算判過,原因照實回報
-                res[c['url']] = {'keep': False, 'readable': False, 'wrong': row.problems, 'fit': 0, 'why': '',
-                                 'cite': [], 'bad_cite': [], 'reasons': [], 'cat': '其他',
-                                 'bad_evidence': any('理由的引用' in p for p in row.problems),
-                                 'card': {}, 'resume': {}, 'risk': None}
-                continue
-            x, said = row.facts, row.judged     # 核對過的事實、agent 判斷(送不送、合不合適、類別、履歷、摘要)
-            # 職稱沒寫等於沒確認到頁面,不送到他眼前;公司沒寫不能蓋掉找缺時已經知道的
-            title = '' if blank(x.get('title')) else str(x['title']).strip()
-            if title:
-                c['title'] = title
-            if not blank(x.get('company')):
-                c['company'] = str(x['company']).strip()
-            try:
-                fit = max(1, min(5, int(round(float(said.get('fit') or 0)))))
-            except (TypeError, ValueError):
-                fit = 0
-            resume_id = str(said.get('resume') or said.get('variant') or '').strip()
-            lang = str(said.get('lang') or '').strip()
-            pick_why = str(x.get('pick_why') or '').strip()
-            selection = {
-                'selection_signature': signature,
-                'feedback_signature': empty_feedback_signature,
-            }
-            if prefs.valid_resume_pick(resume_id, lang, resumes) and pick_why:
-                selection.update(recommend=resume_id, lang=lang, pick_why=pick_why)
-            reasons, _bad = checked_reasons(x.get('reasons'), cites[row.key]['sources'])
-            risk = said.get('risk') if isinstance(said.get('risk'), dict) else {}
-            risk = {'kind': str(risk.get('kind') or '').strip(), 'why': str(risk.get('why') or '').strip()[:300]}
-            scam = risk['kind'] == 'scam'
-            summary = said.get('card') if isinstance(said.get('card'), dict) else {}
-            res[c['url']] = {'keep': bool(said.get('keep')) and bool(title) and not scam,   # 詐騙徵兆:一律不送
-                             'fit': fit, 'why': (f"疑似詐騙:{risk['why']}" if scam else str(x.get('why') or '')),
-                             'risk': risk if risk['kind'] in ('scam', 'ghost') else None,
-                             'cite': [str(k) for k in (x.get('cite') or [])], 'bad_cite': [],
-                             'reasons': reasons, 'bad_evidence': False,
-                             'cat': said.get('cat') if said.get('cat') in CATS else '其他',
-                             'readable': bool(title) and c.get('page_status') != 'unknown',
-                             'card': dict(summary, by=gate.JUDGED) if summary else {},
-                             'resume': selection}
+                raise                     # 收工時被停掉的那幾批只是沒有結果,判完的照讀
+    for bi, b, out, _p, cites in prepared:
+        for row in _inspect(rd, out, b, cites, resumes, first[bi][4]):
+            take(bi, row, cites)
+
+    # 重交一次:2026-10-12 實測擋下的有一半是 agent 引錯了(別張的 JD、程式的指示、編的舊卡代號),講了就會改
+    if failed and answers is None and not finishing():
+        again = {}
+        for bi, row in failed.values():
+            again.setdefault(bi, []).append(row)
+        fix = []
+        for bi, rows in sorted(again.items()):
+            _bi, b, _out, _p, cites = prepared[bi]
+            out = os.path.join(rd, f'judge_{bi}_fix.json')
+            p = judge_prompt(b, cs, out, mode, resumes)[0] + fix_note(rows)
+            with open(os.path.join(rd, f'judge_{bi}_fix.prompt.txt'), 'w', encoding='utf-8') as f:
+                f.write(p)
+            fix.append((bi, b, out, p, evidence.Round('research', f'judge_{bi}_fix', [r.c.get('url') for r in rows], board)))
+        try:
+            launch(fix)
+        except ar.AgentRunError as e:
+            print(f'重交那一輪 agent 沒跑完,擋下的照第一次的結果:{e}')
+        for bi, b, out, _p, rnd in fix:
+            keys = {r.key for r in again[bi]}
+            for row in _inspect(rd, out, b, prepared[bi][4], resumes, rnd):
+                if row.key in keys:
+                    take(bi, row, prepared[bi][4])
+    for _bi, row in failed.values():
+        print(f"{row.c['url']}:交了兩次都跟程式給的材料對不上,摘要沒寫:" + '；'.join(row.problems)[:300])
     return res
 
 
@@ -1069,8 +1124,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
                 st('agent', which=mode, step=f'你按了停止:找到的 {n} 張存起來,下一輪先判', pending=n)
                 return 0
         if wrong:                             # 安檢門擋下的:講清楚哪一格、agent 說什麼、實際是什麼
-            _report(f'找缺 agent 交的候選有 {len(wrong)} 張對不上,沒收:' + '；'.join(wrong[:3])[:300],
-                    '不用你處理;要查原因先打開這一輪找缺的證據', live)
+            print(f'找缺 agent 交的候選有 {len(wrong)} 張對不上,沒收:' + '；'.join(wrong[:3])[:300])
         missing_angle = [c for c in got if not c.get('angle')]
         if missing_angle:
             _report(f'有 {len(missing_angle)} 張候選缺少找缺角度，已略過',
@@ -1091,8 +1145,8 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
         ok, drop = clean(cands, have, cv.EXCLUDE_TITLE, turned_down(turned), flag_re=cv.FLAG_TITLE)
         bad_excerpt = check_excerpts(ok, live)
         if bad_excerpt:
-            _report(f'找缺 agent 交的 JD 摘錄有 {len(bad_excerpt)} 張跟頁面原文對不上,摘錄不用(職缺照判):'
-                    + '；'.join(bad_excerpt[:2])[:300], '不用你處理;要查原因先打開這一輪找缺的證據', live)
+            print(f'找缺 agent 交的 JD 摘錄有 {len(bad_excerpt)} 張跟頁面原文對不上,摘錄不用(職缺照判):'
+                  + '；'.join(bad_excerpt[:2])[:300])
         if tally is not None:
             tally['found'] = tally.get('found', 0) + len(cands) + len(wrong)
             tally['dropped'] = tally.get('dropped', 0) + sum(len(v) for v in drop.values()) + len(wrong)
@@ -1105,16 +1159,12 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
                         step=(f'逐張判斷 {n} 批同時跑' if par else f'逐張判斷 {i + 1}/{n} 批'))) if ok else {}
         left = pending_save([c for c in ok if c['url'] not in res], pending) if finishing() else 0
         add_repost_hints(ok, jobs, fb)
-        wrong_judged = [c['url'] for c in ok if res.get(c['url'], {}).get('wrong')]
-        if wrong_judged:                      # 安檢門擋下的判斷:這幾張不進板、不算判過,講清楚對不上的地方
-            _report(f'有 {len(wrong_judged)} 個職缺的判斷跟程式給它的材料對不上,這一輪不進板:'
-                    + '；'.join(res[wrong_judged[0]]['wrong'][:2])[:300],
-                    '不用你處理;下一輪找到會再判一次;要查原因先打開那張的證據', live)
-        unreadable = [c['url'] for c in ok if not res.get(c['url'], {}).get('readable')
-                      and not res.get(c['url'], {}).get('wrong')]
-        if unreadable:
-            _report(f'有 {len(unreadable)} 個職缺頁沒有可確認的頁面職稱:' + '、'.join(unreadable[:3]),
-                    '確認職缺連結;要登入才看得到的職缺頁程式讀不到,請自己打開看', live)
+        # 安檢門擋下的(重交過一次還是對不上)、頁面上看不到職缺的:這幾張不進板、不算判過,下一輪找到會再判;
+        # 是 agent 找來的候選,不是他的事,原因記在這一輪的紀錄和證據(回報只放要他做的事)
+        for c in ok:
+            r = res.get(c['url'], {})
+            if r and not r.get('readable') and not r.get('wrong'):
+                print(f"{c['url']}:" + (f"頁面上看不到這個職缺:{r['missing']}" if r.get('missing') else '沒有可確認的頁面職稱'))
     except (ar.AgentRunError, ValueError) as e:
         finish_note()                                 # 整理筆記的 agent 不能丟著不管;它交得出來就照樣套用
         pending_save(cands[:carried], pending)        # 帶進來還沒判的放回去,下一輪再判

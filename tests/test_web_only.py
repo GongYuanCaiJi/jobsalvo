@@ -696,8 +696,8 @@ class AddJobReal(unittest.TestCase):
         cards = {j['id']: j for j in data['data']['jobs']}
         self.assertEqual(cards['https://ex.test/good']['sum']['fit'], '他做過平台')
         self.assertNotEqual(cards['https://ex.test/bad']['sum']['fit'], '他做過平台')   # 引用對不上:摘要不用
-        inbox = json.loads(data['fb']).get('__inbox__') or []
-        self.assertTrue(any('對不上' in x.get('msg', '') and x.get('job') == 'https://ex.test/bad' for x in inbox))
+        self.assertIn('摘要沒寫成', cards['https://ex.test/bad']['src']['why'])    # 寫在卡上,不發回報(他處理不了)
+        self.assertEqual(json.loads(data['fb']).get('__inbox__') or [], [])
 
     def test_no_agent_available_keeps_the_jobs_waiting_instead_of_empty_cards(self):
         """agent 都不能用(額度用完):不加空卡,抓好的存成待寫;下一次跑(沒貼新網址也一樣)先寫它們。
@@ -753,7 +753,7 @@ class AddJobReal(unittest.TestCase):
         self.assertNotIn('card 只有 keep 的才要寫', pasted)
         self.assertIn('card 只有 keep 的才要寫', found)
 
-    def test_unreadable_job_is_kept_and_reported(self):
+    def test_unreadable_job_is_kept_and_says_so_on_the_card(self):
         import tempfile, add_job, research, page_fetch
         d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         old_sp, old_dir = add_job.SP, research.DIR
@@ -768,11 +768,32 @@ class AddJobReal(unittest.TestCase):
             data = read_board(p)
             new = next(j for j in data['data']['jobs'] if j['id'] == 'https://ex.test/unreadable')
             self.assertIn('待確認', new['target'])
-            inbox = json.loads(data['fb']).get('__inbox__') or []
-            self.assertTrue(any('無法確認職缺頁內容' in x.get('msg', '') for x in inbox))
+            self.assertIn('無法讀取', new['src']['why'])                    # 卡上看得到;一張一則回報會灌滿回報區
+            self.assertEqual(json.loads(data['fb']).get('__inbox__') or [], [])
         finally:
             add_job.SP, research.DIR = old_sp, old_dir
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_page_without_the_job_is_not_added_and_told_once(self):
+        """2026-10-12 加 240 張:7 張抓回來的是網站首頁、職缺列表、別的職缺或只有選單,agent 看出來了,
+        卻照樣加成空卡、一張發一則回報。虛擬碼:agent 說頁面上看不到這個職缺 → 不加卡;這一輪沒加的合成一則回報。"""
+        import tempfile, add_job, research, page_fetch
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        page = lambda url: page_fetch.PageResult(url, 'ok', text='首页 职位 活动 学习 登录 注册', title='DeJob', via='direct')
+        miss = {'missing': '網站首頁,沒有職缺內容', 'title': '', 'company': '', 'keep': False, 'fit': 1, 'why': '',
+                'cat': research.CATS[0], 'card': {}, 'reasons': [{'text': '看不到', 'citation': '筆記裡沒有相關的',
+                                                                   'basis': '推估'}]}
+        urls = ['https://ex.test/home-1', 'https://ex.test/home-2']
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', side_effect=page):
+            self.assertEqual(add_job.run(urls, p, answers={u: miss for u in urls}), 0)
+        data = read_board(p)
+        self.assertFalse({j['id'] for j in data['data']['jobs']} & set(urls))
+        inbox = json.loads(data['fb']).get('__inbox__') or []
+        self.assertEqual(len(inbox), 1)
+        self.assertIn('2 個網址沒有加成卡', inbox[0]['msg'])
+        self.assertIn('網站首頁', inbox[0]['msg'])
 
 
 class Translate(unittest.TestCase):

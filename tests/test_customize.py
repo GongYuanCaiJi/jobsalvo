@@ -422,7 +422,7 @@ class Customization(unittest.TestCase):
         self.assertEqual([x['id'] for x in customize.feedback_records(fb)], ['only-once'])
 
     def test_a_report_that_cites_feedback_it_was_not_given_is_not_taken(self):
-        """安檢門(#317):整理裡列了這一輪沒給它的回饋:這一則不收、照實回報,回饋也不標成處理過。"""
+        """安檢門(#317):整理裡列了這一輪沒給它的回饋:這一則不收、原因記進紀錄,回饋也不標成處理過。"""
         def add_feedback(fb):
             for url, feedback_id in zip((self.url, self.other_url), ('first', 'second')):
                 fb[url]['custom_docs'] = {'resume:general:zh': {
@@ -432,11 +432,14 @@ class Customization(unittest.TestCase):
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump({'reports': [{'issue': '成果不明確', 'recommendation': '改 skill',
                                     'feedback_ids': ['first', 'made-up']}]}, f, ensure_ascii=False)
-        self.assertTrue(customize.process_feedback_reports(self.board, report_path, ['first', 'second']))
+        import contextlib, io
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            self.assertTrue(customize.process_feedback_reports(self.board, report_path, ['first', 'second']))
         fb = self._fb()
-        said = ' '.join(x['msg'] for x in agent_report.open_items(fb))
-        self.assertIn('made-up', said)
-        self.assertIn('這一輪沒給它', said)
+        self.assertEqual(agent_report.open_items(fb), [])   # 他處理不了:記進這一輪的紀錄,不發回報
+        self.assertIn('made-up', log.getvalue())
+        self.assertIn('這一輪沒給它', log.getvalue())
         self.assertEqual(sorted(x['id'] for x in customize.feedback_records(fb)), ['first', 'second'])
 
     def test_a_grouped_report_is_marked_as_the_agents_judgment_with_the_feedback_text(self):

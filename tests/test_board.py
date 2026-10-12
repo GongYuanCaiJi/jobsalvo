@@ -1191,7 +1191,52 @@ class ResearchPipeline(unittest.TestCase):
                       par=True, launch_all=lambda jobs_, m: sent.append('同時 %d 批' % len(jobs_)))
         self.assertEqual(sent, ['同時 2 批'], '撥了開關還是一批一批排隊')
 
-    def test_unreadable_judgment_is_reported_but_not_remembered_as_rejected(self):
+    def test_a_blocked_judgment_is_sent_back_once_with_what_was_wrong(self):
+        """2026-10-12 擋下的 21 張裡 5 張是 agent 真的引錯(別張的 JD、程式的指示、編的舊卡代號),
+        以前擋下就沒了、卡上摘要空白。虛擬碼:擋下的那幾張帶著安檢門的原話退回去重交一次;
+        改對就收,還是不對就停(不無限重試)。"""
+        import prefs
+        fb, jobs = prefs_load(self.path)
+        cs = prefs.cards(fb, jobs)
+        cands = [{'url': 'https://ex.test/a', 'title': 'Data Engineer', 'company': 'Acme',
+                  'jd': 'Data Engineer\nAcme builds pipelines. Remote.'}]
+
+        def row(citation):
+            return [{'id': 'J1', 'title': 'Data Engineer', 'company': 'Acme', 'keep': True, 'fit': 4, 'cite': [],
+                     'why': '對味', 'cat': self.rs.CATS[0], 'card': {'fit': '做過管線'},
+                     'reasons': [{'text': '遠端', 'citation': citation, 'basis': 'JD 原文'}]}]
+
+        for second, ok in (('Acme builds pipelines.', True), ('Builds rockets', False)):
+            prompts = []
+
+            def agent(prompt, outfile, _browser, second=second):
+                prompts.append(prompt)
+                with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
+                    json.dump(row(second if '【重交】' in prompt else 'Ten years of Go'), f)
+
+            rd = self.enterContext(tempfile.TemporaryDirectory())
+            res = self.rs.judge([dict(c) for c in cands], cs, rd, False, agent, mode='add')
+            self.assertEqual(len(prompts), 2)
+            self.assertIn('Ten years of Go', prompts[1])                 # 退回去時講了哪一句對不上
+            self.assertEqual(not res['https://ex.test/a'].get('wrong'), ok)
+
+    def test_a_quote_is_the_same_words_whatever_the_punctuation(self):
+        """2026-10-12 擋下的 21 張裡 9 張是 agent 抄對了,只差標點或排版。"""
+        from gate_cells import quoted
+        page = ('brand abuse (e.g. Sublime, Doppel), escalating credible threats.\n'
+                'Design, implement and operate multi‑agent LLM architectures\n'
+                'We are looking to hire in London but would _consider_ an exceptional candidate.\n'
+                'You’ll support functions related to energy trading\n'
+                '命中就直接不送到他眼前的那些類型(領導職、\n儲備幹部)\n'
+                '這個職位做 smart-contract security audit。')
+        for said in ('brand abuse (e.g. Sublime, Doppel).', 'Design, implement and operate multi-agent LLM',
+                     'would consider an exceptional candidate', "You'll support functions",
+                     '命中就直接不送到他眼前的那些類型(領導職、儲備幹部)', '這個職位做 smart-contract security audit.'):
+            self.assertTrue(quoted(said, [page]), said)
+        for said in ('brand abuse (e.g. Doppel, Sublime)', 'would not consider', '這個職位做智能合約'):
+            self.assertFalse(quoted(said, [page]), said)
+
+    def test_unreadable_judgment_is_not_reported_nor_remembered_as_rejected(self):
         from unittest.mock import patch
         import config as cf
         url = 'https://ex.test/unreadable'
@@ -1228,7 +1273,8 @@ class ResearchPipeline(unittest.TestCase):
             self.rs.run('dir', 'security', live=self.path, st=lambda *a, **k: None,
                         ledger=self.ledger, sums=self.sums, turned=os.path.join(self.dir, 'turned.jsonl'))
         msgs = [c.args[0] for c in report.call_args_list]
-        self.assertTrue(any('沒有可確認的頁面職稱' in m for m in msgs), msgs)
+        # 讀不到頁的是 agent 找來的候選,不是他的事:記在這一輪的紀錄,不發回報
+        self.assertFalse(any('沒有可確認的頁面職稱' in m for m in msgs), msgs)
         self.assertFalse(any('agent 沒有完成' in m for m in msgs), msgs)   # 這一輪有判完,不是整輪失敗
         self.assertEqual(turned, [])
 
@@ -1308,7 +1354,7 @@ class ResearchPipeline(unittest.TestCase):
             else:
                 judge_prompts.append(prompt)
                 ids = re.findall(r'^=== J(\d+) ===$', prompt, re.M)
-                rows = [{'id': f'J{i}', 'title': f'Confirmed {i}', 'company': 'Acme',
+                rows = [{'id': f'J{i}', 'title': '實際 JD 片段', 'company': '',   # 頁面上看得到的(安檢門照原文比)
                          'keep': False, 'fit': 3, 'cite': [], 'why': 'fake', 'cat': '其他',
                          'reasons': [{'text': '依據職缺原文', 'citation': '實際 JD 片段',
                                       'basis': 'JD 原文'}]}
@@ -1608,7 +1654,11 @@ class ResearchPipeline(unittest.TestCase):
         checkpoint = json.loads(read(feedback_dump.feedback_state_path(preference_file)))
         self.assertTrue(checkpoint['organized_at'])
         self.assertTrue(any('使用者自訂' in msg for msg in reports))
-        self.assertTrue(any('引用' in msg for msg in reports))
+        # 引用對不上的兩張:重交一次還是對不上 → 不進板;是 agent 找來的候選,不是他的事,不發回報
+        self.assertFalse(any('引用' in msg for msg in reports))
+        self.assertEqual(sum('【重交】' in p for p in judge_prompts), 1)
+        self.assertFalse({'https://jobs.lever.co/cloudco/issue42-1', 'https://jobs.lever.co/cloudco/issue42-2'}
+                         & {j.get('id') for j in board_jobs})
 
 
 class FeedbackDump(Tmp):

@@ -126,16 +126,21 @@ def none_cited(citation):
     return str(citation or '').strip().rstrip('。.') == NONE_CITED
 
 
+def words(s):
+    """只留字(文字、數字),比原文用:標點、空白、換行、引號樣式、各種連字號、Markdown 符號都不算。
+    agent 抄原文時句尾多個句號、把 ’ 寫成 '、把 ‑ 寫成 -、拿掉 _斜體_、把換行接起來,字一樣就是同一句(2026-10-12 實測)。"""
+    return re.sub(r'[\W_]+', '', unicodedata.normalize('NFKC', str(s or ''))).casefold()
+
+
 def quoted(citation, sources):
-    """agent 說是逐字引用的那句,在其中一份材料裡找得到。agent 跳著摘、把幾段接起來(… ｜ ；,
-    2026-10-05、10-12 實測),每一段都要在同一份裡;前面標的舊卡代號(「c139：」)、引號、Markdown 粗體和
-    行內碼不算字,「筆記裡沒有相關的」不是引用。理由、卡片摘要、詐騙幽靈缺的引用都用這一支。"""
-    plain = lambda t: norm(re.sub(r'\*\*|__|`', '', str(t or '')))
+    """agent 說是逐字引用的那句,在其中一份材料裡找得到(照 words 比)。agent 跳著摘、把幾段接起來(… ｜ ；,
+    2026-10-05、10-12 實測),每一段都要在同一份裡;前面標的舊卡代號(「c139：」)不算,有用引號括起來的只比引號裡的,
+    「筆記裡沒有相關的」不是引用。理由、卡片摘要、詐騙幽靈缺的引用,職稱、公司都用這一支。"""
     quote = re.sub(r'^\[?c\d+\]?[：:\s]*', '', str(citation or '').strip())
-    marked = re.findall(r'[「『“](.+?)[」』”]', quote)       # 有用引號括起來的(「刊登：「2 weeks ago」」):引號裡的才是原文
-    parts = [plain(p.strip(' "`')) for x in (marked or [quote]) for p in re.split(r'[｜|；;\n]|…|\.\.\.', x)]
-    parts = [p for p in parts if p and not none_cited(p)]
-    return bool(parts) and any(all(p in plain(s) for p in parts) for s in sources)
+    marked = re.findall(r'[「『“](.+?)[」』”]', quote)       # 有用引號括起來的(刊登：「2 weeks ago」):引號裡的才是原文
+    parts = [p for x in (marked or [quote]) for p in re.split(r'[｜|；;\n]|…|\.\.\.', x) if not none_cited(p)]
+    parts = [w for w in map(words, parts) if w]
+    return bool(parts) and any(all(p in words(s) for p in parts) for s in sources)
 
 
 def short(value, n=60):

@@ -46,6 +46,27 @@ class Report(unittest.TestCase):
         with self.assertRaises(ValueError):
             ar.apply_report({}, '代投', '  ')
 
+    def test_the_program_only_reports_what_he_has_to_do(self):
+        """回報 = 非他本人不可的事(GLOSSARY)。2026-10-12 回報區被「不用你處理」灌滿:程式擋下 agent 交件、
+        讀不到頁的每一張各報一則,他一則都處理不了。虛擬碼:程式裡每一個發回報的地方都寫了要他做什麼,
+        而且不是「不用你處理」;那種原因記進紀錄和證據。"""
+        import ast
+        import glob
+        need_at = {'agent_report.report': 2, 'agent_report.apply_report': 3, 'self.report': 2, 'writer': 2,
+                   '_report': 1}                  # 各檔自己的 _report(msg, need, board)
+        wrappers = {('board_server.py', 'agent_report.report')}  # 轉手的,need 照呼叫的
+        bad = []
+        for f in glob.glob(os.path.join(os.path.dirname(HERE), 'tools', '*.py')):
+            for n in ast.walk(ast.parse(open(f, encoding='utf-8').read())):
+                at = need_at.get(ast.unparse(n.func)) if isinstance(n, ast.Call) else None
+                if at is None:
+                    continue
+                need = next((k.value for k in n.keywords if k.arg == 'need'), n.args[at] if len(n.args) > at else None)
+                where = (os.path.basename(f), ast.unparse(n.func))
+                if (need is None and where not in wrappers) or (need is not None and '不用你' in ast.unparse(need)):
+                    bad.append(f'{where[0]}:{n.lineno}')
+        self.assertEqual(bad, [])
+
     def test_every_agent_prompt_carries_the_report_rule(self):
         for model in ('main', 'alt'):
             argv, _ = agent_run.argv_for(model, 'P', '/repo')

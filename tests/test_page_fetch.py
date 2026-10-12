@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import socket
@@ -615,7 +617,7 @@ class PostedAgeCache(unittest.TestCase):
         self.assertEqual(job['posted_src'], 'Posted on')
 
 
-    def test_an_invalid_calendar_date_is_not_written_and_is_reported(self):
+    def test_an_invalid_calendar_date_is_not_written_and_is_logged(self):
         """Agent 解釋文字日期；程式仍拒收不合法的日曆日期。"""
         import config as cf, page_fetch, posted_age, board_doc, agent_report
         from types import SimpleNamespace
@@ -631,14 +633,16 @@ class PostedAgeCache(unittest.TestCase):
         with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
              patch.object(page_fetch, 'fetch', return_value=page), \
              patch.object(posted_age.ar, 'run', side_effect=run_agent), \
-             patch.object(agent_report, 'report') as report:
+             patch.object(agent_report, 'report') as report, contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(posted_age.main(['--board', self.board]), 0)
 
         with open(self.board, encoding='utf-8') as f:
             job = board_doc.parse(f.read())['data']['jobs'][0]
         self.assertNotIn('posted_at', job)
-        said = [c.args[1] for c in report.call_args_list if c.kwargs.get('job') == self.url]
-        self.assertTrue(any('刊登日期' in m and '2026-02-31' in m and 'YYYY-MM-DD' in m for m in said), said)
+        # 下一輪會重查,他處理不了:原因記進這一輪的紀錄,不發回報
+        self.assertFalse([c for c in report.call_args_list if c.kwargs.get('job') == self.url])
+        said = log.getvalue()
+        self.assertTrue('刊登日期' in said and '2026-02-31' in said and 'YYYY-MM-DD' in said, said)
 
     # 一輪最多交 20 頁給 agent、只給跟日期有關的那幾行;連一行日期都沒有的頁不問 agent。
     def test_agent_gets_small_prompt(self):
