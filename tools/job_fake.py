@@ -60,8 +60,8 @@ def research(board, sp, step, mode, direction, minutes=0):
     new = [{'id': f'https://example.test/fake/{int(t0)}-{i}', 'cat': '其他',
             'target': f'(沙箱假職缺 {i})測試用·沙箱公司', 'chan': '官方', 'ammo': '', 'note': '',
             'bk': False, 'dead': False, 'added': today,
-            'sum': {'fit': '沙箱假資料', 'co': '沙箱', 'loc': '無', 'deadline': '無', 'salary': '未公開',
-                    'bar': '無', 'posted': '無', 'ammo': '無'}} for i in (1, 2)]
+            'sum': {'fit': '沙箱假資料', 'co': '沙箱', 'loc': '', 'deadline': '', 'salary': '',
+                    'bar': '', 'posted': '', 'ammo': ''}} for i in (1, 2)]
     bd.set_data(lambda data, fb: data['jobs'].extend(new), live=board)
     jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, finished_at=time.time()))
 

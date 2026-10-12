@@ -957,6 +957,42 @@ class ResearchPipeline(unittest.TestCase):
         self.assertTrue(any(prefs.without_tracking(prefs.ensure_note())[:20] in src
                             for src in cites['J1']['sources']['使用者原話']))
 
+    def test_a_batch_judges_against_one_set_of_old_cards_and_one_quote_rule(self):
+        """2026-10-12 貼網址加入試送 20 張,15 張摘要空掉:引用照指示用 … ；接起來被當成整句比、「查無」被當成公司、
+        引了同一批別張底下附的舊卡。虛擬碼:同一批任一張附的舊卡誰都能引;理由、摘要、幽靈缺的引用同一套比法。"""
+        import gate
+        import prefs
+        fb, jobs = prefs_load(self.path)
+        cs = prefs.cards(fb, jobs)
+        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': 'JD'},
+             {'url': 'https://ex.test/y', 'title': '資安工程師', 'company': 'D', 'jd': '資安'}]
+        _text, cites = self.rs.judge_prompt(b, cs, '/o', 'add')
+        self.assertEqual(cites['J1']['ids'], cites['J2']['ids'])
+        self.assertEqual(cites['J1']['sources']['偏好筆記'], cites['J2']['sources']['偏好筆記'])
+        self.assertNotEqual(cites['J1']['sources']['JD 原文'], cites['J2']['sources']['JD 原文'])
+
+        jd = 'Senior Analyst\nPosted 21d ago\nSalary: $81k - $84k\nHunt for vulnerabilities in protocols.\nBuild agents.'
+        row = {'id': 'J1', 'title': 'Senior Analyst', 'company': '查無', 'keep': True, 'fit': 4, 'cite': ['c2'],
+               'why': '對味', 'risk': {'kind': 'ghost', 'why': '頁面寫「Posted 21d ago」,刊登很久'},
+               'reasons': [{'text': '要找漏洞', 'basis': 'JD 原文',
+                            'citation': 'Hunt for vulnerabilities in protocols.；Build agents.'},
+                           {'text': '他想試', 'basis': '推估', 'citation': '有點屌 可以試試；Build agents.'}],
+               'cat': '其他', 'card': {'fit': '對得上', 'posted': '約 21 天前', 'salary': '$81k–$84k',
+                                     'quote': '21d ago … $81k - $84k'}}
+        truth = lambda ids: gate.Truth(given={'J1': jd}, cites={'J1': ids}, flags={'J1': []}, sources={'J1': {
+            'JD 原文': [jd], '使用者原話': ['有點屌 可以試試'], '偏好筆記': ['[c2] 喜歡']}})
+        verdict = gate.inspect('research_judge', {'jobs': [row]}, truth({'c1', 'c2'}))
+        self.assertEqual(verdict.problems, [])
+        # 程式沒給過的舊卡代號、不在原文裡的引用照樣擋
+        verdict = gate.inspect('research_judge', {'jobs': [dict(row, cite=['c9'])]}, truth({'c1', 'c2'}))
+        self.assertIn('程式沒附給它 c9', ' '.join(verdict.problems))
+        bad = dict(row, card=dict(row['card'], quote='21d ago … $90k'))
+        verdict = gate.inspect('research_judge', {'jobs': [bad]}, truth({'c2'}))
+        self.assertIn('卡片摘要', ' '.join(verdict.problems))
+        bad = dict(row, risk={'kind': 'ghost', 'why': '頁面寫「Posted 3 years ago」'})
+        verdict = gate.inspect('research_judge', {'jobs': [bad]}, truth({'c2'}))
+        self.assertIn('詐騙或幽靈缺', ' '.join(verdict.problems))
+
     def _stop_run(self, fake_agent, finishing, pending, **kw):
         """跑一輪找缺(假 agent、假抓頁),finishing() 為真 = 他按了停止;kw 照樣交給 research.run(time_up、tally…)。"""
         from unittest.mock import patch

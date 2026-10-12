@@ -38,7 +38,7 @@ def jobs():
                 'bk': False, 'dead': False,
                 'sum': {'fit': f'{name} 的 {t}:工作內容跟履歷上的經驗相近(示範資料)。',
                         'co': f'{name} 是一家虛構公司,只用來示範。', 'loc': 'Taipei / Remote',
-                        'salary': '面議', 'bar': f'{2 + n % 4} 年以上相關經驗;英文可溝通', 'deadline': '未公開'},
+                        'salary': '面議', 'bar': f'{2 + n % 4} 年以上相關經驗;英文可溝通', 'deadline': ''},
                 'added': (today - datetime.timedelta(days=n % 9)).isoformat(),
                 'posted_at': (today - datetime.timedelta(days=3 + n * 2)).isoformat(),
                 'posted_src': ats,
@@ -111,7 +111,7 @@ def extra_jobs(n):
         out.append({'id': url, 'target': f'**示範職缺 {i + 1} · {co}**([Lever]({url}))', 'chan': '直投', 'ammo': '', 'note': '',
                     'bk': False, 'dead': False,
                     'sum': {'fit': '示範資料', 'co': f'{co} 是虛構公司', 'loc': 'Taipei', 'salary': '面議',
-                            'bar': '示範', 'deadline': '未公開'},
+                            'bar': '示範', 'deadline': ''},
                     'added': (today - datetime.timedelta(days=i % 30)).isoformat()})
     return out
 

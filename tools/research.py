@@ -25,6 +25,7 @@ import board_doc as bd      # noqa: E402
 import config as cf         # noqa: E402
 import prefs                # noqa: E402
 import card as cards        # noqa: E402
+from gate_cells import NONE_CITED, quoted  # noqa: E402
 
 DIR = cf.RESEARCH
 LEDGER = os.path.join(DIR, 'ledger.jsonl')
@@ -213,17 +214,6 @@ def checked_reasons(value, citation_sources=None):
     out = []
     bad = not rows
     citation_sources = citation_sources or {}
-
-    def matches(citation, sources):
-        # agent 會在前面標舊卡代號(「c139：」「[c139]」)、用 ｜ 或 … 跳著摘(2026-10-05 加職缺實測):
-        # 標記不算引用內容,拆開的每一段都要在同一份材料裡逐字找得到
-        quote = re.sub(r'^\[?c\d+\]?[：:\s]*', '', citation.strip())
-        parts = [' '.join(p.strip('「」『』"“”` ').split()) for p in re.split(r'[｜|\n]|…|\.\.\.', quote)]
-        # Markdown 的粗體、行內碼符號不算字(筆記寫 **原話**,agent 引用時拿掉 **;2026-10-05 找缺實測)
-        plain = lambda t: ' '.join(re.sub(r'\*\*|__|`', '', str(t or '')).split())
-        parts = [plain(p) for p in parts if plain(p)]          # 只剩符號的段落不算引用
-        return bool(parts) and any(all(p in plain(source) for p in parts) for source in sources)
-
     for row in rows:
         if not isinstance(row, dict):
             bad = True
@@ -233,12 +223,10 @@ def checked_reasons(value, citation_sources=None):
         basis = str(row.get('basis') or '').strip()
         prefix = basis + '：'
         quote = citation[len(prefix):].strip() if citation.startswith(prefix) else citation
-        if basis == '推估':
-            citation_ok = quote == '筆記裡沒有相關的' or matches(quote, sum(citation_sources.values(), []))
+        if basis == '推估':          # 推估是把幾處材料接起來想:每一段在哪一份材料裡都算
+            citation_ok = quote == NONE_CITED or quoted(quote, ['\n'.join(sum(citation_sources.values(), []))])
         else:
-            citation_ok = matches(quote, citation_sources.get(basis, []))
-            if quote == '筆記裡沒有相關的':
-                citation_ok = True
+            citation_ok = quote == NONE_CITED or quoted(quote, citation_sources.get(basis, []))
         if not text or basis not in EVIDENCE_BASES or not citation_ok:
             bad = True
         out.append({'text': text, 'citation': citation, 'basis': basis})
@@ -610,19 +598,11 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
     parts = [research_skill('judge'), '\n\n', (WIDE_NOTE if mode == 'wide' else ''), choices,
              '\n\n【完整偏好筆記】(使用者自訂與 Agent 假設分開;原話優先於假設)\n',
              note_text, '\n\n']
-    cites = {}
+    cites, shown = {}, []
     for i, c in enumerate(batch):
         nb = prefs.neighbors(c['title'], c.get('jd') or '', c.get('company') or '', cs)
-        cites[f'J{i + 1}'] = {
-            'ids': {cid for cid, _ in nb},
-            'sources': {
-                'JD 原文': [c.get('jd') or '', c.get('jd_excerpt') or ''],
-                # 他的原話也記在偏好筆記裡(「我感覺能攻擊的都挺好玩」這類);引用照樣逐字比,只是不卡在標哪一類
-                '使用者原話': [card.get('note') or '' for _, card in nb] + [note_text],
-                # 給它看的相似舊卡表態(prefs.render)也算:agent 引用的是畫面上那幾行,材料裡少了它就一律對不上
-                '偏好筆記': [note_text, prefs.render(nb)],
-            },
-        }
+        shown.append(nb)
+        cites[f'J{i + 1}'] = {'sources': {'JD 原文': [c.get('jd') or '', c.get('jd_excerpt') or '']}}
         reposts = []
         for old in c.get('reposts') or []:
             line = f"- {old['title']}（{old['url']}）｜當時表態：{old['mark']}"
@@ -654,17 +634,27 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
                   + '只能依照上方程式提供的職缺頁文字判斷;不可開瀏覽器或自行請求來源網址。'
                   '若頁面文字未取得,不要猜測或依關鍵字判定職缺關閉。\n'
                   f"他對相似舊職缺的表態:\n{prefs.render(nb)}\n\n"]
+    # 舊卡表態和筆記講的是他這個人:這一批任一張底下附的,判哪一張都能引用(agent 讀的是同一份指示);JD 原文只算自己那一張
+    olds = [old for nb in shown for old in nb]
+    for v in cites.values():
+        v['ids'] = {cid for cid, _ in olds}
+        v['sources'].update({
+            # 他的原話也記在偏好筆記裡(「我感覺能攻擊的都挺好玩」這類);引用照樣逐字比,只是不卡在標哪一類
+            '使用者原話': [card.get('note') or '' for _, card in olds] + [note_text],
+            # 給它看的相似舊卡表態(prefs.render)也算:agent 引用的是畫面上那幾行,材料裡少了它就一律對不上
+            '偏好筆記': [note_text] + [prefs.render(nb) for nb in shown],
+        })
     parts += [f'把結果寫成一個 JSON 檔到 {out}(只寫這個檔,其他都不要改):\n',
               '[{"id":"J1","title":"頁面上的職稱","company":"頁面上的公司","keep":true,"fit":4,'
               '"cite":["c12"],"why":"一句結論",'
-              '"risk":{"kind":"scam / ghost / 空字串","why":"引用 JD 原文或程式提醒;沒有就空字串"},'
+              '"risk":{"kind":"scam / ghost / 空字串","why":"一句說明,把頁面上的字或程式提醒逐字放在「」裡;沒有就空字串"},'
               '"reasons":[{"text":"一段理由","citation":"逐字引用偏好筆記條目、舊卡原話或 JD 原文(程式會逐字比對);跳過中間的字要用 … 隔開,不要自己接句子;引用不到寫「筆記裡沒有相關的」",'
               '"basis":"JD 原文/使用者原話/偏好筆記/推估"}],',
               selection_fields,
               '"cat":"' + '/'.join(CATS) + ' 挑一個",',
               '"card":{"fit":"為什麼適合他:他的履歷哪一段對上 JD 哪個需求,1-2 句","co":"公司在做什麼,一句",'
-              '"loc":"地點與遠端","deadline":"截止日,沒寫填無","salary":"薪資,沒寫填未公開",'
-              '"bar":"門檻(年資/學歷/技能,只記不篩)","posted":"刊登日,沒寫填無",'
+              '"loc":"地點與遠端","deadline":"截止日,沒寫留空字串","salary":"薪資,沒寫留空字串",'
+              '"bar":"門檻(年資/學歷/技能,只記不篩)","posted":"刊登日,沒寫留空字串",'
               '"ammo":"打法:直投或找誰;不指定附件,附件由程式照勾選組",'
               '"quote":"有日期或薪資時，附指定 JD 的逐字引用；查不到就不要猜"}}, ...]\n',
               '每段理由都要有引用和根據類型;引用不到時寫「筆記裡沒有相關的」。引用必須能在本輪給你的筆記、相似舊卡原話或 JD 摘錄中逐字找到。\n',
@@ -673,7 +663,7 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
               'keep = 要不要送到他眼前。fit 1-5:5 = 他幾乎一定會喜歡,1 = 他一定不要。',
               # 使用者自己貼進來的(貼網址加入):他已經決定要看這張,判成先不送也要寫摘要,不然卡上一整排「無」
               ('card 一律要寫(這些是使用者自己貼進來的職缺,keep 只是你的建議),' if mode == 'add'
-               else 'card 只有 keep 的才要寫,') + '內容照 JD 原文,查不到就寫查無。\n']
+               else 'card 只有 keep 的才要寫,') + '內容照 JD 原文;查不到的格子(包括 title、company)留空字串。\n']
     return ''.join(parts), cites
 
 
@@ -707,9 +697,14 @@ def _launch_all(jobs, browser_required=False):
     return results
 
 
-# 頁面沒抓到時 agent 照規矩在職稱、公司欄寫「查無」這類字:這不是名字。公司不能蓋掉找缺時已經知道的;
-# 職稱等於沒確認到頁面,跟沒寫一樣不送到他眼前(看板 _EMPTY 同一組)
+# agent 沒值時寫的佔位字(「查無」「未公開」…)跟沒寫一樣:指示要它留空,沒照做的、舊卡上的照樣認。
+# 安檢門判摘要有沒有寫日期薪資、判斷收職稱公司、存進卡片摘要都用這一支(看板 _EMPTY 同一組,給卡上已經存的舊摘要)
 _PLACEHOLDER = re.compile(r'^(無|未明載|未公開|不公開|未提供|未列|查無|n/a|none|-)([（(].*)?$', re.I)
+
+
+def blank(value):
+    text = str(value or '').strip()
+    return not text or bool(_PLACEHOLDER.match(text))
 
 
 def _write_answers(out, batch, answers):
@@ -798,14 +793,12 @@ def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', pa
                                  'card': {}, 'resume': {}, 'risk': None}
                 continue
             x, said = row.facts, row.judged     # 核對過的事實、agent 判斷(送不送、合不合適、類別、履歷、摘要)
-            title = str(x.get('title') or '').strip()
-            company = str(x.get('company') or '').strip()
-            title = '' if _PLACEHOLDER.match(title) else title
-            company = '' if _PLACEHOLDER.match(company) else company
+            # 職稱沒寫等於沒確認到頁面,不送到他眼前;公司沒寫不能蓋掉找缺時已經知道的
+            title = '' if blank(x.get('title')) else str(x['title']).strip()
             if title:
                 c['title'] = title
-            if company:
-                c['company'] = company
+            if not blank(x.get('company')):
+                c['company'] = str(x['company']).strip()
             try:
                 fit = max(1, min(5, int(round(float(said.get('fit') or 0)))))
             except (TypeError, ValueError):
@@ -841,7 +834,8 @@ CARD_KEYS = ('fit', 'co', 'loc', 'deadline', 'salary', 'bar', 'posted', 'ammo')
 
 
 def job_entry(c, r, src):
-    card = {k: str((r.get('card') or {}).get(k) or '無') for k in CARD_KEYS}
+    said = r.get('card') or {}
+    card = {k: '' if blank(said.get(k)) else str(said[k]) for k in CARD_KEYS}
     if (r.get('card') or {}).get('by'):
         card['by'] = r['card']['by']          # 卡上標明:這些是 agent 讀 JD 寫的摘要(agent 判斷)
     t = cards.name(c['title'], c.get('company'))

@@ -118,6 +118,20 @@ def norm(s):
     return re.sub(r'\s+', ' ', s).strip().casefold()
 
 
+NONE_CITED = '筆記裡沒有相關的'
+
+
+def quoted(citation, sources):
+    """agent 說是逐字引用的那句,在其中一份材料裡找得到。agent 跳著摘、把幾段接起來(… ｜ ；,
+    2026-10-05、10-12 實測),每一段都要在同一份裡;前面標的舊卡代號(「c139：」)、引號、Markdown 粗體和
+    行內碼不算字,「筆記裡沒有相關的」不是引用。理由、卡片摘要、詐騙幽靈缺的引用都用這一支。"""
+    plain = lambda t: norm(re.sub(r'\*\*|__|`', '', str(t or '')))
+    quote = re.sub(r'^\[?c\d+\]?[：:\s]*', '', str(citation or '').strip())
+    parts = [plain(p.strip(' 「」『』"“”`')) for p in re.split(r'[｜|；;\n]|…|\.\.\.', quote)]
+    parts = [p for p in parts if p and p != NONE_CITED]
+    return bool(parts) and any(all(p in plain(s) for p in parts) for s in sources)
+
+
 def short(value, n=60):
     s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return s if len(s) <= n else s[:n] + '…'

@@ -17,7 +17,7 @@ import profile_sync as ps      # noqa: E402
 import reply_run               # noqa: E402
 import research                # noqa: E402
 import sync_sent               # noqa: E402
-from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm  # noqa: E402
+from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm, quoted  # noqa: E402
 
 def _given_key(said, row, truth):
     """這一列是誰(網址、代號):要是這一輪程式交給它的其中一個。"""
@@ -26,8 +26,8 @@ def _given_key(said, row, truth):
 
 def _in_given(said, row, truth):
     """agent 說是原文的字:程式交給它的那一列原文裡要逐字看得到(空白、全形半形、大小寫不算)。
-    程式沒有原文可以比(沒抓到頁面):核對不了,這一格不用。"""
-    if not str(said or '').strip():
+    「查無」這類佔位字跟沒寫一樣(research.blank)。程式沒有原文可以比(沒抓到頁面):核對不了,這一格不用。"""
+    if research.blank(said):
         return None
     if not truth.given:
         return UNUSED
@@ -193,7 +193,7 @@ def _job_page(said, row, truth):
 
 
 def _cited(said, row, truth):
-    """它引用的舊卡代號:要是程式這一張附給它的那幾張之一。"""
+    """它引用的舊卡代號:要是程式這一批附給它的那幾張之一。"""
     given = set(truth.cites or ())
     stray = [str(x) for x in (said if isinstance(said, list) else [said]) if str(x) not in given]
     return f'程式沒附給它 {"、".join(stray[:3])} 這幾張舊卡' if stray else None
@@ -213,23 +213,22 @@ def _risk(said, row, truth):
     why = str(said.get('why') or '').strip()
     if not said.get('kind') or not why:
         return None
-    seen = norm(truth.given or '') + '\n' + '\n'.join(norm(x) for x in truth.flags or ())
-    quotes = [norm(q) for q in re.findall(r'[「『"“](.+?)[」』"”]', why)] or [norm(why)]   # 有引號就看引號裡那幾段
-    return None if all(q and q in seen for q in quotes) else '它引的那句 JD 原文和程式提醒裡都沒有'
+    seen = [truth.given or '', *(truth.flags or ())]
+    quotes = re.findall(r'[「『"“](.+?)[」』"”]', why) or [why]   # 有引號就看引號裡那幾段
+    return None if all(quoted(q, seen) for q in quotes) else '它引的那句 JD 原文和程式提醒裡都沒有'
 
 
 def _card_summary(said, row, truth):
     """摘要、日期與金額是 Agent 判斷；程式核對它附的 JD 原文。"""
     if not isinstance(said, dict):
         return '摘要要是物件'
-    has_details = any(str(said.get(k) or '').strip() not in ('', '無', '未公開', '查無')
-                      for k in ('deadline', 'posted', 'salary'))
+    has_details = not all(research.blank(said.get(k)) for k in ('deadline', 'posted', 'salary'))
     if not has_details:
         return None
     if not truth.given:
         return UNUSED
     quote = str(said.get('quote') or '').strip()
-    return None if quote and norm(quote) in norm(truth.given) else '日期／薪資摘要要附指定 JD 的逐字引用 quote'
+    return None if quoted(quote, [truth.given]) else '日期／薪資摘要要附指定 JD 的逐字引用 quote'
 
 
 RESEARCH_SEARCH = {
@@ -250,7 +249,7 @@ RESEARCH_JUDGE = {
     'jobs.keep': Cell(JUDGED, '要不要送到他眼前', '送不送是 agent 判斷:卡上標明、附理由,他可以移除'),
     'jobs.fit': Cell(JUDGED, '合不合適', '1-5 是 agent 判斷:只拿來排序,卡上標明'),
     'jobs.why': Cell(WORDS, '一句結論', '卡上照原文給人看'),
-    'jobs.cite': Cell(CHECK, '引用的舊卡', '程式這一張附給它的那幾張之一', _cited),
+    'jobs.cite': Cell(CHECK, '引用的舊卡', '程式這一批附給它的那幾張之一', _cited),
     'jobs.reasons': Cell(CHECK, '理由的引用', '在程式這一張給它的材料裡逐字找得到(research.checked_reasons)', _reasons,
                          items=('text', 'citation', 'basis')),
     'jobs.risk': Cell(JUDGED, '詐騙或幽靈缺', '是不是詐騙、幽靈缺是 agent 判斷;它引的那句要在 JD 原文或程式提醒裡', _risk,

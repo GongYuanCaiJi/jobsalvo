@@ -432,6 +432,18 @@ if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文�
         self.assertIsNone(gate_flows._card_summary({'salary': '年薪 100,000–120,000 元', 'quote': text}, {}, truth))
         self.assertTrue(gate_flows._card_summary({'salary': '年薪 100,000–120,000 元', 'quote': '原文不存在'}, {}, truth))
 
+    def test_placeholder_words_in_a_summary_are_not_dates_or_salary(self):
+        # agent 沒照指示留空、寫了「查無」「未公開」這類字:跟沒寫一樣,不要它附原文引用;判斷收職稱、存摘要用同一支
+        import gate_flows
+        import research
+        truth = SimpleNamespace(given='Platform engineer, remote')
+        for word in ('無', '未公開', '查無', '未提供', '-', 'N/A', '未明載(JD 沒寫)'):
+            with self.subTest(word=word):
+                self.assertIsNone(gate_flows._card_summary({'deadline': word, 'salary': word, 'posted': word}, {}, truth))
+        entry = research.job_entry({'url': URL, 'title': 'Engineer', 'company': 'Co'},
+                                   {'cat': '其他', 'fit': 3, 'why': '', 'card': {'salary': '未公開', 'loc': '遠端'}}, {})
+        self.assertEqual((entry['sum']['salary'], entry['sum']['deadline'], entry['sum']['loc']), ('', '', '遠端'))
+
     def test_send_result_is_not_inferred_from_success_words_or_retained_form(self):
         page = {'url': URL, 'lines': ['申請已收到', 'Thank you for your interest'],
                 'fields': [{'label': '履歷', 'value': 'base'}]}
