@@ -1302,11 +1302,15 @@ class H(BaseHTTPRequestHandler):
         body=self._json_body()
         if body is None: return
         op=body.get('op')
-        if op not in ('put','del'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
+        if op not in ('put','del','link','stage'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
         out={}
         def mut(data,fb):
-            data['bank']=ib.apply(data.get('bank'),op,body.get('item'),body.get('id')); out['bank']=data['bank']
-        bd.set_data(mut,live=STATE)
+            data['bank']=ib.apply(data.get('bank'),op,body.get('item'),body.get('id'),body.get('job'),body.get('kind'))
+            out['bank']=data['bank']
+        try:
+            bd.set_data(mut,live=STATE)
+        except ValueError as e:
+            return self._json(400,{'ok':False,'msg':str(e)})
         note_saved()
         return self._json(200,{'ok':True,'bank':out['bank']})
     def do_POST_settings(self):

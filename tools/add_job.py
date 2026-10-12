@@ -16,7 +16,7 @@ agent 都不能用(額度用完、限流)時不加空卡:抓好的職缺存成�
 用法:python3 tools/add_job.py --url <網址> [--url <網址> …] [--board B]
       python3 tools/add_job.py --judged 判好的.json [--board B]     # [{url, title, company, keep, fit, why, cat, card, reasons…}]
 """
-import os, sys, time, argparse, json
+import os, re, sys, time, argparse, json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -74,7 +74,8 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
         cands.append({
             'url': url,
             'title': fetched.title or '職缺頁待確認',
-            'company': '',
+            # 104 等平台的程式抓頁會給「公司: …」那一行:卡片名字至少帶得到公司,摘要被安檢擋下時也一樣
+            'company': next(iter(re.findall(r'^公司:\s*(.+)$', fetched.text or '', re.M)), '').strip(),
             'via': '手動加入',
             'jd': fetched.jd,
             'page_status': fetched.status,

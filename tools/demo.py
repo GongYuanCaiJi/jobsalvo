@@ -89,16 +89,18 @@ def marks(js, resumes):
     return fb
 
 
-def bank():
+def bank(js):
     items = []
     for i, (st, raw) in enumerate((('ok', True), ('wip', True), ('todo', True), ('todo', False))):
         items.append({'id': f'q{i}', 't': ['自我介紹', '為什麼想換工作', '講一個你解決過的難題', '你有什麼想問我們的'][i],
                       'cat': ['自我介紹', '職涯方向與動機', '你做過的事', '反問面試官'][i], 'sub': '',
                       'ask': '<p>(示範題目)</p>', 'focus': '', 'covers': '', 'lim': 60 if i == 0 else 0,
-                      'st': st, 'raw': raw, 'asked': ['Nimbus Data'] if i == 1 else [],
+                      'st': st, 'raw': raw,
                       'b': [['h', '重點'], ['s', ['第一段逐字稿(示範)。', '第二段逐字稿(示範)。']]] if st != 'todo' else [],
                       'picks': []})
-    return {'cps': 4.2, 'cats': ['自我介紹', '職涯方向與動機', '你做過的事', '反問面試官'], 'items': items}
+    # 第 10 張(已投出、沒錄取)那一場被問過第 2 題:題目上不記公司,記在 links
+    return {'cps': 4.2, 'cats': ['自我介紹', '職涯方向與動機', '你做過的事', '反問面試官'], 'items': items,
+            'links': {js[9]['id']: {'q1': 'asked'}}}
 
 
 def extra_jobs(n):
@@ -127,7 +129,7 @@ def build(path, extra=0):
     js = js + extra_jobs(extra)
     # 投遞前驗收跑過、都過關:真的看板在卡進「可以投了」之前一定跑過(沒跑過連待你決定都推不過去)
     status = {'schema_version': 2, 'at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'checked_links': True, 'issues': []}
-    data = {'jobs': js, 'status': status, 'research': [], 'bank': bank()}
+    data = {'jobs': js, 'status': status, 'research': [], 'bank': bank(js)}
     doc = bd.assemble(read('board.css'), bd.stat_first(read('header.html'), data), '', data,
                       json.dumps(marked, ensure_ascii=False), read('board.js'))
     bd.write_doc(path, doc)

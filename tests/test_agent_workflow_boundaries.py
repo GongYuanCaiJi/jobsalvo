@@ -432,6 +432,15 @@ if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文�
         self.assertIsNone(gate_flows._card_summary({'salary': '年薪 100,000–120,000 元', 'quote': text}, {}, truth))
         self.assertTrue(gate_flows._card_summary({'salary': '年薪 100,000–120,000 元', 'quote': '原文不存在'}, {}, truth))
 
+    def test_summary_quote_may_skip_with_ellipsis_but_each_part_must_exist(self):
+        import gate_flows
+        truth = SimpleNamespace(given='職稱: AI 工程師\n曝光日期: 2026/10/08\n地點: 台北市\n薪資: 待遇面議')
+        said = {'posted': '2026/10/08', 'salary': '待遇面議'}
+        self.assertIsNone(gate_flows._card_summary(dict(said, quote='曝光日期: 2026/10/08 … 薪資: 待遇面議'), {}, truth))
+        self.assertTrue(gate_flows._card_summary(dict(said, quote='曝光日期: 2026/10/08 … 薪資: 月薪五萬'), {}, truth))
+        self.assertTrue(gate_flows._card_summary(dict(said, quote=' … '), {}, truth))
+        self.assertIsNone(gate_flows._card_summary(dict(said, quote='曝光日期: 2026/10/08\n薪資: 待遇面議'), {}, truth))
+
     def test_placeholder_words_in_a_summary_are_not_dates_or_salary(self):
         # agent 沒照指示留空、寫了「查無」「未公開」這類字:跟沒寫一樣,不要它附原文引用;判斷收職稱、存摘要用同一支
         import gate_flows

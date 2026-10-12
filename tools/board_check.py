@@ -120,31 +120,79 @@ CHECKS=[
  # 面試題庫是投遞流程的最後一站(🎤 面試準備)。現場要立刻用的東西必須 100% 是有用資訊,
  # 也沒必要把所有東西擠在同一個區塊。所以題目照每題走到哪一站分成流水線(還沒答→答過第一輪→磨合中→定案),一站一列預設收起;
  # 點開一題是逐字稿,題組的子題按鈕只顯示那一問的段落,大字讀稿開得起來、關得掉。
- ('面試準備:流水線四站、題目一題不少;點開是逐字稿;子題只顯示那一問的段落;大字讀稿開得起來',"""
+ ('面試準備:面試一場一行、點進那一場看在面什麼和它的題目、從題庫勾題;題目上不寫任何公司;題庫是流水線四站、題目一題不少;點開是逐字稿;大字讀稿開得起來',"""
    var t=document.querySelector('[data-tab="iv"]'); if(!t)return '沒有 🎤 面試準備那一籤';
    t.click(); await T.idle();
-   var rows=[...document.querySelectorAll('#app details.ivrow[data-iv]')];
-   if(!rows.length)return '面試準備那頁沒有題目(題庫沒裝進看板?跑 interview/tools/build_bank.sh)';
    var bad=[];
+   var tabIv=document.querySelector('#app [data-ivview="iv"]'), tabBank=document.querySelector('#app [data-ivview="bank"]');
+   if(!tabIv||!tabBank)return '沒有「面試」「題庫」兩個頁籤';
+   // 面試:一場一行(面試 100 家也只是 100 行),只有記成面試中/Offer 的卡;已結束但記過題目的收在下面
+   tabIv.click(); await T.idle();
+   var st0=await T.state(), live=Object.keys(st0).filter(function(k){var f=st0[k];
+     return f&&typeof f==='object'&&!Array.isArray(f)&&f.app==='sent'&&(f.oc==='iv'||f.oc==='offer')&&!f.rm;});
+   var top=[...document.querySelectorAll('#app > .ivlist > .iv-jrow')].map(function(b){return b.getAttribute('data-ivopen');});
+   if(top.length!==live.length||top.some(function(c){return live.indexOf(c)<0;}))bad.push('面試清單列了 '+top.length+' 場,記成面試中/Offer 的是 '+live.length+' 場');
+   // 面試準備那頁一進來就是面試:填表進度那一列不放這頁(2026-10-12 他:「我完全找不到題目在哪裡」)
+   var fl=document.getElementById('filllistbar'); if(fl&&fl.textContent.trim())bad.push('面試準備頁上面還攤著填表進度');
+   if(document.querySelector('#app .iv-doc, [data-ctl="ivjob"], #app .iv-jc'))bad.push('面試準備頁又出現某一家的參考資料、選公司的選單或題目上的公司標籤');
+   var ended=[...document.querySelectorAll('#app details .iv-jrow')];
+   var anyRow=document.querySelector('#app .iv-jrow');
+   if(!anyRow&&ended.length){var ef=ended[0].closest('details'); ef.querySelector('summary').click(); await T.idle(); anyRow=ended[0];}
+   if(anyRow){
+     anyRow.click(); await T.idle();
+     if(!document.querySelector('#app .iv-ptitle')||!document.querySelector('#app .iv-job'))bad.push('點進一場沒看到是哪個缺、在面什麼');
+     var cnt=function(){return parseInt((document.querySelector('#app .applyhd .n')||{}).textContent||'-1',10);};
+     var n0=cnt(), r0=document.querySelectorAll('#app details.ivrow').length;
+     if(n0!==r0)bad.push('一場寫 '+n0+' 題,底下列了 '+r0+' 題');
+     // 這場的一題點開:改成被問過/要準備、再改回來,種類跟著變、題數不變
+     var lk=document.querySelector('#app [data-ivlink][data-ivkind]:not([data-ivkind=""]):not([disabled])');
+     if(lk){var lq=lk.getAttribute('data-ivlink'), want=lk.getAttribute('data-ivkind');
+       lk.click(); await T.idle();
+       var lk2=document.querySelector('#app [data-ivlink="'+lq+'"][data-ivkind]:not([data-ivkind=""]):not([disabled])');
+       if(!lk2||lk2.getAttribute('data-ivkind')===want)bad.push('按了改成'+(want==='asked'?'被問過':'要準備')+',那一題沒跟著變');
+       else{lk2.click(); await T.idle();}
+       if(cnt()!==n0)bad.push('改種類之後這場的題數變了');}
+     // 從題庫勾題:勾了這場多一題、取消回原本;題目不被複製
+     var pk=document.querySelector('#app [data-ivpick]'); if(!pk)bad.push('那一場沒有「從題庫加題」');
+     else{pk.click(); await T.idle();
+       var cb=[...document.querySelectorAll('#rzmodal [data-ivpkq]')].filter(function(x){return !x.checked;})[0];
+       if(!cb)bad.push('從題庫加題沒有可以勾的題');
+       else{var qid=cb.getAttribute('data-ivpkq'); cb.click(); await T.until(function(){return cnt()===n0+1;},5000);
+         if(cnt()!==n0+1)bad.push('勾了一題,這場的題數沒變('+n0+'→'+cnt()+')');
+         var cb2=document.querySelector('#rzmodal [data-ivpkq="'+qid+'"]'); if(cb2){cb2.click(); await T.until(function(){return cnt()===n0;},5000);}
+         if(cnt()!==n0)bad.push('取消勾選沒回到原本('+n0+'→'+cnt()+')');}
+       var x=document.querySelector('#rzmodal .rzm-x'); if(x)x.click(); await T.idle();}
+     var back=document.querySelector('#app [data-ivopen=""]'); if(back){back.click(); await T.idle();}
+   }
+   // 題庫:流水線四站、預設收起,題數加總 = 題目數(頁籤重畫過,要重新抓)
+   document.querySelector('#app [data-ivview="bank"]').click(); await T.idle();
+   var rows=[...document.querySelectorAll('#app details.ivrow[data-iv]')];
+   if(!rows.length)return bad.concat('題庫那頁沒有題目').join('；');
    var sts=[...document.querySelectorAll('#app details.ivstage')];
-   if(sts.length!==4)bad.push('流水線應該是 4 站,現在 '+sts.length+' 站');
+   if(sts.length!==4)bad.push('題庫流水線應該是 4 站,現在 '+sts.length+' 站');
    var sum=sts.reduce(function(n,d){return n+(parseInt(((d.querySelector('summary .n')||{}).textContent||'0'),10)||0);},0);
    if(sum!==rows.length)bad.push('每一站的題數加起來是 '+sum+',頁上有 '+rows.length+' 題');
    if(sts.some(function(d){return d.open;})||rows.some(function(r){return r.open;}))bad.push('一進來就有東西是開著的');
-   // 不猜面試形式(錄影/真人),實際被哪家考過的才標那家。
    if(document.querySelector('#app .iv-fmt'))bad.push('又出現錄影／真人的標籤');
-   if(!document.querySelector('#app details.ivrow .iv-jc'))bad.push('實際考過的題旁邊沒有標是哪一家');
-   if(!T.absent('#app [data-ivscope]'))bad.push('又出現「通用／只給這家」的按鈕(題目一律通用,考過的才標)');
-   // 這一步只接上一步做完的:最上面只能列他記成面試中/Offer 的公司,這一頁也不准有回頭改結果的按鈕。
-   // 上一步處理完才會跳到這一步,不替單一職缺打專屬補丁。
-   var st0=await T.state(), live=Object.keys(st0).filter(function(k){var f=st0[k];
-     return f&&typeof f==='object'&&!Array.isArray(f)&&f.app==='sent'&&(f.oc==='iv'||f.oc==='offer')&&!f.rm;});
-   var strips=document.querySelectorAll('#app .iv-job').length;
-   if(strips!==live.length)bad.push('最上面列了 '+strips+' 家,記成面試中/Offer 的是 '+live.length+' 家');
-   // 某一家的研究(JD 重點、落差)不上這一頁。
-   if(document.querySelector('#app .iv-doc, [data-ctl="ivjob"]'))bad.push('面試準備頁又出現某一家的參考資料或選公司的選單');
+   // 題目那一行只准有:在哪一站、多長、「用在 N 場」。不准掛任何公司名(公司多了一行會掛滿,在別家底下也看不懂)
+   var odd=rows.filter(function(r){return [...r.querySelectorAll(':scope>summary .iv-meta>*')].some(function(c){
+     return !(c.classList.contains('iv-st')||c.classList.contains('iv-dur')||(c.classList.contains('iv-for')&&/^用在 [0-9]+ 場$/.test(c.textContent.trim())));});});
+   if(odd.length)bad.push('題庫裡有 '+odd.length+' 題那一行掛著站、長度、用在幾場以外的標籤');
    if(!T.absent('#app [data-ivoc]'))bad.push('面試準備頁上有回頭改已投遞結果的按鈕');
-   var r=rows.filter(function(x){return x.querySelector('.iv-pick');})[0]||rows.filter(function(x){return x.querySelector('.iv-seg');})[0];
+   // 題目那一行的狀態點了就能改:開四站選單、選了那顆跟著變、那一題不會因為點狀態就展開;改回原本
+   var sb=document.querySelector('#app details.ivrow [data-ivstage]');
+   if(!sb)bad.push('題目那一行沒有可以點的狀態');
+   else{var sid=sb.getAttribute('data-ivstage'), row=sb.closest('details'), t0=sb.textContent; sb.click(); await T.idle();
+     var opts=[...document.querySelectorAll('#ivstmenu [data-ivst-set]:not([disabled]):not(.on)')];
+     if(row.open)bad.push('點狀態把那一題展開了');
+     if(!opts.length)bad.push('點狀態沒有跳出可以選的站');
+     else{var orig=document.querySelector('#ivstmenu .ctlopt.on'), back=orig&&orig.getAttribute('data-ivst-set'); opts[0].click();
+       await T.until(function(){var x=document.querySelector('#app [data-ivstage="'+sid+'"]'); return x&&x.textContent!==t0;},5000);
+       var s2=document.querySelector('#app [data-ivstage="'+sid+'"]'); if(!s2||s2.textContent===t0)bad.push('選了別的站,狀態沒變');
+       if(s2&&back){s2.click(); await T.idle(); var o=document.querySelector('#ivstmenu [data-ivst-set="'+back+'"]'); if(o){o.click();
+         await T.until(function(){var x=document.querySelector('#app [data-ivstage="'+sid+'"]'); return x&&x.textContent===t0;},5000);}}}}
+   rows=[...document.querySelectorAll('#app details.ivrow[data-iv]')];   // 改狀態會重畫,下面要用新的
+   var r=rows.filter(function(x){return x.querySelector('[data-ivpk="-1"]');})[0]||rows.filter(function(x){return x.querySelector('.iv-seg');})[0];
    if(!r)return bad.concat('沒有任何一題有逐字稿').join('；');
    var stg=r.closest('details.ivstage'); if(stg&&!stg.open){stg.querySelector('summary').click(); await T.idle();}
    r.querySelector('summary').click(); await T.idle();
@@ -156,6 +204,11 @@ CHECKS=[
      if(!(n>0&&n<all))bad.push('點子題之後段落沒變少('+all+'→'+n+')');
      r.querySelector('[data-ivpk="-1"]').click(); await T.idle();
      if(r.querySelectorAll('.iv-seg:not(.off)').length!==all)bad.push('按「全部」沒回到全部段落');}
+   // 好幾版的稿子(60/90/180):一次只顯示一版,點另一版就換
+   var vr=rows.filter(function(x){return x.querySelector('.iv-pick')&&!x.querySelector('[data-ivpk="-1"]');})[0];
+   if(vr){var vs=vr.querySelectorAll('.iv-say .iv-script').length; if(vs!==1)bad.push('好幾版的稿子一次顯示了 '+vs+' 版');
+     var v1=vr.querySelector('[data-ivpk="1"]'), before=vr.querySelector('.iv-say').textContent;
+     if(v1){v1.click(); await T.idle(); if(vr.querySelector('.iv-say').textContent===before)bad.push('點另一版,稿子沒換');}}
    r.querySelector('[data-ivread]').click(); await T.idle();
    var ov=document.getElementById('rzmodal');
    if(!ov||ov.style.display!=='flex'||!ov.querySelector('.rd-doc .iv-seg'))bad.push('大字讀稿沒打開');
@@ -2992,6 +3045,7 @@ CHECKS.append((
     r'''
       var bad=[], t=document.querySelector('[data-tab="iv"]'); if(!t)return '沒有 🎤 面試準備那一籤';
       t.click(); await T.idle();
+      var tb=document.querySelector('#app [data-ivview="bank"]'); if(tb){tb.click(); await T.idle();}   // 題目在「題庫」那一籤
       // 有中文的段落照原本數非空白字元(使用者的語速是照這個量的),夾的英文也算字元
       [['英文 150 字',60],['中文 42 字',10],['中文夾英文',11]].forEach(function(c,i){
         var row=document.querySelector('#app details.ivrow[data-iv="'+P.ids[i]+'"]'), d=row&&row.querySelector('[data-ivdur]');

@@ -470,19 +470,37 @@ a.att-pill:hover{border-color:var(--accent-ink)}
 /* ---------- 🎤 面試準備(題庫) ---------- */
 .iv-job{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 18px}
 .iv-job-t{font-size:15px;font-weight:700;line-height:1.45}
+.iv-job .sum,.iv-job .facts{margin-top:8px}
+.iv-cnt{font-size:12px;color:var(--ink-dim);white-space:nowrap}
+.iv-tabs{display:flex;gap:8px;margin:0 0 14px}
+/* 面試清單一場一行:整行可按,跟題目那一行同一種樣子,右邊一個 › 表示點進去 */
+.iv-jrow{display:flex;align-items:center;gap:8px;width:100%;min-height:52px;box-sizing:border-box;padding:10px 12px;text-align:left;
+  background:var(--surface);border:1px solid var(--line);border-radius:9px;color:var(--ink);font:inherit;cursor:pointer}
+.iv-jrow:hover{border-color:var(--accent)}
+.iv-go{flex:none;font-size:20px;color:var(--ink-dim)}
+.iv-ptitle{font-size:18px;font-weight:700;line-height:1.4;margin:4px 0 8px}
+.iv-used{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
+.iv-used-k{font-size:12px;color:var(--ink-dim)}
+.rzm-box.iv-picker,.rzm-box.iv-edit{max-width:640px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-sizing:border-box}
+.iv-picker h3{margin:0 70px 4px 0;font-size:16px;line-height:1.4}
+.iv-picker #ivpk-q{width:100%;box-sizing:border-box;margin:8px 0}
+.iv-pkrow{display:flex;align-items:center;gap:8px;padding:9px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+.iv-pkrow input{flex:none;width:18px;height:18px}
+.iv-sub{font-size:14px;font-weight:700;margin:12px 0 6px}
+.iv-for{font-size:11px;border-radius:20px;padding:1px 8px;white-space:nowrap;border:1px solid var(--accent);color:var(--accent-ink)}
+.iv-read.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-ink)}
+.iv-st.st-final{background:var(--accent-soft);color:var(--accent-ink)}
 .iv-job-st{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;font-size:13px;color:var(--ink-dim)}
 .ivlist{display:flex;flex-direction:column;gap:6px}
 details.ivrow{background:var(--surface);border:1px solid var(--line);border-radius:9px}
 details.ivrow>summary{min-height:44px;box-sizing:border-box;padding:9px 12px}
 details.ivrow[open]{border-color:var(--accent)}
 details.ivrow[open]>summary{border-bottom:1px solid var(--line)}
-.iv-t{flex:1;min-width:0;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.iv-t{flex:1;min-width:0;font-size:14px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}
 .iv-hit{display:block;margin-top:2px;font-size:12px;font-weight:400;color:var(--ink-dim);white-space:normal}
 .iv-hit b{color:var(--ink);background:var(--warm-soft);border-radius:3px}
-.iv-meta{flex:none;display:flex;align-items:center;gap:6px}
+.iv-meta{flex:none;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:4px 6px;max-width:45%}
 .iv-st{font-size:11px;font-weight:700;border-radius:20px;padding:1px 8px;white-space:nowrap;background:var(--surface-2);color:var(--ink-dim)}
-.iv-jc{font-size:11px;font-weight:700;border-radius:20px;padding:1px 8px;white-space:nowrap;max-width:8em;
-  overflow:hidden;text-overflow:ellipsis;background:var(--accent-soft);color:var(--accent-ink)}   /* 他標了只跟哪一家有關 */
 .iv-dur{font-family:var(--mono);font-size:12px;color:var(--ink-dim);white-space:nowrap}
 .iv-dur.over,.rd-est.over{color:var(--warn);font-weight:700}   /* 照他的語速念會超過限時 */
 /* 流水線每一站:摺起來一列,前面一個站號 */
@@ -503,8 +521,7 @@ details.ivstage[open]>summary{margin-bottom:10px}
 .iv-pick{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 14px}
 .iv-pk{min-height:34px;font:inherit;font-size:13px;line-height:1.35;text-align:left;padding:6px 11px;border:1px solid var(--line);
   border-radius:8px;background:var(--surface-2);color:var(--ink);cursor:pointer}
-.iv-pk.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
-.iv-acts{margin:2px 0 8px}
+.iv-pk.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);font-weight:700}   /* 選了哪一版:淡色,跟實心的「大字讀稿」分開 */
 .iv-read{min-height:38px;padding:7px 16px;border:0;border-radius:8px;background:var(--accent);color:#fff;
   font:inherit;font-size:14px;font-weight:700;cursor:pointer}
 details.iv-qf>summary{min-height:36px;font-size:13px;color:var(--ink-dim)}
@@ -1105,3 +1122,25 @@ body:has(.cfg-save.dirty) #totop{bottom:84px}
 .fl-bad .fl-st,.fl-wait .fl-st,.fl-gone .fl-st,.fl-unsure .fl-st{color:var(--warn)}
 .fl-unsure .fl-name{font-weight:600}
 .fl-sum{margin-left:8px;font-size:12px;font-weight:600;color:var(--ink-dim)}
+.ivlist+details.applygrp{margin-top:18px}
+
+/* 一題點開:一顆主要按鈕(實心)＋一顆次要(框線);管理這場的放最下面一小行 */
+.iv-acts{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.iv-ghost{min-height:38px;padding:7px 14px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit;font-size:14px;cursor:pointer}
+.iv-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.iv-foot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:14px;padding-top:10px;border-top:1px solid var(--line);font-size:12px}
+.iv-foot-k{color:var(--ink-dim)}
+.iv-kind{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.iv-kb{min-height:30px;padding:4px 12px;border:0;background:transparent;color:var(--ink-dim);font:inherit;font-size:12px;cursor:pointer}
+.iv-kb+.iv-kb{border-left:1px solid var(--line)}
+.iv-kb.on{background:var(--accent-soft);color:var(--accent-ink);font-weight:700;cursor:default}
+.iv-rm{margin-left:auto;min-height:30px;padding:4px 6px;border:0;background:transparent;color:var(--ink-dim);font:inherit;font-size:12px;text-decoration:underline;cursor:pointer}
+.iv-rm:hover{color:var(--warn)}
+.ive-lim{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-dim)}
+/* 題庫四站:一站一列,不要每站中間空一大段 */
+details.ivstage.applygrp{margin:0 0 8px}
+
+/* 狀態那顆可以點:看起來像小選單按鈕 */
+button.iv-st{border:1px solid transparent;font-family:inherit;cursor:pointer}
+button.iv-st:hover{border-color:var(--accent)}
+#ivstmenu .ctlopt[disabled]{opacity:.5;cursor:not-allowed}
