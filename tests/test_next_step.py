@@ -137,6 +137,8 @@ def settle(fb, pl):
     """自動流程這一輪記下的(看到的新改動、派出去的記號)寫回看板,像 Pilot 做的那樣。"""
     a = fb['__auto__']
     a['rf'] = dict(a.get('rf') or {}, **pl['rf'])
+    if pl['fix'] in a['rf']:                       # 叫了重打:這一次改動記成叫過
+        a['rf'][pl['fix']] = dict(a['rf'][pl['fix']], sent=True)
     a['tried'] = list(a['tried']) + pl['tried']
 
 
@@ -197,7 +199,7 @@ class AgentStops(unittest.TestCase):
     def test_a_retype_that_left_the_mark_is_not_retried_and_says_why(self):
         import next_step
         fb, jobs = self.refill()
-        fb['__auto__']['tried'] = ['fix:c:' + next_step.fix_sig(fb, 'c')]
+        fb['__auto__']['rf'] = {'c': {'sig': next_step.fix_sig(fb, 'c'), 'sent': True}}   # 自動重打過這一次改動
         nx = steps(fb, jobs)['c']
         self.assertIsNone(nx['auto'])
         self.assertIn('不會再自動重試', nx['stop'])
@@ -206,7 +208,7 @@ class AgentStops(unittest.TestCase):
     def test_changing_the_answer_again_hands_it_back_to_the_agent(self):
         import next_step
         fb, jobs = self.refill()
-        fb['__auto__']['tried'] = ['fix:c:' + next_step.fix_sig(fb, 'c')]
+        fb['__auto__']['rf'] = {'c': {'sig': next_step.fix_sig(fb, 'c'), 'sent': True}}   # 自動重打過這一次改動
         fb['__ans__'][0]['v'] = 'Because, again.'
         nx = steps(fb, jobs)['c']
         self.assertEqual(((nx['auto'] or {}).get('do'), nx['stop']), ('fix', None))
@@ -299,7 +301,7 @@ class CardView(unittest.TestCase):
         if kind == 'noev':
             fb['__ans__'][0].update(inf='2026-01-02', noev='沒有程式自己截的那一頁')
         if kind == 'tried':
-            fb['__auto__']['tried'] = ['fix:' + URL + ':' + next_step.fix_sig(fb, URL)]
+            fb['__auto__']['rf'] = {URL: {'sig': next_step.fix_sig(fb, URL), 'sent': True}}
         return steps(fb, jobs, flow=dict(FLOW, auto_fill=True))[URL]['view']
 
     def test_only_a_retranslation_left_is_done_by_the_agent_not_by_you(self):
@@ -455,7 +457,7 @@ class FlowPicksExactlyTheNextStep(unittest.TestCase):
                 e.update(inf='2026-01-02', noev='沒有程式自己截的那一頁')
             bank[:] = [x for x in bank if x['k'] != k] + [e]
         import next_step
-        fb['__auto__']['tried'].append('fix:e1:' + next_step.fix_sig(fb, 'e1'))   # 自動重打過、還沒改好的
+        fb['__auto__'].setdefault('rf', {})['e1'] = {'sig': next_step.fix_sig(fb, 'e1'), 'sent': True}   # 自動重打過、還沒改好的
         return fb, jobs
 
     def drain(self, fb, jobs, flow=FLOW):

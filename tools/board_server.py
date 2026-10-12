@@ -67,32 +67,25 @@ def code_version(root=None):
     return digest.hexdigest()[:16]
 
 
-def _watch_code(servers, version, interval=10):
+def _watch(servers, version, launchd, interval=10):
+    """看板什麼時候讓位(停掉伺服器,main 的收尾照常跑):launchd 起的,程式更新了(launchd 用新程式重起);
+    不是 launchd 起的(安裝指令在背景起的,沒有終端機可以按 Ctrl-C),這個資料夾裝好開機自動啟動了
+    (不管是設定頁按的還是終端機裝的):讓出埠給 launchd 起的那個(它每 30 秒重試一次)。"""
+    import install_service
     while True:
         time.sleep(interval)
-        if code_version() == version:
-            continue
-        for server in servers:
-            threading.Thread(target=server.shutdown, daemon=True).start()
-        return
+        if code_version()!=version if launchd else os.path.exists(install_service.plist_path()):
+            break
+    for server in servers:
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
-SERVERS=[]   # main 綁好的伺服器;要讓出埠時(交給開機自動啟動)從這裡停
-
-def hand_over_to_launchd(delay=1.0):
-    """開機自動啟動裝好了,這個看板卻不是 launchd 起的(安裝指令在背景起的,沒有終端機可以按 Ctrl-C):
-    回完話就自己關,讓出埠給 launchd 起的那個(它每 30 秒重試一次)。關法跟程式更新後一樣(_watch_code):
-    停掉伺服器,main 的收尾照常跑。安裝指令記的 pid 是自己的就一起清掉。"""
-    def go():
-        pidfile=os.path.join(cf.HOME,'.jobsalvo-server.pid')
-        try:
-            with open(pidfile,encoding='utf-8') as f: mine=f.read().strip()==str(os.getpid())
-            if mine: os.remove(pidfile)
-        except OSError:
-            pass
-        for server in SERVERS:
-            threading.Thread(target=server.shutdown,daemon=True).start()
-    t=threading.Timer(delay,go); t.daemon=True; t.start()
-    return t
+def _drop_own_pidfile():
+    """安裝指令記下的 pid(<資料夾>/.jobsalvo-server.pid)是這一個看板的話,結束時清掉:
+    反安裝照它停看板,不能留一個之後會被別的程式拿去用的 pid。"""
+    pidfile=os.path.join(cf.HOME,'.jobsalvo-server.pid')
+    with contextlib.suppress(OSError):   # 沒有這個檔:不是安裝指令起的
+        with open(pidfile,encoding='utf-8') as f: mine=f.read().strip()==str(os.getpid())
+        if mine: os.remove(pidfile)
 
 import gzip as _gz, hashlib as _hl
 _GZ={}
@@ -498,7 +491,7 @@ def note_saved():
 
 
 _BUILD_LOCK=threading.Lock()
-_build_state={'running':False,'again':False,'gen':0}   # gen:每跑完一次 reconcile +1,給頁面判斷「卡片資料該重拿了」
+_build_state={'running':False,'again':False,'gen':0,'done':True}   # gen:每跑完一次 reconcile +1,給頁面判斷「卡片資料該重拿了」;done:最近那一輪有沒有跑完
 
 def trigger_build():
     """有卡片被標成 ready/ship 就在背景跑一次 reconcile,把那張的可投遞包生出來。
@@ -524,6 +517,7 @@ def trigger_build():
                 # 以前一張卡建不成,輪數就不前進,所有卡的自動推進都停住
                 done=result.returncode in (0,reconcile.PACKAGE_PROBLEMS)
                 with _BUILD_LOCK:
+                    _build_state['done']=done
                     if done:
                         _build_state['gen']+=1
                     if not _build_state['again']:
@@ -580,12 +574,12 @@ def _source_preflight():
     if os.path.abspath(STATE or '') != os.path.abspath(bd.LIVE or ''):
         return ''
     import reconcile, source_sync
-    # 背景已經在建(切回看板那一下開始的):等它建完再比,不要同時再開一個 reconcile 做同一件事
-    while True:
-        with _BUILD_LOCK:
-            if not _build_state['running']:
-                break
-        time.sleep(1)
+    def built():   # 建置只有一個入口(trigger_build):在跑就等它跑完,回最近那一輪有沒有跑完
+        while True:
+            with _BUILD_LOCK:
+                if not _build_state['running']: return _build_state['done']
+            time.sleep(1)
+    built()
     if not source_sync.stale(reconcile.MANIFEST, board=STATE):
         _source_fail.clear()
         return ''
@@ -593,10 +587,8 @@ def _source_preflight():
     last=dict(_source_fail)   # 另一條執行緒可能同時清掉它
     if last.get('key')==key and time.time()-last.get('t',0)<SOURCE_RETRY:
         return last['msg']
-    result = subprocess.run([sys.executable, os.path.join(HERE, 'reconcile.py'),
-                             '--board', STATE], cwd=REPO, capture_output=True, text=True)
-    # 來源同步好了、只是有幾張卡的要寄的檔案沒建成(那幾張各自擋、各自回報)不算來源失敗,這一輪照跑
-    if result.returncode not in (0, reconcile.PACKAGE_PROBLEMS):
+    trigger_build()
+    if not built():                  # 只有幾張卡的要寄的檔案沒建成也算跑完(trigger_build 那裡判):那幾張各自擋、各自回報
         msg='來源檔更新失敗，請先查看「整理要寄的檔案」回報。'
         _source_fail.update(key=key,t=time.time(),
             msg=msg+f'({time.strftime("%H:%M",time.localtime(time.time()))} 試過;改了來源檔會馬上再試,沒改的話 {SOURCE_RETRY//60} 分鐘後再試)')
@@ -1364,9 +1356,7 @@ class H(BaseHTTPRequestHandler):
                              capture_output=True,text=True,env=dict(os.environ,JOBSALVO_HOME=cf.HOME))
             msg=(r.stdout or r.stderr).strip()[-400:]
             if r.returncode==0 and body.get('act')!='remove' and os.environ.get('JOBSALVO_LAUNCHD')!='1':
-                # 開機啟動會自己起一個看板;現在這個不是它起的,兩個搶同一個埠,launchd 那個會一直重試。
-                # 安裝指令起的看板在背景、沒有終端機可以按 Ctrl-C:回完話自己關,交給 launchd
-                hand_over_to_launchd()
+                # 這個看板不是開機啟動起的:看到裝好了就自己關(_watch),交給它起的那一個
                 msg+='\n裝好了。這個看板馬上會自己關掉,交給開機自動啟動接手:大約半分鐘後重整這一頁。'
             return self._json(200 if r.returncode==0 else 400,{'ok':r.returncode==0,'msg':msg})
         before=sent_files()
@@ -1647,7 +1637,6 @@ def main():
         hosts=resolve_hosts(a.host)
         for h in hosts:
             srvs.append(ThreadingHTTPServer((h,a.port),H))
-        SERVERS[:]=srvs
         migrate_marks(STATE)   # 舊資料寫回成現在的樣子:自動流程第一次盤點、頁面第一次載入之前
         if is_real():
             cf.upgrade_file()          # 設定檔裡現在不用的舊設定寫回拿掉
@@ -1656,8 +1645,7 @@ def main():
         start_pilot()  # 所有埠先綁好，首次盤點仍在開始接受 HTTP 前完成
         RUNNING_VERSION=code_version()
         launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1'
-        if launchd:
-            threading.Thread(target=_watch_code,args=(srvs,RUNNING_VERSION),daemon=True).start()
+        threading.Thread(target=_watch,args=(srvs,RUNNING_VERSION,launchd),daemon=True).start()
         for h in hosts:
             print(f'看板 server 起在 http://{"localhost" if h=="127.0.0.1" else h}:{a.port}  (狀態檔 {STATE})')
         for s in srvs[1:]:
@@ -1670,13 +1658,14 @@ def main():
             server.server_close()
         if PILOT is not None:
             PILOT.stop()   # 等自動流程正在跑的那一次寫完,再刪副本資料夾
+        _drop_own_pidfile()
         if tmp:
-            # 刪的同時若還有東西寫進來(慢的機器上時間會重疊),會剩下空殼;再試幾次,真的刪不掉要講出來
-            for _ in range(5):
-                shutil.rmtree(tmp,ignore_errors=True)
-                if not os.path.exists(tmp): break
-                time.sleep(0.2)
-            else:
+            # 派出去的子行程(準備、填表、查回音…)先停下、等它結束,沒有人還在寫,一次刪乾淨
+            for p in [x for x in _PROC.values() if x and x.poll() is None]:
+                p.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired): p.wait(timeout=10)
+            shutil.rmtree(tmp,ignore_errors=True)
+            if os.path.exists(tmp):
                 print('副本的暫存資料夾刪不掉,要手動清:'+tmp,file=sys.stderr)
     if launchd and code_version()!=RUNNING_VERSION:
         raise SystemExit(75)

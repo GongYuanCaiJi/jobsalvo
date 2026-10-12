@@ -130,7 +130,6 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
                 out['wait'] = x['wait'] if out['wait'] is None else min(out['wait'], x['wait'])
                 continue
             out['fix'] = i
-            out['tried'].append(x['mark'])
             break
 
     if cfg.get('auto_fill') and not chrome_busy and not out['fix']:
@@ -329,13 +328,10 @@ class Pilot:
             done = [k for k in pl['tried'] if k.startswith('adv:') or ok.get(k.split(':', 1)[0])]
             rf = dict(a.get('rf') or {})
             rf.update(pl['rf'])
-            # 標記清掉了(重打好了,或他自己按了改)就把這張的記號一起清掉:記號只在還標著的時候算數。
-            # 不清的話,他之後把答案改回重打過的值,伺服器認得那組值不再派,卡上卻一直寫「會自動重打」。
-            # 重打完還標著的(agent 沒打好)記號留著,不會一直重來。
-            marks = set(rf) | {k[4:].rsplit(':', 1)[0] for k in a.get('tried') or [] if k.startswith('fix:')}
-            clear = {i for i in marks if not next_step.fix_sig(f, i)}
-            a['tried'] = [k for k in a.get('tried') or [] if not (k.startswith('fix:') and k[4:].rsplit(':', 1)[0] in clear)]
-            a['rf'] = {i: v for i, v in rf.items() if (f.get(i) or {}).get('app') == 'ship' and i not in clear}
+            if ok.get('fix') and pl['fix'] in rf:          # 真的叫了才算:同一次改動不再叫第二次
+                rf[pl['fix']] = dict(rf[pl['fix']], sent=True)
+            # 這張沒有待重打的了(重打好了,或他自己按了改):那一筆拿掉。他之後把答案改回重打過的值,是新的一次改動
+            a['rf'] = {i: v for i, v in rf.items() if (f.get(i) or {}).get('app') == 'ship' and next_step.fix_sig(f, i)}
             a['tried'] = (list(a.get('tried') or []) + done)[-500:]
             if ok.get('replies'):
                 a['replies_day'] = today
@@ -352,8 +348,7 @@ class Pilot:
                     f[i]['app'] = 'ship'
             f[KEY] = a
         A = fb.get(KEY) if isinstance(fb.get(KEY), dict) else {}
-        marked = set(A.get('rf') or {}) | {k[4:].rsplit(':', 1)[0] for k in A.get('tried') or [] if k.startswith('fix:')}
-        expire = any(not next_step.fix_sig(fb, i) for i in marked)      # 有張卡的待重打清掉了,記號要跟著清
+        expire = any(not next_step.fix_sig(fb, i) for i in A.get('rf') or {})   # 有張卡的待重打清掉了,那一筆要跟著拿掉
         if pl['init'] or pl['seen'] or pl['advance'] or pl['rf'] or started or expire:
             bd.set_fb(mut, live=self.state, by='autopilot')
         if was_blocked and not need_browser and (ok.get('fill') or ok.get('fix') or ok.get('replies')):

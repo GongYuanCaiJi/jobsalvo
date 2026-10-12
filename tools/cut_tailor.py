@@ -8,9 +8,8 @@ agent 每張寫一個 <resume.prepare_dir>/<jid>/fill.json(variant、lang,名字
 對不上或關了就 skip+reason)。收尾把判斷寫進卡片、把有結果的卡推到「待你決定」,再跑 reconcile
 建可投遞夾(見 ship.py:Markdown 原稿會先排成 PDF)。
 
-fill.json 裡 worker 只擁有 WORKER_KEYS 那幾欄;其他欄位(例如自己的產線寫的客製內容、approved)
-是別人寫的,跑之前備份、跑完原封不動放回去。這一輪 agent 交的那份(交件單)只經安檢門:存回正式位置的
-只有收下的格子,所以正式那份裡 worker 以外的欄位都不是 agent 寫的。
+agent 的交件單寫在這一輪自己的資料夾(cut_tailor_runs/<輪>/),只經安檢門:正式那份裡 worker 只擁有
+WORKER_KEYS 那幾欄,換成收下的格子;其他欄位(例如自己的產線寫的客製內容、approved)是別人寫的,原樣留著。
 
 用法:python3 tools/cut_tailor.py --board <看板檔> [--limit N] [--jids a,b]
 """
@@ -91,44 +90,29 @@ def _techerr(ff, u):
 
 
 
-PREV=os.path.join(SP,'cut_tailor_prev')
-KEEPF=os.path.join(PREV,'kept.json')
-
 # fill.json 裡 worker 這一輪只擁有這幾欄。其他欄位是別人寫的(自己的產線寫的客製內容、approved…),
-# 跑之前備份、跑完原封不動放回去:防覆蓋不能靠誰記得標 approved。
+# 存回時原樣留著:防覆蓋不能靠誰記得標 approved。
 WORKER_KEYS=('resume','variant','lang','why','content_problem','real_title','skip','reason')
 
-def keep_others(rows):
-    """跑之前把 fill.json 裡不屬於 worker 的欄位備份一份,跑完放回去(見 restore_others)。"""
-    os.makedirs(PREV,exist_ok=True); keep={}
-    for u,_ in rows:
-        d,_missing=gate.read(os.path.join(OUT,card.card_id_from_url(u)),'prepare')
-        if d is None: continue   # 還沒跑過(或寫壞了):沒有要保留的欄位
-        k={x:v for x,v in d.items() if x not in WORKER_KEYS and v not in (None,'',[],{})}
-        if k: keep[card.card_id_from_url(u)]=k
-    json.dump(keep,open(KEEPF,'w',encoding='utf-8'),ensure_ascii=False)
-    if keep: print(f'{len(keep)} 張的 fill.json 有別人寫的欄位,先備份,跑完原封不動放回去')
-    return keep
 
-
-def restore_others(rows, checked):
-    """把這一輪安檢門收下的格子(checked:_fills 的結果)存回正式位置,並放回跑之前備份的別人寫的欄位。
-    交件單原樣不存:agent 沒登記的格子(例如它自己寫的 approved)、沒收下的格子都不會變成正式的。"""
-    try: keep=json.load(open(KEEPF,encoding='utf-8'))
-    except (OSError,ValueError): keep={}   # 這一輪沒備份到(或寫壞了):沒有要放回的
+def save_accepted(rows, checked):
+    """把這一輪安檢門收下的格子(checked:_fills 的結果)併進正式那份:worker 那幾欄換成收下的,別人寫的欄位原樣留著
+    (判跳過的那張只留收下的格子)。交件單原樣不存:agent 沒登記的格子(例如它自己寫的 approved)、
+    沒收下的格子都不會變成正式的。"""
     n=0
     for u,_ in rows:
         if u not in checked: continue   # 這一張沒寫出來:check_written 會把它算成沒重寫、照實報
-        jid=card.card_id_from_url(u)
+        where=os.path.join(OUT,card.card_id_from_url(u))
         d=dict(checked[u][0])
         if not d.get('skip'):
-            d.update({x:v for x,v in keep.get(jid,{}).items() if x not in WORKER_KEYS})
-        dst=os.path.join(OUT,jid,'fill.json')
+            old,_missing=gate.read(where,'prepare')   # 還沒跑過(或寫壞了):沒有別人寫的欄位
+            d.update({x:v for x,v in (old or {}).items() if x not in WORKER_KEYS and v not in (None,'',[],{})})
+        dst=os.path.join(where,'fill.json')
         os.makedirs(os.path.dirname(dst),exist_ok=True)
         with open(dst,'w',encoding='utf-8') as fh:
             json.dump(d,fh,ensure_ascii=False,indent=2)
         n+=1
-    if n: print(f'存回安檢門收下的格子 {n} 張(別人寫的欄位原樣放回)')
+    if n: print(f'存回安檢門收下的格子 {n} 張(別人寫的欄位原樣留著)')
     return n
 
 
@@ -490,7 +474,7 @@ def run_finish(board, out_dir=None):
         bad=check_written(rows,t0,out_dir)
         with evidence.activated(rnd):     # 安檢門核對每一張的交件單,比對結果記進那一張的證據
             checked=_fills(rows, out_dir)
-        restore_others(rows,checked)   # 只存安檢門收下的格子,並保留跑之前別人寫的欄位
+        save_accepted(rows,checked)   # 只存安檢門收下的格子,別人寫的欄位留著
         # 有判斷 = 已準備:先把這輪剛判的推到 ready,再跑 reconcile。
         # 順序很重要:先推 ready,reconcile 建可投遞夾那步才會把這幾張一起建好。
         moved=_apply_stages(rows, board, out_dir,
@@ -535,7 +519,7 @@ def skip_approved(rows, out_dir=None):
     out_dir = out_dir or OUT
     kept = []
     for u, title in rows:
-        # approved 是他的決定:正式那份只存安檢門收下的格子加別人寫的欄位(restore_others),agent 寫的 approved 進不來。
+        # approved 是他的決定:正式那份只存安檢門收下的格子加別人寫的欄位(save_accepted),agent 寫的 approved 進不來。
         # 檔一樣只經 gate.read 打開。還沒跑過、寫壞了:沒有認可,照跑
         sheet, _missing = gate.read(os.path.join(out_dir, card.card_id_from_url(u)), 'prepare')
         if (sheet or {}).get('approved'):
@@ -634,7 +618,6 @@ def main():
                  'finished_at':time.time(),'msg':msg})
         return
     rows = reselect
-    keep_others(rows)
     os.makedirs(OUT,exist_ok=True)
     run_out_dir=os.path.join(RUNS,uuid.uuid4().hex)
     os.makedirs(run_out_dir,exist_ok=True)

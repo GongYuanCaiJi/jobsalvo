@@ -167,6 +167,7 @@ class BuildCompletion(Tmp):
         import source_sync
         self.enterContext(mock.patch.object(bd, 'LIVE', self.path))
         self.enterContext(mock.patch.object(bs, 'STATE', self.path))
+        bs.trigger_build = self._tb          # 來源檢查走背景建置那一個入口(tearDown 會換回假的)
         getattr(bs, '_source_fail', {}).clear()
         with mock.patch.object(source_sync, 'stale', return_value=True):
             for code, want in ((reconcile.PACKAGE_PROBLEMS, ''), (1, '來源檔更新失敗')):
@@ -182,6 +183,7 @@ class BuildCompletion(Tmp):
         import source_sync
         old_live, old_state = bd.LIVE, bs.STATE
         bd.LIVE = bs.STATE = self.path
+        bs.trigger_build = self._tb          # 來源檢查走背景建置那一個入口(tearDown 會換回假的)
         getattr(bs, '_source_fail', {}).clear()
         src = os.path.join(os.path.dirname(self.path), 'resume.md')
         with open(src, 'w', encoding='utf-8') as f:
@@ -954,7 +956,7 @@ class ResearchPipeline(unittest.TestCase):
         self.assertTrue(shown.strip())
         self.assertTrue(any(shown in src for src in cites['J1']['sources']['偏好筆記']))
         # 偏好筆記裡記著他的原話:標成「使用者原話」引用也找得到(2026-10-05 找缺實測)
-        self.assertTrue(any(prefs.without_tracking(prefs.ensure_note())[:20] in src
+        self.assertTrue(any(prefs.ensure_note()[:20] in src
                             for src in cites['J1']['sources']['使用者原話']))
 
     def test_a_batch_judges_against_one_set_of_old_cards_and_one_quote_rule(self):
@@ -1337,9 +1339,9 @@ class ResearchPipeline(unittest.TestCase):
                 delta_ids = re.findall(r'卡片代號=([^\n｜]+)', note_material(prompt, '新表態'))
                 with open(note_path, 'w', encoding='utf-8') as f:
                     f.write('# 偏好筆記\n\n## 使用者自訂\n\n\n## Agent 假設\n\n'
-                            + '\n'.join(f'- 探索平台｜出處卡片代號={i}' for i in delta_ids)
-                            + '\n\n### 新表態逐張核對\n'
-                            + '\n'.join(f'- 卡片代號={i}：來源假設=探索平台' for i in delta_ids) + '\n')
+                            + '\n'.join(f'- 探索平台｜出處卡片代號={i}' for i in delta_ids) + '\n')
+                with open(self.rs.tracking_path(note_path), 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(f'- 卡片代號={i}：來源假設=探索平台' for i in delta_ids) + '\n')
                 return
             if name.startswith('search_'):
                 mode = name[len('search_'):-len('.out')]
@@ -1456,9 +1458,9 @@ class ResearchPipeline(unittest.TestCase):
                 first = delta_ids[0]
                 with open(note_path, 'w', encoding='utf-8') as f:
                     f.write('# 偏好筆記\n\n## 使用者自訂\n\n\n## Agent 假設\n\n'
-                            f'- 探索平台｜出處卡片代號={first}\n\n'
-                            '### 新表態逐張核對\n'
-                            f'- 卡片代號={first}：來源假設=探索平台\n')
+                            f'- 探索平台｜出處卡片代號={first}\n')
+                with open(self.rs.tracking_path(note_path), 'w', encoding='utf-8') as f:
+                    f.write(f'- 卡片代號={first}：來源假設=探索平台\n')
                 return
             if os.path.basename(outfile).startswith('search_'):
                 with open(result_path, 'w', encoding='utf-8') as f:
@@ -1553,8 +1555,9 @@ class ResearchPipeline(unittest.TestCase):
                     for card_id in delta_ids)
                 with open(note_path, 'w', encoding='utf-8') as f:
                     f.write('# 偏好筆記\n\n## 使用者自訂\n\n' + custom +
-                            '\n\n## Agent 假設\n\n' + assumptions +
-                            '\n\n### 新表態逐張核對\n' + tracking + '\n')
+                            '\n\n## Agent 假設\n\n' + assumptions + '\n')
+                with open(self.rs.tracking_path(note_path), 'w', encoding='utf-8') as f:
+                    f.write(tracking + '\n')
                 return
             if os.path.basename(outfile).startswith('search_'):
                 fake_round[0] += 1
@@ -1634,6 +1637,7 @@ class ResearchPipeline(unittest.TestCase):
         self.assertIn('公司在做什麼：代管雲端資料平台', judge_prompts[0])
         self.assertIn('門檻：三年平台維運', judge_prompts[0])
         self.assertIn('偏好筆記', judge_prompts[0])
+        self.assertNotIn('來源假設=', judge_prompts[-1])     # 歸屬清單另外交:不進筆記、不給判斷的 agent(#76)
         self.assertIn('請使用者決定是否修改', note_prompts[1])
 
         records = [json.loads(line) for line in open(self.ledger, encoding='utf-8')]
@@ -1910,7 +1914,7 @@ class PrepRunFinish(Tmp):
             self.assertEqual(ct.skip_approved([(a, 'Approved'), (b, 'Pending')]), [(b, 'Pending')])
 
     def test_the_saved_fill_keeps_only_what_the_gate_accepted_and_never_an_approval_the_agent_wrote(self):
-        """#313 審查:這一輪的交件單經安檢門,存回正式位置的只有收下的格子加上跑之前別人寫的欄位;
+        """#313 審查:這一輪的交件單經安檢門,存回正式位置的只有收下的格子加上正式那份裡別人寫的欄位;
         agent 自己寫 approved(或沒登記的格子)不會存下來,下一輪也不會因此被跳過。"""
         import cut_tailor as ct
         from types import SimpleNamespace
@@ -1928,11 +1932,9 @@ class PrepRunFinish(Tmp):
             f.write('prompt')
         with open(os.path.join(sp, 'rows.json'), 'w', encoding='utf-8') as f:
             json.dump([[a, 'Fresh']], f)
-        with open(os.path.join(sp, 'keep.json'), 'w', encoding='utf-8') as f:
-            json.dump({ct.jid(a): {'tailored': '他的產線寫的客製內容'}}, f, ensure_ascii=False)
+        write_fill(canonical, a, {'resume': 'old', 'tailored': '他的產線寫的客製內容'})
         write_fill(run_out, a, {'resume': 'general', 'lang': 'klingon', 'why': 'fresh', 'approved': True, 'secret': 'x'})
-        with patch.multiple(ct, SP=sp, ROWSF=os.path.join(sp, 'rows.json'), KEEPF=os.path.join(sp, 'keep.json'),
-                            OUT=canonical, PIDF=os.path.join(sp, 'pid'), WORKER_PIDF=os.path.join(sp, 'worker.pid')):
+        with patch.multiple(ct, SP=sp, ROWSF=os.path.join(sp, 'rows.json'), OUT=canonical, PIDF=os.path.join(sp, 'pid'), WORKER_PIDF=os.path.join(sp, 'worker.pid')):
             with patch.object(ct, '_status'), patch.object(ct, '_report'), \
                  patch.object(ct.ar, 'argv_for', return_value=(['codex'], '/repo')), \
                  patch.object(ct.ar, 'launch', return_value=SimpleNamespace(pid=123)), \
@@ -1941,7 +1943,8 @@ class PrepRunFinish(Tmp):
                 ct.run_finish(self.path, out_dir=run_out)
             with open(os.path.join(canonical, ct.jid(a), 'fill.json'), encoding='utf-8') as f:
                 saved = json.load(f)
-            self.assertEqual(saved.get('tailored'), '他的產線寫的客製內容')      # 別人寫的欄位原樣放回
+            self.assertEqual(saved.get('tailored'), '他的產線寫的客製內容')      # 別人寫的欄位原樣留著
+            self.assertNotIn('resume', saved)            # worker 那幾欄只認這一輪收下的:舊的不留,沒收下的(語言不對)不存
             self.assertEqual(saved.get('why'), 'fresh')                        # 收下的格子
             self.assertNotIn('approved', saved)                                # agent 寫的認可不算他的決定
             self.assertNotIn('secret', saved)                                  # 沒登記的格子
@@ -1969,15 +1972,12 @@ class PrepRunFinish(Tmp):
             f.write('prompt')
         with open(rows_file, 'w', encoding='utf-8') as f:
             json.dump([[a, 'Fresh'], [b, 'Missing']], f)
-        with open(os.path.join(sp, 'keep.json'), 'w', encoding='utf-8') as f:
-            json.dump({}, f)
         write_fill(run_out, a, {'variant': 'general', 'lang': 'zh', 'why': 'fresh'})
         with open(os.path.join(canonical, ct.jid(b), 'fill.json'), 'w', encoding='utf-8') as f:
             json.dump({'variant': 'stale', 'lang': 'en'}, f)
 
         statuses, reports = [], []
-        with patch.multiple(ct, SP=sp, ROWSF=rows_file, KEEPF=os.path.join(sp, 'keep.json'),
-                            OUT=canonical, PIDF=os.path.join(sp, 'pid'),
+        with patch.multiple(ct, SP=sp, ROWSF=rows_file, OUT=canonical, PIDF=os.path.join(sp, 'pid'),
                             WORKER_PIDF=os.path.join(sp, 'worker.pid')):
             with patch.object(ct, '_status', side_effect=statuses.append), \
                  patch.object(ct, '_report', side_effect=lambda *args: reports.append(args)), \
@@ -2020,8 +2020,6 @@ class PrepReselection(Tmp):
             'PIDF': os.path.join(root, 'pid'),
             'WORKER_PIDF': os.path.join(root, 'worker.pid'),
             'RUNS': os.path.join(root, 'runs'),
-            'PREV': os.path.join(root, 'previous'),
-            'KEEPF': os.path.join(root, 'previous', 'kept.json'),
         }
 
     def test_only_never_picked_changed_signature_and_new_feedback_are_sent_to_agent(self):
@@ -2061,7 +2059,6 @@ class PrepReselection(Tmp):
 
         with patch.object(cf, 'LANGS', languages), patch.object(cf, 'RESUMES', {'general': resume}), \
              patch.multiple(ct, **paths), patch.object(ct, 'stop_previous'), \
-             patch.object(ct, 'keep_others') as keep_others, \
              patch('page_fetch.fetch', side_effect=lambda url: page_result(
                  url, 'Active role: expired credentials; unrelated account is 已關閉.')), \
              patch.object(ct.subprocess, 'Popen', return_value=SimpleNamespace(pid=123)), \
@@ -2070,7 +2067,6 @@ class PrepReselection(Tmp):
 
         rows = json.load(open(paths['ROWSF'], encoding='utf-8'))
         self.assertEqual([u for u, _ in rows], urls[:3])
-        self.assertEqual(list(keep_others.call_args.args[0]), [tuple(row) for row in rows])
         prompt = open(os.path.join(paths['SP'], 'cut_tailor_prompt.txt'), encoding='utf-8').read()
         self.assertTrue(all(u in prompt for u in urls[:3]))
         self.assertIn('Active role: expired credentials; unrelated account is 已關閉.', prompt)
@@ -2883,23 +2879,6 @@ class PromptPreview(HttpBase):
             self.req('/api/prompt?kind=find&mode=deep')
             self.req('/api/prompt?kind=prep')
         self.assertEqual(launched, [])
-
-
-class NoteTracking(unittest.TestCase):
-    """「新表態逐張核對」只給程式交件時核對,不存進筆記、不給判斷的 agent(#76:判斷 prompt 一半以上是它)。"""
-
-    def test_tracking_is_dropped(self):
-        import prefs
-        note = ('## 使用者自訂\n\n不要外派\n\n## Agent 假設\n\n- 喜歡平台｜出處 A\n\n'
-                '### 新表態逐張核對\n- 卡片代號=A：來源假設=喜歡平台\n')
-        out = prefs.without_tracking(note)
-        self.assertNotIn('逐張核對', out)
-        self.assertIn('- 喜歡平台｜出處 A', out)
-        self.assertIn('不要外派', out)
-        self.assertEqual(prefs.without_tracking('沒有核對段'), '沒有核對段')
-        mid = note.replace('### 新表態逐張核對', '### 新表態逐張核對').replace(
-            '- 卡片代號=A：來源假設=喜歡平台\n', '- 卡片代號=A：來源假設=喜歡平台\n\n## 其他\n保留\n')
-        self.assertIn('## 其他\n保留', prefs.without_tracking(mid))
 
 
 class FlagWords(unittest.TestCase):

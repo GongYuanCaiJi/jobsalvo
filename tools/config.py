@@ -239,6 +239,13 @@ def save(settings):
     reload()
 
 
+def folder_tag(home=None):
+    """同一台電腦上分辨是哪一個資料夾的短碼(開機啟動的服務名稱、新資料夾自己的暫存資料夾都用它)。"""
+    import hashlib
+    real = os.path.realpath(os.path.expanduser(home or HOME))
+    return hashlib.blake2b(real.encode('utf-8'), digest_size=4).hexdigest()
+
+
 def path(p):
     """設定裡的路徑 → 絕對路徑(~ 展開,相對的接在 home 後面)。"""
     return _abs(p, HOME)

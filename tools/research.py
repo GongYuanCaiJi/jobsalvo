@@ -233,16 +233,18 @@ def checked_reasons(value, citation_sources=None):
     return out, bad
 
 
-def missing_feedback_coverage(delta, candidate_note):
-    """回傳未在假設出處或待釐清原因中逐張交代的新表態卡片代號。"""
+def tracking_path(note_out):
+    """整理筆記的 agent 交「每張新表態歸到哪條假設」的檔:跟新版筆記分開交,核對完就沒用,不進筆記(#76)。"""
+    return os.path.join(os.path.dirname(note_out), '新表態歸屬.md')
+
+
+def missing_feedback_coverage(delta, candidate_note, tracking):
+    """回傳未在假設出處或待釐清原因中逐張交代的新表態卡片代號。tracking:agent 交的歸屬清單(tracking_path)。"""
     card_ids = set(re.findall(r'卡片代號=([^\n｜]+)', delta))
     if not card_ids:
         return []
-    agent_note = prefs._note_section(candidate_note, prefs.NOTE_AGENT)
-    if agent_note is None:
-        return sorted(card_ids)
-    evidence, marker, tracking = agent_note.partition('### 新表態逐張核對')
-    if not marker:
+    evidence = prefs._note_section(candidate_note, prefs.NOTE_AGENT)
+    if evidence is None:
         return sorted(card_ids)
 
     seen = {}
@@ -277,8 +279,8 @@ def note_prompt(files, note_out):
                       f'\n=== {name.replace(".md", "")}(原文結束)===\n\n']
     parts += ['\n請把完整新版偏好筆記寫到指定檔案。使用者自訂區必須逐字保留;不要修改原始筆記檔。\n',
               f'更新後偏好筆記請寫到 {note_out}\n',
-              '新版筆記的「Agent 假設」區最後附「### 新表態逐張核對」,每張新表態恰好一行：\n',
-              '- 卡片代號=<代號>：來源假設=<上方假設名稱>（代號也須出現在該假設的出處）；或\n',
+              f'每張新表態歸到哪裡另外寫到 {tracking_path(note_out)},每張新表態恰好一行：\n',
+              '- 卡片代號=<代號>：來源假設=<筆記裡的假設名稱>（代號也須出現在該假設的出處）；或\n',
               '- 卡片代號=<代號>：還看不出來=<原因>。\n未列齊就不能推進整理進度。\n']
     return ''.join(parts)
 
@@ -594,7 +596,7 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
     else:
         choices = '【履歷選擇】目前沒有已勾選且可挑的履歷;照常判斷職缺,不選履歷、不選語言。'
         selection_fields = ''
-    note_text = prefs.without_tracking(prefs.ensure_note())   # 舊筆記裡還留著核對段的,判的時候不給
+    note_text = prefs.ensure_note()
     parts = [research_skill('judge'), '\n\n', (WIDE_NOTE if mode == 'wide' else ''), choices,
              '\n\n【完整偏好筆記】(使用者自訂與 Agent 假設分開;原話優先於假設)\n',
              note_text, '\n\n']
@@ -1083,7 +1085,9 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
             try:
                 with open(note_out, encoding='utf-8') as f:
                     candidate_note = f.read()
-                missing_feedback = missing_feedback_coverage(delta, candidate_note)
+                with open(tracking_path(note_out), encoding='utf-8') as f:
+                    tracking = f.read()
+                missing_feedback = missing_feedback_coverage(delta, candidate_note, tracking)
                 if missing_feedback:
                     raise ValueError(f'新版偏好筆記有 {len(missing_feedback)} 張新表態未交代')
                 changed = prefs.apply_agent_note(candidate_note, prefs.PREF, base=note_base)

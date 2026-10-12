@@ -81,21 +81,8 @@ def save_custom_text(custom, path=None):
     _write_note(custom, agent, path)
 
 
-TRACKING = '### 新表態逐張核對'
-
-
-def without_tracking(text):
-    """拿掉「新表態逐張核對」那段:那是整理筆記的 agent 交件時給程式核對用的(每張新表態歸到哪條假設),
-    核對完就沒用了。以前照樣存進筆記、每輪越積越長,判斷的 prompt 有一半以上是它(#76)。"""
-    head, marker, rest = str(text or '').partition(TRACKING)
-    if not marker:
-        return text
-    nxt = re.search(r'(?m)^## ', rest)
-    return head.rstrip('\n') + ('\n\n' + rest[nxt.start():] if nxt else '\n')
-
-
 def apply_agent_note(candidate, path=None, base=None):
-    """接受 agent 的假設更新,但逐字保留使用者自訂區。核對用的那段不存。回:agent 有沒有動自訂區。
+    """接受 agent 的假設更新,但逐字保留使用者自訂區。回:agent 有沒有動自訂區。
     base:交給 agent 的那一份筆記。整理跟找缺同時跑、可以跑很久,這段時間他在看板上改的以現在的為準:
     自訂區一律留現在的,跟交給它的那份比才知道 agent 有沒有動(以前跟現在的比,他自己加的也算成 agent 改的);
     他在這段時間刪掉(或改寫成自訂)的假設,agent 照舊版原樣寫回來的那幾行不要。"""
@@ -105,7 +92,7 @@ def apply_agent_note(candidate, path=None, base=None):
     new_agent = _note_section(candidate, NOTE_AGENT)
     if new_custom is None or new_agent is None:
         raise ValueError('偏好筆記缺少使用者自訂或 Agent 假設區')
-    new_agent = without_tracking(new_agent).rstrip('\n')
+    new_agent = new_agent.rstrip('\n')
     base_custom, base_agent = old_custom, old_agent
     if base is not None:
         base_custom = _note_section(base, NOTE_CUSTOM) or ''

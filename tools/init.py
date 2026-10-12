@@ -44,12 +44,12 @@ def installed_agents(which=None):
 
 
 def own_paths(config_path, home):
-    """新資料夾自己的暫存資料夾、agent Chrome 的連線紀錄。預設值(/tmp/jobsalvo、~/.cache/jobsalvo/agent-chrome.json)
-    是全機器共用的:同一台電腦第二份資料夾(試用、給家人用)會跟第一份共用進度檔,開跑準備區時還會把
-    另一份正在跑的那一隻當成「上一個」殺掉;連 agent Chrome 會蓋掉另一份的連線。已經在用的資料夾不改,
-    只有新建的這份寫進自己的路徑。"""
-    import hashlib, json
-    tag = hashlib.blake2b(home.encode('utf-8'), digest_size=4).hexdigest()
+    """新資料夾自己的暫存資料夾。預設值 /tmp/jobsalvo 是全機器共用的:同一台電腦第二份資料夾(試用、給家人用)
+    會跟第一份共用進度檔,開跑準備區時還會把另一份正在跑的那一隻當成「上一個」殺掉。已經在用的資料夾不改,
+    只有新建的這份寫進自己的路徑(跟開機啟動的服務名稱同一個資料夾短碼)。"""
+    import json
+    import config as cf
+    tag = cf.folder_tag(home)
     with open(config_path, encoding='utf-8') as f:
         data = json.load(f)
     data.setdefault('paths', {}).setdefault('tmp', f'/tmp/jobsalvo-{tag}')

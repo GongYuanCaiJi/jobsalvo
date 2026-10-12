@@ -110,10 +110,11 @@ def fix_sig(fb, i):
     return hashlib.blake2b(raw.encode('utf-8'), digest_size=8).hexdigest()   # 只是「有沒有又改過」的指紋,不是卡片 ID
 
 
-def _fix(fb, job, flow, tried, rf, now, real, ctx=None):
+def _fix(fb, job, flow, rf, now, real, ctx=None):
     """答案改過、停著的頁(填好了、叫得回那隻 agent)要照新答案重打、重翻:他停手 QUIET 秒後自動叫回那隻 agent。
     回 (auto, stop):stop 是本來會自動重打、這次不打的原因(要你處理)。
-    同一組「哪幾條、什麼值」只重打一次(記號 fix:<id>:<指紋>);還有答案等他確認的不重打(確認完再一次打);
+    同一組「哪幾條、什麼值」只重打一次(自動流程替這次改動記的那一筆 rf:指紋、從何時等起、叫過了沒);
+    還有答案等他確認的不重打(確認完再一次打);
     只缺證據的不重打,卡上是缺證據的回報。"""
     i = job['id']
     m = fb.get(i) if isinstance(fb.get(i), dict) else {}
@@ -127,16 +128,15 @@ def _fix(fb, job, flow, tried, rf, now, real, ctx=None):
         return None, (None if ask(fb, i, ctx) else fr.NO_EVIDENCE)
     refill, tr = _refix(fb, i)
     what = '、'.join((['重翻 %d 條' % len(tr)] if tr else []) + (['重打 %d 欄' % len(refill)] if refill else []))
-    mark = 'fix:' + i + ':' + sig
-    if mark in tried:
-        return None, '{} 已經自動照新答案{}過一次,網頁上還是沒改好,不會再自動重試;看過頁面再叫它改'.format(cf.AGENT, what)
     r = rf.get(i) or {}
+    if r.get('sig') == sig and r.get('sent'):
+        return None, '{} 已經自動照新答案{}過一次,網頁上還是沒改好,不會再自動重試;看過頁面再叫它改'.format(cf.AGENT, what)
     left = QUIET[bool(real)]
     if r.get('sig') == sig:                          # 自動流程已經看過這一次改動:從那時候開始算
         with contextlib.suppress(TypeError, ValueError):     # 記的時間讀不懂:當成剛看到,從頭等
             left -= (now - datetime.datetime.fromisoformat(r.get('since'))).total_seconds()
     line = '答案改過,你停手{}後 {} 會自動照新答案{}'.format('一分鐘' if real else ' %d 秒' % QUIET[False], cf.AGENT, what)
-    return {'do': 'fix', 'mark': mark, 'sig': sig, 'wait': max(0, left), 'line': line}, None
+    return {'do': 'fix', 'sig': sig, 'wait': max(0, left), 'line': line}, None
 
 
 def _ask_ctx(fb):
@@ -387,7 +387,7 @@ def of(fb, jobs, status=None, *, flow=None, now=None, real=True, gen=0, building
     build = {'gen': gen, 'running': building, 'real': real}
     out = {}
     for j in jobs:
-        auto, stop = _fix(fb, j, flow, tried, rf, now, real, ctx)
+        auto, stop = _fix(fb, j, flow, rf, now, real, ctx)
         out[j['id']] = card(fb, j['id'], status, auto or _fill(fb, j, flow, tried, full) or _move(fb, j, flow, tried, status, build),
                             stop, ctx, j)
     return out

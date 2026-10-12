@@ -28,6 +28,8 @@ class OwnPaths(unittest.TestCase):
         ca, cb = self.config_of(a), self.config_of(b)
         self.assertNotEqual(ca['paths']['tmp'], cb['paths']['tmp'])
         self.assertNotEqual(ca['paths']['tmp'], '/tmp/jobsalvo')
+        import install_service
+        self.assertEqual(ca['paths']['tmp'].rsplit('-', 1)[1], install_service.label(a).rsplit('.', 1)[1])   # 同一個資料夾短碼
         self.assertEqual(ca['agent']['name'], 'Agent')          # 範例裡原本的設定還在
 
     def test_board_server_first_run_uses_the_new_homes_own_paths(self):

@@ -236,8 +236,8 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(p2['fix']); self.assertIn('a', p2['rf'])
         fb['__auto__']['rf'] = p2['rf']
         p3 = run(data('a'), fb, now=NOW + datetime.timedelta(seconds=151))
-        self.assertEqual(p3['fix'], 'a'); self.assertEqual(p3['tried'], ['fix:a:' + next_step.fix_sig(fb, 'a')])
-        fb['__auto__']['tried'] = p3['tried']
+        self.assertEqual(p3['fix'], 'a'); self.assertEqual(p3['tried'], [])
+        fb['__auto__']['rf']['a']['sent'] = True                         # 自動流程叫過了(真的發動才記)
         self.assertIsNone(run(data('a'), fb, now=NOW + datetime.timedelta(seconds=300))['fix'])
 
     def test_refix_skips_stuck_stale_unfilled_and_waits_for_running(self):
@@ -496,7 +496,7 @@ class PilotStepTest(unittest.TestCase):
         bd.set_fb(lambda fb: fb['__auto__']['rf'][new].__setitem__('since', '2026-01-01T00:00:00'), live=self.board)
         p.step()
         self.assertEqual(applies(), [('apply', {'stage': 'fix', 'url': new})])
-        self.assertTrue([k for k in self.fb()['__auto__']['tried'] if k.startswith('fix:' + new + ':')])
+        self.assertTrue(self.fb()['__auto__']['rf'][new].get('sent'))
         doc = _read(self.board)                        # 派過了:卡上不再寫會自動重打
         self.assertIsNone(next_step.of(self.fb(), doc['data']['jobs'], doc['data'].get('status'), flow=ap.flow())[new]['auto'])
 
@@ -506,7 +506,6 @@ class PilotStepTest(unittest.TestCase):
             fb[new]['apply'].update(stage='fix', at='t2')
         bd.set_fb(done, live=self.board)
         p.step()
-        self.assertFalse([k for k in self.fb()['__auto__']['tried'] if k.startswith('fix:' + new + ':')])
         self.assertNotIn(new, self.fb()['__auto__'].get('rf') or {})
         bd.set_fb(lambda fb: fb[new]['form']['f'][0].__setitem__('refill', 1), live=self.board)   # 同一個值再標一次
         p.step()

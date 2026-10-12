@@ -66,17 +66,16 @@ class WebOnly(tb.HttpBase):
         self.assertIn('副本', json.loads(raw)['msg'])
 
     def test_turning_on_autostart_hands_the_background_board_over(self):
-        """安裝指令在背景起的看板沒有終端機:打開開機自動啟動後,不叫他按 Ctrl-C,看板回完話自己關、交給 launchd。
-        install_service 換成假的,不真的裝;看板自己關的那一步也換成假的,不把測試用的伺服器關掉。"""
+        """安裝指令在背景起的看板沒有終端機:打開開機自動啟動後,不叫他按 Ctrl-C,告訴他看板會自己關、交給 launchd
+        (看到裝好了自己關的是 board_server._watch)。install_service 換成假的,不真的裝。"""
         ok = Mock(returncode=0, stdout='已裝好:x.plist', stderr='')
         with patch.object(bs, 'is_real', return_value=True), patch.object(bs.subprocess, 'run', return_value=ok), \
-                patch.dict(os.environ, {'JOBSALVO_LAUNCHD': ''}), \
-                patch.object(bs, 'hand_over_to_launchd', create=True) as hand_over:
+                patch.dict(os.environ, {'JOBSALVO_LAUNCHD': ''}):
             code, raw, _ = self.req('/api/settings/service', {'act': 'install'})
         msg = json.loads(raw)['msg']
         self.assertEqual(code, 200)
         self.assertNotIn('Ctrl-C', msg)
-        hand_over.assert_called_once_with()
+        self.assertIn('自己關掉', msg)
 
     def test_settings_round_trip(self):
         legacy_resume = cf.path('resume.md')
