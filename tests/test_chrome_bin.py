@@ -29,6 +29,20 @@ class FindChrome(unittest.TestCase):
         with tempfile.NamedTemporaryFile() as exe, mock.patch.dict(os.environ, {'CHROME_BIN': exe.name}):
             self.assertEqual(chrome_bin.find(), exe.name)
 
+    def test_the_agent_browser_is_never_started_as_another_chrome(self):
+        """2026-10-13:有人把 CHROME_BIN 設成 ego 的執行檔跑看板檢查,4 個 worker 各開一份 ego,他的 Dock 一直跳、多出圖示。"""
+        with tempfile.TemporaryDirectory() as d:
+            app = os.path.join(d, 'Agent Browser.app')
+            cli = os.path.join(app, 'Contents', 'Helpers', 'ego-browser')
+            exe = os.path.join(app, 'Contents', 'MacOS', 'Agent Browser')
+            for f in (cli, exe):
+                os.makedirs(os.path.dirname(f), exist_ok=True)
+                open(f, 'w').close()
+            with mock.patch.object(chrome_bin.shutil, 'which', side_effect=lambda n: cli if n == 'ego-browser' else None), \
+                 mock.patch.dict(os.environ, {'CHROME_BIN': exe}):
+                with self.assertRaisesRegex(RuntimeError, 'agent 的瀏覽器'):
+                    chrome_bin.find()
+
     def test_chrome_in_home_applications_is_found(self):
         home_app = os.path.expanduser('~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
         env = {k: v for k, v in os.environ.items() if k != 'CHROME_BIN'}

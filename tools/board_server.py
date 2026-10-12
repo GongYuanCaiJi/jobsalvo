@@ -617,7 +617,7 @@ RUNS={
  'apply':   {'script':'apply_run.py',  'env':'APPLY_TMP',     'status':'apply_status.json',     'dir':'.apply'},
  # 查回音(已投遞那一頁的「📬 查回音」):agent 在自己的 Chrome 查回音與各平台應徵紀錄,程式照證據改狀態。
  'replies': {'script':'reply_run.py',  'env':'REPLY_TMP',     'status':'reply_status.json',     'dir':'.replies'},
- # 貼網址加入(add_job):agent 讀職缺頁並寫卡片摘要,一律加進待評估。
+ # 貼網址加入(add_job):agent 讀職缺頁並寫卡片摘要,加進新職缺;頁面上看不到職缺的不加,結果放在貼網址那一格底下。
  'add':     {'script':'add_job.py',    'env':'ADD_TMP',       'status':'add_status.json',       'dir':'.add'},
  # 「⚙ 設定 → 分類」讓 agent 建議類別與標籤(suggest_cats),建議寫在 suggest.json,套用要使用者按。
  'suggest': {'script':'suggest_cats.py','env':'SUGGEST_TMP',  'status':'suggest_status.json',   'dir':'.suggest'},
@@ -817,7 +817,7 @@ def run_status(kind):
         st=jobrun.read(os.path.join(run_sp(kind),RUNS[kind]['status']),(RUNS[kind]['script'],'job_fake.py'))
     return {k:st[k] for k in ('phase','running','paused','n','done','msg','missing','ready','skipped','techerr','added',
                                'mode','which','direction','step','t0','finished_at','stage','results','url',
-                               'graceful','finishing','pending','found','dropped','timeup','minutes')
+                               'graceful','finishing','pending','found','dropped','timeup','minutes','unadded')
             if st.get(k) is not None}
 
 def control_run(kind,act):

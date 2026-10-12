@@ -800,6 +800,15 @@ body.scrolled .tab-arr{font-size:12px}
 /* ---------- 找新職缺(更深/更廣/指定方向) ---------- */
 #findbar{margin:0 0 4px}
 .find-st{min-height:18px}
+.add-res{margin:4px 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;line-height:1.6;color:var(--ink)}
+.add-res .add-list{margin-top:4px}
+.add-res .add-list>summary{color:var(--accent);cursor:pointer;font-size:12.5px}
+.add-out{list-style:none;margin:4px 0 0;padding:0}
+.add-out li{padding:6px 0;border-top:1px solid var(--line);font-size:12.5px;line-height:1.5}
+.add-top{display:flex;gap:8px;align-items:baseline;min-width:0}
+.add-out a{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);text-decoration:underline}
+.add-url{flex:0 10 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-dim);font-size:11.5px}
+.add-why{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-dim)}
 .stage-b:disabled{opacity:.5;cursor:default;filter:none}
 .find-t{margin-top:8px}
 .find-rounds{margin-top:10px}

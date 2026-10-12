@@ -113,11 +113,12 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
     src = {'round': time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), 'mode': 'add', 'via': 'manual'}
     empty = {'keep': False, 'fit': 0, 'why': 'agent 無法讀取職缺頁,請確認網址與登入狀態',
              'cite': [], 'bad_cite': [], 'cat': '其他', 'card': {}}
-    entries, unseen = [], [(url, '確定已下架') for url in gone]
+    # 沒加成卡的:結果放在他貼網址的那一格底下(這一輪的狀態),不進回報區(他沒有要處理的)
+    entries, unadded = [], [{'url': url, 'title': '', 'why': '職缺已下架'} for url in gone]
     for candidate in cands:
         result = res.get(candidate['url']) or empty
-        if result.get('missing'):             # 頁面內文看不到這個職缺(首頁、列表、別的職缺):不加卡,它看到什麼一起講
-            unseen.append((candidate['url'], '頁面上看不到這個職缺:' + result['missing']))
+        if result.get('missing'):             # 頁面內文看不到這個職缺(首頁、列表、別的職缺):不加卡,它看到什麼照原文
+            unadded.append({'url': candidate['url'], 'title': candidate['title'], 'why': result['missing']})
             continue
         # 卡照樣加(他自己貼的),摘要沒寫成的原因寫在卡上;原因細節在那張卡的證據(回報只放要他做的事)
         if result.get('wrong'):
@@ -129,13 +130,11 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
         entry['chan'] = '直投'
         entries.append(entry)
     added = rs.add_entries(entries, board) if entries else 0
-    if unseen:                                # 沒加的一輪講一次:他貼的網址不能默默不見
-        _report(f'{len(unseen)} 個網址沒有加成卡:' + '；'.join(f'{u}({why})' for u, why in unseen[:5])[:600],
-                '要的話自己打開看;真的是職缺就再貼一次', board)
-    msg = f'加進待評估 {added} 張' + (f',{len(unseen)} 張沒加(已下架或頁面上看不到職缺)' if unseen else '')
+    msg = f'加進新職缺 {added} 張' + (f',{len(unadded)} 張沒加(已下架或頁面上看不到職缺)' if unadded else '')
     if agent_error:
         msg += f';{agent_error}'
-    st({'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': added, 'n': len(cands) + len(gone), 'msg': msg})
+    st({'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': added, 'n': len(cands) + len(gone), 'msg': msg,
+        'unadded': unadded})
     return added
 
 

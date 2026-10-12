@@ -2391,6 +2391,21 @@
     if(!p.found&&p.timeup)return '這輪沒找到，可以把時間放寬';
     return '找到 '+p.found+' 張、清掉 '+(p.dropped||0)+' 張、'+add;
   }
+  // 貼網址加入的上一輪結果:放在他貼網址的這一格底下(不進回報區,他沒有要處理的)。
+  // 沒加成卡的一行一張:哪一張、為什麼(agent 看到的是什麼),點名字打開那一頁自己看
+  function addResultHTML(){
+    // 全部加進去了不用講(跑完已經跳過通知);沒加進去的才講,一句話講完:什麼時候貼的、幾個沒加、為什麼。放三天就收
+    var p=MISC.add||{}, out=p.unadded||[];
+    if(p.running||p.phase!=='done'||!out.length||Date.now()/1000-(p.finished_at||0)>3*86400)return '';
+    var when=new Date((p.finished_at||0)*1000), at=(when.getMonth()+1)+'/'+when.getDate()+' '+('0'+when.getHours()).slice(-2)+':'+('0'+when.getMinutes()).slice(-2);
+    var head='<b>'+esc(at)+' 貼的 '+(p.n||out.length)+' 個網址,有 '+out.length+' 個沒有加進新職缺</b>:頁面上找不到那個職缺(可能已經下架,或只是職缺列表頁)。';
+    // 名字照頁面標題(兩張同一個網站的標題常常一樣),旁邊附短網址分得出是哪一張;原因一行,滑上去看全文
+    var short=function(u){try{var x=new URL(u), seg=x.pathname.split('/').filter(Boolean), last=seg.pop()||'';
+      return x.hostname.replace(/^www\./,'')+'/'+(seg.length?'…/':'')+last+x.search;}catch(e){return u;}};
+    return '<div class="add-res">'+head+fold('addres','看是哪 '+out.length+' 個','<ul class="add-out">'+out.map(function(x){
+      return '<li><div class="add-top"><a href="'+escA(x.url)+'" target="_blank" rel="noopener">'+esc(x.title||short(x.url))+'</a>'+
+        (x.title?'<span class="add-url">'+esc(short(x.url))+'</span>':'')+'</div><span class="add-why" title="'+escA(x.why)+'">'+esc(x.why)+'</span></li>';}).join('')+'</ul>',
+      {cls:'add-list'})+'</div>';}
   function findStatusHTML(){
     var p=FIND||{};
     if(p.running)return '<span class="prep-st run">⏳ 正在找（'+esc(findWhat(p))+'）：'+esc(p.step||FIND_PH[p.phase]||p.phase)+'　· 已 '+minsOf(p)+' 分鐘'+
@@ -2551,6 +2566,7 @@
           '<button class="stage-b adv" data-addurls="1" type="button"'+((MISC.add||{}).running?' disabled':'')+'>'+
             ((MISC.add||{}).running?'⏳ 加入中…':'➕ 加進新職缺')+'</button>'+
         '</div>'+
+        addResultHTML()+
         seedRowsHTML()+
         '<div class="findset">'+findNHTML()+agentFreeHTML()+pvBtn('find')+'</div>'+
         fold('findmore','找過幾輪 · 各找法的成績',

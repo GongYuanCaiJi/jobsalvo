@@ -1160,6 +1160,26 @@ def status_issue(board):
 
 # 找新職缺:副本上跑的是 job_fake(照真的格式寫進度、在副本加兩筆假職缺),不會派 agent。
 FIND_CHECKS=[
+ ('找新職缺:貼網址加入,沒加成卡的(頁面上看不到職缺)列在貼網址那一格底下、點得開,不進回報區',"""
+   // 2026-10-12:沒加成卡的被塞進回報區,一整段網址、截在半路,點開只有一顆沒意義的「處理好了」
+   var d=document.getElementById('finddet'); if(!d)return '頁首沒有找新職缺';
+   d.open=true; await T.idle();
+   var inbox0=((await T.state())['__inbox__']||[]).filter(function(x){return !x.done;}).length;
+   var miss='https://listing.example.test/nojob/backend-engineer';
+   T.type(document.getElementById('add-urls'),'https://jobs.example.test/paste-1\\nhttps://jobs.example.test/paste-2\\n'+miss);
+   T.press('[data-addurls]');
+   var res=await T.until(function(){return document.querySelector('.add-res');},20000);
+   if(!res)return '加完之後,貼網址那一格底下沒有這一輪的結果';
+   var bad=[], txt=res.textContent;
+   if(!/貼的 3 個網址,有 1 個沒有加進新職缺/.test(txt)||!/找不到那個職缺/.test(txt))bad.push('沒講清楚幾個沒加、為什麼:'+txt.slice(0,80));
+   var list=res.querySelector('details'); if(list)list.open=true; await T.frame();
+   var a=res.querySelector('a[href="'+miss+'"]');
+   if(!a)bad.push('沒加成卡的那一張沒有列出來、點不開');
+   else if(!/職缺列表/.test(a.closest('li').textContent))bad.push('沒講為什麼沒加');
+   var inbox1=((await T.state())['__inbox__']||[]).filter(function(x){return !x.done;}).length;
+   if(inbox1!==inbox0)bad.push('回報區多了 '+(inbox1-inbox0)+' 則(他沒有要處理的,不該進回報區)');
+   return bad.join('；');
+ """),
  ('找新職缺:打一句方向按下去,看得到在找,找完新缺自己出現在待評估、告訴他,不用重整',"""
    var d=document.getElementById('finddet'); if(!d)return '頁首沒有找新職缺';
    d.open=true; await T.idle();          // 預設收起來,要先展開才按得到

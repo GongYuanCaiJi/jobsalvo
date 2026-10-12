@@ -131,6 +131,10 @@ def add(board, sp, step, urls):
     t0 = time.time()
     jobrun.write(path, {'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(urls)}); time.sleep(step)
     today = time.strftime('%Y-%m-%d')
+    # 網址帶 nojob 的當成頁面上看不到這個職缺(跟真的那支一樣不加卡,結果放在貼網址那一格底下)
+    unadded = [{'url': u, 'title': '(沙箱)' + u.rstrip('/').rsplit('/', 1)[-1], 'why': '頁面內文是一整串職缺列表,沒有這個職缺'}
+               for u in urls if 'nojob' in u]
+    urls = [u for u in urls if 'nojob' not in u]
 
     def mut(data, fb):
         have = {j['id'] for j in data['jobs']}
@@ -140,8 +144,8 @@ def add(board, sp, step, urls):
                                      'note': '', 'bk': False, 'dead': False, 'added': today,
                                      'sum': {'fit': '沙箱假資料'}, 'src': {'mode': 'add', 'via': 'manual'}})
     bd.set_data(mut, live=board)
-    jobrun.write(path, {'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': len(urls), 'n': len(urls),
-                        'msg': f'加進待評估 {len(urls)} 張'})
+    jobrun.write(path, {'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': len(urls),
+                        'n': len(urls) + len(unadded), 'msg': f'加進新職缺 {len(urls)} 張', 'unadded': unadded})
 
 
 def suggest(board, sp, step):

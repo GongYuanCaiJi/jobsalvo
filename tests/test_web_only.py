@@ -619,7 +619,7 @@ class WebOnly(tb.HttpBase):
 
 class AddJobReal(unittest.TestCase):
     """貼網址加入先擷取頁面文字,一律加;直連 404/410 才不加。"""
-    def test_adds_every_live_url_and_reports_gone_ones(self):
+    def test_adds_every_live_url_and_lists_gone_ones_in_the_result(self):
         import tempfile, add_job, research, page_fetch
         d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         old_sp = add_job.SP
@@ -649,8 +649,11 @@ class AddJobReal(unittest.TestCase):
             data = read_board(p)
             new = [j for j in data['data']['jobs'] if j['id'] == 'https://ex.test/a'][0]
             self.assertIn('Backend Engineer', new['target'])
-            inbox = json.loads(data['fb']).get('__inbox__') or []
-            self.assertTrue(any('已下架' in x.get('msg', '') for x in inbox))
+            # 已下架的沒加:列在這一輪的結果(貼網址那一格底下),不進回報區
+            self.assertEqual(json.loads(data['fb']).get('__inbox__') or [], [])
+            with open(os.path.join(d, add_job.STATUS), encoding='utf-8') as f:
+                st = json.load(f)
+            self.assertEqual([(x['url'], x['why']) for x in st['unadded']], [('https://ex.test/b', '職缺已下架')])
         finally:
             add_job.SP = old_sp
             research.DIR = old_dir
@@ -774,9 +777,10 @@ class AddJobReal(unittest.TestCase):
             add_job.SP, research.DIR = old_sp, old_dir
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_a_page_without_the_job_is_not_added_and_told_once(self):
+    def test_a_page_without_the_job_is_not_added_and_listed_where_he_pasted(self):
         """2026-10-12 加 240 張:7 張抓回來的是網站首頁、職缺列表、別的職缺或只有選單,agent 看出來了,
-        卻照樣加成空卡、一張發一則回報。虛擬碼:agent 說頁面上看不到這個職缺 → 不加卡;這一輪沒加的合成一則回報。"""
+        卻照樣加成空卡、一張發一則回報;改成合成一則回報,又變成回報區一整段網址、只有一顆沒意義的「處理好了」。
+        虛擬碼:agent 說頁面上看不到這個職缺 → 不加卡;哪幾張、為什麼放在這一輪的結果(貼網址那一格底下),不進回報區。"""
         import tempfile, add_job, research, page_fetch
         d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         make_board(p, {})
@@ -790,10 +794,11 @@ class AddJobReal(unittest.TestCase):
             self.assertEqual(add_job.run(urls, p, answers={u: miss for u in urls}), 0)
         data = read_board(p)
         self.assertFalse({j['id'] for j in data['data']['jobs']} & set(urls))
-        inbox = json.loads(data['fb']).get('__inbox__') or []
-        self.assertEqual(len(inbox), 1)
-        self.assertIn('2 個網址沒有加成卡', inbox[0]['msg'])
-        self.assertIn('網站首頁', inbox[0]['msg'])
+        self.assertEqual(json.loads(data['fb']).get('__inbox__') or [], [])
+        with open(os.path.join(d, add_job.STATUS), encoding='utf-8') as f:
+            st = json.load(f)
+        self.assertEqual([x['url'] for x in st['unadded']], urls)
+        self.assertTrue(all('網站首頁' in x['why'] for x in st['unadded']))
 
 
 class Translate(unittest.TestCase):
