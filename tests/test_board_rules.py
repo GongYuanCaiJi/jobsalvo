@@ -8,7 +8,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, TOOLS)
 
-import board_server as bs
 import delivery_state
 import config as cf
 import settings_api
@@ -21,11 +20,11 @@ PASSED = {'schema_version': 2, 'checked_links': True, 'issues': []}
 
 
 class SharedBoardRules(unittest.TestCase):
-    def test_mark_empty_and_conflict_equivalence_cases(self):
+    def test_mark_empty_equivalence_cases(self):
         for case in CASES['mark_values']:
             with self.subTest(case=case['name']):
-                self.assertEqual(delivery_state.lean(case['value']), case['normalized'])   # 伺服器比對標記用的那一份
-                self.assertEqual(bs._same(case['value'], case['base']), case['same'])
+                self.assertEqual(delivery_state.lean(case['value']), case['normalized'])
+                self.assertEqual(delivery_state.same(case['value'], case['base']), case['same'])
 
     def test_custom_pending_cases(self):
         """客製還沒處理完擋不擋這張:只看這張現在會寄的那幾份(ship.documents)。

@@ -150,9 +150,8 @@ class ManualSent(unittest.TestCase):
         self.path = os.path.join(self.tmp, f'sent{self.n}.html')
         make_board(self.path, {U: dict(mark)})
         self.enterContext(mock.patch.object(self.bs, 'STATE', self.path))
-        rejected = []
-        ev = [{'u': U, 'ev': 'sent_manual', 'data': {'by': 'manual', 'at': '2026-10-02T10:00:00', 'sent_at': '2026-10-02'}}]
-        self.assertEqual(self.bs.write_fb({U: dict(mark)}, base={U: dict(mark)}, events=ev, rejected=rejected), [])
+        rejected = self.bs.write_fb([{'u': U, 'ev': 'sent_manual',
+                                      'data': {'by': 'manual', 'at': '2026-10-02T10:00:00', 'sent_at': '2026-10-02'}}])
         return rejected, read_fb(self.path)[U]
 
     def test_every_stage_can_mark_sent_with_the_resume_the_user_picked(self):
@@ -205,14 +204,12 @@ class TwoDevices(unittest.TestCase):
         d = dict(copy.deepcopy(FIX['data'].get(event) or {}), **data)
         bd.set_fb(lambda fb: ds.try_fire(fb, CARD, event, **d), live=self.path, by='test')
 
-    def phone(self, seen, event, change=None, extra=None):
-        """手機上的看板:照它載入時看到的那一張(seen)按了一下,送改過的那張 + 事件 + 基準。回 (衝突的鍵, 被擋的事件)。"""
-        mine = copy.deepcopy(seen)
-        (change or (lambda m: None))(mine)
-        rejected = []
-        ev = [{'u': CARD, 'ev': event, 'data': copy.deepcopy(FIX['data'].get(event) or {})}] if event else []
-        bad = self.bs.write_fb({CARD: mine}, base={CARD: seen}, events=ev + (extra or []), rejected=rejected)
-        return bad, rejected
+    def phone(self, event, sets=None, extra=None):
+        """手機上的看板(載入之後別處已經改過這張卡)按了一下:送指令(事件 + 跟著改的欄)。回被擋的那幾道。"""
+        cmd = dict({'ev': event, 'data': copy.deepcopy(FIX['data'].get(event) or {})} if event else {}, u=CARD)
+        if sets:
+            cmd['set'] = sets
+        return self.bs.write_fb(([cmd] if event or sets else []) + (extra or []))
 
     def assertAllowed(self, want):
         import delivery_state as ds
@@ -223,10 +220,9 @@ class TwoDevices(unittest.TestCase):
 
     # 手機按「退回」(離開可以投了)的同時 agent 送出成功
     def test_back_while_the_agent_is_sending_then_it_succeeds(self):
-        seen = self.board('confirmed')
+        self.board('confirmed')
         self.backend('submit_start')                       # 8 秒到了,agent 開始送
-        bad, rejected = self.phone(seen, 'leave', lambda m: m.update(app='ready'))
-        self.assertEqual(bad, [])
+        rejected = self.phone('leave', {'app': 'ready'})
         self.assertEqual([r['ev'] for r in rejected], ['leave'])
         m = self.assertAllowed('sending')
         self.assertEqual(m.get('app'), 'ship', '退回沒發生,卡不能一半在退回、一半在正在送出')
@@ -235,18 +231,18 @@ class TwoDevices(unittest.TestCase):
         self.assertTrue(m['apply'].get('sent'), 'agent 的送出證據留著')
 
     def test_back_arrives_after_the_agent_already_sent(self):
-        seen = self.board('confirmed')
+        self.board('confirmed')
         self.backend('submit_start')
         self.backend('submit_ok')
-        self.phone(seen, 'leave', lambda m: m.update(app='ready'))
+        self.phone('leave', {'app': 'ready'})
         m = self.assertAllowed('sent')
         self.assertEqual(m.get('app'), 'sent')
         self.assertTrue(m['apply'].get('sent'))
 
     def test_back_first_then_the_timer_cannot_send(self):
         import form_record as fr
-        seen = self.board('confirmed')
-        self.phone(seen, 'leave', lambda m: m.update(app='ready'))
+        self.board('confirmed')
+        self.phone('leave', {'app': 'ready'})
         why = []
         bd.set_fb(lambda fb: why.append(fr.start_submit(fb, CARD)), live=self.path, by='test')
         self.assertTrue(why[0], '退回之後不能再開始送出')
@@ -255,17 +251,12 @@ class TwoDevices(unittest.TestCase):
 
     # 同時改答案與 agent 記表單
     def test_answer_change_while_the_agent_records_a_new_form(self):
-        seen = self.board('parked')
+        self.board('parked')
         new_form = {'plat': 'x', 'f': [{'q': 'Why?', 'src': 'bank', 'k': 'k1'},
                                        {'q': 'When?', 'src': 'bank', 'k': 'k2'}]}
         bd.set_fb(lambda fb: fb[CARD].__setitem__('form', copy.deepcopy(new_form)), live=self.path, by='agent')
-
-        def edit(m):                                        # 看板當場在它手上那份表單標重打
-            for x in m['form']['f']:
-                if x['k'] == 'k1':
-                    x['refill'] = 1
-        bad, rejected = self.phone(seen, None, edit, extra=[{'refill': 'k1'}])
-        self.assertEqual((bad, rejected), ([], []), 'agent 記表單不算撞到他改答案')
+        rejected = self.phone(None, extra=[{'refill': 'k1'}])    # 看板不送表單,只送「這條答案改了」
+        self.assertEqual(rejected, [], 'agent 記表單不算撞到他改答案')
         m = self.assertAllowed('parked')
         self.assertEqual([x['k'] for x in m['form']['f']], ['k1', 'k2'], 'agent 剛記的新表單不能被換回手機上的舊表單')
         self.assertEqual([x.get('refill') for x in m['form']['f']], [1, None], '改過的答案在新表單上照樣標重打')
@@ -273,40 +264,39 @@ class TwoDevices(unittest.TestCase):
     def test_refill_mark_only_where_the_page_is_still_up(self):
         self.board('parked')
         bd.set_fb(lambda fb: fb[CARD]['form']['f'][0].pop('refill'), live=self.path, by='test')
-        seen = self.card()
         self.backend('page_lost')
-        self.phone(seen, None, extra=[{'refill': 'k1'}])
+        self.phone(None, extra=[{'refill': 'k1'}])
         m = self.assertAllowed('gone')
         self.assertFalse(any(x.get('refill') for x in m['form']['f']), '頁已經不在,沒有網頁可重打')
 
     # 同時確認與頁面不見了
     def test_confirm_after_the_page_was_lost(self):
-        seen = self.board('parked')
+        self.board('parked')
         self.backend('page_lost')
-        bad, rejected = self.phone(seen, 'confirm')
+        rejected = self.phone('confirm')
         self.assertEqual([r['ev'] for r in rejected], ['confirm'])
         m = self.assertAllowed('gone')
         self.assertNotIn('approve', m)
 
     def test_page_lost_after_confirm(self):
-        seen = self.board('parked')
-        self.phone(seen, 'confirm')
+        self.board('parked')
+        self.phone('confirm')
         self.backend('page_lost')
         m = self.assertAllowed('gone')
         self.assertNotIn('approve', m)
 
     # 8 秒計時器和取消確認撞在一起
     def test_unconfirm_after_the_timer_started_sending(self):
-        seen = self.board('confirmed')
+        self.board('confirmed')
         self.backend('submit_start')
-        bad, rejected = self.phone(seen, 'unconfirm')
+        rejected = self.phone('unconfirm')
         self.assertEqual([r['ev'] for r in rejected], ['unconfirm'])
         self.assertAllowed('sending')
 
     def test_timer_after_unconfirm_does_not_send(self):
         import form_record as fr
-        seen = self.board('confirmed')
-        self.phone(seen, 'unconfirm')
+        self.board('confirmed')
+        self.phone('unconfirm')
         why = []
         bd.set_fb(lambda fb: why.append(fr.start_submit(fb, CARD)), live=self.path, by='test')
         self.assertTrue(why[0])
@@ -372,7 +362,7 @@ if __name__ == '__main__':
 
 
 class SaveEdges(Tmp):
-    """看板存檔(write_fb)還沒走過的幾條:別的裝置先改過、沒指定是哪一張的事件、被擋下的整張清掉。"""
+    """看板的指令(write_fb)還沒走過的幾條:別的裝置改過別的欄、沒指定是哪一張的事件、被擋下的那一道整道不做。"""
 
     def setUp(self):
         super().setUp()
@@ -382,22 +372,18 @@ class SaveEdges(Tmp):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def test_a_card_changed_elsewhere_is_not_overwritten(self):
-        with mock.patch.object(self.bs, 'note_saved') as saved:
-            bad = self.bs.write_fb({U: {'s': 'dislike'}}, base={U: {'s': 'meh'}})
-        self.assertEqual(bad, [U])
-        self.assertEqual(read_fb(self.path)[U], {'s': 'like'})
-        saved.assert_not_called()                  # 沒寫就不存版本
+    def test_a_card_changed_elsewhere_keeps_what_was_changed_there(self):
+        # 這個分頁載入時心情是別的;它只送它改的那一欄(筆記),別處改的心情留著
+        self.assertEqual(self.bs.write_fb([{'u': U, 'set': {'n': '我的筆記'}}]), [])
+        self.assertEqual(read_fb(self.path)[U], {'s': 'like', 'n': '我的筆記'})
 
     def test_an_event_without_a_card_is_refused_with_the_reason(self):
-        rejected = []
-        self.bs.write_fb({}, events=[{'u': '', 'ev': 'confirm'}, {'u': '__ans__', 'ev': 'confirm'}], rejected=rejected)
+        rejected = self.bs.write_fb([{'u': '', 'ev': 'confirm'}, {'u': '__ans__', 'ev': 'confirm'}])
         self.assertEqual([r['msg'] for r in rejected], ['沒有指定是哪一張'] * 2)
 
-    def test_clearing_a_card_along_with_a_refused_click_keeps_the_card(self):
-        # 「移除」這一下被狀態表擋了:跟著那一下送來的整張清掉也不做
-        rejected = []
-        self.bs.write_fb({U: None}, events=[{'u': U, 'ev': 'confirm'}], rejected=rejected)
+    def test_the_fields_sent_with_a_refused_click_are_not_written(self):
+        # 這一下被狀態表擋了:跟著那一下改的欄也不做
+        rejected = self.bs.write_fb([{'u': U, 'ev': 'confirm', 'set': {'s': None}}])
         self.assertEqual(len(rejected), 1)
         self.assertEqual(read_fb(self.path)[U], {'s': 'like'})
 
@@ -456,33 +442,83 @@ class SandboxPageLost(Tmp):
             self.assertEqual(bs.agent_swapped(U, '換掉了'), '')
 
 
-with open(os.path.join(HERE, 'fixtures', 'merge-cases.json'), encoding='utf-8') as _f:
-    MERGES = json.load(_f)['cases']
 
 
-class MergeEdits(unittest.TestCase):
-    """存檔撞到別的裝置(或 agent、程式)先改了同一筆:兩邊改的格子都留下,同一格撞到先留這台的並回報撞到哪一格。
-    合併只在後台算一份(docs/adr/0005),看板拿結果畫。"""
+class SendQueue(unittest.TestCase):
+    """確認送出之後 8 秒由後台送(分頁關掉照樣送);那之前按了復原、取消確認,時間到就不送。"""
+    setUp0, tearDown, card, phone, assertAllowed = (TwoDevices.setUp, TwoDevices.tearDown, TwoDevices.card,
+                                                    TwoDevices.phone, TwoDevices.assertAllowed)
 
-    def test_each_case(self):
-        import board_server as bs
-        for c in MERGES:
-            with self.subTest(c['name']):
-                got = bs.merge_edit(c['base'], c['mine'], c['theirs'], c.get('key'))
-                self.assertEqual((got['value'], got['clash']), (c['value'], c['clash']))
+    def board(self, state):
+        m = copy.deepcopy(FIX['cards'][state])
+        for x in m['form']['f']:
+            x.pop('refill', None)                            # 網頁照現在的答案填的:可以確認送出
+        _env.make_board(self.path, {CARD: m, '__ans__': copy.deepcopy(FIX['ans'])},
+                        data={'jobs': [{'id': CARD, 'target': 'x'}],
+                              'status': {'schema_version': 2, 'checked_links': True, 'issues': []}}, sty=CSS)
 
+    def setUp(self):
+        self.setUp0()
+        self.sent, self.reply = [], [(200, {})]
+        self.enterContext(mock.patch.object(self.bs, 'start_run',
+                                            lambda kind, args: self.sent.append((kind, args)) or self.reply.pop(0)))
+        self.enterContext(mock.patch.object(self.bs, 'SERVING', [True]))
+        self.timers = []
+        self.enterContext(mock.patch.object(self.bs.threading, 'Timer',
+                                            lambda _s, fn, args: mock.Mock(start=lambda: self.timers.append((fn, args)))))
 
-from test_board import HttpBase  # noqa: E402  真的看板伺服器(臨時看板)
+    def time_is_up(self):
+        timers, self.timers = self.timers, []
+        for fn, args in timers:
+            fn(*args)
 
+    def confirm(self):
+        out = {}
+        self.assertEqual(self.bs.write_fb([{'u': CARD, 'ev': 'confirm'}], out), [])
+        return out['undo'][0]
 
-class MergeOnTheServer(HttpBase):
-    def test_the_page_gets_the_merge_against_what_the_server_has_now(self):
-        """常用答案照 k 一條一條合:這台改了一條、agent 同時新開一條,兩條都留(照哪一欄合由後台決定)。"""
-        bd.set_fb(lambda fb: fb.update({'__ans__': [{'k': 'nat', 'v': 'Taiwan'}, {'k': 'new', 'v': '新答案'}]}), live=self.path)
-        code, raw, _ = self.req('/api/merge', {'base': {'__ans__': [{'k': 'nat', 'v': 'Taiwan'}]},
-                                                'mine': {'__ans__': [{'k': 'nat', 'v': 'Taiwan (R.O.C.)'}]}})
-        self.assertEqual(code, 200, raw)
-        got = json.loads(raw)
-        self.assertEqual(got['merged']['__ans__'], {'value': [{'k': 'nat', 'v': 'Taiwan (R.O.C.)'}, {'k': 'new', 'v': '新答案'}],
-                                                    'clash': [], 'key': 'k'})
-        self.assertEqual(got['fb']['__ans__'], [{'k': 'nat', 'v': 'Taiwan'}, {'k': 'new', 'v': '新答案'}])
+    def test_time_is_up_with_no_tab_open_it_is_sent(self):
+        self.board('parked')
+        self.confirm()
+        self.assertEqual(self.sent, [])
+        self.time_is_up()
+        self.assertEqual(self.sent, [('apply', {'stage': 'submit', 'url': CARD})])
+
+    def test_undo_within_the_wait_is_not_sent(self):
+        self.board('parked')
+        slip = self.confirm()
+        self.assertEqual(self.bs.write_fb(slip), [])
+        self.time_is_up()
+        self.assertAllowed('parked')
+        self.assertEqual(self.sent, [])
+
+    def test_another_tab_unconfirming_within_the_wait_is_not_sent(self):
+        self.board('parked')
+        self.confirm()
+        self.phone('unconfirm')
+        self.time_is_up()
+        self.assertEqual(self.sent, [])
+
+    def test_another_round_using_the_browser_waits_then_sends(self):
+        """時間到時另一輪代投(或查應徵進度)正在用 agent 的瀏覽器:等它跑完照樣送,不叫他再按。"""
+        self.board('parked')
+        self.confirm()
+        self.reply = [(409, {'running': True}), (409, {'other': True, 'msg': '查應徵進度正在用'}), (200, {})]
+        self.time_is_up()
+        self.time_is_up()
+        self.time_is_up()
+        self.assertEqual(len(self.sent), 3)
+        self.assertEqual(self.timers, [])
+        self.assertEqual([x for x in read_fb(self.path).get('__inbox__', []) if not x.get('done')], [])
+
+    def test_it_cannot_be_sent_for_another_reason_it_says_so(self):
+        """沒有 ego 這種原因送不出去:照實寫進看板的回報(他看得到為什麼停在你已確認),不悄悄不送。"""
+        self.board('parked')
+        self.confirm()
+        self.reply = [(409, {'needs_browser': True, 'msg': '這個動作需要 agent 的瀏覽器(ego)'})]
+        self.time_is_up()
+        self.assertEqual(self.timers, [])
+        box = [x for x in read_fb(self.path).get('__inbox__', []) if x.get('job') == CARD]
+        self.assertEqual(len(box), 1)
+        self.assertIn('需要 agent 的瀏覽器', box[0]['msg'])
+        self.assertAllowed('confirmed')

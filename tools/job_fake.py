@@ -95,7 +95,7 @@ def apply(board, sp, step, stage, url, limit=0):
     def mut(fb):
         # 跟真的 apply_run 一樣只送狀態表的事件:開始 → 填好 / 看到已收到申請頁
         for u, m in list(fb.items()):
-            if not isinstance(m, dict) or m.get('app') != 'ship' or m.get('rm') or (url and u != url):
+            if ds.app_of(m) != 'ship' or (url and u != url):
                 continue
             if stage == 'fill':
                 if (limit and len(done) >= limit) or not ds.allowed(m, 'fill_start'):     # 「跑幾張」:填滿就停

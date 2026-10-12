@@ -1,5 +1,5 @@
 """連續很多步的隨機走法(#302 補充驗收):照固定亂數種子產生一串一串的動作,每一步都經過正式的入口
-(看板按鈕的規則、apply_run 的關卡、自動流程、平台對帳、Chrome 關過),記下每一步照狀態表送了哪些事件、改了哪些欄位。
+(看板的指令走 board_server.apply_cmds、apply_run 的關卡、自動流程、平台對帳、Chrome 關過),記下每一步送了什麼。
 
 後台測試(tests/test_delivery_sequences.py)每一步驗「永遠要成立的事」。
 種子、張數、步數不准亂改:失敗訊息印的是種子和第幾串,重跑得出同一串。"""
@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 
 import apply_run
 import autopilot
+import board_server as bs
 import delivery_state as ds
 import form_record as fr
 
@@ -24,6 +25,7 @@ JOBS = [{'id': 'https://walk.example/a', 'target': '**Role A · Acme**'},
 URLS = [j['id'] for j in JOBS]
 BY = {j['id']: j for j in JOBS}
 FORM = {'plat': 'x', 'f': [{'q': 'Why?', 'src': 'bank', 'k': 'k1'}]}
+bs._now = lambda: '2026-02-01T12:00:00'      # 確認時間是後台蓋的:固定下來,同一串重跑一樣
 
 
 def start():
@@ -42,7 +44,7 @@ class Walk:
         self.ops = []            # [{'op': 'fire'|'set'|'del'|'undo'|'bank', ...}]
         self.log = []            # 人看的:第幾步做了什麼
         self.n = 0
-        self.last = None         # 最近一次看板上的動作(復原用):(url, 改之前那一張, 改完的狀態部分, 復原不了時送的事件)
+        self.last = None         # 最近一次看板上的動作(復原用):(按之前的整份看板, 復原單)
         self.was_sent = set()
 
     # ---- 低階:照狀態表送事件、改一般欄位,同時記進 ops ----
@@ -54,17 +56,19 @@ class Walk:
         self.fb.setdefault(u, {})[key] = v
         self.ops.append({'op': 'set', 'u': u, 'k': key, 'v': copy.deepcopy(v)})
 
-    def drop(self, u, key):
-        self.fb.get(u, {}).pop(key, None)
-        self.ops.append({'op': 'del', 'u': u, 'k': key})
-
     def at(self):
         self.n += 1
         return f'2026-02-01T00:{self.n // 60:02d}:{self.n % 60:02d}'
 
-    def user(self, u, before):
-        """看板上的一個動作做完了:記下來給「復原」用。"""
-        self.last = (u, before, ds.part(self.fb[u]))
+    def cmd(self, *cmds):
+        """看板送一包指令(跟看板同一個入口):收了的那幾道的復原單記下來給「復原」用。回傳每一道收了沒。"""
+        before = copy.deepcopy(self.fb)
+        rejected, undo, _cards = bs.apply_cmds({'fb': self.fb, 'data': {'jobs': JOBS, 'status': STATUS}}, list(cmds))
+        self.ops.append({'op': 'cmd', 'cmds': copy.deepcopy(list(cmds)), 'rejected': [x['i'] for x in rejected]})
+        got = [x for s in undo if s for x in s]
+        if got:
+            self.last = (before, got)
+        return [s is not None for s in undo]
 
     # ---- 系統那一邊(apply_run、自動流程、Chrome、平台對帳)----
     def sys_fill(self, u):
@@ -142,87 +146,56 @@ class Walk:
         return ds.state(self.fb[u]) in ('running', 'sending', 'unsure')
 
     def user_confirm(self, u):
-        if fr.confirm_problem(self.fb, u, STATUS) is None:
-            b = copy.deepcopy(self.fb[u])
-            self.fire(u, 'confirm', approve=fr.approval(self.fb, u, self.at()))
-            self.user(u, b)
+        self.cmd({'u': u, 'ev': 'confirm', 'data': {}})
 
     def user_simple(self, u, event, **data):
-        b = copy.deepcopy(self.fb[u])
-        if ds.allowed(self.fb[u], event):
-            self.fire(u, event, **data)
-            self.user(u, b)
+        self.cmd({'u': u, 'ev': event, 'data': data})
 
     def user_answer(self):
-        """他在常用答案改了一條:用到它的「你已確認」確認作廢,頁還在的表單標重打(後台 form_record.changed)。"""
-        v = 'Because %d.' % self.n
+        """他在常用答案改了一條,跟著送「答案改了」:用到它的確認作廢、頁還在的表單標重打(後台 form_record.changed)。"""
         if any(ds.state(self.fb[u]) == 'unsure' for u in URLS):
-            return                                              # 送出結果不明的卡在用:答案先不給改
-        self.fb['__ans__'][0]['v'] = v
-        self.ops.append({'op': 'bank', 'v': v})
-        for u in URLS:
-            m = self.fb[u]
-            if ds.state(m) == 'confirmed' and (m.get('approve') or {}).get('snap') != fr.snapshot(self.fb, u):
-                self.fire(u, 'answers_changed')
-        fr.mark_refill(self.fb, 'k1')
-        self.ops.append({'op': 'refill'})
+            return                                              # 送出結果不明的卡在用:答案先不給改(看板不給按)
+        e = dict(self.fb['__ans__'][0], v='Because %d.' % self.n)
+        self.cmd({'u': '__ans__', 'set': {'k1': e}}, {'refill': 'k1'})
 
     def user_files(self, u):
         if not self.busy(u):
-            b = copy.deepcopy(self.fb[u])
-            self.put(u, 'lang', 'en' if self.fb[u].get('lang') != 'en' else 'zh')
-            if ds.allowed(self.fb[u], 'files_changed'):
-                self.fire(u, 'files_changed', why='語言換了')
-            self.user(u, b)
+            ev = {'ev': 'files_changed', 'data': {'why': '語言換了'}} if ds.allowed(self.fb[u], 'files_changed') else {}
+            self.cmd(dict(ev, u=u, set={'lang': 'en' if self.fb[u].get('lang') != 'en' else 'zh'}))
 
     def user_remove(self, u):
         if self.fb[u].get('rm'):
-            b = copy.deepcopy(self.fb[u])
-            self.drop(u, 'rm')
-            self.user(u, b)
+            self.cmd({'u': u, 'set': {'rm': None}})
         elif not self.busy(u) and ds.allowed(self.fb[u], 'leave'):
-            b = copy.deepcopy(self.fb[u])
-            self.fire(u, 'leave')
-            self.put(u, 'rm', 1)
-            self.user(u, b)
+            self.cmd({'u': u, 'ev': 'leave', 'set': {'rm': 1}})
 
     def user_block(self):
-        if isinstance(self.fb.get('__block__'), list) and self.fb['__block__']:
-            self.fb['__block__'] = []
-            self.ops.append({'op': 'block', 'v': []})
+        if self.fb.get('__block__'):
+            self.cmd({'u': '__block__', 'set': {'*': None}})
             return
         if any(self.busy(u) for u in URLS[:2]):
             return                                              # 這家有卡 agent 正在做或結果不明:先擋
-        for u in URLS[:2]:                                     # 封鎖了:流程裡的卡一起退出,確認作廢
-            if self.fb[u].get('app') == 'ship':
-                self.fire(u, 'leave')
-            if self.fb[u].get('app') in ('prep', 'ready', 'ship'):
-                self.drop(u, 'app')
-        self.fb['__block__'] = ['Acme']
-        self.ops.append({'op': 'block', 'v': ['Acme']})
+        out = [dict({'ev': 'leave'} if self.fb[u].get('app') == 'ship' else {}, u=u, set={'app': None})
+               for u in URLS[:2] if self.fb[u].get('app') in ('prep', 'ready', 'ship')]   # 流程裡的卡一起退出,確認作廢
+        self.cmd({'u': '__block__', 'set': {'*': ['Acme']}}, *out)
 
     def user_push(self, u):
         """他把一張不在流程裡的卡推回「可以投了」(看板的階段按鈕)。"""
         if self.fb[u].get('app') not in ('ship', 'sent') and not self.fb[u].get('rm'):
-            b = copy.deepcopy(self.fb[u])
-            self.put(u, 'app', 'ship')
-            self.user(u, b)
+            self.cmd({'u': u, 'set': {'app': 'ship'}})
 
     def user_manual_sent(self, u):
         if not self.busy(u):
             self.user_simple(u, 'sent_manual', by='manual', at=self.at(), sent_at='2026-02-03')
 
     def user_undo(self):
+        """按 snack 上的「復原」:把復原單照原樣送回去。回傳按之前的整份看板(沒有可以復原的回 None)。"""
         if not self.last:
-            return
-        u, before, after = self.last
+            return None
+        before, got = self.last
         self.last = None
-        try:
-            ds.undo(self.fb, u, ds.part(before), after)
-        except ds.Forbidden:
-            return
-        self.fb[u] = copy.deepcopy(before)
-        self.ops.append({'op': 'undo', 'u': u, 'prev': copy.deepcopy(before), 'after': after})
+        self.cmd(*got)
+        self.last = None
         return before
 
     # ---- 一步 ----

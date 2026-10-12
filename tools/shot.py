@@ -7,7 +7,7 @@ shot —— 自己把看板截圖出來看,不依賴任何人幫忙開視窗。
 
 為什麼不用 `chrome --headless --screenshot` 就好:--window-size 的版面寬度有 500px
 的下限,手機是 390px。差這 110px 正好是「會不會折行」的分界,量不到就等於沒驗。
-所以用 Playwright 開瀏覽器(https://playwright.dev/python/):任意寬度、行動裝置模擬,
+所以用 CDP 模擬尺寸(dev_browser:本機走 ego,CI 走 Chrome):任意寬度、行動裝置模擬,
 而且可以先把畫面操作到指定狀態(切分頁、展開公司、打開詳細)再截。
 
 **一律開在看板的副本上。** 對著正在用的看板點按鈕做測試,會把使用者選好的履歷版本、
@@ -27,8 +27,8 @@ sys.path.insert(0, HERE)
 
 
 import board_doc as bd
+import chrome_door
 
-from chrome_bin import chrome as _chrome   # 用哪個 Chrome 的單一真相(見 tools/chrome_bin.py)
 
 
 def sandbox_api(base, path, body=None, method=None, headers=None, timeout=10, raw=False):
@@ -76,9 +76,10 @@ class Sandbox:
             [sys.executable, os.path.join(HERE, 'board_server.py'),
              '--port', str(self.port), '--host', '127.0.0.1', '--state', self.copy],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            # 副本產 PDF 用開發用的 Chrome(dev_pdf),不去叫使用者的 ego;CI 的 Linux 上也沒有 ego
-            env=dict(os.environ, AGENT_BOARD=self.copy, JOBSALVO_DEV_PDF='1'))
-        self.url = f'http://localhost:{self.port}'
+            # 副本產 PDF:有 ego 跟產品一樣走 ego;沒有 ego 的地方(CI 的 Linux)用開發用的 Chrome(dev_pdf)
+            env=dict(os.environ, AGENT_BOARD=self.copy, **({} if chrome_door.ego_bin() else {'JOBSALVO_DEV_PDF': '1'})))
+        # 開 127.0.0.1 不開 localhost:瀏覽器的縮放是照網址的主機記的,他看正式看板(localhost)調的縮放不能跟過來
+        self.url = f'http://127.0.0.1:{self.port}'
         for _ in range(80):
             try:
                 urllib.request.urlopen(self.url, timeout=1); return
@@ -133,23 +134,17 @@ def main():
         url = sandbox.url
     else:
         url = a.url
-    from playwright.sync_api import sync_playwright
+    import dev_browser
     try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(executable_path=_chrome()[0], args=['--disable-gpu', '--hide-scrollbars'])
-            mobile = a.width < 720
-            ctx = browser.new_context(viewport={'width': a.width, 'height': a.height},
-                                      device_scale_factor=2, is_mobile=mobile, has_touch=mobile)
-            page = ctx.new_page()
-            page.goto(url, wait_until='load', timeout=60000)
-            page.wait_for_timeout(900)
-            cfg = {'tab': a.tab, 'expand': a.expand, 'expandMax': a.expand_max, 'detail': a.detail,
-                   'focus': a.focus, 'offset': a.offset, 'scroll': a.scroll}
-            info = page.evaluate(SETUP % json.dumps(cfg, ensure_ascii=False))
+        mobile = a.width < 720
+        size = {'width': a.width, 'height': a.height, 'deviceScaleFactor': 2, 'mobile': mobile}
+        cfg = {'tab': a.tab, 'expand': a.expand, 'expandMax': a.expand_max, 'detail': a.detail,
+               'focus': a.focus, 'offset': a.offset, 'scroll': a.scroll}
+        with dev_browser.page() as page:
+            info = page.run(SETUP % json.dumps(cfg, ensure_ascii=False), viewport=size, goto=url)
             if a.js:
-                page.evaluate(a.js)
-            page.screenshot(path=a.out, full_page=a.full)
-            browser.close()
+                page.run(a.js, viewport=size)
+            page.screenshot(a.out, full=a.full, viewport=size)
         kb = os.path.getsize(a.out) // 1024
         print(f"{a.tab or '首頁'} · 版面 {info['w']}px(要求 {a.width})"
               f"{'·行動裝置' if mobile else ''} · 卡片 {info['cards']} 張"

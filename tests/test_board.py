@@ -100,51 +100,32 @@ class Tmp(unittest.TestCase):
 
 
 class WriteFb(Tmp):
-    def test_merge_keeps_keys_not_sent(self):
-        """以前整包覆蓋:一個擱著沒關的舊分頁一存,別處的新標記全部倒回去。"""
+    def test_only_the_fields_sent_are_written(self):
+        """以前整包覆蓋:一個擱著沒關的舊分頁一存,別處的新標記全部倒回去。看板只送它改的那幾欄。"""
         make_board(self.path, {JOBS[0]['id']: {'s': 'like'}})
-        self.assertEqual(bs.write_fb({JOBS[1]['id']: {'s': 'meh'}}), [])
+        self.assertEqual(bs.write_fb([{'u': JOBS[1]['id'], 'set': {'s': 'meh'}}]), [])
         fb = read_fb(self.path)
         self.assertEqual(fb[JOBS[0]['id']], {'s': 'like'})
         self.assertEqual(fb[JOBS[1]['id']], {'s': 'meh'})
 
-    def test_null_deletes_the_key(self):
+    def test_a_card_left_empty_is_gone(self):
         make_board(self.path, {JOBS[0]['id']: {'s': 'like'}})
-        bs.write_fb({JOBS[0]['id']: None})
+        bs.write_fb([{'u': JOBS[0]['id'], 'set': {'s': None}}])
         self.assertNotIn(JOBS[0]['id'], read_fb(self.path))
 
-    def test_conflict_writes_nothing(self):
-        """別的裝置先改過其中一筆:整批不寫。寫一半他分不出哪幾筆生效了。"""
-        a, b = JOBS[0]['id'], JOBS[1]['id']
-        make_board(self.path, {a: {'s': 'like'}})
-        before = read(self.path)
-        bad = bs.write_fb({a: {'s': 'meh'}, b: {'s': 'grow'}}, base={a: {'s': 'dislike'}, b: None})
-        self.assertEqual(bad, [a])
-        self.assertEqual(read(self.path), before)
-
-    def test_cancel_then_remark_is_not_a_conflict(self):
-        """取消喜歡之後頁面記成 {s:''} 或 {},磁碟上是整筆不見。兩個要算同一件事。"""
-        a = JOBS[0]['id']
-        make_board(self.path, {})
-        for base in ({a: None}, {a: {}}, {a: {'s': ''}}):
-            self.assertEqual(bs.write_fb({a: {'s': 'meh'}}, base=base), [], base)
-            bs.write_fb({a: None})
-
-    def test_special_keys_save_twice(self):
-        """「我的想法」存第二次一定被擋:頁面沒把 __notes__ 的基準更新。伺服器這邊要收得下。"""
-        make_board(self.path, {})
-        v1 = [{'id': 'n1', 't': 'first'}]
-        self.assertEqual(bs.write_fb({'__notes__': v1}, base={'__notes__': None}), [])
-        v2 = [{'id': 'n1', 't': 'second'}]
-        self.assertEqual(bs.write_fb({'__notes__': v2}, base={'__notes__': v1}), [])
-        self.assertEqual(read_fb(self.path)['__notes__'], v2)
+    def test_notes_change_one_by_one(self):
+        """「我的想法」一則一則照 id 改:這台改一則,別台同時新加的那則留著。"""
+        make_board(self.path, {'__notes__': [{'id': 'n1', 't': 'first'}]})
+        bs.write_fb([{'u': '__notes__', 'set': {'n2': {'id': 'n2', 't': '別台加的'}}}])
+        self.assertEqual(bs.write_fb([{'u': '__notes__', 'set': {'n1': {'id': 'n1', 't': 'second'}}}]), [])
+        self.assertEqual(read_fb(self.path)['__notes__'], [{'id': 'n1', 't': 'second'}, {'id': 'n2', 't': '別台加的'}])
 
     def test_journal_records_only_real_changes(self):
         """流水帳:每次真的改到東西就留一行(改之前、改之後),沒變就不寫。"""
         a = JOBS[0]['id']
         make_board(self.path, {a: {'s': 'like'}})
-        bs.write_fb({a: {'s': 'meh'}})
-        bs.write_fb({a: {'s': 'meh'}})       # 沒變
+        bs.write_fb([{'u': a, 'set': {'s': 'meh'}}])
+        bs.write_fb([{'u': a, 'set': {'s': 'meh'}}])       # 沒變
         lines = read(bd.journal_path(self.path)).splitlines()
         self.assertEqual(len(lines), 1)
         rec = json.loads(lines[0])
@@ -154,7 +135,7 @@ class WriteFb(Tmp):
         a = JOBS[0]['id']
         make_board(self.path, {})
         evil = '</script><script>alert(1)</script>'
-        bs.write_fb({a: {'s': 'like', 'n': evil}})
+        bs.write_fb([{'u': a, 'set': {'s': 'like', 'n': evil}}])
         raw = read(self.path)
         self.assertNotIn(evil, raw)
         self.assertEqual(read_fb(self.path)[a]['n'], evil)
@@ -423,26 +404,21 @@ class Http(HttpBase):
 
     def test_agent_cannot_write_his_board(self):
         before = read(self.path)
-        code, _, _ = self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'s': 'meh'}},
+        code, _, _ = self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'s': 'meh'}}]},
                               ua='Mozilla/5.0 Claude/1.0')
         self.assertEqual(code, 403)
         self.assertEqual(read(self.path), before)
 
     def test_sandbox_lets_agent_write(self):
         bs.ALLOW_AGENT[0] = True
-        code, _, _ = self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'s': 'meh'}},
+        code, _, _ = self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'s': 'meh'}}]},
                               ua='Mozilla/5.0 Claude/1.0')
         self.assertEqual(code, 200)
 
-    def test_old_tab_sending_everything_is_refused(self):
-        body = {'https://ex.test/x/%d' % i: {'s': 'like'} for i in range(41)}
-        self.assertEqual(self.req('/api/save', body)[0], 409)
-
-    def test_conflict_names_the_keys(self):
-        a = JOBS[0]['id']
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__base__': {a: {'s': 'meh'}}, a: {'s': 'grow'}})
-        self.assertEqual(code, 409)
-        self.assertEqual(json.loads(raw)['keys'], [a])
+    def test_old_tab_sending_whole_cards_is_refused(self):
+        before = read(self.path)
+        self.assertEqual(self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'s': 'like'}})[0], 409)
+        self.assertEqual(read(self.path), before)
 
     def test_the_board_sends_events_not_the_delivery_state(self):
         """同時存檔(狀態表修正 9):看板送來的卡上投遞狀態那幾欄不算數,只看它送的事件,照磁碟上現在的狀態套表;
@@ -453,8 +429,8 @@ class Http(HttpBase):
                   'apply': {'stage': 'fill', 'tab_id': '7', 'delivery': {'method': 'direct_upload'}}}
         make_board(self.path, {a: dict(filled, ds='sending', approve={'snap': {}}), b: dict(filled, ds='parked')},
                    data={'jobs': JOBS, 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}})   # 驗收跑完、沒擋:能確認
-        stale_tab = dict(filled, ds='confirmed', approve={'snap': {}}, n='我的筆記')
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, a: stale_tab, '__events__': [
+        code, raw, _ = self.req('/api/save', {'cmds': [
+            {'u': a, 'set': {'n': '我的筆記', 'ds': 'confirmed', 'approve': {'snap': {}}}},   # 舊分頁想寫的狀態欄不算數
             {'u': a, 'ev': 'unconfirm'},                                    # 8 秒計時器已經開始送:取消確認撞上
             {'u': b, 'ev': 'confirm', 'data': {'approve': {'snap': {}, 'round': None}}}]})
         self.assertEqual(code, 200, raw)
@@ -464,39 +440,36 @@ class Http(HttpBase):
         self.assertEqual([r['u'] for r in json.loads(raw)['rejected']], [a])
         self.assertIn('正在送出', json.loads(raw)['rejected'][0]['msg'])
 
-    def test_undo_only_when_nothing_else_moved_the_card(self):
+    def save(self, *cmds):
+        code, raw, _ = self.req('/api/save', {'cmds': list(cmds)})
+        self.assertEqual(code, 200, raw)
+        return json.loads(raw)
+
+    def test_undo_only_puts_back_what_nothing_else_moved(self):
         import delivery_state as ds
         a = JOBS[0]['id']
         make_board(self.path, {a: {'app': 'ship', 'ds': 'parked', 'form': {'plat': 'x', 'f': []},
                                    'apply': {'stage': 'fill', 'tab_id': '7', 'delivery': {'method': 'direct_upload'}}}},
                    data={'jobs': JOBS, 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}})
-        before = ds.part(read_fb(self.path)[a])
-        self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'confirm', 'data': {'approve': {'snap': {}}}}]})
-        after = ds.part(read_fb(self.path)[a])
+        got = self.save({'u': a, 'ev': 'confirm'})
         self.assertEqual(ds.state(read_fb(self.path)[a]), 'confirmed')
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'undo': {'prev': before, 'after': after}}]})
+        self.assertEqual(self.save(*got['undo'][0])['rejected'], [])
         self.assertEqual(ds.state(read_fb(self.path)[a]), 'parked')
-        self.assertEqual(json.loads(raw)['rejected'], [])
-        # 復原之前自動流程已經把它改了(這裡換成換了檔):不准整份放回;換檔的復原就是又換了一次檔
+        # 復原之前自動流程已經把它改了(這裡換成換了檔):狀態那幾欄不放回
+        got = self.save({'u': a, 'ev': 'confirm'})
         bs.bd.set_fb(lambda f: ds.fire(f, a, 'files_changed', why='x'), live=self.path)
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'undo': {'prev': before, 'after': after}}]})
-        self.assertEqual(json.loads(raw)['rejected'][0]['u'], a)
+        self.assertEqual(self.save(*got['undo'][0])['rejected'][0]['u'], a)
         self.assertEqual(ds.state(read_fb(self.path)[a]), 'stale')
-        # 正在填的時候按「復原」換回履歷:也算換檔,正在填不准換檔(#341),原因照卡上那一句
+        # 換了履歷、agent 接著開始填:按「復原」換回履歷也算換檔,正在填不准換檔(#341),原因照卡上那一句
+        got = self.save({'u': a, 'set': {'resume_id': 'tech'}})
         bs.bd.set_fb(lambda f: ds.fire(f, a, 'fill_start', apply={'stage': 'fill', 'at': 'x', 'issues': []}), live=self.path)
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [
-            {'u': a, 'undo': {'prev': before, 'after': after}, 'else': {'ev': 'files_changed', 'data': {'why': '履歷換回來了'}}}]})
-        m = read_fb(self.path)[a]
-        self.assertEqual((ds.state(m), m['apply'].get('stale')), ('running', None))
-        self.assertEqual(json.loads(raw)['rejected'][0]['msg'], 'Agent 正在做,等它做完')
+        back = self.save(*got['undo'][0])
+        self.assertEqual((back['rejected'][0]['msg'], read_fb(self.path)[a]['resume_id']), ('Agent 正在做,等它做完', 'tech'))
 
-    def test_undo_actually_sent_although_the_server_noted_the_sent_version(self):
-        """送出結果不明 → 其實送出了 → 復原:後台套完事件會補記寄出的是哪一份(sent_v),看板照狀態表算的 after 沒有它。
-        以前復原拿 after 跟後台那張整份比,差這一欄就當成「被別處改過了」不准復原,卡停在已投出
-        (CI 的看板檢查抓到:那張卡挑得出履歷才會記 sent_v;單跑那一條挑不出,CI 分組第 1 組前面的檢查讓它挑得出)。"""
-        import copy
+    def test_undo_actually_sent_gives_back_the_card_with_what_the_server_noted(self):
+        """送出結果不明 → 其實送出了 → 復原:後台套完事件補記的寄出版本(sent_v)也在復原單上,一起拿掉
+        (以前看板照狀態表算的 after 沒有它,就當成「被別處改過了」不准復原,卡停在已投出)。"""
         import config as cf
-        import delivery_state as ds
         a = JOBS[0]['id']
         make_board(self.path, {a: {
             'app': 'ship', 'ds': 'unsure', 'resume_id': next(iter(cf.RESUMES)), 'form': {'plat': 'x', 'f': []},
@@ -504,34 +477,26 @@ class Http(HttpBase):
             'approve': {'snap': {}}}})
         before = read_fb(self.path)[a]
         data = {'by': 'agent', 'at': '2026-10-01T00:00:00Z', 'sent_at': '2026-10-01', 'evidence': {'you_sent': 'x'}}
-        board = copy.deepcopy(before)               # 看板手上那一份照同一張表走一步(board.js evFire → dsPart)
-        ds.fire({a: board}, a, 'actually_sent', **data)
-        self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'actually_sent', 'data': data}]})
-        self.assertTrue(read_fb(self.path)[a].get('sent_v'))   # 後台真的補記了,看板的 after 沒有
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, '__events__': [
-            {'u': a, 'undo': {'prev': ds.part(before), 'after': ds.part(board)}}]})
-        self.assertEqual((code, json.loads(raw)['rejected']), (200, []))
+        got = self.save({'u': a, 'ev': 'actually_sent', 'data': data})
+        self.assertTrue(read_fb(self.path)[a].get('sent_v'))
+        self.assertEqual(self.save(*got['undo'][0])['rejected'], [])
         self.assertEqual(read_fb(self.path)[a], before)
 
     def test_undo_of_retry_gives_back_the_locked_form(self):
-        """再投一次把整份表單(鎖著的)收進 tries;看板按復原時送復原事件和按之前那張卡,伺服器要把表單連鎖一起放回
+        """再投一次把整份表單(鎖著的)收進 tries;復原要把表單連鎖一起放回
         (#303 每顆按鈕按一遍抓到:以前表單回來了、鎖沒回來,已投出的表單變成可以改)。"""
-        import delivery_state as ds
         a = JOBS[0]['id']
         card = {'app': 'sent', 'ds': 'sent', 'sent_by': 'manual', 'sent_at': '2026-01-02', 'oc': 'rej',
                 'oc_at': {'rej': '2026-01-05'}, 'form': {'plat': 'x', 'f': [{'q': 'Q', 'src': 'bank', 'k': 'k1'}], 'lock': 1}}
         make_board(self.path, {a: card})
         before = read_fb(self.path)[a]
-        self.req('/api/save', {'__rev__': 1, '__events__': [{'u': a, 'ev': 'retry'}]})
-        after = read_fb(self.path)[a]
-        self.assertNotIn('form', after)
-        code, raw, _ = self.req('/api/save', {'__rev__': 1, a: before, '__base__': {a: after},
-                                              '__events__': [{'u': a, 'undo': {'prev': ds.part(before), 'after': ds.part(after)}}]})
-        self.assertEqual((code, json.loads(raw)['rejected']), (200, []))
+        got = self.save({'u': a, 'ev': 'retry'})
+        self.assertNotIn('form', read_fb(self.path)[a])
+        self.assertEqual(self.save(*got['undo'][0])['rejected'], [])
         self.assertEqual(read_fb(self.path)[a], before)
 
     def test_moving_to_ready_builds_the_pack(self):
-        self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'app': 'ready'}})
+        self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'app': 'ready'}}]})
         self.assertEqual(self.builds, [1])
 
     def test_gzip(self):
@@ -602,7 +567,7 @@ class Http(HttpBase):
 
     def test_rev_moves_when_he_saves(self):
         r1 = self.rev()
-        self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'s': 'meh'}})
+        self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'s': 'meh'}}]})
         r2 = self.rev()
         self.assertNotEqual(r1['rev'], r2['rev'])
         self.assertEqual(r1['gen'], r2['gen'])      # 只動標記,不必重拿 1MB 的職缺資料
@@ -680,11 +645,11 @@ class ShipFilesApi(HttpBase):
         # 標已投出是「我已在外部送出」事件(投遞狀態只靠事件改,#302)
         a = JOBS[0]['id']
         sent = [{'u': a, 'ev': 'sent_manual', 'data': {'by': 'manual', 'sent_at': '2026-01-01'}}]
-        self.assertEqual(self.req('/api/save', {'__rev__': 1, a: {'app': 'ship', 'lang': 'en'}})[0], 200)
-        self.assertEqual(self.req('/api/save', {'__rev__': 1, '__events__': sent})[0], 200)
+        self.assertEqual(self.req('/api/save', {'cmds': [{'u': a, 'set': {'app': 'ship', 'lang': 'en'}}]})[0], 200)
+        self.assertEqual(self.req('/api/save', {'cmds': sent})[0], 200)
         self.assertEqual(read_fb(self.path)[a]['sent_v'], 'en-general')
-        # 頁面手上那份還沒拿到伺服器記的(沒帶 sent_v)、又改了語言:記過的那份留著
-        self.req('/api/save', {'__rev__': 1, a: {'app': 'sent', 'lang': 'zh'}})
+        # 之後又改了語言:記過的那份留著
+        self.req('/api/save', {'cmds': [{'u': a, 'set': {'app': 'sent', 'lang': 'zh'}}]})
         self.assertEqual(read_fb(self.path)[a]['sent_v'], 'en-general')
 
 
@@ -2727,7 +2692,7 @@ class TestsLeaveNothingRunning(unittest.TestCase):
         """#335:存檔會排一個 1 秒後存資料夾版本的計時器;測試結束時沒收掉,它在下一條測試裡跑 git,
         被那條換掉的 subprocess.run 抓到。存過檔的測試一結束,背景不能還有計時器。"""
         result = unittest.TestResult()
-        Http('test_undo_only_when_nothing_else_moved_the_card').run(result)
+        Http('test_undo_only_puts_back_what_nothing_else_moved').run(result)
         self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
         self.assertEqual([t for t in threading.enumerate() if isinstance(t, threading.Timer)], [])
 

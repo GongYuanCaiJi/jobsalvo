@@ -114,6 +114,15 @@ DEFAULTS = {
 }
 
 
+def _fields(d, pre=''):
+    return [f for k, v in d.items() for f in (_fields(v, pre + k + '.') if isinstance(v, dict) and v else [pre + k])]
+
+
+# 欄位表:存設定的單位,一欄一條路徑(DEFAULTS 的每個值;清單、空的對照表整個算一欄)。設定頁只送他改過的欄,
+# 沒碰過的預設不會寫進 jobsalvo.json(之後產品改預設他拿得到)
+FIELDS = _fields(DEFAULTS)
+
+
 def _merge(base, over):
     for k, v in over.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):

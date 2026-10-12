@@ -23,6 +23,7 @@ import evidence
 import jobrun
 import config as cf
 import card
+import delivery_state as ds
 import prefs
 
 jid = card.card_id_from_url
@@ -80,7 +81,6 @@ def _techerr(ff, u):
     技術錯誤跟喜歡/還好是同一個欄位,直接寫就把他原本的標記蓋掉了,先另存到 s0;階段也清掉,另存到 app0。
     看板「出錯了」那一頁的「放回原處」照這兩個放回去(board.js 手動標出錯了也存同一組)。
     live_ok 是他之前按放回原處時說的「頁面沒壞」,又被判出錯了就不算了。"""
-    import delivery_state as ds
     ds.try_fire(ff, u, 'leave')          # 出錯了:你之前按的確認送出作廢
     e = ff.setdefault(u, {})
     if e.get('s') and e['s'] != 'techerr': e['s0'] = e['s']
@@ -265,8 +265,7 @@ def preview(live=None, model='main'):
     live = live or bd.LIVE
     d = bd.load(live)
     fb = json.loads(d['fb']); jobs = d['data'].get('jobs', [])
-    rows = [(j['id'], j.get('target') or '') for j in jobs
-            if isinstance(fb.get(j['id']), dict) and fb[j['id']].get('app') == 'prep']
+    rows = [(j['id'], j.get('target') or '') for j in jobs if ds.place_of(fb, j) == 'prep']
     return ar.rules_for(model, board=live) + prompt(rows, notes=notes_of(fb))
 
 
@@ -569,10 +568,8 @@ def main():
     def keep(j):
         if not str(j.get('id','')).startswith('http'): return False
         if only: return card.card_id_from_url(j['id']) in only
-        e=FB.get(j['id']) if isinstance(FB.get(j['id']),dict) else {}
-        # 按了 🗑 移除的(app 還在、多一個 rm)不跑:跟看板上的張數、代投、建置同一條(以前照樣派 agent 判、推進待你決定)
-        if e.get('rm'): return False
-        return e.get('app')=='prep'
+        # 跟看板上「準備履歷中」那一頁同一份(移除的、公司封鎖了的不跑)
+        return ds.place_of(FB, j)=='prep'
     def title(j): return card.name(j)
     rows=[(j['id'],title(j)) for j in d['data']['jobs'] if keep(j)]
     if a.limit: rows=rows[:a.limit]

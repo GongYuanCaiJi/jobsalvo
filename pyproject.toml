@@ -25,7 +25,7 @@ select = ["BLE001", "S110", "S112", "SIM105", "E722", "F401", "F821", "F841"]
 
 [dependency-groups]
 dev = [
-    "playwright==1.63.0",        # 開發用:看板檢查、介面截圖(board_check、shot;用這台的 Chrome,不另外下載)。使用者的功能都走 ego
+    "playwright==1.63.0",        # 開發用:CI 的 Linux 沒有 ego,看板檢查、截圖、副本 PDF 在那裡用它開 Chrome(dev_browser、dev_pdf);本機跟使用者的功能一樣走 ego
     "coverage==7.16.2",          # 測試的分岔覆蓋率:哪些 if/except 的路從來沒被測到(CI 單元測試那一步)
 ]
 

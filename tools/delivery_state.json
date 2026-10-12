@@ -1,5 +1,5 @@
 {
-  "_": "投遞狀態 × 事件表(docs/adr/0004、GLOSSARY「投遞狀態」)。只有後台 tools/delivery_state.py 解譯這一份(看板只送事件,docs/adr/0005):沒列的格子就是不准。效果只用固定幾個字(guard、history、tries、push、do、clear、set、setdefault、merge、keep、lock_form、unlock_form、when、to);先收(history、tries、push),再改,值寫 $名字 的從事件資料拿。",
+  "_": "投遞狀態 × 事件表(docs/adr/0004、GLOSSARY「投遞狀態」)。只有後台 tools/delivery_state.py 解譯這一份(看板只送事件,docs/adr/0005):沒列的格子就是不准。效果只用固定幾個字(guard、history、tries、push、do、clear、set、setdefault、merge、keep、lock_form、unlock_form、when、outcome、to);先收(history、tries、push),再改,值寫 $名字 的從事件資料拿。",
   "owned": ["ds", "apply", "approve", "sent_by", "sent_rec", "sync_no", "history", "sent_at", "sent_v", "ev", "tries"],
   "late": ["tab_handed", "fill_ok", "fill_bad", "fill_nopage", "fill_submitted", "fill_unsure", "check_failed", "submit_ok", "submit_unsure", "submit_not_started", "submit_not_sent"],
   "late_": "晚到的結果:卡已經到已送出(他標了在外部送出、平台對帳找到了),agent 的填表或送出結果才回來。不准改狀態,收進投遞歷史(try_fire)。",
@@ -49,7 +49,8 @@
     "undo_sent": "沒送成",
     "back": "退回",
     "retry": "再投一次",
-    "leave": "移除、封鎖公司、出錯了、👎、退出可以投了"
+    "leave": "移除、封鎖公司、出錯了、👎、退出可以投了",
+    "outcome": "記投遞後的結果(等回音、面試、offer、沒錄取、沒下文、我不去了)"
   },
   "moves": {
     "mark_sent": {"set": {"app": "sent", "sent_by": "$by"}, "setdefault": {"sent_at": "$sent_at"},
@@ -175,7 +176,8 @@
       "answers_changed": {"to": "sent"},
       "files_changed": {"to": "sent"},
       "page_lost": {"to": "sent"},
-      "leave": {"to": "sent"}
+      "leave": {"to": "sent"},
+      "outcome": {"outcome": "$s", "clear": ["oc_auto"], "to": "sent"}
     }
   }
 }

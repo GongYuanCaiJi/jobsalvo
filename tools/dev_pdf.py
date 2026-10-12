@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """dev_pdf —— 開發工具(看板檢查、介面截圖)的副本產 PDF 用:Playwright + 這台的 Chrome(跟換 ego 之前一樣排版)。
 
-使用者會跑到的程式一律用 ego 產 PDF(chrome_door.EgoDoor.print_pdf);只有設了 JOBSALVO_DEV_PDF=1 的副本才走這裡
-(board_check、shot 開副本前設)。CI 在 Linux 上跑看板檢查,那裡沒有 ego。
+使用者會跑到的程式、有 ego 的開發機一律用 ego 產 PDF(chrome_door.EgoDoor.print_pdf);只有沒有 ego 的地方
+(CI 的 Linux)看板副本才設 JOBSALVO_DEV_PDF=1 走這裡(shot.Sandbox)。
 """
 import os, sys
 

@@ -131,9 +131,7 @@ class CodexFlow(unittest.TestCase):
         return run.run_one('fill', U, self.board)
 
     def press(self, event, **data):
-        rejected = []
-        self.assertEqual(bs.write_fb({}, events=[{'u': U, 'ev': event, 'data': data}], rejected=rejected), [])
-        return rejected
+        return bs.write_fb([{'u': U, 'ev': event, 'data': data}])
 
     def confirm(self):
         return self.press('confirm', approve=fr.approval(read_fb(self.board), U, run.now()))

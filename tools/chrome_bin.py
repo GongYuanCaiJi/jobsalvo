@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""chrome_bin —— 開發工具(看板檢查、介面截圖)用哪個 Chrome。使用者會跑到的程式都走 ego,不用它。"""
+"""chrome_bin —— 沒有 ego 的地方(CI 的 Linux)開發工具用哪個 Chrome(dev_browser、dev_pdf)。有 ego 的機器都走 ego,不用它。"""
 import os, shutil
 
 GUI = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'

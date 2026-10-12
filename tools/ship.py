@@ -736,12 +736,12 @@ def _busy(fb):
 
 def reconcile_packages(man, force, check_only, board, timings=False):
     """建置、驗收與記錄可投遞夾；呼叫端只負責重建其他衍生物。"""
+    import delivery_state as ds
     parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
-    jobs = [j for j in parsed['data']['jobs'] if (fb.get(j['id']) or {}).get('app') in STAGES
+    jobs = [j for j in parsed['data']['jobs'] if ds.app_of(fb.get(j['id'])) in STAGES
             # dead 是程式判的「頁面打不開」;他在「出錯了」按了放回原處(live_ok)就是說沒壞,照常建(頁面真的活著時 board_status 會清 dead)
-            and not (j.get('dead') and not (fb.get(j['id']) or {}).get('live_ok'))
-            and not (fb.get(j['id']) or {}).get('rm')]
+            and not (j.get('dead') and not (fb.get(j['id']) or {}).get('live_ok'))]
     did, failed = False, []
     elapsed = {'比對': 0.0, '建置': 0.0, '檢查': 0.0, '預覽': 0.0, '回報': 0.0}
     busy = _busy(fb)

@@ -286,19 +286,18 @@ class BoardPage(HttpBase):
     def test_his_own_saves_keep_working(self):
         u = next(iter(_env.read_fb(self.path)))
         for s in ('meh', 'like', 'dislike'):
-            code, body, _h = self.req('/api/save', {'__rev__': self.rev()['rev'], u: {'s': s}})
+            code, body, _h = self.req('/api/save', {'cmds': [{'u': u, 'set': {'s': s}}]})
             self.assertEqual(code, 200, body)
         self.assertEqual(self.req('/')[0], 200)
         self.assertEqual(_env.read_fb(self.path)[u]['s'], 'dislike')
 
     def test_after_a_sneaked_edit_the_page_says_so_and_saving_stops(self):
         u = next(iter(_env.read_fb(self.path)))
-        self.req('/api/save', {'__rev__': self.rev()['rev'], u: {'s': 'meh'}})
-        rev = self.rev()['rev']
+        self.req('/api/save', {'cmds': [{'u': u, 'set': {'s': 'meh'}}]})
         sneak(self.path, lambda fb: fb[u].__setitem__('s', 'grow'))
         code, body, _h = self.req('/api/rev')                            # 頁面輪詢也知道
         self.assertEqual((code, json.loads(body)['err']), (423, 'tampered'))
-        code, body, _h = self.req('/api/save', {'__rev__': rev, u: {'s': 'like'}})
+        code, body, _h = self.req('/api/save', {'cmds': [{'u': u, 'set': {'s': 'like'}}]})
         self.assertEqual(code, 423)
         self.assertEqual(json.loads(body)['err'], 'tampered')
         self.assertIn('繞過', json.loads(body)['msg'])

@@ -511,8 +511,8 @@ class Server(HttpBase):
             cur.update(copy.deepcopy(fb))
         bd.set_fb(put, live=self.path)
 
-    def save(self, body):
-        code, raw, _ = self.req('/api/save', dict({'__rev__': 1}, **body))
+    def save(self, *cmds):
+        code, raw, _ = self.req('/api/save', {'cmds': list(cmds)})
         self.assertEqual(code, 200, raw)
         return json.loads(raw)
 
@@ -529,20 +529,20 @@ class ConfirmEvent(Server):
         fb['__ans__'][0]['inf'] = 1
         self.use(fb)
         shown = self.next_of()['confirm']
-        got = self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {'approve': {'snap': {}}}}]})
+        got = self.save({'u': URL, 'ev': 'confirm', 'data': {'approve': {'snap': {}}}})
         self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, shown)])
         self.assertIn('答案', shown)
         self.assertEqual(ds.state(self.card()), 'parked')
 
     def test_the_confirmed_answers_are_the_ones_the_backend_reads_not_the_ones_the_page_sent(self):
-        """確認時記下的答案由後台當下算(#340 user story 9):頁面送來的快照不算數。"""
+        """確認時記下的答案和時間由後台當下算(#340 user story 9):頁面送來的快照、手機的時鐘不算數。"""
         self.use(ready_to_confirm())
-        got = self.save({'__events__': [{'u': URL, 'ev': 'confirm',
-                                         'data': {'approve': {'snap': {'Why?': '頁面上的舊答案'}, 'at': '2026-02-02T00:00:00Z'}}}]})
+        got = self.save({'u': URL, 'ev': 'confirm',
+                         'data': {'approve': {'snap': {'Why?': '頁面上的舊答案'}, 'at': '2026-02-02T00:00:00Z'}}})
         self.assertEqual(got['rejected'], [])
         m = self.card()
-        self.assertEqual((ds.state(m), m['approve']['snap'], m['approve']['at']),
-                         ('confirmed', {'Why?': 'Because.'}, '2026-02-02T00:00:00Z'))
+        self.assertEqual((ds.state(m), m['approve']['snap']), ('confirmed', {'Why?': 'Because.'}))
+        self.assertNotEqual(m['approve']['at'], '2026-02-02T00:00:00Z')
 
 
 BUSY = ('running', 'sending', 'unsure')
@@ -570,7 +570,7 @@ class BusyEvents(Server):
     def test_removing_a_card_the_agent_is_filling_is_refused_with_the_buttons_reason(self):
         self.use(busy_board('running'))
         shown = self.next_of()['busy']
-        got = self.save({URL: dict(self.card(), rm=1), '__events__': [{'u': URL, 'ev': 'leave'}]})
+        got = self.save({'u': URL, 'ev': 'leave', 'set': {'rm': 1}})
         self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, shown)])
         self.assertNotIn('rm', self.card())
 
@@ -580,13 +580,13 @@ class BusyEvents(Server):
                 with self.subTest(state=state, change=change):
                     self.use(busy_board(state))
                     before = self.card()
-                    got = self.save({URL: dict(before, **change)})
+                    got = self.save({'u': URL, 'set': change})
                     self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, step(busy_board(state))['busy'])])
                     self.assertEqual(self.card(), before)
 
     def test_a_note_on_a_busy_card_is_still_saved(self):
         self.use(busy_board('running'))
-        got = self.save({URL: dict(self.card(), n='我的筆記')})
+        got = self.save({'u': URL, 'set': {'n': '我的筆記'}})
         self.assertEqual((got['rejected'], self.card()['n']), ([], '我的筆記'))
 
     def test_using_your_own_file_while_the_agent_is_filling_is_refused(self):
@@ -644,7 +644,7 @@ class EveryEventOnTheServer(Server):
                 fb = busy_board(state)
                 why = next_step.refuse(copy.deepcopy(fb), URL, ev, PASSED)
                 self.use(fb)
-                got = self.save({'__events__': [{'u': URL, 'ev': ev}]})
+                got = self.save({'u': URL, 'ev': ev})
                 self.assertTrue(why)
                 self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, why)])
 
@@ -671,9 +671,9 @@ class JobStillOpenOnTheServer(Server):
         import board_doc as bd
         bd.rewrite(lambda d: d['data'].__setitem__('status', CLOSED), self.path, 'test')
         self.assertIn(CLOSED['issues'][0]['msg'], self.next_of()['confirm'])
-        self.save({URL: dict(self.card(), judged_no={'closed': '2026-01-02'})})
+        self.save({'u': URL, 'set': {'judged_no': {'closed': '2026-01-02'}}})
         self.assertIsNone(self.next_of()['confirm'])
-        got = self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {'approve': {}}}]})
+        got = self.save({'u': URL, 'ev': 'confirm', 'data': {'approve': {}}})
         self.assertEqual((got['rejected'], ds.state(self.card())), ([], 'confirmed'))
 
 
@@ -702,7 +702,7 @@ class PageGetsTheNextStep(Server):
 
     def test_saving_returns_the_new_next_step_of_the_changed_card(self):
         self.use(ready_to_confirm())
-        got = self.save({'__events__': [{'u': URL, 'ev': 'fix_start', 'data': {'apply': {'stage': 'fix'}}}]})
+        got = self.save({'u': URL, 'ev': 'fix_start', 'data': {'apply': {'stage': 'fix'}}})
         self.assertTrue(got['next'][URL]['busy'])
 
     def test_the_page_and_the_job_poll_carry_the_card_and_company_names(self):
@@ -732,7 +732,7 @@ class PageGetsTheNextStep(Server):
     def test_saving_an_event_returns_the_card_the_server_stored(self):
         """看板按下去不自己套狀態表:等後台回話,拿它存好的那一張畫(#343、user story 5)。"""
         self.use(ready_to_confirm())
-        got = self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {}}]})
+        got = self.save({'u': URL, 'ev': 'confirm', 'data': {}})
         self.assertEqual((got['cards'][URL], ds.state(got['cards'][URL])), (self.card(), 'confirmed'))
 
     def test_a_refused_event_returns_the_card_as_it_was(self):
@@ -740,14 +740,14 @@ class PageGetsTheNextStep(Server):
         fb['__ans__'][0]['inf'] = 1
         self.use(fb)
         before = self.card()
-        got = self.save({URL: dict(before, rm=1), '__events__': [{'u': URL, 'ev': 'confirm', 'data': {}}]})
-        self.assertEqual((got['cards'][URL], got['undo']), (before, {}))
+        got = self.save({'u': URL, 'ev': 'confirm', 'data': {}, 'set': {'rm': 1}})
+        self.assertEqual((got['cards'][URL], got['undo'], self.card()), (before, [None], before))
 
     def test_undoing_with_what_the_save_returned_puts_the_card_back(self):
         self.use(ready_to_confirm())
         before = self.card()
-        got = self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {}}]})
-        back = self.save({'__events__': [{'u': URL, 'undo': got['undo'][URL]}]})
+        got = self.save({'u': URL, 'ev': 'confirm', 'data': {}})
+        back = self.save(*got['undo'][0])
         self.assertEqual((back['rejected'], back['cards'][URL]), ([], before))
 
     def test_a_card_changed_in_the_background_shows_up_in_the_next_poll(self):
@@ -777,7 +777,7 @@ class ClearAnAnswer(Server):
 
     def test_an_answer_only_an_off_board_unsent_form_uses_is_cleared_not_deleted(self):
         self.use(self.board(off_locked=False))
-        self.save({'__events__': [{'redo': 'k2'}]})
+        self.save({'redo': 'k2'})
         e = self.bank()['k2']
         self.assertEqual((e['v'], bool(e.get('redo'))), ('', True))      # 題目留著,下一輪 agent 代填
 
@@ -790,21 +790,21 @@ class ClearAnAnswer(Server):
 
     def test_an_answer_only_sent_forms_use_is_deleted(self):
         self.use(self.board(off_locked=True))
-        self.save({'__events__': [{'redo': 'k2'}]})
+        self.save({'redo': 'k2'})
         self.assertNotIn('k2', self.bank())
 
     def test_the_filled_page_using_it_is_marked_to_retype(self):
         self.use(self.board(off_locked=False))
-        got = self.save({'__events__': [{'redo': 'k1'}]})
+        got = self.save({'redo': 'k1'})
         self.assertTrue(self.card()['form']['f'][0].get('refill'))
         self.assertTrue(got['next'][URL]['confirm'])
 
     def test_a_confirmed_card_using_it_loses_the_confirmation(self):
         fb = self.board(off_locked=False)
         self.use(fb)
-        self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {'approve': {}}}]})
+        self.save({'u': URL, 'ev': 'confirm', 'data': {'approve': {}}})
         self.assertEqual(ds.state(self.card()), 'confirmed')
-        self.save({'__events__': [{'redo': 'k1'}]})
+        self.save({'redo': 'k1'})
         self.assertEqual(ds.state(self.card()), 'parked')
 
     def test_the_cleared_answer_survives_an_old_bank_sent_in_the_same_save(self):
@@ -812,7 +812,7 @@ class ClearAnAnswer(Server):
         fb = self.board(off_locked=False)
         self.use(fb)
         ans = copy.deepcopy(fb['__ans__'])
-        self.save({'__ans__': ans, '__events__': [{'redo': 'k2'}]})
+        self.save({'u': '__ans__', 'set': {e['k']: e for e in ans}}, {'redo': 'k2'})
         self.assertEqual(self.bank()['k2']['v'], '')
 
 
@@ -822,7 +822,7 @@ class NotSent(Server):
         fb = busy_board('unsure')
         fb[URL]['apply'].pop('tab_id', None)
         self.use(fb)
-        got = self.save({'__events__': [{'u': URL, 'ev': 'not_sent', 'data': {}}]})
+        got = self.save({'u': URL, 'ev': 'not_sent', 'data': {}})
         m = self.card()
         self.assertEqual((got['rejected'], ds.state(m), m['apply']['issues']), ([], 'gone', [ds.GONE]))
 
@@ -832,7 +832,7 @@ class ActuallySent(Server):
         """送出結果不明、他查到其實送出了:證據就是 agent 當時那一份,後台抄,看板不用知道狀態表先清哪一格(#343)。"""
         self.use(busy_board('unsure'))
         fail = copy.deepcopy(self.card()['apply']['submit_fail'])
-        got = self.save({'__events__': [{'u': URL, 'ev': 'actually_sent', 'data': {'by': 'agent', 'at': '2026-01-03T00:00:00'}}]})
+        got = self.save({'u': URL, 'ev': 'actually_sent', 'data': {'by': 'agent', 'at': '2026-01-03T00:00:00'}})
         m = self.card()
         self.assertEqual((got['rejected'], ds.state(m), m['apply']['sent']),
                          ([], 'sent', dict(fail, you_sent='2026-01-03T00:00:00')))
@@ -845,7 +845,7 @@ class ChangeAnAnswer(Server):
     def change(self):
         ans = read_fb(self.path)['__ans__']
         ans[0]['v'] = 'Because I care.'
-        return self.save({'__ans__': ans, '__events__': [{'refill': 'k1'}]})
+        return self.save({'u': '__ans__', 'set': {'k1': ans[0]}}, {'refill': 'k1'})
 
     def test_the_filled_page_using_it_is_marked_to_retype(self):
         self.use(ready_to_confirm())
@@ -855,7 +855,7 @@ class ChangeAnAnswer(Server):
 
     def test_a_confirmed_card_using_it_loses_the_confirmation(self):
         self.use(ready_to_confirm())
-        self.save({'__events__': [{'u': URL, 'ev': 'confirm', 'data': {}}]})
+        self.save({'u': URL, 'ev': 'confirm', 'data': {}})
         self.change()
         self.assertEqual(ds.state(self.card()), 'parked')
 
@@ -881,19 +881,18 @@ class SwapMarksThePageOld(Server):
         self.use(ready_to_confirm())
 
     def test_switching_the_language_of_a_filled_card_without_an_event_marks_the_page_old(self):
-        got = self.save({URL: dict(self.card(), lang='en')})
+        got = self.save({'u': URL, 'set': {'lang': 'en'}})
         m = self.card()
         self.assertEqual((got['rejected'], ds.state(m), m['lang']), ([], 'stale', 'en'))
         self.assertIn('語言', m['apply']['stale'])
 
     def test_the_boards_own_event_is_kept_as_the_reason(self):
-        got = self.save({URL: dict(self.card(), lang='en'),
-                         '__events__': [{'u': URL, 'ev': 'files_changed', 'data': {'why': '語言換成「English」'}}]})
+        got = self.save({'u': URL, 'ev': 'files_changed', 'data': {'why': '語言換成「English」'}, 'set': {'lang': 'en'}})
         m = self.card()
         self.assertEqual((got['rejected'], ds.state(m), m['apply']['stale']), ([], 'stale', '語言換成「English」'))
 
     def test_pressing_the_language_already_in_use_changes_nothing(self):
-        self.save({URL: dict(self.card(), lang='zh')})
+        self.save({'u': URL, 'set': {'lang': 'zh'}})
         self.assertEqual(ds.state(self.card()), 'parked')
 
 

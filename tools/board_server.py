@@ -5,8 +5,7 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
 手機看、手機存、agent 的產線(cut_tailor、converge、apply_run…)都讀寫這一個檔。
 
   GET  /            → 服務現行看板(送出前注入設定裡的類別、標籤、可用履歷與附件及各自有哪些語言的檔與預覽、agent 名字)
-  POST /api/save    → body 是 data-fb 的 JSON(使用者的標記);逐筆併回看板的 data-fb,存檔
-  POST /api/merge   → 存檔撞到別處(409)之後:{keys, base, mine} 照現在的 data-fb 合併(merge_edit),只算不寫
+  POST /api/save    → {cmds: [指令…]}:看板的指令(write_fb),回存好的那幾份、每一道的復原單、新的下一步
   GET  /api/state   → 回傳目前 data-fb(給 agent/loop 讀狀態用)
   GET  /api/rev     → 小包:標記版本、職缺資料版本、背景建包中、兩個「跑」的進度(頁面輪詢用)
   POST /api/run/prep      → 跑準備區(cut_tailor)
@@ -18,7 +17,7 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
 (自己的 tailnet 裝置才連得到,手機走這條)。抓不到 Tailscale IP 就只剩 localhost。
 絕不綁 0.0.0.0:那會連同 Wi-Fi/LAN 的陌生人都能讀到你的履歷和求職資料。
 """
-import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal,html,contextlib,copy
+import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal,html,contextlib,copy,datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _HTTPServer
 import socketserver
 
@@ -157,6 +156,9 @@ def next_steps(doc, only=None):
                      gen=gen,building=building)
     if only is not None:
         out={k:v for k,v in out.items() if k in only}
+    for u,due in list(QUEUED.items()):    # 確認了、排在後台等著送的:看板寫「幾秒後開始送出」,不給「▶ 送出」
+        if isinstance(out.get(u),dict) and due>time.time():
+            out[u].setdefault('view',{})['due']=round(due-time.time(),1)
     out['__ans__']=next_step.answers(fb)     # 常用答案的:哪幾條按刪除是清掉(還沒送出的表單在用)、等不等你
     import agent_report
     out['__inbox__']={'todo':[it.get('id') for it in agent_report.todo(fb)]}   # 回報裡要你處理的(缺證據的不算)
@@ -265,10 +267,6 @@ def cur_gen():
     with _BUILD_LOCK: n=_build_state['gen']
     return '%s.%d'%(content_sig()[1],n)
 
-# 比對標記值:跟頁面上的 lean() 同一套規則(空字串、空陣列、空物件、None 都算「沒有」),收在 delivery_state 一份。
-# 兩邊一定要用同一套:以前頁面把清空的那筆記成 [] 或 {},伺服器這邊是整個 key 拿掉(None),比對起來永遠對不上。
-# 結果「標喜歡 → 取消 → 再標還好」第三下被當成衝突丟掉,還跳一條「有 1 筆在別的裝置改過」騙他。
-from delivery_state import same as _same  # noqa: E402
 
 def _record_sent_version(fb, url, jobs):
     """看板送來的事件把卡帶到已送出(我已在外部送出、其實送出了):記下實際寄出的是哪一份
@@ -289,182 +287,178 @@ def _manual_sent_problem(job, fb):
         return '先在卡上挑一份履歷和語言,再按「我已在外部送出」(要記寄出的是哪一份)'
     return None
 
-def write_fb(fb_obj, base=None, events=None, rejected=None, out=None):
-    """把新的 data-fb 併進 STATE 檔,其餘(jobs/sty/app)不動。單寫者鎖。
-
-    逐筆合併,不是整包覆蓋。以前是整包蓋:任何一個停在舊狀態的分頁(手機擱著沒關、
-    我開著沒重整)一自動存,就把整份標記倒回它載入時的樣子,別處的新改動全沒了。
-    現在只吃這次真的帶了東西的那幾筆,其餘保留磁碟上的版本。清空一筆要送 null。
-
-    投遞狀態不跟著卡片存:卡上歸狀態表管的那幾欄(delivery_state.OWNED、表單鎖、進出已送出)看板送來的不算數,
-    看板只送事件(events:[{u, ev, data}] 或復原 [{u, undo:{prev, after}, else?}]),這裡照磁碟上現在的狀態套表;
-    那一格不准的不做事(跟著那一下改的階段、心情也不收),原因放進 rejected 回給看板(狀態表修正 9)。
-    表單只有後台寫:看板改答案要標重打就送 {refill: 答案鍵},在鎖內標在現在那份表單上(#308);
-    清掉一條答案送 {redo: 答案鍵},清掉還是刪掉照整份看板算(form_record.redo)。
-    out:收這一包動到的卡存好的樣子(cards)和復原用的(undo:{卡: {prev, after}},投遞那一部分前後,
-    送回來 {u, undo} 就放回去):看板按下去不自己套狀態表,等這裡回話才照存好的畫(#343)。"""
-    import delivery_state, next_step
-    bad=[]
+def write_fb(cmds, out=None):
+    """看板送來的一串指令(#407 R8):照 apply_cmds 套在磁碟上「現在」那一份。單寫者鎖。回不收的那幾道。
+    out:收這一包動到的那幾份存好的樣子(cards)和每一道的復原單(undo,跟 cmds 對齊;不收的是 None)。"""
+    cmds=[c if isinstance(c,dict) else {} for c in cmds or []]
     # 按「✅ 確認送出」之前:程式自己讀那一頁,跟驗收時核對過的樣子比;變了就不讓他確認,卡上寫哪一格從什麼變成什麼和下一步(#316)。
     # 讀頁很慢(Codex 幾秒),在拿鎖之前做。副本(沙箱、測試、看板檢查)沒有真的 agent 的 Chrome,不讀
     changed={}
-    if events and is_real():
+    if is_real():
         import apply_run
-        for e in events:
-            u=str((e or {}).get('u') or '') if isinstance(e,dict) else ''
-            if u and not u.startswith('__') and e.get('ev')=='confirm':
+        for c in cmds:
+            u=str(c.get('u') or '')
+            if u and not u.startswith('__') and c.get('ev')=='confirm':
                 problems=apply_run.confirm_check(u,STATE)
                 if problems: changed[u]=problems
-    def put(d):
-        cur=d['fb']
-        # 樂觀鎖:這個分頁是照「它載入時看到的值」在改的。如果磁碟上那一筆已經不是那個值,
-        # 代表別的裝置(另一支手機、另一個分頁)先改過了,這次就整批不寫,讓它重新拿再改。
-        # 這是把 artifact 那套搬過來:publish 不加 force,底下版本比較新就直接擋下來。
-        # 全有或全無,不做一半——一半寫進去他無從分辨哪幾筆生效了。狀態表管的那幾欄不比(那一部分看事件)。
-        if base:
-            bad.extend(k for k,want in base.items() if not (_same(cur.get(k),want) if k.startswith('__') else
-                                                               _same(delivery_state.plain(cur.get(k)),delivery_state.plain(want))))
-            if bad: return bd.SKIP
-        refused=set()
-        redo=[]
-        evented={str(e.get('u') or '') for e in events or [] if isinstance(e,dict)}
-        mine=[k for k in evented|set(fb_obj) if k and not k.startswith('__')]
-        was={k:delivery_state.part(cur.get(k)) for k in mine}
-        jobs={j.get('id'):j for j in d['data'].get('jobs') or [] if isinstance(j,dict)}
-        for e in events or []:
-            u=str((e or {}).get('u') or '')
-            if isinstance(e,dict) and 'refill' in e and not u:
-                redo.append((False,str(e['refill'])))   # 答案改了:等這一包的常用答案收完再標(見下面)。看板不送整份表單
-                continue
-            if isinstance(e,dict) and 'redo' in e and not u:
-                redo.append((True,str(e['redo'])))     # 清掉一條答案:等這一包的常用答案收完再清(見下面)
-                continue
-            try:
-                if not u or u.startswith('__'):
-                    raise ValueError('沒有指定是哪一張')
-                ev=str(e.get('ev') or '')
-                data=e.get('data') if isinstance(e.get('data'),dict) else {}
-                # 收不收照這張卡的下一步(#341):擋的原因就是卡上灰掉的按鈕寫的那一句,繞過畫面直接送也一樣
-                # 復原只看它帶的退路(換檔的復原 = 又換了一次檔);復原本身准不准由 delivery_state.undo 判
-                fallback=e.get('else') if isinstance(e.get('else'),dict) else {}
-                fev=str(fallback.get('ev') or '')
-                why=((next_step.refuse(cur,u,fev) if fev else None) if 'undo' in e
-                     else next_step.refuse(cur,u,ev,d['data'].get('status')))
-                if not why and 'undo' not in e and ev=='sent_manual':
-                    why=_manual_sent_problem(jobs.get(u),cur)
-                if why:
-                    raise ValueError(why)
-                if 'undo' in e:
-                    delivery_state.undo(cur,u,(e['undo'] or {}).get('prev'),(e['undo'] or {}).get('after'),e.get('else'))
-                elif ev=='confirm' and u in changed:
-                    import apply_run
-                    apply_run.page_changed(cur,u,changed[u],'確認前')     # 停著等你 → 填了卡住,原因和下一步寫在卡上
-                    raise ValueError('確認前'+apply_run.PAGE_CHANGED+changed[u][0])
-                else:
-                    if ev=='confirm':
-                        # 確認時記下的答案由後台當下算(#340 user story 9):頁面送來的快照不算數,只拿它按下去的時間
-                        import form_record
-                        data={'approve':form_record.approval(cur,u,(data.get('approve') or {}).get('at'))}
-                    if ev=='not_sent':
-                        data=dict(data,issues=[delivery_state.GONE])   # 頁已經不在的話卡上寫這一句(看板不抄)
-                    if ev=='actually_sent' and 'evidence' not in data:
-                        # 他查到其實送出了:證據就是 agent 當時那一份(狀態表這一格先清掉它,所以先抄)
-                        data=dict(data,evidence=dict(((cur.get(u) or {}).get('apply') or {}).get('submit_fail') or {},
-                                                     you_sent=data.get('at')))
-                    delivery_state.fire(cur,u,ev,**data)
-                    if e.get('ev')=='not_sent':
-                        # 他查過了、確認沒送出:這張跟送出有關的回報(送出沒確認成功、去信箱查)一起收掉(#316)
-                        import agent_report, apply_run
-                        agent_report.apply_resolve(cur,u,'你確認沒送出',only=lambda it: it.get('from')==apply_run.REPORT_FROM)
-                if delivery_state.state(cur.get(u))=='sent': _record_sent_version(cur,u,d['data'].get('jobs') or [])
-            except (ValueError,TypeError,KeyError) as x:
-                refused.add(u)
-                if rejected is not None: rejected.append({'u':u,'ev':(e or {}).get('ev') or 'undo','msg':str(x)[:200]})
-        # 事件先套(復原要比的是這一包送來之前的樣子),再收這一包裡卡片的其他欄位。
-        # 那一張的事件被擋下:他按的那一下沒發生,跟著那一下改的欄位(退回、移除、出錯了、👎 改的階段和心情)也不收,
-        # 不然會拼出「正在送出卻在待你決定」這種狀態表不准存在的組合;同一包裡的筆記照收
-        for k,v in fb_obj.items():
-            if not k.startswith('__'):
-                # 沒帶事件、直接存:忙的卡也不准跟著存檔換檔或離開流程(#341,繞過畫面一樣擋)
-                why=None if k in refused else next_step.refuse_save(cur.get(k),v)
-                if why:
-                    refused.add(k)
-                    if rejected is not None: rejected.append({'u':k,'ev':'save','msg':why})
-                if k in refused:
-                    if v is None: continue          # 整張清掉也是跟著那一下的:不做
-                    v=delivery_state.keep_flow(cur.get(k),v)
-                v=delivery_state.merge_saved(cur.get(k),v)
-            # 換了履歷、語言、自己的檔,這一包又沒帶這張的事件:後台自己看要寄的檔案真的變了沒,變了就送「換檔」
-            # (填好的頁上傳的是舊檔,#341)。看板自己送的事件照收,它寫的原因比較清楚
-            job=jobs.get(k) if k not in refused and k not in evented and isinstance(v,dict) and any(
-                (cur.get(k) or {}).get(f)!=v.get(f) for f in delivery_state.SWAP_FIELDS) else None
-            before=_doc_sig(job,cur) if job else None
-            old=cur.get(k) if isinstance(cur.get(k),dict) else {}
-            if v is None:
-                old_apply=old.get('apply')
-                delivery_state.queue_workspace(cur,old_apply.get('workspace') if isinstance(old_apply,dict) else None,'card_removed')
-                cur.pop(k,None)
-            else: cur[k]=v
-            if job and _doc_sig(job,cur)!=before:
-                delivery_state.try_fire(cur,k,'files_changed',why=_swap_why(old,v))
-        # 改了、清掉答案:清掉還是刪掉、哪幾張表單要重打、哪幾張確認作廢,照整份看板算(form_record.redo、changed):
-        # 不在看板上畫得出來的卡也算。放在最後:同一包帶來的常用答案(這個分頁手上的)不會把清掉蓋回去,確認快照比的是新答案
-        import form_record
-        hit=set()
-        for clear,k in redo:
-            hit|=set(form_record.users(cur,k))
-            (form_record.redo if clear else form_record.changed)(cur,k)
-        if out is not None:
-            out['cards']={k:copy.deepcopy(cur.get(k)) for k in set(mine)|hit}   # 改答案動到的表單也一起回
-            out['undo']={k:{'prev':was[k],'after':delivery_state.part(cur.get(k))} for k in mine
-                         if not _same(was[k],delivery_state.part(cur.get(k)))}
+    got={}
     with LOCK:
-        if bd.rewrite(put,STATE,by='看板') is bd.SKIP:
-            return bad
+        bd.rewrite(lambda d: got.update(zip(('rejected','undo','cards'),apply_cmds(d,cmds,changed))),STATE,by='看板')
+    for c,slip in zip(cmds,got['undo']):
+        if slip is not None and c.get('ev')=='confirm':
+            queue_send(c['u'],((got['cards'].get(c['u']) or {}).get('approve') or {}).get('at'))
     note_saved()
     import chrome_door
     chrome_door.close_if_idle(STATE)
-    return []
+    if out is not None:
+        out.update(cards=got['cards'],undo=got['undo'])
+    return got['rejected']
 
 
-# 陣列裡每一條有穩定 id 的,照 id 一條一條合:常用答案的 k、回報的 id
-MERGE_BY={'__ans__':'k','__inbox__':'id'}
+def apply_cmds(d, cmds, changed=None):
+    """一串指令套在一份看板(d:{fb, data})上,只算不寫檔。指令只有三種:
+    {u, ev?, data?, set?}(事件照狀態表和這張卡的下一步收或擋;set 只改送來的那幾欄,delivery_state.put)、
+    {u, back, expect}(復原單送回來,delivery_state.restore)、{refill|redo: 答案鍵}(答案改了、清掉:
+    哪幾張表單要重打、哪幾張確認作廢,照整份看板算,form_record)。兩個分頁各改各的欄不會互相蓋掉。
+    不收的那一道整道不做(它動到的都放回)。回 (不收的 [{i, u, ev, msg}], 每一道的復原單, 動到的那幾份現在的樣子)。"""
+    import delivery_state as ds, next_step, form_record
+    cur=d['fb']
+    jobs={j.get('id'):j for j in d['data'].get('jobs') or [] if isinstance(j,dict)}
+    rejected,undo,touched=[],[None]*len(cmds),set()
+    for i,c in enumerate(cmds):
+        u=str(c.get('u') or ''); ev=str(c.get('ev') or '')
+        before=copy.deepcopy(cur)   # ponytail: 每道指令拷一份整個看板;看板一包只有幾道,大了再改成只拷動到的那幾份
+        try:
+            if 'refill' in c or 'redo' in c:
+                k=str(c.get('refill') if 'refill' in c else c.get('redo'))
+                (form_record.changed if 'refill' in c else form_record.redo)(cur,k)
+            elif not u or (ev and u.startswith('__')):
+                raise ValueError('沒有指定是哪一張')
+            elif 'back' in c:
+                left=ds.restore(cur,c)
+                if left and len(left)==len(c.get('back') or {}):
+                    raise ValueError('這張已經被別處改過了,不能復原')
+                # 狀態那幾欄沒有整份放回按之前:其他欄照一般改法放回,忙的卡一樣不准換檔、離開流程
+                if not (set(c.get('back') or {})&set(ds.STATE_FIELDS)) or set(left)&set(ds.STATE_FIELDS):
+                    why=next_step.refuse_save(before.get(u),cur.get(u)) if not u.startswith('__') else None
+                    if why: raise ValueError(why)
+            else:
+                if ev:
+                    _event(cur,u,ev,c.get('data') if isinstance(c.get('data'),dict) else {},jobs,changed or {},
+                           d['data'].get('status'))
+                sets=c.get('set') if isinstance(c.get('set'),dict) else {}
+                if sets and not u.startswith('__'):
+                    sets=ds.settable(cur.get(u),sets)
+                    new=copy.deepcopy(cur); ds.put(new,u,sets)
+                    # 沒帶事件、直接改:忙的卡也不准跟著改換檔或離開流程(#341,繞過畫面一樣擋)
+                    why=next_step.refuse_save(cur.get(u),new.get(u))
+                    if why: raise ValueError(why)
+                if sets and (u.startswith('__') or u in cur or u in jobs):
+                    ds.put(cur,u,sets)
+            if u and not u.startswith('__'):
+                _after_card(cur,before,u,jobs.get(u),ev)
+        except _Refused as x:
+            rejected.append({'i':i,'u':u,'ev':ev,'msg':str(x)[:200]})   # 擋下來但卡上記了原因(確認前頁面變了)
+            touched.add(u)
+            continue
+        except (ValueError,TypeError,KeyError) as x:
+            cur.clear(); cur.update(before)
+            rejected.append({'i':i,'u':u,'ev':ev or ('undo' if 'back' in c else 'set'),'msg':str(x)[:200]})
+            touched.add(u)      # 看板照它現在的樣子畫回來
+            continue
+        undo[i]=ds.slips(before,cur)
+        touched|={x['u'] for x in undo[i]}|({u} if u else set())
+    return rejected,undo,{k:copy.deepcopy(cur.get(k)) for k in touched if k}
 
-def merge_edit(base, mine, theirs, key=None):
-    """存檔撞到別的裝置(或 agent、程式)先改了同一筆(/api/save 回 409):兩邊都從 base 改起,各改各的格子都留下。
-    同一格兩邊改成不一樣才算撞到,留這台的(他剛打的),撞到的格子放進 clash 讓看板給他換回那邊的。
-    想法這種陣列整個當一格('*');key:照那一欄一條一條合,agent 新開的答案、程式剛寫的回報不會被這台整份蓋掉。
-    兩邊都改了同一格、而且是物件(卡上的 judged_no 這種):再往下一層一欄一欄合,撞到的記成 a.b 這種路徑。
-    「一樣」照 delivery_state.same(空的各種寫法都算一樣)。回 {value, clash}。"""
-    def keyed(a):
-        return a is None or (isinstance(a, list) and all(isinstance(x, dict) and x.get(key) is not None for x in a))
-    if key and keyed(base) and keyed(mine) and keyed(theirs):
-        B, M, T = ({x[key]: x for x in a or []} for a in (base, mine, theirs))
-        out, hit = [], []
-        for i in dict.fromkeys(x[key] for x in (theirs or []) + (mine or [])):
-            if _same(M.get(i), B.get(i)):
-                if i in T: out.append(T[i])
-                continue
-            if i in M: out.append(M[i])
-            if not _same(T.get(i), B.get(i)) and not _same(T.get(i), M.get(i)): hit.append(i)
-        return {'value': out, 'clash': hit}
-    if not all(v is None or isinstance(v, dict) for v in (base, mine, theirs)):
-        if _same(mine, base): return {'value': theirs, 'clash': []}
-        return {'value': mine, 'clash': [] if _same(theirs, base) or _same(theirs, mine) else ['*']}
-    b, m, t = base or {}, mine or {}, theirs or {}
-    out, clash = {}, []
-    for k in dict.fromkeys([*b, *m, *t]):
-        if _same(m.get(k), b.get(k)):
-            if k in t: out[k] = t[k]
-        elif (isinstance(m.get(k), dict) and isinstance(t.get(k), dict) and (k not in b or isinstance(b[k], dict))
-              and not _same(t.get(k), b.get(k)) and not _same(t.get(k), m.get(k))):
-            sub = merge_edit(b.get(k) or {}, m[k], t[k])
-            out[k] = sub['value']
-            clash += [k if c == '*' else k + '.' + c for c in sub['clash']]
-        else:
-            if k in m: out[k] = m[k]
-            if not _same(t.get(k), b.get(k)) and not _same(t.get(k), m.get(k)): clash.append(k)
-    return {'value': out, 'clash': clash}
+
+class _Refused(ValueError):
+    """不收,但卡上已經記了原因(確認前頁面變了):卡不放回。"""
+
+
+def _event(cur, u, ev, data, jobs, changed, status):
+    """看板送來的一個事件:收不收照這張卡的下一步(#341,擋的原因就是卡上灰掉的按鈕寫的那一句),收了照狀態表改。"""
+    import delivery_state as ds, next_step
+    why=next_step.refuse(cur,u,ev,status) or (_manual_sent_problem(jobs.get(u),cur) if ev=='sent_manual' else None)
+    if why:
+        raise ValueError(why)
+    if ev=='confirm' and u in changed:
+        import apply_run
+        apply_run.page_changed(cur,u,changed[u],'確認前')     # 停著等你 → 填了卡住,原因和下一步寫在卡上
+        raise _Refused('確認前'+apply_run.PAGE_CHANGED+changed[u][0])
+    if ev=='confirm':
+        # 確認時記下的答案由後台當下算(#340 user story 9),時間也是後台的:頁面送來的快照、手機的時鐘都不算數
+        import form_record
+        data={'approve':form_record.approval(cur,u,_now())}
+    if ev=='not_sent':
+        data=dict(data,issues=[ds.GONE])   # 頁已經不在的話卡上寫這一句(看板不抄)
+    if ev=='actually_sent' and 'evidence' not in data:
+        # 他查到其實送出了:證據就是 agent 當時那一份(狀態表這一格先清掉它,所以先抄)
+        data=dict(data,evidence=dict(((cur.get(u) or {}).get('apply') or {}).get('submit_fail') or {},you_sent=data.get('at')))
+    ds.fire(cur,u,ev,**data)
+    # 這張之前還開著、跟送出有關的回報已經有答案了,一起收掉(#316)
+    import agent_report, apply_run
+    if ev=='not_sent':
+        agent_report.apply_resolve(cur,u,'你確認沒送出',only=lambda it: it.get('from')==apply_run.REPORT_FROM)
+    elif ev in ('actually_sent','sent_manual'):
+        agent_report.apply_resolve(cur,u,'你確認其實送出了' if ev=='actually_sent' else '你標了已在外部送出')
+
+
+def _after_card(cur, before, u, job, ev):
+    """一道指令動到一張卡之後,後台自己補的事:到已送出記寄出的是哪一份;沒帶事件卻換了履歷、語言、
+    自己的檔,要寄的檔案真的變了就送「換檔」(填好的頁上傳的是舊檔,#341)。"""
+    import delivery_state as ds
+    old,m=before.get(u) if isinstance(before.get(u),dict) else {},cur.get(u)
+    if not isinstance(m,dict):
+        old_apply=old.get('apply')
+        ds.queue_workspace(cur,old_apply.get('workspace') if isinstance(old_apply,dict) else None,'card_removed')
+        return
+    if ds.state(m)=='sent' and ds.state(old)!='sent':
+        _record_sent_version(cur,u,[job] if job else [])
+    stated=not ds.same({k:old.get(k) for k in ds.STATE_FIELDS},{k:m.get(k) for k in ds.STATE_FIELDS})
+    if job and not ev and not stated and any(old.get(f)!=m.get(f) for f in ds.SWAP_FIELDS):
+        if _doc_sig(job,before)!=_doc_sig(job,cur):
+            ds.try_fire(cur,u,'files_changed',why=_swap_why(old,m))
+
+
+def _now():
+    return datetime.datetime.now().isoformat(timespec='seconds')
+
+
+# 確認送出之後 8 秒才叫 agent 送(Gmail 的「復原傳送」):排在後台,分頁關掉照樣送;
+# 時間到時這張已經不是同一次確認(按了復原、取消確認、退回、換檔、移除)就不送
+SEND_AFTER=8
+QUEUED={}   # 卡 → 幾點送(time.time())
+SERVING=[False]   # 只有真的在服務的伺服器(main)排送出;單元測試直接呼叫 write_fb 不留計時器
+
+
+def queue_send(u, at, after=SEND_AFTER):
+    if not SERVING[0]:
+        return
+    QUEUED[u]=time.time()+after
+    t=threading.Timer(after,_send_confirmed,(u,at))
+    t.daemon=True
+    t.start()
+
+
+def _send_confirmed(u, at):
+    """時間到:還是同一次確認才送。另一輪代投、查應徵進度正在用 agent 的瀏覽器,就等它跑完再送(全自動,不叫他再按);
+    其他原因送不出去(沒有 ego、確認後答案又改了…),照實寫進看板的回報,卡停在你已確認、給「▶ 送出」。"""
+    import delivery_state as ds
+    QUEUED.pop(u,None)
+    doc=bd.parse(read_doc())
+    m=json.loads(doc['fb'] or '{}').get(u) or {}
+    if ds.state(m)!='confirmed' or (m.get('approve') or {}).get('at')!=at:
+        return
+    code,st=start_run('apply',{'stage':'submit','url':u})
+    if code==409 and (st.get('running') or st.get('other')):
+        queue_send(u,at,SEND_RETRY)
+    elif code!=200:
+        import agent_report
+        agent_report.report('幫你填表',f'確認送出了,8 秒後卻沒送出去:{str(st.get("msg") or code)[:160]}',
+                            need='處理好之後在卡上按「▶ 送出」',job=u,live=STATE)
+
+
+SEND_RETRY=15   # 另一輪正在用 agent 的瀏覽器:每 15 秒再看一次
 
 
 def _swap_why(old, new):
@@ -926,7 +920,8 @@ def start_run(kind,args):
         if stage not in ('fill','fix','submit'): return 400,{'msg':'不知道要填表、修改還是送出'}
         doc=bd.parse(read_doc()); fb=json.loads(doc['fb']); status=doc['data'].get('status')
         if stage=='submit':
-            urls=[url] if url else [u for u,m in fb.items() if isinstance(m,dict) and m.get('app')=='ship' and not m.get('rm')]
+            import delivery_state as ds
+            urls=[url] if url else [u for u,m in fb.items() if ds.app_of(m)=='ship']
             ok=[u for u in urls if fr.approval_problem(fb,u,status) is None]
             if not ok: return 400,{'msg':fr.approval_problem(fb,url,status) if url else '沒有核准有效的卡'}
         if stage=='fix':
@@ -1344,24 +1339,21 @@ class H(BaseHTTPRequestHandler):
             rt=body.get('runtime')
             if rt not in doctor.RUNTIMES or not doctor.agent_state(rt)[0]:
                 return self._json(400,{'ok':False,'msg':'這一種在這台電腦上用不了'})
-            s=cf.user_settings(); ag=s.setdefault('agent',{})
-            old=list(ag.get('agents') or (cf.C.get('agent') or {}).get('agents') or [])
+            old=list(cf.load(cf.HOME)['agent']['agents'])   # 讀檔裡最新的(他可能手改過)
             ids={str(x.get('id')) for x in old if isinstance(x,dict)}
             import chrome_door
             chrome=rt in chrome_door.DOORS      # 這一家能用 agent 的 Chrome
             if chrome:   # 只准一個 agent 用 Chrome:換成新的那個
                 old=[{**x,'browser':False} if isinstance(x,dict) else x for x in old]
             new_id=next(i for i in [rt]+[f'{rt}-{n}' for n in range(2,99)] if i not in ids)
-            ag['agents']=[{'id':new_id,'runtime':rt,'model':'','effort':'max','speed':'standard',
-                           'browser':chrome}]+old
-            bad=PILOT.save_settings(lambda: sa.save({'settings':s})) if PILOT else sa.save({'settings':s})
+            s={'agent.agents':[{'id':new_id,'runtime':rt,'model':'','effort':'max','speed':'standard','browser':chrome}]+old}
+            bad=PILOT.save_settings(lambda: sa.save({'set':s})) if PILOT else sa.save({'set':s})
             return self._json(400 if bad else 200,{'ok':not bad,'msg':';'.join(bad) or '改好了,之後會先用它'})
         if act=='find_minutes':
             # 找缺那一列的「__ 分鐘」格子:改了就存(同一套驗證、同一條存檔路);空的存成 0 = 不限時
             v=body.get('minutes')
-            v=0 if v in (None,'') else v
-            s=cf.user_settings(); s.setdefault('search',{})['find_minutes']=v
-            bad=PILOT.save_settings(lambda: sa.save({'settings':s})) if PILOT else sa.save({'settings':s})
+            s={'search.find_minutes':0 if v in (None,'') else v}
+            bad=PILOT.save_settings(lambda: sa.save({'set':s})) if PILOT else sa.save({'set':s})
             return self._json(400 if bad else 200,{'ok':not bad,'msg':';'.join(bad)})
         if act=='service':
             # 開機啟動是整台電腦的服務:副本(沙箱、截圖、介面檢查)按了會停掉或換掉真的那一個
@@ -1498,14 +1490,6 @@ class H(BaseHTTPRequestHandler):
             return self._json(200 if r.get('ok') else 400,r)
         if self.path=='/api/bank':
             return self.do_POST_bank()
-        if self.path=='/api/merge':
-            # 存檔撞到之後(409):照伺服器現在的版本,把這個分頁手上的改動疊上去。只算不寫,看板拿結果再存一次
-            body=self._json_body()
-            if body is None: return
-            fb=json.loads(bd.parse(read_doc())['fb'] or '{}')
-            base,mine=(x if isinstance(x,dict) else {} for x in (body.get('base'),body.get('mine')))
-            return self._json(200,{'fb':fb,'merged':{k:dict(merge_edit(base.get(k),mine.get(k),fb.get(k),MERGE_BY.get(k)),
-                                                             key=MERGE_BY.get(k)) for k in map(str,body.get('keys') or mine.keys()|base.keys())}})
         if self.path=='/api/customize':
             if self._agent_blocked():return
             body=self._json_body()
@@ -1545,35 +1529,25 @@ class H(BaseHTTPRequestHandler):
             code,st=start_run(kind,args)
             self._json(code,dict(st,ok=code==200)); return
         try:
-            n=int(self.headers.get('Content-Length','0'))
-            fb=json.loads(self.rfile.read(n).decode('utf-8'))
-            assert isinstance(fb,dict)
-            # 陳舊分頁防護:整包送(超過 40 筆)而且沒帶版本的,一律擋。
-            # 手機擱著沒關的舊分頁會把整份標記倒回它載入時的樣子,別處的改動就沒了。
-            keys=[k for k in fb if not k.startswith('__')]
-            if '__rev__' not in fb and len(keys)>40:
+            body=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))).decode('utf-8'))
+            if not isinstance(body,dict) or not isinstance(body.get('cmds'),list):
+                # 看板只送指令:送整份標記的是還開著的舊版分頁,照它存會把別處的新改動蓋掉
                 self._json(409,{'ok':False,'err':'stale','msg':'這個分頁的程式是舊版,請重新整理再存'}); return
-            fb.pop('__rev__',None)
-            base=fb.pop('__base__',None)
-            events=fb.pop('__events__',None)
-            rejected=[]
+            cmds=body['cmds']
             got={}
-            bad=write_fb(fb, base if isinstance(base,dict) else None,
-                         events if isinstance(events,list) else None, rejected, got)
-            if bad:
-                self._json(409,{'ok':False,'err':'conflict','keys':bad,
-                    'msg':'這幾筆在別的地方改過了,先拿最新的再存'}); return
+            rejected=write_fb(cmds,got)
+            sets=[c.get('set') for c in cmds if isinstance(c,dict) and isinstance(c.get('set'),dict)]
             # 有卡進待你決定/可投遞 → 背景生可投遞包(single-flight),使用者不用再等人建。
-            if any(isinstance(v,dict) and v.get('app') in ('ready','ship') for v in fb.values()):
+            if any(x.get('app') in ('ready','ship') for x in sets):
                 trigger_build()
-            if PILOT and (events or '__auto__' in fb or any(isinstance(v,dict) and v.get('app') in ('prep','ready','ship') for v in fb.values())):
+            if PILOT and (any(isinstance(c,dict) and (c.get('ev') or 'back' in c or c.get('u')=='__auto__') for c in cmds)
+                          or any(x.get('app') in ('prep','ready','ship') for x in sets)):
                 PILOT.kick()
             with _BUILD_LOCK: building=_build_state['running']
-            # 有變動的卡的新下一步:這一包動到的卡;動到常用答案、封鎖這類整份的資料(或改答案的事件)就每一張都重算
-            whole=any(k.startswith('__') for k in fb) or any(isinstance(e,dict) and not e.get('u') for e in events or [])
-            touched=None if whole else {k for k in fb}|{str(e.get('u') or '') for e in events or [] if isinstance(e,dict)}
-            self._json(200,{'ok':True,'building':building,'rejected':rejected,'cards':got.get('cards',{}),
-                            'undo':got.get('undo',{}),'next':next_steps(bd.parse(read_doc()),touched)})
+            # 有變動的那幾份的新下一步;動到常用答案、封鎖這類整份的資料就每一張都重算
+            touched=set(got.get('cards',{}))
+            self._json(200,{'ok':True,'building':building,'rejected':rejected,'cards':got.get('cards',{}),'undo':got.get('undo',[]),
+                            'next':next_steps(bd.parse(read_doc()),None if any(k.startswith('__') for k in touched) else touched)})
         except bd.Tampered:
             raise
         except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)
@@ -1658,7 +1632,7 @@ def main():
     ap.add_argument('--state',default=cf.LIVE)
     ap.add_argument('--allow-agent',action='store_true',
                     help='允許 AI 助理的瀏覽器寫入。只有沙箱板該開,正式看板一律不開。')
-    a=ap.parse_args(); STATE=os.path.abspath(a.state); ALLOW_AGENT[0]=a.allow_agent
+    a=ap.parse_args(); STATE=os.path.abspath(a.state); ALLOW_AGENT[0]=a.allow_agent; SERVING[0]=True
     first_run(STATE)
     tmp=None; srvs=[]; previous_sigterm=None
     try:

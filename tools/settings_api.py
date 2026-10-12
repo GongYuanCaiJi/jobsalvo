@@ -134,8 +134,8 @@ def get():
     render_warnings = markdown_warnings()
     return {
         'settings': cf.user_settings(),
-        'effective': dict({k: C[k] for k in ('board', 'agent', 'resume', 'search', 'research', 'replies')},
-                          flow=dict(cf.DEFAULTS.get('flow') or {}, **(C.get('flow') or {}))),
+        'effective': {k: C[k] for k in ('board', 'agent', 'resume', 'search', 'research', 'replies', 'flow')},
+        'fields': cf.FIELDS,
         'texts': {'preferences_custom': preferences_custom, 'preferences_agent': preferences_agent,
                   'apply_rules': _read(cf.APPLY_RULES)},
         'files': _files(),
@@ -572,15 +572,25 @@ def find_minutes_problem(value):
 
 
 def save(body):
-    """body = {settings: 整份使用者設定, texts: {preferences_custom, preferences_agent, apply_rules}, version: 設定頁打開時的版本}。回問題清單。
-    沒帶 version 的(讀了最新的檔才改的:「改用 X」、找缺分鐘數、檢查程式)不比對。"""
+    """body = {set: {欄位路徑(config.FIELDS): 新值}, texts: {preferences_custom, preferences_agent, apply_rules}, version: 設定頁打開時的版本}
+    (檢查程式還原用 settings 整份換掉)。回問題清單。沒帶 version 的(只改自己那一格:「改用 X」、找缺分鐘數)不比對。"""
     if 'version' in body and body['version'] != version():
         return [CONFLICT]
     s = None
-    if 'settings' in body:
-        s = body['settings']
+    if 'settings' in body or 'set' in body:
+        s = copy.deepcopy(body.get('settings', cf.user_settings()))
         if not isinstance(s, dict):
             return ['設定格式不對']
+        for key, value in (body.get('set') or {}).items():
+            if key not in cf.FIELDS:
+                return [f'沒有「{key}」這個設定']
+            *up, last = key.split('.')
+            o = s
+            for k in up:
+                if not isinstance(o.get(k), dict):
+                    o[k] = {}
+                o = o[k]
+            o[last] = value
         s = cf.migrate_settings(s)
         bad = _check(s)
         if bad:
@@ -600,27 +610,10 @@ def save(body):
         return [f'「你的喜好」或「填表做法」沒存成({e.strerror or e}),設定也還沒動;處理好再按一次']
     if s is not None:
         try:
-            cf.save(_without_untouched_defaults(s, cf.user_settings()))
+            cf.save(s)
         except OSError as e:
             return [f'設定檔沒存成({e.strerror or e});「你的喜好」和「填表做法」已經存好,處理好再按一次']
     return []
-
-
-def _without_untouched_defaults(new, old):
-    """設定頁送來的是整份(找缺、agent、分類…從實際生效的值起頭,含預設)。他沒設過、值又跟預設一樣的欄位不寫進檔:
-    寫了就變成「他自己設的」,之後產品改了預設(docs/adr/0001 更新跟 main)他拿不到,也分不出哪些是自己設的。
-    檔裡原本就有的照留。"""
-    new = copy.deepcopy(new)
-    for sec, defaults in cf.DEFAULTS.items():
-        cur = new.get(sec)
-        if not isinstance(defaults, dict) or not isinstance(cur, dict):
-            continue
-        mine = old.get(sec) if isinstance(old.get(sec), dict) else {}
-        for key in [k for k in cur if k not in mine and k in defaults and cur[k] == defaults[k]]:
-            del cur[key]
-        if not cur and sec not in old:
-            del new[sec]
-    return new
 
 
 def safe_rel(rel, allow_external_symlink=False):

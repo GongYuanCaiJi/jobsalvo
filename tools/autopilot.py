@@ -65,7 +65,7 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
         return m.get('app') if isinstance(m, dict) else None
 
     def live(i):
-        return i in jobs and not (fb.get(i) or {}).get('rm')
+        return i in jobs and ds.app_of(fb.get(i)) != 'rm'
 
     out = {'init': None, 'seen': {}, 'advance': [], 'prep': None, 'fix': None, 'fill': None, 'replies': False, 'replies_retry': False,
            'tried': [], 'rf': {}, 'wait': None}
@@ -214,9 +214,7 @@ class Pilot:
         skip = set(a.get('skip') or [])
         if newly_enabled:
             skip.update(j['id'] for j in data.get('jobs') or [] if isinstance(j, dict)
-                        and isinstance(fb.get(j['id']), dict)
-                        and fb[j['id']].get('app') in newly_enabled
-                        and not fb[j['id']].get('rm'))
+                        and ds.app_of(fb.get(j['id'])) in newly_enabled)
         def mutate(current):
             item = current.get(KEY)
             if isinstance(item, dict):

@@ -47,7 +47,7 @@ def mine(fb, job):
     a = fb.get('__auto__')
     m = fb.get(job['id'])
     return (isinstance(a, dict) and job['id'] not in (a.get('skip') or [])
-            and not (isinstance(m, dict) and m.get('rm')) and not ds.company_blocked(fb, job))
+            and ds.app_of(m) != 'rm' and not ds.company_blocked(fb, job))
 
 
 def _move(fb, job, flow, tried, status, build):

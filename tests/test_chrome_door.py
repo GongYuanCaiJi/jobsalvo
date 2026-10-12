@@ -92,7 +92,7 @@ class OnlyTheDoorAsksWhichFamily(unittest.TestCase):
     def test_only_dev_tools_launch_a_browser_themselves(self):
         # 使用者會跑到的程式要開網頁、截圖、印 PDF 一律走 ego 的門路;自己開 Playwright/Chrome 的只准是開發工具
         # (看板檢查、介面截圖在 CI 的 Linux 上跑,ego 只有 macOS)。無頭 Chrome 會在 Dock 冒圖示、要使用者另裝 Chrome
-        dev = {'board_check.py', 'shot.py', 'chrome_bin.py', 'dev_pdf.py'}
+        dev = {'dev_browser.py', 'chrome_bin.py', 'dev_pdf.py'}
         pat = re.compile(r'^\s*(import|from)\s+(playwright|chrome_bin)\b', re.M)
         tools = os.path.join(HERE, '..', 'tools')
         bad = [name for name in sorted(os.listdir(tools)) if name.endswith('.py') and name not in dev

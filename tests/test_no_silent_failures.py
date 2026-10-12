@@ -100,14 +100,13 @@ class FailuresReachTheBoard(unittest.TestCase):
 
     def test_folder_history_not_scheduled_is_reported(self):
         with mock.patch('folder_history.note_saved', side_effect=OSError('磁碟滿了')):
-            self.assertEqual(self.bs.write_fb({self.url: {'s': 'like'}}), [])
+            self.assertEqual(self.bs.write_fb([{'u': self.url, 'set': {'s': 'like'}}]), [])
         self.assertTrue(any('版本紀錄' in m and '磁碟滿了' in m for m in self.reports()), self.reports())
 
     def test_sent_version_not_recorded_is_reported(self):
         with mock.patch('ship.record_sent', side_effect=OSError('讀不到履歷檔')), \
              mock.patch.object(self.bs, '_manual_sent_problem', return_value=None):   # 這條測的是記不下來,不是有沒有挑履歷
-            rejected = []
-            self.bs.write_fb({}, events=[{'u': self.url, 'ev': 'sent_manual'}], rejected=rejected)
+            rejected = self.bs.write_fb([{'u': self.url, 'ev': 'sent_manual'}])
         self.assertEqual(rejected, [])
         self.assertTrue(any('寄出的是哪一份' in m and '讀不到履歷檔' in m for m in self.reports()), self.reports())
 

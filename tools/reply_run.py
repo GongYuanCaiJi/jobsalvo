@@ -9,12 +9,14 @@ from dataclasses import dataclass, field
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd
+from delivery_state import set_outcome   # 跟看板的「記結果」事件同一支
 import agent_run as ar
 import evidence
 import jobrun
 import agent_report
 import config as cf
 import card
+import delivery_state as ds
 
 SP = os.environ.get('REPLY_TMP', cf.TMP)
 STATUS = 'reply_status.json'
@@ -55,8 +57,6 @@ def mailbox_message_ref(link, box=None):
 
 GMAIL, _IS_GMAIL = mailbox()
 MAX_MAILS = 60
-OC_RANK = {'': 0, 'iv': 1, 'offer': 2}
-OC_END = {'rej', 'ghost', 'wd'}
 KIND_TO_OC = {'reject': 'rej', 'interview': 'iv', 'offer': 'offer'}
 OC_WORD = {'': '等回音', 'iv': '面試中', 'offer': 'Offer', 'rej': '沒錄取', 'ghost': '沒下文', 'wd': '我不去了'}
 KINDS = {'confirm', 'reject', 'interview', 'offer'}
@@ -81,28 +81,9 @@ def load(board):
     return {j['id']: j for j in p['data']['jobs']}, json.loads(p['fb'])
 
 
-def set_outcome(f, s, day):
-    """跟看板 board.js 的 setOutcome 同一套:每個結果第一次出現的日期留在 oc_at。"""
-    at = dict(f.get('oc_at') or {})
-    for k in list(at):
-        if (k in OC_END and k != s) if s in OC_END else (k in OC_END or OC_RANK.get(k, 0) > OC_RANK.get(s, 0)):
-            del at[k]
-    if s and s not in at:
-        at[s] = day
-    if s:
-        f['oc'] = s
-    else:
-        f.pop('oc', None)
-    if at:
-        f['oc_at'] = at
-    else:
-        f.pop('oc_at', None)
-
-
 def waiting(fb):
     """已投遞、還沒結束的卡;面試中和 Offer 也要查後續回音。"""
-    return [u for u, m in fb.items() if isinstance(m, dict) and m.get('app') == 'sent' and not m.get('rm')
-            and (m.get('oc') or '') not in ('rej', 'wd')]
+    return [u for u, m in fb.items() if ds.app_of(m) == 'sent' and (m.get('oc') or '') not in ('rej', 'wd')]
 
 
 def since_of(fb, url):
@@ -625,7 +606,7 @@ def apply_findings(fb, found, day=None):
     for url, items in (found or {}).items():
         m = fb.get(url)
         # 卡清單是這一輪開頭定的,跑的時候他可能把卡移除了:已移除的不再碰(跟 waiting() 同一條)
-        if not isinstance(m, dict) or m.get('app') != 'sent' or m.get('rm'):
+        if ds.app_of(m) != 'sent':
             continue
         rp = m.setdefault('replies', {'items': []})
         # 已存的照欄位重算身分再比,不看存著的 id:舊版的 id 是用舊算法算的;存著的 id 不動,自動改狀態的 by 還指得到
@@ -735,7 +716,7 @@ def apply_checked_evidence(fb, checked):
     updated = []
     for url in checked or []:
         item = fb.get(url)
-        if isinstance(item, dict) and item.get('app') == 'sent' and not item.get('rm') and item.get('ev'):
+        if ds.app_of(item) == 'sent' and item.get('ev'):
             item['ev'] = '已查信箱與可讀平台應徵紀錄,仍未找到確認信或平台紀錄;目前只有送出頁證據'
             updated.append(url)
     return updated
@@ -792,7 +773,7 @@ def apply_results(fb, findings, checked, day=None, unverified=()):
     result = apply_findings(fb, findings, day)
     for url in checked:
         item = fb.get(url)
-        if not isinstance(item, dict) or item.get('app') != 'sent' or item.get('rm'):
+        if ds.app_of(item) != 'sent':
             continue
         replies = item.setdefault('replies', {'items': []})
         replies['at'] = day

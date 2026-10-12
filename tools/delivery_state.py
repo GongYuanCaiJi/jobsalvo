@@ -12,11 +12,11 @@ delivery_state.json 那張「狀態 × 事件」表定義:所有會改動卡片�
 
 用法:
   import delivery_state as ds
-  prev = ds.fire(fb, url, 'confirm', approve={...})   # 回傳改動前的那一張(復原就整張放回)
+  prev = ds.fire(fb, url, 'confirm', approve={...})   # 回傳改動前的那一張
   ds.state(fb[url])                                   # 'parked'…
   ds.held(fb, url, job)                               # 算不算停著的頁
 """
-import copy, json, os
+import copy, datetime, json, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(HERE, 'delivery_state.json'), encoding='utf-8') as _f:
@@ -134,7 +134,7 @@ def _val(v, data):
 
 
 def _collect(m, cell, event, data):
-    """第一段:把要留下的收起來(投遞歷史、上一次的紀錄、對帳不算的那一筆),之後才清。看板那份一樣。"""
+    """第一段:把要留下的收起來(投遞歷史、上一次的紀錄、對帳不算的那一筆),之後才清。"""
     for key, box in (('history', 'history'), ('tries', 'tries')):
         paths = cell.get(key)
         if not paths:
@@ -157,7 +157,7 @@ def _collect(m, cell, event, data):
 
 
 def _apply(m, cell, event, data):
-    """第二段:清 → 設 → 沒有才設 → 併 → 留著的放回 → 表單鎖。看板那份一樣。"""
+    """第二段:清 → 設 → 沒有才設 → 併 → 留著的放回 → 表單鎖 → 結果。"""
     for p in cell.get('clear') or []:
         _pop(m, p)
     keep = {p: _get(m, p) for p in cell.get('keep') or []}
@@ -184,6 +184,10 @@ def _apply(m, cell, event, data):
             x.pop('refill', None)          # 送出去了就沒有網頁可重打
     if cell.get('unlock_form') and f is not None:
         f.pop('lock', None)
+    if 'outcome' in cell:
+        v = _val(cell['outcome'], data)
+        if v is not _MISSING:
+            set_outcome(m, v, data.get('day') or datetime.date.today().isoformat(), data.get('oc_at'))
 
 
 def queue_workspace(fb, workspace, reason):
@@ -195,7 +199,7 @@ def queue_workspace(fb, workspace, reason):
 
 
 def fire(fb, url, event, **data):
-    """送一個事件給這張卡:照表改,回傳改動前的那一張(深拷貝;復原就整張放回)。不准就丟 Forbidden,卡不動。"""
+    """送一個事件給這張卡:照表改,回傳改動前的那一張(深拷貝)。不准就丟 Forbidden,卡不動。"""
     if event not in TABLE['events']:
         raise ValueError(f'表上沒有這個事件:{event}')
     m = fb.get(url)
@@ -302,112 +306,103 @@ def same(a, b):
     return json.dumps(lean(a), sort_keys=True, ensure_ascii=False) == json.dumps(lean(b), sort_keys=True, ensure_ascii=False)
 
 
-def part(m):
-    """一張卡歸狀態表管的那一部分:復原時比對、放回的就是這些。"""
-    m = m if isinstance(m, dict) else {}
-    out = {k: copy.deepcopy(m[k]) for k in OWNED if k in m}
-    out['app'] = m.get('app')
-    f = m.get('form') if isinstance(m.get('form'), dict) else {}
-    out['lock'] = f.get('lock')
-    # 鎖表單時清掉的雇主網頁待重打(哪幾欄,照表單上的順序):復原跟著鎖一起放回(#333)
-    out['refill'] = [i for i, x in enumerate(f.get('f') or []) if isinstance(x, dict) and x.get('refill')] or None
-    return out
+# ---- 看板的指令與復原單(#407 R8)----
+# 看板只送指令:{u: 哪一份, ev?: 事件, data?, set?: {欄: 值或 None}};後台套在「現在」那一份上,回一張復原單
+# {u, back: {欄: 按之前的值}, expect: {欄: 按之後的值}}。復原就是把復原單當指令送回來(restore)。
+# 只改送來的那幾欄,兩個分頁各改各的欄不會互相蓋掉;同一欄後到的贏。
+KEYED = {'__ans__': 'k', '__inbox__': 'id', '__notes__': 'id'}   # 這幾份是清單:一條一條照這一欄認
+STATE_FIELDS = OWNED + ('app', 'form')    # 狀態表管的(加上只有後台寫的表單):復原時一起放回或一起不動
+INTERNAL = ('__browser_cleanup__',)       # 後台自己的排程,不進復原單
 
 
-# 看板不寫、只有後台寫的欄位:表單是 agent 填表時記的,看板只在上面標重打(送 {refill: 答案鍵},後台在鎖內標在現在那份上)。
-# 以前看板存檔整份送回它手上的表單,agent 剛記的新表單就被換回手機上的舊表單(#308)。
-SERVER_ONLY = ('form',)
+def fields(k, v):
+    """一份標記拆成「欄」:卡片是它的每一欄;KEYED 的清單一條一欄;其他(封鎖名單…)整份算一欄 '*'。"""
+    key = KEYED.get(k)
+    if key and isinstance(v, list):
+        return {str(x[key]): x for x in v if isinstance(x, dict) and x.get(key) is not None}
+    if isinstance(v, dict):
+        return v
+    return {} if v is None else {'*': v}
 
 
-def plain(m):
-    """一張卡看板存檔照舊逐張寫的那一部分(心情、原因…):不含狀態表管的、也不含只有後台寫的。"""
-    if not isinstance(m, dict):
-        return m
-    out = {k: copy.deepcopy(v) for k, v in m.items() if k not in OWNED and k not in SERVER_ONLY}
-    if out.get('app') == 'sent':
-        out.pop('app')
-    return out
-
-
-# 跟離開流程那一類按鈕(退回、移除、出錯了、👎、放回來)一起改的欄位:卡在哪一階、移除、心情、出錯了之前在哪;
-# 和換檔那一類(換履歷、語言、自己的檔)
-FLOW_FIELDS = ('app', 'rm', 's', 's0', 'app0', 'live_ok') + SWAP_FIELDS
-
-
-def keep_flow(cur, new):
-    """看板那一下的事件被狀態表擋下:送來的這張卡,跟著那一下改的欄位照現在的留著(其他欄位照收)。"""
-    if not isinstance(new, dict):
-        return new
-    cur = cur if isinstance(cur, dict) else {}
-    out = copy.deepcopy(new)
-    for k in FLOW_FIELDS:
-        if k in cur:
-            out[k] = copy.deepcopy(cur[k])
-        else:
-            out.pop(k, None)
-    return out
-
-
-def merge_saved(cur, new):
-    """看板存檔送來的一張卡(new)併到現在這一張(cur)上:狀態表管的、只有後台寫的那幾欄照現在的留著,只收其他欄。
-    進出已送出(app='sent')只能靠事件。new 是 None(整張清掉)時,那幾欄照樣留著。"""
-    cur = cur if isinstance(cur, dict) else {}
-    out = plain(new) if isinstance(new, dict) else {}
-    for k in OWNED + SERVER_ONLY:
-        if k in cur:
-            out[k] = copy.deepcopy(cur[k])
-    if cur.get('app') == 'sent' or (isinstance(new, dict) and new.get('app') == 'sent'):
-        out.pop('app', None)
-        if 'app' in cur:
-            out['app'] = cur['app']
-    return out or None
-
-
-# 後台套完事件之後自己補記的欄位:卡到已送出時記寄出的是哪一份(ship.record_sent,記過不改)。
-# 看板照狀態表算的 after 不會有它;復原時比「有沒有被別處改過」不看它,放回照樣照 prev(prev 沒有就清掉)
-NOTED_AFTER = ('sent_v',)
-
-
-def undo(fb, url, prev, after, fallback=None):
-    """看板按了「復原」:這張歸狀態表管的那一部分還是按下去之後的樣子(after),就整份放回按之前(prev);
-    已經被別處改過(自動流程、另一個分頁)就照 fallback 送一個事件(例如換檔的復原 = 又換了一次檔),
-    沒有就不准。准不准只在這裡判,看板不自己判。"""
-    m = fb.get(url) if isinstance(fb.get(url), dict) else {}
-    def compared(p):
-        return {k: v for k, v in (p or {}).items() if k not in NOTED_AFTER}
-    if not same(compared(part(m)), compared(after)):
-        if fallback:
-            return fire(fb, url, fallback['ev'], **(fallback.get('data') or {}))
-        raise Forbidden('這張已經被別處改過了,不能復原')
-    before = copy.deepcopy(m)
-    # 事件收進 tries 的不歸狀態表管的欄位(再投一次收走整份鎖著的表單):從收進去的那一筆拿回來,鎖才有地方放
-    for entry in (m.get('tries') or [])[len((prev or {}).get('tries') or []):]:
-        for k, v in (entry if isinstance(entry, dict) else {}).items():
-            if k not in OWNED and '.' not in k and k not in m:
-                m[k] = copy.deepcopy(v)
-    for k in OWNED:
-        m.pop(k, None)
-    for k in OWNED:
-        if (prev or {}).get(k) is not None:
-            m[k] = copy.deepcopy(prev[k])
-    if (prev or {}).get('app'):
-        m['app'] = prev['app']
+def put(fb, k, sets):
+    """把幾欄的新值(None = 拿掉)套到 fb[k] 現在的樣子上;整份空了就拿掉那一份。"""
+    if '*' in sets:
+        v = copy.deepcopy(sets['*'])
     else:
-        m.pop('app', None)
-    if isinstance(m.get('form'), dict):
-        if (prev or {}).get('lock'):
-            m['form']['lock'] = prev['lock']
-        else:
-            m['form'].pop('lock', None)
-        marks = set((prev or {}).get('refill') or [])
-        for i, x in enumerate(m['form'].get('f') or []):
-            if isinstance(x, dict):
-                if i in marks:
-                    x['refill'] = 1
-                else:
-                    x.pop('refill', None)
-    fb[url] = m
-    return before
+        f = dict(fields(k, fb.get(k)))
+        for name, x in sets.items():
+            if x in (None, '', [], {}):              # 空的各種寫法都是拿掉那一欄
+                f.pop(name, None)
+            else:
+                f[name] = copy.deepcopy(x)
+        v = list(f.values()) if k in KEYED else f
+    if v in (None, '', [], {}):
+        fb.pop(k, None)
+    else:
+        fb[k] = v
+
+
+def diff(k, a, b):
+    """a 變成 b 動到哪幾欄:{欄: b 那邊的值(沒有是 None)}。"""
+    fa, fb_ = fields(k, a), fields(k, b)
+    return {n: fb_.get(n) for n in dict.fromkeys([*fa, *fb_]) if fa.get(n) != fb_.get(n)}
+
+
+def slips(before, after):
+    """一道指令前後的整份看板 → 它的復原單(每一份動到的一張)。"""
+    out = []
+    for k in dict.fromkeys([*before, *after]):
+        if k in INTERNAL or before.get(k) == after.get(k):
+            continue
+        back = diff(k, after.get(k), before.get(k))
+        now = fields(k, after.get(k))
+        out.append({'u': k, 'back': back, 'expect': {n: copy.deepcopy(now.get(n)) for n in back}})
+    return out
+
+
+def restore(fb, slip):
+    """收到一張復原單:每一欄還是按之後的樣子(沒被別處改過)才放回;卡片狀態表管的那幾欄一起放回或一起不動
+    (只放回一半會拼出狀態表不准的組合)。回傳沒放回的那幾欄。"""
+    k, back, expect = slip['u'], slip.get('back') or {}, slip.get('expect') or {}
+    now = fields(k, fb.get(k))
+    ok = [n for n in back if now.get(n) == expect.get(n)]
+    if not k.startswith('__') and any(n in STATE_FIELDS and n not in ok for n in back):
+        ok = [n for n in ok if n not in STATE_FIELDS]
+    put(fb, k, {n: back[n] for n in ok})
+    return [n for n in back if n not in ok]
+
+
+def settable(m, sets):
+    """看板的 set 能寫的欄:狀態表管的、只有後台寫的(表單)不收;進出已送出只能靠事件。"""
+    m = m if isinstance(m, dict) else {}
+    return {n: v for n, v in sets.items() if n not in STATE_FIELDS
+            or n == 'app' and 'sent' not in (m.get('app'), v)}
+
+
+# ---- 投遞後的結果(等回音、面試、offer、沒錄取、沒下文、我不去了):狀態表的「記結果」事件、查應徵進度都用這一支 ----
+OC_RANK = {'': 0, 'iv': 1, 'offer': 2}
+OC_END = {'rej', 'ghost', 'wd'}
+
+
+def set_outcome(f, s, day, at=None):
+    """每個結果第一次出現的日期留在 oc_at:往前走(面試→offer)留著走過的日期;往回改(記錯了)把後面的日期收掉;
+    結案保留之前走到哪,換另一種結案則取代。at:原封放回的日期(「不對,復原」放回改之前的)。"""
+    if at is None:
+        at = dict(f.get('oc_at') or {})
+        for k in list(at):
+            if (k in OC_END and k != s) if s in OC_END else (k in OC_END or OC_RANK.get(k, 0) > OC_RANK.get(s, 0)):
+                del at[k]
+        if s and s not in at:
+            at[s] = day
+    if s:
+        f['oc'] = s
+    else:
+        f.pop('oc', None)
+    if at:
+        f['oc_at'] = copy.deepcopy(at)
+    else:
+        f.pop('oc_at', None)
 
 
 def company_blocked(fb, job):
@@ -427,11 +422,30 @@ def company_block(fb, job):
     return next((x for x in blocked if card.same_company(x, name)), None)
 
 
+def app_of(m):
+    """這張卡在流程哪一階(app:prep、ready、ship、sent),移除了的是 'rm':移除保留 app 好放回原處,但移除優先。
+    後台挑「這一階的卡」一律照它,不各自記得再排除移除的。"""
+    m = m if isinstance(m, dict) else {}
+    return 'rm' if m.get('rm') else m.get('app')
+
+
+def place_of(fb, job):
+    """這張卡在看板哪一頁(跟 board.js placeOf 同一條):'rm' 已移除;流程四階;'' 公司封鎖了(已投出的照留);其餘照表態。
+    後台挑「要處理哪幾張」照它,看板上的張數跟按下去處理的才是同一份。"""
+    m = fb.get(job['id']) if isinstance(fb.get(job['id']), dict) else {}
+    app = app_of(m)
+    if app == 'rm':
+        return 'rm'
+    if company_blocked(fb, job) and app != 'sent':
+        return ''
+    return app if app in ('prep', 'ready', 'ship', 'sent') else m.get('s') or 'none'
+
+
 def held(fb, url, job=None):
     """停著的頁:這張的頁還開在 agent 的 Chrome 等他(停著等你、填了卡住、上傳的是舊檔、你已確認、送出結果不明),
     而且卡還在「可以投了」、沒移除、公司沒被封鎖。下一步、自動流程的上限、關 Chrome 時保護的分頁都看它。"""
     m = fb.get(url)
-    if not isinstance(m, dict) or m.get('app') != 'ship' or m.get('rm') or state(m) not in HELD_STATES:
+    if app_of(m) != 'ship' or state(m) not in HELD_STATES:
         return False
     if TABLE['states'][state(m)].get('held_tab') and not (m.get('apply') or {}).get('tab_id'):
         return False                    # 表上 held_tab:頁還開著才算(送出結果不明、頁已經不在了:等他查,但不佔一頁)

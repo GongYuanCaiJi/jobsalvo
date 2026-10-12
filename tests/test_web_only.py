@@ -931,8 +931,7 @@ class SaveKicksTheAutoFlow(tb.HttpBase):
         pilot = Mock()
         u = JOBS[0]['id']
         with patch.object(bs, 'PILOT', pilot):
-            code, raw, _ = self.req('/api/save', {u: {'s': 'like', 'n': '備註'}, '__rev__': 1,
-                                                  '__events__': [{'u': u, 'ev': 'leave'}]})
+            code, raw, _ = self.req('/api/save', {'cmds': [{'u': u, 'ev': 'leave', 'set': {'s': 'like', 'n': '備註'}}]})
         self.assertEqual(code, 200, raw)
         pilot.kick.assert_called_once()
         self.assertEqual(read_fb(self.path)[u]['n'], '備註')

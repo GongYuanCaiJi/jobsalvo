@@ -507,33 +507,24 @@ if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文�
             self.assertEqual(stored.get('effect_rejected'), flags.get('effect_rejected'))
 
     def test_board_restore_records_veto_and_snackbar_undo_restores_it(self):
-        source = (Path(__file__).resolve().parents[1] / 'board' / 'board.js').read_text()
-        start = source.index("var oun=e.target.closest('[data-ocundo]');")
-        end = source.index("var rmb=e.target.closest('[data-rpmaybe]');", start)
-        script = """
-const assert = require('node:assert/strict');
-const handler = new Function('e', 'FB', 'setOutcome', 'markDirty', 'patchInPlace', 'snack', 'ocLabel', process.argv[1]);
-for (const prior of [undefined, true]) {
-  const receipt = {id:'receipt'};
-  if (prior !== undefined) receipt.effect_rejected = prior;
-  const previous = {from:'', by:'receipt', s:'rej'};
-  const card = {oc:'rej', oc_auto:previous, replies:{items:[receipt]}};
-  let undo;
-  handler({target:{closest:()=>({getAttribute:()=>'card'})}}, {card},
-    (item, outcome)=>{if(outcome)item.oc=outcome;else delete item.oc;},
-    ()=>{}, ()=>{}, (_message, callback)=>{undo=callback;}, x=>x);
-  assert.equal(receipt.effect_rejected, true);
-  assert.equal(card.oc, undefined);
-  assert.equal(card.oc_auto, undefined);
-  undo();
-  assert.equal(receipt.effect_rejected, prior);
-  assert.equal(card.oc, 'rej');
-  assert.equal(card.oc_auto, previous);
-}
-"""
-        result = subprocess.run(['node', '-e', script, source[start:end]], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
+        """看板「不對,復原」送的指令(記結果 + 那一則回音標成他說不對);snack 的復原把復原單送回去,整張回到按之前。"""
+        import board_server as bs
+        for prior in (None, True):
+            receipt = {'id': 'receipt'}
+            if prior is not None:
+                receipt['effect_rejected'] = prior
+            card = {'app': 'sent', 'ds': 'sent', 'sent_by': 'manual', 'oc': 'rej', 'oc_at': {'rej': '2026-10-01'},
+                    'oc_auto': {'from': '', 'by': 'receipt', 's': 'rej'}, 'replies': {'items': [receipt]}}
+            d = {'fb': {URL: card}, 'data': {'jobs': [{'id': URL, 'target': 'x'}]}}
+            before = copy.deepcopy(d['fb'])
+            veto = copy.deepcopy(card['replies'])
+            veto['items'][0]['effect_rejected'] = True
+            rejected, undo, _ = bs.apply_cmds(d, [{'u': URL, 'ev': 'outcome', 'data': {'s': ''}, 'set': {'replies': veto}}])
+            self.assertEqual(rejected, [])
+            m = d['fb'][URL]
+            self.assertEqual((m.get('oc'), m.get('oc_auto'), m['replies']['items'][0]['effect_rejected']), (None, None, True))
+            self.assertEqual(bs.apply_cmds(d, undo[0])[0], [])
+            self.assertEqual(d['fb'], before)
 
 if __name__ == '__main__':
     unittest.main()

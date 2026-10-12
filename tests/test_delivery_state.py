@@ -105,6 +105,23 @@ class PageLeftWaiting(unittest.TestCase):
         fb['__block__'] = ['Acme']
         self.assertFalse(ds.held(fb, URL, self.JOB))                 # 公司被封鎖了
 
+    def test_place_is_the_same_rule_as_the_board_tabs(self):
+        job = self.JOB
+        def place(**m):
+            return ds.place_of({job['id']: m, '__block__': m.pop('block', [])}, job)
+        self.assertEqual(place(app='prep'), 'prep')
+        self.assertEqual(place(app='prep', rm=1), 'rm')
+        self.assertEqual(place(app='prep', block=['acme']), '')      # 封鎖了:哪一頁都不列,準備履歷也不跑它
+        self.assertEqual(place(app='sent', block=['Acme']), 'sent')   # 已投出的照留當紀錄
+        self.assertEqual(place(s='like'), 'like')
+        self.assertEqual(place(), 'none')
+
+    def test_removed_wins_over_the_stage_it_keeps_for_undo(self):
+        # 移除保留 app 好放回原處:後台挑「這一階的卡」照 app_of,移除的不會被當成還在那一階
+        # (以前每個迴圈各自記得加 not rm,漏掉的那幾處照樣準備、填表、查應徵進度)
+        self.assertEqual([ds.app_of(m) for m in ({'app': 'sent'}, {'app': 'sent', 'rm': 1}, {'s': 'like'}, None)],
+                         ['sent', 'rm', None, None])
+
     def test_page_up_only_while_left_waiting_with_a_tab(self):
         self.assertTrue(ds.page_up(FIX['cards']['stuck']))
         self.assertFalse(ds.page_up(FIX['cards']['gone']))
@@ -328,14 +345,30 @@ class CellEffects(unittest.TestCase):
         self.assertEqual(m['tries'][-1]['sent_at'], '2026-01-02')
         self.assertNotIn('form', m)
 
+    def test_outcome_keeps_dates_forward_and_clears_them_back(self):
+        """記結果(看板的結果按鈕、查應徵進度同一支):往前走留著走過的日期,往回改收掉後面的,結案換另一種結案取代;
+        「不對,復原」帶著改之前的日期原封放回。只有已送出的卡能記。"""
+        fb = {URL: {'app': 'sent', 'ds': 'sent', 'sent_by': 'manual', 'oc_auto': {'s': 'iv'}}}
+        for s, day, want in (('iv', '2026-01-02', {'iv': '2026-01-02'}), ('offer', '2026-01-03', {'iv': '2026-01-02', 'offer': '2026-01-03'}),
+                             ('rej', '2026-01-04', {'iv': '2026-01-02', 'offer': '2026-01-03', 'rej': '2026-01-04'}),
+                             ('ghost', '2026-01-05', {'iv': '2026-01-02', 'offer': '2026-01-03', 'ghost': '2026-01-05'}),
+                             ('iv', '2026-01-06', {'iv': '2026-01-02'}), ('', '2026-01-07', None)):
+            ds.fire(fb, URL, 'outcome', s=s, day=day)
+            self.assertEqual((fb[URL].get('oc'), fb[URL].get('oc_at')), (s or None, want), s)
+        self.assertNotIn('oc_auto', fb[URL])
+        ds.fire(fb, URL, 'outcome', s='ghost', oc_at={'ghost': '2025-12-01'})
+        self.assertEqual(fb[URL]['oc_at'], {'ghost': '2025-12-01'})
+        self.assertRaises(ds.Forbidden, ds.fire, board('parked'), URL, 'outcome', s='iv')
+
     def test_undo_sent_manual_puts_refill_back(self):
         """#333:「我已在外部送出」鎖表單時清掉雇主網頁待重打;看板按復原,重打記號跟著鎖一起回到按之前。"""
         fb = board('parked')
-        before = copy.deepcopy(fb[URL])
+        before = copy.deepcopy(fb)
         fire(fb, 'sent_manual')
         self.assertFalse(any(x.get('refill') for x in fb[URL]['form']['f']))
-        ds.undo(fb, URL, ds.part(before), ds.part(fb[URL]))
-        self.assertEqual(fb[URL], before)
+        for slip in ds.slips(before, fb):
+            self.assertEqual(ds.restore(fb, slip), [])
+        self.assertEqual(fb, before)
 
 
 if __name__ == '__main__':
@@ -401,11 +434,17 @@ class BrokenCardsAreCaught(unittest.TestCase):
 
 
 class BoardSaveCannotForge(unittest.TestCase):
-    """看板存檔送來的卡:狀態表管的欄位照現在的留著。"""
+    """看板的 set 寫不到狀態表管的欄位、也不能把卡搬進或搬出已送出(只能靠事件)。"""
 
     def test_board_cannot_move_a_card_into_sent(self):
-        out = ds.merge_saved({'s': 'like'}, {'s': 'like', 'app': 'sent'})
-        self.assertNotIn('app', out)
+        self.assertEqual(ds.settable({'s': 'like'}, {'s': 'meh', 'app': 'sent', 'ds': 'sent', 'form': {}}), {'s': 'meh'})
+        self.assertEqual(ds.settable({'app': 'sent'}, {'app': 'ship'}), {})
 
-    def test_a_refused_click_on_a_whole_card_clear_is_left_alone(self):
-        self.assertIsNone(ds.keep_flow({'app': 'ship'}, None))
+    def test_a_restore_puts_the_state_part_back_whole_or_not_at_all(self):
+        fb = {URL: {'app': 'ship', 'ds': 'parked', 'apply': {'tab_id': '1'}, 'rm': None}}
+        before = copy.deepcopy(fb)
+        fb[URL].update(rm=1, apply={'tab_id': '2'})
+        slip, = ds.slips(before, fb)
+        fb[URL]['apply'] = {'tab_id': '3'}                   # 別處改了狀態那幾欄
+        self.assertEqual(sorted(ds.restore(fb, slip)), ['apply'])
+        self.assertEqual((fb[URL].get('rm'), fb[URL]['apply']), (None, {'tab_id': '3'}))

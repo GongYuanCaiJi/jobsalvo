@@ -103,7 +103,7 @@ def eligible(jobs, fb, stage, url=None, status=None):
     submit:核准有效的(status:投遞前驗收的結果)。fix 指定 --url 就一定跑(他寫了話要 agent 改)。"""
     out = []
     for u, m in fb.items():
-        if not isinstance(m, dict) or m.get('app') != 'ship' or m.get('rm') or (url and u != url) or u not in jobs:
+        if ds.app_of(m) != 'ship' or (url and u != url) or u not in jobs:
             continue                  # 移到「🗑 已移除」的不填也不送(前端的張數本來就不算它)
         a = m.get('apply') or {}
         if stage == 'submit' and fr.approval_problem(fb, u, status) is None:
