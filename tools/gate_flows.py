@@ -214,8 +214,7 @@ def _risk(said, row, truth):
     if not said.get('kind') or not why:
         return None
     seen = [truth.given or '', *(truth.flags or ())]
-    quotes = re.findall(r'[「『"“](.+?)[」』"”]', why) or [why]   # 有引號就看引號裡那幾段
-    return None if all(quoted(q, seen) for q in quotes) else '它引的那句 JD 原文和程式提醒裡都沒有'
+    return None if quoted(why, seen) else '它引的那句 JD 原文和程式提醒裡都沒有'
 
 
 def _card_summary(said, row, truth):

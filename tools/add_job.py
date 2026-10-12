@@ -76,7 +76,7 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
             'title': fetched.title or '職缺頁待確認',
             'company': '',
             'via': '手動加入',
-            'jd': fetched.text if fetched.readable else '',
+            'jd': fetched.jd,
             'page_status': fetched.status,
             'page_via': fetched.via,
             'page_http_status': fetched.http_status,

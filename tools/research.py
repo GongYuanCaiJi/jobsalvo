@@ -25,7 +25,7 @@ import board_doc as bd      # noqa: E402
 import config as cf         # noqa: E402
 import prefs                # noqa: E402
 import card as cards        # noqa: E402
-from gate_cells import NONE_CITED, quoted  # noqa: E402
+from gate_cells import none_cited, quoted  # noqa: E402
 
 DIR = cf.RESEARCH
 LEDGER = os.path.join(DIR, 'ledger.jsonl')
@@ -224,9 +224,9 @@ def checked_reasons(value, citation_sources=None):
         prefix = basis + '：'
         quote = citation[len(prefix):].strip() if citation.startswith(prefix) else citation
         if basis == '推估':          # 推估是把幾處材料接起來想:每一段在哪一份材料裡都算
-            citation_ok = quote == NONE_CITED or quoted(quote, ['\n'.join(sum(citation_sources.values(), []))])
+            citation_ok = none_cited(quote) or quoted(quote, ['\n'.join(sum(citation_sources.values(), []))])
         else:
-            citation_ok = quote == NONE_CITED or quoted(quote, citation_sources.get(basis, []))
+            citation_ok = none_cited(quote) or quoted(quote, citation_sources.get(basis, []))
         if not text or basis not in EVIDENCE_BASES or not citation_ok:
             bad = True
         out.append({'text': text, 'citation': citation, 'basis': basis})
@@ -497,7 +497,7 @@ def clean(cands, have, exclude_re, turned=(), fetch_page=None, flag_re=None):
         c['page_status'] = fetched.status
         c['page_via'] = fetched.via
         c['page_http_status'] = fetched.http_status
-        c['jd'] = fetched.text if fetched.readable else ''
+        c['jd'] = fetched.jd
         c['posted_at'] = fetched.posted_at
         c['posted_src'] = fetched.posted_source
         age = _age_days(fetched.posted_at)

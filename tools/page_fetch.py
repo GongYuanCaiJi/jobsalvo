@@ -58,6 +58,11 @@ class PageResult:
         body = ' '.join(self.text.split())
         return self.status == 'ok' and bool(body) and body != ' '.join(self.title.split())
 
+    @property
+    def jd(self):
+        """給判斷的職缺頁原文:頁面標題(常寫著職稱、公司、薪資)加內文;沒讀到就是空的。"""
+        return '\n'.join(x for x in (self.title, self.text) if x) if self.readable else ''
+
 
 class _VisibleText(HTMLParser):
     def __init__(self):

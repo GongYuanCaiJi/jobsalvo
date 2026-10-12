@@ -630,7 +630,7 @@ class AddJobReal(unittest.TestCase):
             make_board(p, {})
             def judge(cands, *_args, **_kw):
                 self.assertEqual(len(cands), 1)
-                self.assertEqual(cands[0]['jd'], 'Platform Engineer: build secure systems')
+                self.assertEqual(cands[0]['jd'], 'Platform Engineer\nPlatform Engineer: build secure systems')   # 頁面標題也是程式讀到的原文
                 self.assertEqual(cands[0]['title'], 'Platform Engineer')
                 cands[0]['title'] = 'Backend Engineer'
                 cands[0]['company'] = 'Acme'

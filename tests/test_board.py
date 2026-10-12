@@ -993,6 +993,26 @@ class ResearchPipeline(unittest.TestCase):
         verdict = gate.inspect('research_judge', {'jobs': [bad]}, truth({'c2'}))
         self.assertIn('詐騙或幽靈缺', ' '.join(verdict.problems))
 
+    def test_what_the_program_read_counts_however_the_agent_labels_it(self):
+        """第二輪試送 30 張又擋掉 6 張:「筆記裡沒有相關的。」多個句號、引用前面加「刊登：」標籤再括「」、
+        職稱和薪資只寫在頁面標題(程式讀到了,卻沒算進原文)。"""
+        import gate
+        import page_fetch
+        page = page_fetch.PageResult('https://ex.test/j', 'ok', title='Acme is hiring Policy Intern · USD100K–190K/yr',
+                                     text='About the job\nPosted 2 weeks ago\nWork on policy.')
+        self.assertIn('Policy Intern', page.jd)
+        self.assertEqual(page_fetch.PageResult('https://ex.test/j', 'ok', title='殼', text='殼').jd, '')   # 只有標題不算讀到
+        row = {'id': 'J1', 'title': 'Policy Intern', 'company': 'Acme', 'keep': True, 'fit': 3, 'cite': [], 'why': '可問',
+               'risk': {'kind': '', 'why': ''}, 'cat': '其他',
+               'reasons': [{'text': '筆記沒提', 'basis': '偏好筆記', 'citation': '筆記裡沒有相關的。'}],
+               'card': {'fit': '可問', 'posted': '2 週前', 'salary': '100K–190K',
+                        'quote': '刊登：「Posted 2 weeks ago」；薪資：「USD100K–190K/yr」'}}
+        truth = gate.Truth(given={'J1': page.jd}, cites={'J1': set()}, flags={'J1': []},
+                           sources={'J1': {'JD 原文': [page.jd], '使用者原話': [], '偏好筆記': ['筆記']}})
+        self.assertEqual(gate.inspect('research_judge', {'jobs': [row]}, truth).problems, [])
+        bad = dict(row, card=dict(row['card'], quote='刊登：「Posted 3 weeks ago」'))
+        self.assertIn('卡片摘要', ' '.join(gate.inspect('research_judge', {'jobs': [bad]}, truth).problems))
+
     def _stop_run(self, fake_agent, finishing, pending, **kw):
         """跑一輪找缺(假 agent、假抓頁),finishing() 為真 = 他按了停止;kw 照樣交給 research.run(time_up、tally…)。"""
         from unittest.mock import patch
