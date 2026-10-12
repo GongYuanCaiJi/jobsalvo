@@ -6,6 +6,8 @@ add_job —— 看板上「➕ 貼網址加入」:使用者自己找到的職缺
 跟找缺那一輪同一套(research):程式抓取職缺頁文字,agent 依收到的文字對照使用者原話寫卡片摘要與對味程度。
 差別只有一個:這張是使用者自己要的,判斷結果不決定要不要加,一律加進去(判斷只拿來寫卡片)。
 抓不到頁面文字也照加,卡片標示待確認並寫進回報;只有直連 HTTP 404/410 才不加。
+agent 都不能用(額度用完、限流)時不加空卡:抓好的職缺存成待寫(跟找缺的待判同一套),下一次跑先寫它們;
+自動流程每隔一小時自己再跑一次(autopilot),不用他再貼一次。
 
 用法:python3 tools/add_job.py --url <網址> [--url <網址> …] [--board B]
 """
@@ -19,6 +21,17 @@ from research import web_agent     # 跟找缺同一支:不給操作 Chrome 的�
 
 SP = os.environ.get('ADD_TMP') or cf.TMP
 STATUS = 'add_status.json'
+
+
+def pending_path():
+    import research as rs
+    return os.path.join(rs.DIR, 'add_pending.json')
+
+
+def waiting():
+    """上一次 agent 都不能用、還沒寫卡片的幾張。"""
+    import research as rs
+    return rs.pending_count(pending_path())
 
 
 
@@ -36,9 +49,10 @@ def run(urls, board, browser_required=True, run_agent=None):
     t0 = time.time()
     fb, jobs = prefs.load(board)
     have = {j['id'] for j in jobs}
+    held = [c for c in rs.pending_take(pending_path()) if c['url'] not in have]   # 上一次 agent 不能用、還沒寫的先寫
     urls = [u.strip() for u in urls if u.strip().startswith('http')]
-    new = [u for u in dict.fromkeys(urls) if u not in have]
-    if not new:
+    new = [u for u in dict.fromkeys(urls) if u not in have and u not in {c['url'] for c in held}]
+    if not new and not held:
         # 已移除的卡也算板上有(去重用全部卡);只說「都有了」他在看板上找不到,要講它在哪、怎麼放回來
         gone = sum(1 for u in dict.fromkeys(urls) if (fb.get(u) or {}).get('rm'))
         msg = '這幾個網址板上都已經有了' + (
@@ -46,8 +60,8 @@ def run(urls, board, browser_required=True, run_agent=None):
         st({'phase': 'nothing', 'msg': msg if urls else '沒有網址'})
         return 0
 
-    st({'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(new), 'step': '檢查網址'})
-    cands, gone = [], []
+    st({'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(new) + len(held), 'step': '檢查網址'})
+    cands, gone = list(held), []
     for url, fetched in zip(new, page_fetch.fetch_many(new)):
         if fetched.status == 'closed':
             gone.append(url)
@@ -81,6 +95,13 @@ def run(urls, board, browser_required=True, run_agent=None):
             res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add', board=board,
                            par=bool(fb.get('__agentfree__')))
         except ar.AgentRunError as e:
+            if all(r.status == 'unavailable' for r in e.results):
+                # agent 都不能用(額度用完、限流、要重新登入):等得到,不加空卡,存成待寫,之後接著寫
+                n = rs.pending_save(cands, pending_path())
+                msg = f'{n} 張還沒寫卡片:agent 都不能用({e})'
+                _report(msg, '不用你處理:每隔一小時會自動接著寫;要馬上試就再按一次「貼網址加入」', board)
+                st({'phase': 'waiting', 't0': t0, 'finished_at': time.time(), 'added': 0, 'n': n, 'msg': msg})
+                return 0
             agent_error = f'判斷沒有完成:{e}'
             _report(agent_error, '在「貼網址加入」按「看紀錄」確認後再重試', board)
 
@@ -106,7 +127,7 @@ def run(urls, board, browser_required=True, run_agent=None):
     msg = f'加進待評估 {added} 張' + (f',{len(gone)} 張已下架沒加' if gone else '')
     if agent_error:
         msg += f';{agent_error}'
-    st({'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': added, 'n': len(new), 'msg': msg})
+    st({'phase': 'done', 't0': t0, 'finished_at': time.time(), 'added': added, 'n': len(cands) + len(gone), 'msg': msg})
     return added
 
 

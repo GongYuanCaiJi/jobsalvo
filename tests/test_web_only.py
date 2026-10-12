@@ -674,6 +674,33 @@ class AddJobReal(unittest.TestCase):
                     add_job.run(['https://ex.test/a'], p)
                 self.assertIs(seen['par'], bool(on))
 
+    def test_no_agent_available_keeps_the_jobs_waiting_instead_of_empty_cards(self):
+        """agent 都不能用(額度用完):不加空卡,抓好的存成待寫;下一次跑(沒貼新網址也一樣)先寫它們。
+        以前照樣加進看板、摘要寫「agent 無法讀取」,之後沒有任何東西回頭補(收卡整個停住)。"""
+        import tempfile, add_job, research, page_fetch, agent_run as ar
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        ok = page_fetch.PageResult('https://ex.test/a', 'ok', text='Platform Engineer: build secure systems',
+                                   title='Platform Engineer', via='direct', http_status=200)
+        out = ar.AgentRunError([ar.AgentResult('unavailable', reason='all_unavailable')])
+        judged = []
+
+        def judge(cands, *_a, **_kw):
+            judged.append([c['url'] for c in cands])
+            return {c['url']: {'keep': True, 'fit': 4, 'why': '符合', 'cite': [], 'bad_cite': [], 'cat': '其他',
+                               'readable': True, 'card': {}} for c in cands}
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', return_value=ok) as fetch:
+            with patch.object(research, 'judge', side_effect=out):
+                self.assertEqual(add_job.run(['https://ex.test/a'], p), 0)
+            self.assertEqual([j['id'] for j in read_board(p)['data']['jobs'] if j['id'] == 'https://ex.test/a'], [])
+            self.assertEqual(add_job.waiting(), 1)
+            fetch.reset_mock()
+            with patch.object(research, 'judge', side_effect=judge):
+                self.assertEqual(add_job.run([], p), 1)            # 沒貼新網址:接著寫上次沒寫完的
+            fetch.assert_not_called()                              # 抓好的頁面跟著存,不重抓
+            self.assertEqual((judged, add_job.waiting()), ([['https://ex.test/a']], 0))
+
     def test_a_url_already_on_the_board_but_removed_says_where_it_is(self):
         """貼的網址板上已經有、但在「🗑 已移除」:要講它在已移除、怎麼放回來,不是只說「都已經有了」。"""
         import tempfile, add_job

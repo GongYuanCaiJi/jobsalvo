@@ -34,6 +34,7 @@ KEY = '__auto__'
 # 排程的查應徵進度沒跑成:隔多久再試、當天最多再試幾次(#289 決定)。看板那一列用同一組數字寫「幾點再試」
 REPLY_RETRY_MAX = 3
 REPLY_RETRY_GAP = 3600
+ADD_RETRY_GAP = 3600     # 貼網址加入碰到 agent 都不能用(額度、限流):隔一小時自己再接著寫
 
 
 def flow():
@@ -46,14 +47,16 @@ def flow_modes(cfg):
     return {key: bool(cfg.get(key)) for key in ('auto_prep', 'auto_advance', 'auto_fill')}
 
 
-def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, real=True, replies_last=None):
+def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, real=True, replies_last=None,
+         add_waiting=0, add_last=None):
     """看現在的看板,決定要替他按哪幾下。純函式:不寫檔、不派東西(測試直接測它)。
 
     verified_gen:伺服器建置(reconcile,含投遞前驗收)已經跑完幾輪;build_running:現在有沒有在跑。
     running:{'prep': bool, 'apply': bool, 'replies': bool}。real:是不是真的看板(副本沒有建置)。
     replies_last:上一輪查應徵進度的狀態(phase、finished_at/t0),沒跑成的當天要不要再試看它。
+    add_waiting、add_last:貼網址加入上次 agent 都不能用、存著還沒寫卡片的張數,和上一輪的狀態。
     回傳 {'init':第一次的 __auto__ 或 None, 'seen':{id: 要等到第幾輪}, 'advance':[ids],
-          'prep': 'all'|[id]|None, 'fix': id|None, 'fill': id|None, 'replies': bool, 'replies_retry': bool, 'tried':[key],
+          'prep': 'all'|[id]|None, 'fix': id|None, 'fill': id|None, 'replies': bool, 'replies_retry': bool, 'add': bool, 'tried':[key],
           'rf':{id: {sig, since}} 新看到的待重打, 'wait': 幾秒後再看一次(等他停手)|None}。"""
     cfg = cfg or flow()
     now = now or datetime.datetime.now()
@@ -68,7 +71,12 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
         return i in jobs and ds.app_of(fb.get(i)) != 'rm'
 
     out = {'init': None, 'seen': {}, 'advance': [], 'prep': None, 'fix': None, 'fill': None, 'replies': False, 'replies_retry': False,
+           'add': False,
            'tried': [], 'rf': {}, 'wait': None}
+    # 貼網址加入上次 agent 都不能用、存著還沒寫的:隔一小時自己接著寫(是他自己貼的,不管自動流程開沒開)
+    last = add_last or {}
+    out['add'] = bool(add_waiting) and not running.get('add') and \
+        now.timestamp() - (last.get('finished_at') or last.get('t0') or 0) >= ADD_RETRY_GAP
     if auto is None:
         # 第一次:當下已經在流程裡的卡記成 backlog,之後不碰
         backlog = sorted(i for i in jobs if stage(i) in ('prep', 'ready', 'ship') and live(i))
@@ -282,13 +290,15 @@ class Pilot:
             self._fresh = False
         self._sync_flow(p['data'], fb)
         bs = self.build_state()
-        status = {k: self.run_status(k) or {} for k in ('prep', 'apply', 'replies')}
+        status = {k: self.run_status(k) or {} for k in ('prep', 'apply', 'replies', 'add')}
         running = {k: bool(st.get('running')) for k, st in status.items()}
         self._settle(fb)
         if self.is_real():
             self._sweep_gone(fb)
+        import add_job
         pl = plan(p['data'], fb, verified_gen=bs['gen'], build_running=bs['running'], running=running,
-                  real=self.is_real(), replies_last=status['replies'])
+                  real=self.is_real(), replies_last=status['replies'],
+                  add_waiting=add_job.waiting() if self.is_real() else 0, add_last=status['add'])
         self.last = {'plan': {k: v for k, v in pl.items() if k != 'init'}, 't': time.time()}
         started = {}
         if pl['prep']:
@@ -299,6 +309,8 @@ class Pilot:
             started['fill'] = self.start_run('apply', {'stage': 'fill', 'url': pl['fill']})
         if pl['replies']:
             started['replies'] = self.start_run('replies', {})
+        if pl['add']:
+            started['add'] = self.start_run('add', {})
         ok = {k: code == 200 for k, (code, _st) in started.items()}
         need_browser = [k for k, (code, st) in started.items() if code == 409 and (st or {}).get('needs_browser')]
         was_blocked = (fb.get(KEY) or {}).get('blocked')

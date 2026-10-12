@@ -21,9 +21,9 @@ def data(*ids, **kw):
     return {'jobs': [dict({'id': i}, **kw.get(i, {})) for i in ids], 'status': kw.get('status', OKST)}
 
 
-def run(d, fb, gen=0, building=False, running=None, now=NOW, real=True, cfg=CFG, last=None):
+def run(d, fb, gen=0, building=False, running=None, now=NOW, real=True, cfg=CFG, last=None, add_waiting=0, add_last=None):
     return ap.plan(d, fb, verified_gen=gen, build_running=building, running=running or {}, now=now, cfg=cfg, real=real,
-                   replies_last=last)
+                   replies_last=last, add_waiting=add_waiting, add_last=add_last)
 
 
 def auto(**kw):
@@ -109,6 +109,15 @@ class PlanTest(unittest.TestCase):
               'issues': [{'jid': 'a', 'stage': 'ready', 'kind': 'unverified', 'soft': True,
                           'msg': '職缺頁擷取失敗,狀態未知'}]}
         self.assertEqual(run(data('a', status=st), fb, gen=1)['advance'], ['a'])
+
+    def test_jobs_waiting_for_an_agent_are_retried_every_hour(self):
+        # 貼網址加入碰到 agent 都不能用、存著還沒寫的:隔一小時自己再跑一次,不用他再貼(跟自動流程開沒開無關)
+        fb = {'__auto__': auto()}
+        t = NOW.timestamp()
+        self.assertTrue(run(data(), fb, add_waiting=3, add_last={'phase': 'waiting', 'finished_at': t - 3601})['add'])
+        self.assertFalse(run(data(), fb, add_waiting=3, add_last={'phase': 'waiting', 'finished_at': t - 60})['add'])
+        self.assertFalse(run(data(), fb, add_waiting=3, running={'add': True})['add'])
+        self.assertFalse(run(data(), fb, add_waiting=0)['add'])
 
     def test_sandbox_advances_without_a_build(self):
         fb = {'__auto__': auto(), 'a': {'app': 'ready'}}

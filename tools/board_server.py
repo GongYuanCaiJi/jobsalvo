@@ -940,8 +940,9 @@ def start_run(kind,args):
     if kind in ('prep','replies'):
         args={'limit':0 if one else limit,'url':one}
     if kind=='add':
+        import add_job
         urls=[u for u in re.split(r'\s+',str(args.get('text') or '')) if re.match(r'https?://',u)][:30]
-        if not urls: return 400,{'msg':'貼一個以上的職缺網址(http 開頭)'}
+        if not urls and not add_job.waiting(): return 400,{'msg':'貼一個以上的職缺網址(http 開頭)'}   # 沒貼網址:接著寫上次沒寫完的
         args={'urls':urls}
     if kind in ('apply', 'replies') and is_real():
         import chrome_door
