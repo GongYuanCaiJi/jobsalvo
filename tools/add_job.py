@@ -9,9 +9,14 @@ add_job —— 看板上「➕ 貼網址加入」:使用者自己找到的職缺
 agent 都不能用(額度用完、限流)時不加空卡:抓好的職缺存成待寫(跟找缺的待判同一套),下一次跑先寫它們;
 自動流程每隔一小時自己再跑一次(autopilot),不用他再貼一次。
 
+外面已經判好的(別的 agent 讀過 JD、照找缺判斷的交件單格式寫好,每列多一個 url):用 --judged 交進來,
+不再派 agent 讀第二次;程式照樣抓頁、照樣過安檢門,引用對不上的那張照加、摘要不用、原因照實回報。
+格式就是看板「🔎 找新職缺」判斷那一段的 📝 prompt(research.preview('judge'))。
+
 用法:python3 tools/add_job.py --url <網址> [--url <網址> …] [--board B]
+      python3 tools/add_job.py --judged 判好的.json [--board B]     # [{url, title, company, keep, fit, why, cat, card, reasons…}]
 """
-import os, sys, time, argparse
+import os, sys, time, argparse, json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -43,7 +48,7 @@ def _report(msg, need, board, job=''):
     except Exception as e:  # noqa: BLE001 — 回報寫不進看板:印進這一輪的紀錄
         print(f'⚠ 這則回報寫不進看板({str(e)[:120]}):{msg} → {need}')
 
-def run(urls, board, browser_required=True, run_agent=None):
+def run(urls, board, browser_required=True, run_agent=None, answers=None):
     import research as rs, prefs, page_fetch
     st = lambda d: jobrun.write(os.path.join(SP, STATUS), d)
     t0 = time.time()
@@ -93,7 +98,7 @@ def run(urls, board, browser_required=True, run_agent=None):
         try:
             # 他撥了「愛派幾隻就派幾隻」:跟找缺一樣,判斷那幾批同時跑
             res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add', board=board,
-                           par=bool(fb.get('__agentfree__')))
+                           par=bool(fb.get('__agentfree__')), answers=answers)
         except ar.AgentRunError as e:
             if all(r.status == 'unavailable' for r in e.results):
                 # agent 都不能用(額度用完、限流、要重新登入):等得到,不加空卡,存成待寫,之後接著寫
@@ -134,10 +139,15 @@ def run(urls, board, browser_required=True, run_agent=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--url', action='append', default=[])
+    ap.add_argument('--judged', help='外面已經判好的交件單(JSON 清單,每列帶 url)')
     ap.add_argument('--board', default=cf.LIVE)
     a = ap.parse_args()
+    answers = None
+    if a.judged:
+        with open(a.judged, encoding='utf-8') as f:
+            answers = {r['url']: {k: v for k, v in r.items() if k != 'url'} for r in json.load(f) if r.get('url')}
     try:
-        print('新增', run(a.url, a.board), '張')
+        print('新增', run(a.url + list(answers or ()), a.board, answers=answers), '張')
     except Exception as e:
         jobrun.write(os.path.join(SP, STATUS), {'phase': 'failed', 'msg': f'沒加成:{e}', 'finished_at': time.time()})
         raise

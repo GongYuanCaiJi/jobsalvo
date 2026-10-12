@@ -712,10 +712,19 @@ def _launch_all(jobs, browser_required=False):
 _PLACEHOLDER = re.compile(r'^(無|未明載|未公開|不公開|未提供|未列|查無|n/a|none|-)([（(].*)?$', re.I)
 
 
+def _write_answers(out, batch, answers):
+    """外面已經照交件單格式判好的(網址 → 一列):寫成這一批的交件單,代號照這一批的順序(J1、J2…)。"""
+    rows = [dict(answers[c['url']], id=f'J{i + 1}') for i, c in enumerate(batch) if c['url'] in answers]
+    with open(out, 'w', encoding='utf-8') as f:
+        json.dump({'jobs': rows}, f, ensure_ascii=False)
+
+
 def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', par=False,
-          launch_all=None, resumes=None, selection_signature=None, finishing=None, board=None):
+          launch_all=None, resumes=None, selection_signature=None, finishing=None, board=None, answers=None):
     """用程式提供的 JD 文字判斷;判斷階段固定不開瀏覽器。他按了停止(finishing)就不再派下一批,
     已經判完的照常回傳;被停掉的那一批沒有結果,呼叫的人把它存回待判。
+    answers:外面已經照交件單格式判好的(網址 → 一列,例如別的 agent 讀過 JD 了):不派 agent,
+    直接當這一批的交件單,照樣過安檢門(引用要在程式這一輪給的材料裡逐字找得到)。
     證據(#315):每一批記進那一批每一張卡的證據夾(指示、動作紀錄、交件單)。"""
     finishing = finishing or (lambda: False)
     import agent_run as ar
@@ -733,7 +742,7 @@ def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', pa
         with open(os.path.join(rd, f'judge_{bi}.prompt.txt'), 'w', encoding='utf-8') as f:
             f.write(p)
         prepared.append((bi, b, out, p, cites))
-    if par and len(prepared) > 1:
+    if par and len(prepared) > 1 and answers is None:
         if on_batch: on_batch(0, len(batches), par=True)
         rounds = [evidence.Round('research', f'judge_{bi}', [c.get('url') for c in b], board)
                   for bi, b, _o, _p, _c in prepared]
@@ -758,7 +767,10 @@ def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', pa
                 with evidence.opened('research', f'judge_{bi}', [c.get('url') for c in b], board) as rnd:
                     batch_round[bi] = rnd         # 安檢門核對這一批的比對結果記進同一輪
                     try:
-                        ar.require_success(run_agent(p, os.path.join(rd, f'judge_{bi}.out'), browser_required))
+                        if answers is not None:
+                            _write_answers(out, b, answers)
+                        else:
+                            ar.require_success(run_agent(p, os.path.join(rd, f'judge_{bi}.out'), browser_required))
                     finally:
                         rnd.handoff(out)
             except ar.AgentRunError:

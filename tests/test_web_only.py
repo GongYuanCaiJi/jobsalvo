@@ -674,6 +674,31 @@ class AddJobReal(unittest.TestCase):
                     add_job.run(['https://ex.test/a'], p)
                 self.assertIs(seen['par'], bool(on))
 
+    def test_jobs_judged_outside_skip_the_agent_but_still_pass_the_gate(self):
+        """別的 agent 已經讀過 JD、照交件單格式判好的:不再派 agent 讀第二次;程式照樣抓頁、照樣過安檢門,
+        引用在頁面原文裡找不到的那張照加(他要的),摘要不用、原因照實回報。"""
+        import tempfile, add_job, research, page_fetch
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        jd = 'Acme is hiring a Platform Engineer to build secure systems. Remote, Asia time zones.'
+        page = lambda url: page_fetch.PageResult(url, 'ok', text=jd, title='Platform Engineer', via='direct', http_status=200)
+        good = {'title': 'Platform Engineer', 'company': 'Acme', 'keep': True, 'fit': 4, 'why': '遠端、亞洲時區',
+                'cat': research.CATS[0], 'card': {'fit': '他做過平台', 'co': 'Acme', 'loc': 'Remote'},
+                'reasons': [{'text': '可遠端', 'citation': 'Remote, Asia time zones', 'basis': 'JD 原文'}]}
+        bad = dict(good, reasons=[{'text': '要求 10 年', 'citation': '10 years of experience', 'basis': 'JD 原文'}])
+        answers = {'https://ex.test/good': good, 'https://ex.test/bad': bad}
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', side_effect=page):
+            n = add_job.run(list(answers), p, run_agent=lambda *a, **k: self.fail('判好的不該再派 agent'),
+                            answers=answers)
+        self.assertEqual(n, 2)
+        data = read_board(p)
+        cards = {j['id']: j for j in data['data']['jobs']}
+        self.assertEqual(cards['https://ex.test/good']['sum']['fit'], '他做過平台')
+        self.assertNotEqual(cards['https://ex.test/bad']['sum']['fit'], '他做過平台')   # 引用對不上:摘要不用
+        inbox = json.loads(data['fb']).get('__inbox__') or []
+        self.assertTrue(any('對不上' in x.get('msg', '') and x.get('job') == 'https://ex.test/bad' for x in inbox))
+
     def test_no_agent_available_keeps_the_jobs_waiting_instead_of_empty_cards(self):
         """agent 都不能用(額度用完):不加空卡,抓好的存成待寫;下一次跑(沒貼新網址也一樣)先寫它們。
         以前照樣加進看板、摘要寫「agent 無法讀取」,之後沒有任何東西回頭補(收卡整個停住)。"""
