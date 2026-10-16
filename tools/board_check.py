@@ -83,6 +83,27 @@ CHECKS=[
    }
    return bad.join('；');
  """),
+ ('篩選選單上寫幾張,選了這一頁就是幾張(進板、上架、應徵人數)',"""
+   document.querySelector('[data-tab="all"]').click(); await T.idle();
+   var bad=[], names=['range','open','crowd'];
+   for(var i=0;i<names.length;i++){
+     var sel='[data-ctl="'+names[i]+'"]';
+     if(!document.querySelector(sel)){bad.push(names[i]+' 這顆不見了');continue;}
+     document.querySelector(sel).click(); await T.idle();
+     var opts=[].slice.call(document.querySelectorAll('#ctlmenu .ctlopt')).map(function(o){
+       return [o.getAttribute('data-val'),o.querySelector('span').textContent,+((o.querySelector('b')||{}).textContent||0)];});
+     document.querySelector(sel).click(); await T.idle();
+     for(var k=0;k<opts.length;k++){
+       document.querySelector(sel).click(); await T.idle();
+       document.querySelector('#ctlmenu .ctlopt[data-val="'+opts[k][0]+'"]').click(); await T.idle();
+       var shown=+((document.querySelector('.rvbar-t b')||{}).textContent||0);
+       if(shown!==opts[k][2])bad.push(opts[k][1]+':選單寫 '+opts[k][2]+' 張,選了是 '+shown+' 張');
+     }
+     document.querySelector(sel).click(); await T.idle();
+     document.querySelector('#ctlmenu .ctlopt[data-val="0"]').click(); await T.idle();
+   }
+   return bad.join('；');
+ """),
  ('破壞性動作固定在卡片右側那條',"""
    var h=document.querySelectorAll('#app .cohead')[0]; if(!h)return '看板上沒有公司列';
    h.click();

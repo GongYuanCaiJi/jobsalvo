@@ -48,10 +48,10 @@ def reconcile_process_calls(run_mock):
             any(str(part).endswith('reconcile.py') for part in call.args[0])]
 
 
-def page_result(url, text='實際 JD 片段', via='fake', posted_at='', posted_source=''):
+def page_result(url, text='實際 JD 片段', via='fake', posted_at='', posted_source='', applicants=''):
     import page_fetch
     return page_fetch.PageResult(url, 'ok', text=text, via=via,
-                                 posted_at=posted_at, posted_source=posted_source)
+                                 posted_at=posted_at, posted_source=posted_source, applicants=applicants)
 
 
 
@@ -1160,7 +1160,7 @@ class ResearchPipeline(unittest.TestCase):
              patch.object(self.rs.prefs, 'refresh_like'), \
              patch('page_fetch.fetch', side_effect=lambda url: page_result(
                  url, 'Security Engineer · ACME · 工作內容包含資安工程', posted_at='2026-09-01',
-                 posted_source='test date')):
+                 posted_source='test date', applicants='0~5 人')):
             added = self.rs.run('deep', '', live=self.path, run_agent=fake_agent,
                                 ledger=self.ledger, sums=self.sums, turned=turned, limit=1)
 
@@ -1180,6 +1180,9 @@ class ResearchPipeline(unittest.TestCase):
         self.assertEqual(new['src']['reposts'][0]['mark'], '喜歡')
         self.assertEqual(new['posted_at'], '2026-09-01')
         self.assertEqual(new['posted_src'], 'test date')
+        self.assertEqual(new['applicants'], '0~5 人', '抓到當下的應徵人數區間要跟著卡片存下來')
+        self.assertEqual(new['applicants_at'], time.strftime('%Y-%m-%d'))
+        self.assertEqual(new['applicants_log'], [[time.strftime('%Y-%m-%d'), '0~5 人']])
 
     def test_judge_batches_run_together_when_he_lets_them(self):
         """判斷四批彼此不相干,沒有理由排隊(實測:排隊 37 分鐘,是整輪 84 分鐘裡最大的一塊)。"""

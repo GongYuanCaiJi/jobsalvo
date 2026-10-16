@@ -120,9 +120,28 @@
   // 「掛很久」是排序的事(見 SORTS 的「開最久」),不是篩選的事。查不到那顆留著:
   // 那是我們資料自己產的必然產物,主流的資料來自雇主 API 不會有,不能讓它們無聲消失。
   var OPENS=[[7,'7 天內'],[30,'30 天內'],[90,'90 天內'],[-2,'查不到'],[0,'不限']];
+  // 應徵人數:只看最多 N 人應徵的缺(照頁面寫的上限判:「30 人以上」不算 50 人以下)
+  var crowdMax=0; try{crowdMax=parseInt(localStorage.getItem('sts_crowd')||'0',10)||0;}catch(e){}
+  var CROWDS=[[5,'5 人以下'],[10,'10 人以下'],[25,'25 人以下'],[50,'50 人以下'],[-2,'查不到'],[0,'不限']];
   // 排序:以前只有篩選沒有排序,結果新缺被埋在幾百張裡。預設「剛進板的先看」。
   var sortBy='added'; try{sortBy=localStorage.getItem('sts_sort')||'added';}catch(e){}
-  var SORTS=[['added','剛進板'],['fit','最可能喜歡'],['posted','剛上架'],['oldest','開最久'],['co','公司']];
+  var SORTS=[['added','剛進板'],['fit','最可能喜歡'],['posted','剛上架'],['oldest','開最久'],['few','應徵少'],['co','公司']];
+  // 職缺頁公開的應徵人數(抓卡時存的 j.applicants:「45 人」「200 人以上」「兩週內 0~5 人」「不到 25 人」「還沒幾人」)。
+  // 排序照字面上的下限:人少的排前面,沒資料的最後
+  // 「兩週內 6~10 人」→[6,10]、「200 人以上」→[200,∞]、「不到 25 人」→[0,24]、「還沒幾人」→[0,0];沒資料 null
+  function crowdRange(j){var a=String(j.applicants||''); if(!a)return null;
+    var n=(a.match(/\d+/g)||[]).map(Number);
+    if(/^還沒/.test(a)||!n.length)return [0,0];
+    if(/^不到/.test(a))return [0,n[0]-1];
+    if(/以上/.test(a))return [n[0],Infinity];
+    return [n[0],n.length>1?n[1]:n[0]];}
+  function crowdOf(j){var r=crowdRange(j); return r?r[0]:9e9;}
+  function inCrowd(j){
+    if(!crowdMax)return true;
+    var r=crowdRange(j);
+    if(crowdMax===-2)return !r;            // 只看頁面沒寫人數的
+    return !!r&&r[1]<=crowdMax;
+  }
   // 「最可能喜歡」:找缺那一輪判斷過的(對照他的原話給 1-5,j.src.fit)排前面;
   // 其餘照 j.like(職稱加摘要像他喜歡過的程度 − 像不喜歡過的程度,0-100,prefs.like_scores;
   // 拿他表過態的卡驗過 AUC 0.82)。
@@ -151,10 +170,12 @@
       posted:function(a,b){return (daysSince(a.posted_at)==null?9e9:daysSince(a.posted_at))-(daysSince(b.posted_at)==null?9e9:daysSince(b.posted_at));},
       oldest:function(a,b){var x=daysSince(a.posted_at),y=daysSince(b.posted_at);
         return (y==null?-1:y)-(x==null?-1:x);},   // 掛最久的先看:常設缺/沒人管的先攤出來
+      few:function(a,b){return crowdOf(a)-crowdOf(b)||f.posted(a,b);},   // 同一區間:剛上架的先
       co:function(a,b){return companyOf(a).localeCompare(companyOf(b));},
       fit:function(a,b){return fitOf(b)-fitOf(a);}
-    }[sortBy];
-    return f?l.slice().sort(f):l;
+    };
+    var cmp=f[sortBy];
+    return cmp?l.slice().sort(cmp):l;
   }
   var filtersOpen=false;
   function _matchQ(j,q){var s=j.sum||{}; var hay=((j.target||'')+' '+(j.note||'')+' '+(s.fit||'')+' '+(s.co||'')+' '+(s.bar||'')+' '+(s.ammo||'')).toLowerCase(); return hay.indexOf(q)>=0;}
@@ -256,6 +277,15 @@
     if(n===null)return '';
     var cls=n>180?'opened old':'opened';
     return '<span class="'+cls+'" title="'+esc(j.posted_at)+' 上架（'+esc(j.posted_src||'')+'）">開了 '+n+' 天</span>';
+  }
+  // 職缺頁公開的應徵人數;人數天天在變,滑過去看是哪天抓的
+  function crowdBadge(j){
+    if(!j.applicants)return '';
+    var log=(j.applicants_log||[]).filter(function(x){return x&&x[1];});
+    var tip=log.length>1?log.map(function(x){return (x[0]||'?')+' '+x[1];}).join(' → ')
+      :'職缺頁上的應徵人數('+(j.applicants_at||'')+' 抓)';
+    return '<span class="opened" title="'+esc(tip)+'">'+esc(j.applicants)+'應徵'+
+      (log.length>1?'(原 '+esc(log[0][1])+')':'')+'</span>';
   }
   // 104 顯示「企業最後處理履歷時間」、Indeed 自動標 Response seems unlikely。我們沒有雇主端資料,
   // 但手上三個訊號合起來能講同一件事:掛超過半年、死線已過、連結檢查沒過。
@@ -1161,7 +1191,7 @@
     // 標題整行就是「去看這個職缺」:一整條可點,行尾補一個 ↗ 當提示。
     function headHTML(withStage){
       var h3='<h3>'+jdTitleHTML(j)+dead+'</h3>';
-      return '<div class="card-top">'+h3+badge+(withStage?apbadge:'')+openedBadge(j)+addedBadge(j)+'</div>';}
+      return '<div class="card-top">'+h3+badge+(withStage?apbadge:'')+openedBadge(j)+crowdBadge(j)+addedBadge(j)+'</div>';}
     var chan='<span class="pill '+pill(j.chan)+'">'+esc(j.chan)+'</span>';
     var note_t='<textarea class="fb-t" rows="1" placeholder="原因(喜歡/普通/不喜歡都可寫)">'+esc(note)+'</textarea>';
     // 履歷回饋:這份履歷哪裡不對。跟上面那格分開,因為那格講的是這個職缺你喜不喜歡,
@@ -1268,7 +1298,7 @@
   // 公司的順序(畫公司列、「一張一張看」排卡片共用,兩邊看到的順序一樣)
   function _coOrder(list,sec){
     sec=sec||active;
-    var sig=[active,activeCat,activeFacet,searchQuery,rangeDays,openDays,sortBy].join('\u0001');
+    var sig=[active,activeCat,activeFacet,searchQuery,rangeDays,openDays,crowdMax,sortBy].join('\u0001');
     var byCo={},coOrder=[];
     list.forEach(function(j){var co=companyOf(j);if(!byCo[co]){byCo[co]=[];coOrder.push(co);}byCo[co].push(j);});
     coOrder.sort(function(a,b){
@@ -1276,10 +1306,12 @@
       if(sortBy==='co')return a.localeCompare(b);
       // 排序看「這家最新那筆多久前」,最新的公司排前面
       function newest(co){return Math.min.apply(null,byCo[co].map(function(j){
-        var d=daysSince(sortBy==='posted'?j.posted_at:j.added); return d==null?9e9:d;}));}
+        var d=daysSince(sortBy==='posted'||sortBy==='few'?j.posted_at:j.added); return d==null?9e9:d;}));}
       function oldest(co){return Math.max.apply(null,byCo[co].map(function(j){
         var d=daysSince(j.posted_at); return d==null?-1:d;}));}
       if(sortBy==='oldest')return oldest(b)-oldest(a)||a.localeCompare(b);
+      if(sortBy==='few'){var ca=Math.min.apply(null,byCo[a].map(crowdOf)), cb=Math.min.apply(null,byCo[b].map(crowdOf));
+        if(ca!==cb)return ca-cb;}
       if(sortBy==='fit'){var fa=Math.max.apply(null,byCo[a].map(fitOf)), fb2=Math.max.apply(null,byCo[b].map(fitOf));
         if(fa!==fb2)return fb2-fa;}
       return newest(a)-newest(b)||byCo[b].length-byCo[a].length||a.localeCompare(b);});
@@ -1870,7 +1902,7 @@
     if(REVIEW){renderReview();return;}
     var base=jobs.filter(function(j){var p=placeOf(j.id); if(!p||p==='rm')return false;
       if(justMarked[j.id])return true;   // 剛標的先留著,讓他在同一張卡上接著做下一步
-      if(!inRange(j))return false; if(!inOpen(j))return false; if(!onTab(j.id,active))return false; if(activeFacet&&tagsOf(j).indexOf(activeFacet)<0)return false; if(searchQuery&&!_matchQ(j,searchQuery))return false; return true;});
+      if(!inRange(j))return false; if(!inOpen(j))return false; if(!inCrowd(j))return false; if(!onTab(j.id,active))return false; if(activeFacet&&tagsOf(j).indexOf(activeFacet)<0)return false; if(searchQuery&&!_matchQ(j,searchQuery))return false; return true;});
     var catCount={}; base.forEach(function(j){var _w=catOf(j);catCount[_w]=(catCount[_w]||0)+1;});
     var pool=onPage('all');
     var pool2=pool.filter(inRange);
@@ -1881,6 +1913,8 @@
     function nOpen(d){return pool2.filter(function(j){var k=daysSince(j.posted_at);
       if(!d)return true; if(d===-2)return k===null; if(k===null)return false;
       return k<=d;}).length;}
+    var pool3=pool2.filter(inOpen);
+    function nCrowd(m){var keep=crowdMax; crowdMax=m; var n=pool3.filter(inCrowd).length; crowdMax=keep; return n;}
     var catItems=[['all','全部',base.length]];
     catOrder.forEach(function(c){ if(catCount[c]) catItems.push([c,(catIcon[c]||'')+c,catCount[c]]); });
     Object.keys(catCount).forEach(function(c){ if(catOrder.indexOf(c)<0) catItems.push([c,c,catCount[c]]); });
@@ -1888,11 +1922,12 @@
     var forder=TAGS.map(function(t){return t.name;});
     var fk=forder.filter(function(x){return fc[x];}); Object.keys(fc).forEach(function(x){if(fk.indexOf(x)<0)fk.push(x);});
     var tagItems=[['','全部','']].concat(fk.map(function(x){return [x,x,fc[x]];}));
-    var anyFilter=(rangeDays||openDays||activeCat!=='all'||activeFacet||searchQuery);
+    var anyFilter=(rangeDays||openDays||crowdMax||activeCat!=='all'||activeFacet||searchQuery);
     var bl=(FB['__block__']||[]).length;
     var chips='<div class="ctlbar">'+
       sel('range','進板',RANGES.map(function(r){return [r[0],r[1],nRange(r[0])];}),rangeDays)+
       sel('open','上架',OPENS.map(function(r){return [r[0],r[1],nOpen(r[0])];}),openDays)+
+      sel('crowd','應徵人數',CROWDS.map(function(r){return [r[0],r[1],nCrowd(r[0])];}),crowdMax)+
       sel('cat','類別',catItems,activeCat)+
       (tagItems.length>1?sel('tag','標籤',tagItems,activeFacet):'')+
       sel('sort','排序',SORTS.map(function(x){return [x[0],x[1]];}),sortBy)+
@@ -1906,6 +1941,7 @@
       var conds=[];
       if(rangeDays)conds.push('進板時間：'+(RANGES.filter(function(r){return r[0]===rangeDays;})[0]||[,''])[1]);
       if(openDays)conds.push('上架多久：'+(OPENS.filter(function(r){return r[0]===openDays;})[0]||[,''])[1]);
+      if(crowdMax)conds.push('應徵人數：'+(CROWDS.filter(function(r){return r[0]===crowdMax;})[0]||[,''])[1]);
       if(activeCat!=='all')conds.push('類別：'+activeCat);
       if(activeFacet)conds.push('標籤：'+activeFacet);
       if(searchQuery)conds.push('搜尋：'+searchQuery);
@@ -2890,7 +2926,7 @@
   function closeMenu(){var m=$('ctlmenu'); if(m)m.remove(); _menuFor=null;}
   function openMenu(btn){
     var name=btn.getAttribute('data-ctl'), items=CTL_ITEMS[name]||[];
-    var cur={range:rangeDays,open:openDays,cat:activeCat,tag:activeFacet,sort:sortBy}[name];
+    var cur={range:rangeDays,open:openDays,crowd:crowdMax,cat:activeCat,tag:activeFacet,sort:sortBy}[name];
     closeMenu();
     var m=document.createElement('div'); m.id='ctlmenu'; m.className='ctlmenu';
     m.innerHTML=items.map(function(o){
@@ -2919,11 +2955,12 @@
     userFiltered=true;
     if(k==='range')rangeDays=parseInt(v,10)||0;
     else if(k==='open')openDays=parseInt(v,10)||0;
+    else if(k==='crowd')crowdMax=parseInt(v,10)||0;
     else if(k==='cat')activeCat=v;
     else if(k==='tag'){activeFacet=v; if($('facetf'))renderFacetInd();}
     else if(k==='sort')sortBy=v;
     try{localStorage.setItem('sts_range',String(rangeDays));localStorage.setItem('sts_open',String(openDays));
-        localStorage.setItem('sts_sort',sortBy);}catch(e2){}
+        localStorage.setItem('sts_crowd',String(crowdMax));localStorage.setItem('sts_sort',sortBy);}catch(e2){}
     renderApp(); saveView();
   }
   // 卡上換履歷版本(resume_id)/換語言(lang):同一套
@@ -2979,9 +3016,9 @@
     var _ro=e.target.closest('.rz-open'); if(_ro){openResume(_ro.getAttribute('data-rz'),_ro.getAttribute('data-var')); return;}
     if(e.target.closest('[data-openfind]')){FOLD['find']=1; renderAll(); var fr=$('findrow'); if(fr)fr.scrollIntoView({block:'start'}); return;}
     var ca=e.target.closest('[data-clearall]');
-    if(ca){rangeDays=0;openDays=0;activeCat='all';activeFacet='';searchQuery='';userFiltered=false;
+    if(ca){rangeDays=0;openDays=0;crowdMax=0;activeCat='all';activeFacet='';searchQuery='';userFiltered=false;
       if($('q'))$('q').value='';
-      try{localStorage.setItem('sts_range','0');localStorage.setItem('sts_open','0');}catch(e5){}
+      try{localStorage.setItem('sts_range','0');localStorage.setItem('sts_open','0');localStorage.setItem('sts_crowd','0');}catch(e5){}
       renderApp(); return;}
     var ctl=e.target.closest('[data-ctl]');
     if(ctl){ if(_menuFor===ctl.getAttribute('data-ctl'))closeMenu(); else openMenu(ctl); return;}

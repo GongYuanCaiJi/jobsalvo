@@ -80,7 +80,8 @@ class PageFetchRoutes(unittest.TestCase):
             '/api/acme/fake-id?mode=json': (200, JSON, b'{"text":"Security Work","descriptionPlain":'
                                                        b'"Build controls for active internet services."}'),
             '/api/104/ABC1': (200, JSON, json.dumps({'data': {
-                'switch': 'on', 'header': {'jobName': 'Platform Engineer', 'custName': 'Example', 'appearDate': '20260901'},
+                'switch': 'on', 'header': {'jobName': 'Platform Engineer', 'custName': 'Example', 'appearDate': '20260901',
+                           'analysisType': 2},
                 'jobDetail': {'jobDescription': '<p>Build secure services.</p>'}}}).encode()),
             '/api/104/CLOSED': (200, JSON, json.dumps({'data': {'switch': 'off', 'header': {'jobName': 'Platform Engineer'}}}).encode()),
             '/api/ashby/acme': (200, JSON, json.dumps({'jobs': [{
@@ -329,7 +330,20 @@ class PageFetchRoutes(unittest.TestCase):
         self.assertIn('Build secure services.', result.text)
         self.assertEqual(result.posted_at, '2026-09-01')
         self.assertEqual(result.posted_source, '104 appearDate')
+        self.assertEqual(result.applicants, '兩週內 6~10 人')   # 104 頁上「兩週內應徵人數」的區間
         self.assertEqual(self.requests, ['/api/104/ABC1'])
+
+    def test_page_applicants_reads_the_public_count_line_and_count_field(self):
+        import page_fetch
+        cap = '<span class="num-applicants__caption topcard__flavor">\n  {}\n</span>'.format
+        cases = {cap('45 位應徵者'): '45 人', cap('57 位申请者'): '57 人', cap('Over 200 applicants'): '200 人以上',
+                 cap('超過 200 位應徵者'): '200 人以上', cap('成为前 25 位申请者'): '不到 25 人',
+                 cap('Be among the first 25 applicants'): '不到 25 人',
+                 '<figure class="num-applicants__figure"></figure>' + cap('搶先應徵，拔得頭籌！'): '還沒幾人',
+                 '{\\"page_views\\":11516,\\"applicant_count\\":2,': '2 人',
+                 '<p>We received 300 applicants last year.</p>': ''}
+        for html, want in cases.items():
+            self.assertEqual(page_fetch._page_applicants(html), want, html)
 
     def test_104_official_switch_off_is_closed_without_reading_page(self):
         result = self._api_fetch('104', 'https://www.104.com.tw/job/CLOSED')

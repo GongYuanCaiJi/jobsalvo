@@ -44,6 +44,9 @@ def jobs():
                 'posted_src': ats,
                 'source_platform': '104.com.tw' if n == 10 else 'linkedin.com' if n == 11 else '',
             })
+            crowd = {1: '兩週內 0~5 人', 4: '45 人', 6: '200 人以上', 8: '還沒幾人'}.get(n)
+            if crowd:   # 職缺頁公開的應徵人數(示範資料)
+                out[-1].update(applicants=crowd, applicants_at=today.isoformat())
             if n == 1:   # 判斷那一段看出來的幽靈職缺(示範卡片上的標記)
                 out[-1]['src'] = {'risk': {'kind': 'ghost', 'why': '刊登已經 120 天,JD 寫「持續招募」(示範資料)'}}
     return out

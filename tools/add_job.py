@@ -83,6 +83,7 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
             'page_http_status': fetched.http_status,
             'posted_at': fetched.posted_at,
             'posted_src': fetched.posted_source,
+            'applicants': fetched.applicants,
             'page_errors': list(fetched.errors),
             'flag': [] if fetched.readable else ['程式無法取得職缺頁文字;保留待確認,不可猜測內容'],
         })

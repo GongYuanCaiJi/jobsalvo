@@ -41,9 +41,11 @@ class FindTime(unittest.TestCase):
         with mock.patch('prefs.load', return_value=({}, [])), \
                 mock.patch('research.run', side_effect=fake_run), \
                 mock.patch('research.pending_count', return_value=0), \
-                mock.patch.object(converge.subprocess, 'run'):
+                mock.patch.object(converge.subprocess, 'run') as sub:
             converge._main(a, '', lambda phase, **kw: done.update(kw, phase=phase), lambda: False, lambda: clock['up'])
         self.assertEqual(ran, [('deep', 15)])
+        scripts = [os.path.basename(c.args[0][1]) for c in sub.call_args_list]
+        self.assertIn('applicants.py', scripts, '每輪找缺結束自動更新應徵人數,不靠他手動跑')
         self.assertEqual((done['phase'], done['added'], done['found'], done['timeup']), ('done', 2, 4, True))
         self.assertIn('時間到', done['msg'])
 

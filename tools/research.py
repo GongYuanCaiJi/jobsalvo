@@ -502,6 +502,7 @@ def clean(cands, have, exclude_re, turned=(), fetch_page=None, flag_re=None):
         c['jd'] = fetched.jd
         c['posted_at'] = fetched.posted_at
         c['posted_src'] = fetched.posted_source
+        c['applicants'] = fetched.applicants
         age = _age_days(fetched.posted_at)
         if age is not None and age > GHOST_DAYS:
             c['flag'] = list(c.get('flag') or []) + [
@@ -915,6 +916,11 @@ def job_entry(c, r, src):
         entry['posted_at'] = c['posted_at']
         if c.get('posted_src'):
             entry['posted_src'] = c['posted_src']
+    if c.get('page_status') == 'ok':   # 頁面讀到了就算查過人數(沒寫就是沒寫,之後不重查)
+        entry['applicants_at'] = time.strftime('%Y-%m-%d')
+    if c.get('applicants'):   # 人數天天在變:記下是哪天看到的;applicants_log 留每次看到的變化
+        entry['applicants'] = c['applicants']
+        entry['applicants_log'] = [[entry['applicants_at'], c['applicants']]]
     return entry
 
 

@@ -110,6 +110,9 @@ def _main(a,direction,st,finishing=lambda:False,time_up=lambda:False):
     # 新缺補上架日:ATS 有日期就直接用;其餘 agent 只讀程式擷取文字,已處理網址不重抓。
     subprocess.run([sys.executable,os.path.join(TOOLS,'posted_age.py'),
                     '--board',a.live],cwd=REPO,check=False)
+    # 應徵人數:新卡查一次、有人數的卡重抓(變了記下來);只走直連,不開瀏覽器
+    subprocess.run([sys.executable,os.path.join(TOOLS,'applicants.py'),
+                    '--board',a.live],cwd=REPO,check=False)
     print(f'這輪新增 {added} 筆職缺(在看板「🆕 待評估」)')
     if finishing():
         st('stopped',added=added,pending=research.pending_count(),finished_at=time.time(),msg='你按了停止,做完的收下了')

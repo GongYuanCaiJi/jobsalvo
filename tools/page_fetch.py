@@ -48,6 +48,7 @@ class PageResult:
     title: str = ''
     posted_at: str = ''
     posted_source: str = ''
+    applicants: str = ''   # 頁面公開的應徵人數,照頁面原意寫成「45 人」「200 人以上」「兩週內 0~5 人」
     http_status: int = 0
     verified_live: bool = False  # 官方結構化欄位明確標示仍在徵
     errors: tuple = ()
@@ -119,6 +120,30 @@ def _job_posting_date(html):
             if day:
                 return day
     return ''
+
+
+# 職缺頁上公開的應徵人數:LinkedIn 公開頁 num-applicants 那一行(「45 位應徵者」「Over 200 applicants」
+# 「成为前 25 位申请者」「搶先應徵，拔得頭籌！」),或頁內資料的 applicant_count(remote3 等)。內文提到的數字不算
+_APPLICANT_LINE = re.compile(r'class="num-applicants__[^"]*"[^>]*>(.*?)</', re.S)
+_APPLICANT_COUNT = re.compile(r'applicant_count\\?"\s*:\s*(\d+)')
+
+
+def _page_applicants(html):
+    for raw in _APPLICANT_LINE.findall(html or ''):
+        text = ' '.join(re.sub(r'<[^>]+>', ' ', raw).split())
+        if not text:
+            continue
+        n = re.search(r'\d[\d,]*', text)
+        if not n:
+            return '還沒幾人'
+        n = n.group(0).replace(',', '')
+        if re.search(r'(?i)超過|超过|over', text):
+            return f'{n} 人以上'
+        if re.search(r'(?i)前|first', text):
+            return f'不到 {n} 人'
+        return f'{n} 人'
+    count = _APPLICANT_COUNT.search(html or '')
+    return f'{count.group(1)} 人' if count else ''
 
 
 def _visible_text(body):
@@ -277,6 +302,10 @@ def _api_json(endpoint, headers=None):
     return status, json.loads(_decode(body, charset))
 
 
+# 104 職缺頁「兩週內應徵人數」:API 只給代號,頁面前端照這張表換成字
+APPLICANTS_104 = {1: '兩週內 0~5 人', 2: '兩週內 6~10 人', 3: '兩週內 11~30 人', 4: '兩週內 30 人以上'}
+
+
 def _104(url):
     parts = urllib.parse.urlsplit(url)
     host = (parts.hostname or '').lower()
@@ -324,6 +353,7 @@ def _104(url):
                       title=_field_text(header.get('jobName')),
                       posted_at=_date(header.get('appearDate')),
                       posted_source='104 appearDate' if _date(header.get('appearDate')) else '',
+                      applicants=APPLICANTS_104.get(header.get('analysisType'), ''),
                       http_status=status, verified_live=data.get('switch') == 'on')
 
 
@@ -353,17 +383,18 @@ def _direct(url, pinned_ip=''):
     if not 200 <= status < 400:
         raise RuntimeError(f'HTTP {status}')
     raw = _decode(body, charset)
-    posted = ''
+    posted = applicants = ''
     if content_type == 'text/html' or raw.lstrip().startswith('<'):
         text, title = _visible_text(raw)
         posted = _job_posting_date(raw)
+        applicants = _page_applicants(raw)
     else:
         text, title = raw.strip(), ''
     if not text:
         raise RuntimeError('response contained no readable text')
     return PageResult(url, 'ok', text=text, via='direct', title=title,
                       http_status=status, posted_at=posted,
-                      posted_source='JobPosting datePosted' if posted else '')
+                      posted_source='JobPosting datePosted' if posted else '', applicants=applicants)
 
 
 def _reader(url):
@@ -515,6 +546,11 @@ def _ego_now(url):
 # 好幾個缺一起抓:大多時間在等網路,一個一個抓的話,一個打不開的頁(逾時加重試最多四分鐘)會卡住後面全部。
 # ego 那一步另外有 _EGO_SLOTS 限制同時幾個,電腦不會被拖垮。
 FETCH_WORKERS = 6
+
+
+def fetch_light(url):
+    """只抓官方資料或直連一次,不退到閱讀代理或瀏覽器:補卡片欄位用(例如應徵人數),不是為了讀內文。"""
+    return _104(url) or _direct(url)
 
 
 def fetch_many(urls, fetch_page=None):
