@@ -18,6 +18,7 @@ BOARD_SRC = os.path.join(ROOT, 'board')  # 看板外殼(css/js/頁首)
 
 RESEARCH_SKILLS = {
     'common': {'label': '找缺共通', 'file': 'find-common.md'},
+    'note': {'label': '整理偏好筆記', 'file': 'note.md'},
     'deep': {'label': '更深', 'file': 'deep.md'},
     'wide': {'label': '更廣', 'file': 'wide.md'},
     'dir': {'label': '指定方向', 'file': 'direction.md'},
@@ -88,6 +89,8 @@ DEFAULTS = {
         'flag_title': '',
         # 找缺那一段最多跑幾分鐘(看板找缺那一列的格子改它);0 = 不限時,agent 自己決定找多久
         'find_minutes': 15,
+        # 找缺條件(看板找缺那一列的數字格改它;tools/find_terms.py 定義每一項):空的 = 不限
+        'terms': {},
     },
     'research': {
         # 找缺與判斷各自可指定客製 skill;空白用產品附的預設。

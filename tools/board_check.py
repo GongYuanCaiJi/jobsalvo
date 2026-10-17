@@ -560,7 +560,7 @@ WEB_CHECKS=[
    document.querySelector('[data-tab="none"]').click(); await T.idle();
    return bad.join('；');
  """),
- ('設定頁:五種找缺與判斷的做法可各自選取並存回',"""
+ ('設定頁:找缺與判斷的每一種做法(含整理偏好筆記)可各自選取並存回',"""
    document.querySelector('[data-tab="cfg"]').click(); await T.idle();
    var bad=[], original=null, realTimeout=window.setTimeout;
    try{
@@ -568,13 +568,15 @@ WEB_CHECKS=[
      if(!fold)return '找不到找缺與判斷的做法那一區';
      if(!fold.open)fold.querySelector('summary').click();
      var selects=[...document.querySelectorAll('select[data-cf^="research.skills."]')];
-     if(selects.length!==5)return '找缺與判斷的做法選單數量不對:'+selects.length;
+     var settings0=await fetch('/api/settings').then(function(r){return r.json();});
+     var want=Object.keys(((settings0.effective||{}).research||{}).skills||{}).length;   // 產品有幾種做法就有幾個選單
+     if(!want||selects.length!==want)return '找缺與判斷的做法選單數量不對:'+selects.length+'(應該 '+want+')';
      if(selects.some(function(s){return s.options[0].value!=='';}))return '空白選項沒有沿用產品預設';
      var settings=await fetch('/api/settings').then(function(r){return r.json();});
      original=JSON.parse(JSON.stringify(settings.settings||{}));
      var tasks=settings.research_skill_tasks||[];
-     if(tasks.length!==5||tasks.some(function(x){return !x.default_content||!x.default_content.trim();}))
-       return '設定頁沒有拿到五份預設 skill 的完整內容';
+     if(tasks.length!==want||tasks.some(function(x){return !x.default_content||!x.default_content.trim();}))
+       return '設定頁沒有拿到每一份預設 skill 的完整內容('+tasks.length+'/'+want+')';
      for(var i=0;i<tasks.length;i++){
        var preview=document.querySelector('[data-research-default="'+tasks[i].key+'"]');
        if(!preview||preview.textContent!==tasks[i].default_content)
@@ -623,7 +625,7 @@ WEB_CHECKS=[
        return ['common','deep','wide','dir','judge'].every(function(k){return values[k]===path;});},15000);
      var values=((saved.settings||{}).research||{}).skills||{};
      if(!['common','deep','wide','dir','judge'].every(function(k){return values[k]===path;}))
-       bad.push('五份 skill 沒有各自記住');
+       bad.push('每一份 skill 沒有各自記住');
    }catch(e){bad.push('操作找缺與判斷的做法出錯:'+e.message);}
    finally{
      await T.idle();   // 同上:存檔請求都回來、重載被擋掉之後才還原 setTimeout
@@ -2703,6 +2705,52 @@ CHECKS.append((
       }finally{
         window.fetch=f0;
         document.querySelector('[data-tab="none"]').click(); await T.idle();
+      }
+      return bad.join('；');
+    """,
+    'no_setup', {'fresh_page': True},
+))
+
+
+# 找缺條件(#458):每一格填一遍都存進設定、重畫後還在;不合理的值擋下來講哪一格、不存;按找缺時條件跟著請求走
+CHECKS.append((
+    '找缺條件:每一格填完就存、重畫後還在;不合理的值講出哪一格、不存;按找缺時條件一起帶上',
+    r"""
+      var bad=[], orig=null;
+      var post=function(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json();});};
+      var terms=async function(){var st=await fetch('/api/settings').then(function(r){return r.json();}); return (st.effective.search||{}).terms||{};};
+      var open=function(){var d=document.getElementById('finddet'); if(d&&!d.open)d.querySelector('summary').click();};
+      var cell=function(k){return document.querySelector('#findrow [data-fterm="'+k+'"]');};
+      var fill=function(k,v){var c=cell(k); c.value=v; c.dispatchEvent(new Event('change',{bubbles:true}));};
+      try{
+        orig=(await fetch('/api/settings').then(function(r){return r.json();})).settings;
+        open(); await T.idle();
+        var want={posted_days:7,applicants_max:10,salary_min:50000,exp_max:3,location:'台北 遠端'};
+        for(var k in want){ if(!cell(k)){bad.push('找缺面板沒有「'+k+'」這一格'); continue;} fill(k,String(want[k])); await T.idle(); }
+        var cb=document.querySelector('#findrow [data-fstrict="salary_min"]');
+        if(!cb)bad.push('薪資沒有「查不到就排除」');
+        else{cb.checked=true; cb.dispatchEvent(new Event('change',{bubbles:true})); await T.idle();}
+        var got=await terms();
+        for(var k2 in want){ if(got[k2]!==want[k2])bad.push(k2+' 存成 '+JSON.stringify(got[k2])+'(填的是 '+want[k2]+')'); }
+        if((got.strict||[]).indexOf('salary_min')<0)bad.push('勾了薪資查不到就排除,沒存進去');
+        // 重畫後還在
+        document.querySelector('[data-tab="like"]').click(); await T.idle();
+        document.querySelector('[data-tab="none"]').click(); await T.idle(); open(); await T.idle();
+        if(!cell('salary_min')||cell('salary_min').value!=='50000')bad.push('重畫後薪資那一格不見了');
+        // 不合理的值:講哪一格、不存
+        fill('posted_days','-3'); await T.idle();
+        if(!/上架/.test(T.snack()))bad.push('上架填 -3 沒講是哪一格(看到:'+T.snack().slice(0,40)+')');
+        if((await terms()).posted_days!==7)bad.push('上架填 -3 還是存進去了');
+        fill('posted_days','7'); await T.idle();
+        // 按找缺時條件一起帶上(攔下請求,不真的跑)
+        var sent=null, f0=window.fetch;
+        window.fetch=function(u,o){if(/\/api\/run\/research/.test(String(u))){sent=JSON.parse(o.body); return Promise.resolve(new Response('{"ok":false,"msg":"check"}',{status:409}));} return f0.apply(this,arguments);};
+        try{var b=document.querySelector('#findrow [data-find="wide"]'); if(b){b.click(); await T.idle();}}finally{window.fetch=f0;}
+        if(!sent)bad.push('按「更廣」沒送出找缺請求');
+        else if(!sent.terms||sent.terms.salary_min!==50000)bad.push('找缺請求沒帶條件:'+JSON.stringify(sent.terms));
+      }finally{
+        if(orig)await post('/api/settings',{settings:orig});
+        await T.idle();
       }
       return bad.join('；');
     """,

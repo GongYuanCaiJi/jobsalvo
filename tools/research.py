@@ -17,7 +17,7 @@ research —— 找缺一輪:找 → 程式清洗 → 判 → 進板。converge.
   進板  只把送的那幾張加進看板,記出處(哪一輪、哪種找法、哪個方向、哪個網站、怎麼找到的)與對味程度。
   紀錄  每輪一行寫進 <paths.research>/ledger.jsonl,下一輪找的那隻 agent 看得到以前往哪找過、結果如何。
 """
-import os, re, sys, json, time, urllib.parse, contextlib, threading
+import os, re, sys, json, time, urllib.parse, contextlib, threading, collections
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -99,7 +99,7 @@ def search_files(rd, cs, listing, ledger_txt):
 
 
 def search_prompt(mode, direction, cs, cats, ledger_txt, out_json, out_md, listing=(), seeds=(),
-                  model='', files=None, note_out=None, minutes=0):
+                  model='', files=None, note_out=None, minutes=0, terms=None):
     import agent_run as ar
     files = files or {}
     parts = []
@@ -109,6 +109,9 @@ def search_prompt(mode, direction, cs, cats, ledger_txt, out_json, out_md, listi
     if mode == 'dir' and direction:
         parts += [f'他說:「{direction}」\n\n']
     parts += [research_skill('common'), '\n\n', research_skill(mode), '\n\n']
+    import find_terms
+    if find_terms.active(terms or {}):
+        parts += ['這輪條件:\n', find_terms.describe(terms), '\n\n']
     if mode == 'deep' and seeds:
         parts += ['他剛剛在看板上指名要找的,這一輪就是為了這幾個:\n',
                   '\n'.join('- ' + s for s in seeds), '\n\n']
@@ -125,18 +128,9 @@ def search_prompt(mode, direction, cs, cats, ledger_txt, out_json, out_md, listi
         for name, f in files.items():
             parts += [f'- {name.replace(".md", "")}:{f}\n']
         parts += ['\n']
-    # 整理偏好筆記由另一個 agent 同時做(note_prompt):這一輪整段時間都拿來找
-    parts += ['這一輪不用做「1. 整理」,偏好筆記另外有人在整理;直接做「2. 找」。\n\n']
-    # 以前要它每張都用瀏覽器打開確認:一頁倒回來三到二十幾萬字,十分鐘裡一半的步數花在這,只交得出幾張。
-    # 交件後 clean() 本來就會同時讀每一頁、丟掉下架的,判的 agent 拿到的是整頁原文;這一步不用它再做一次。
-    parts += ['不用逐張打開職缺頁確認:交件後程式會同時去讀每一頁,下架的直接丟掉,判的人拿到的是整頁原文。'
-              '搜尋結果看得出是單一職缺頁、可能對味就交。搜尋結果不夠用的時候(例如公司的職缺列表要打開才看得到有哪些缺)'
-              f'才抓那一頁:`{ar.page_fetch_cmd()} <網址>`。\n\n',
-              # 以前找缺一輪 72 步,有好幾步在翻工具清單找別的搜尋工具、讀其他 skill 的說明;每一步都要花時間
-              '網路搜尋用你手上現成的搜尋工具就好,不用去翻工具清單找別的、也不用讀其他 skill 的說明。'
-              '一次送好幾個關鍵字、一次打開好幾頁:每一次呼叫都要花時間,呼叫次數就是這一輪要多久。\n\n',
-              '怎麼找由你決定。覺得可能對味的就交出來,不用讀完整 JD、不用寫摘要:後面有人逐張對照他的原話判斷,',
-              '板上已經有的、網址不是單一職缺頁的,程式也會擋掉。\n\n',
+    # 偏好筆記由另一個 agent 同時整理(note_prompt);怎麼找寫在 find-common skill。這裡只放程式這一輪才知道的:
+    # 抓頁指令、交件檔位置與格式。交件後 clean() 會同時讀每一頁、丟掉下架的,判的 agent 拿到整頁原文。
+    parts += [f'要看公司的職缺列表時,用這個指令抓那一頁:`{ar.page_fetch_cmd()} <網址>`。\n\n',
               f'交件:寫一個 JSON 檔到 {out_json}。每找到一張就把目前找到的全部重寫進這個檔,不要等全部找完才寫'
               '(使用者可能中途按停止,已經寫進檔的會先判、不浪費):\n',
               '[{"url":"單一職缺頁網址","title":"職稱","company":"公司","why":"一句為什麼可能對味",'
@@ -271,8 +265,7 @@ def note_prompt(files, note_out):
     以前跟找缺塞在同一個 agent,它先讀完一堆材料、重寫整份筆記才開始找,真正在找的時間被吃掉一大半(#76)。"""
     # 材料原文直接放進 prompt:以前只給檔名,它 cat 出來的字超過工具輸出上限被截斷,
     # 只好再分段讀好幾次;一輪十步裡一半在重讀,每一步都要重送一次越來越長的對話。
-    parts = [research_skill('common'), '\n\n',
-             '這一輪你只做上面的「1. 整理」,不要找缺、不要上網。材料原文都在下面,不用再去讀檔。\n\n']
+    parts = [research_skill('note'), '\n\n', '材料原文都在下面,不用再去讀檔。\n\n']
     for name, f in files.items():
         with open(f, encoding='utf-8') as fh:
             parts += [f'=== {name.replace(".md", "")}(原文開始)===\n', fh.read().rstrip('\n'),
@@ -299,14 +292,14 @@ def run_note(files, rd, note_out, run_agent):
 
 
 def run_search(mode, direction, cs, cats, ledger_txt, rd, browser_required, run_agent,
-                listing=(), seeds=(), extra_files=None, note_out=None, known_angles=(), minutes=0):
+                listing=(), seeds=(), extra_files=None, note_out=None, known_angles=(), minutes=0, terms=None):
     """回 (候選, 筆記, 對不上的原因)。交件單經安檢門(read_search)。"""
     oj = os.path.join(rd, f'search_{mode}.json')      # 交件單(經安檢門讀)
     om = os.path.join(rd, f'search_{mode}.md')        # 每個角度的理由(agent 的話,只記進紀錄)
     files = search_files(rd, cs, listing, ledger_txt)
     files.update(extra_files or {})
     p = search_prompt(mode, direction, cs, cats, ledger_txt, oj, om, listing, seeds, None,
-                      files=files, note_out=note_out, minutes=minutes)
+                      files=files, note_out=note_out, minutes=minutes, terms=terms)
     with open(os.path.join(rd, f'search_{mode}.prompt.txt'), 'w', encoding='utf-8') as f:
         f.write(p)
     import agent_run as ar
@@ -530,6 +523,45 @@ WIDE_NOTE = ('【這一批的出身】這幾個是「更廣」找來的:他沒�
              '這個職能他會不會有興趣、值不值得讓他看一眼、給他一個表態的機會。\n\n')
 
 
+def apply_page_terms(cands, terms, counter):
+    """程式讀得到的條件(上架天數、應徵人數)。回 (留下的, 不符的網址);查不到的留著,記在 terms_unknown。"""
+    import find_terms
+    if not find_terms.active(terms or {}):
+        return cands, []
+    keep, missed = [], []
+    for c in cands:
+        miss, unknown = find_terms.check_page(c, terms)
+        if miss:
+            missed.append(c['url'])
+            counter.update(miss)
+            continue
+        if unknown:
+            c['terms_unknown'] = list(dict.fromkeys((c.get('terms_unknown') or []) + unknown))
+        keep.append(c)
+    return keep, missed
+
+
+def apply_judged_terms(cands, res, terms, counter):
+    """agent 讀出來的條件(薪資、經驗、地點):送的那幾張照條件比;不符的改成不送,回不符的網址。"""
+    import find_terms
+    missed = []
+    if not find_terms.active(terms or {}):
+        return missed
+    for c in cands:
+        r = res.get(c['url']) or {}
+        if not r.get('keep'):
+            continue
+        miss, unknown = find_terms.check_judged(r.get('terms'), terms)
+        if miss:
+            r['keep'] = False
+            r['why'] = '不符這輪條件:' + '、'.join(miss)
+            missed.append(c['url'])
+            counter.update(miss)
+        elif unknown:
+            c['terms_unknown'] = list(dict.fromkeys((c.get('terms_unknown') or []) + unknown))
+    return missed
+
+
 def _card_repost_identity(job):
     title = str(job.get('title') or '').strip()
     company = str(job.get('company') or '').strip()
@@ -586,7 +618,7 @@ def add_repost_hints(cands, jobs, fb):
             candidate.pop('reposts', None)
 
 
-def judge_prompt(batch, cs, out, mode='', resumes=None):
+def judge_prompt(batch, cs, out, mode='', resumes=None, terms=None):
     resumes = prefs.checked_resumes(resumes)
     if resumes:
         choices = ('【使用者勾選的履歷】每份檔案都可以直接讀取;只從以下履歷中挑,不可挑附件:\n'
@@ -598,7 +630,11 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
         choices = '【履歷選擇】目前沒有已勾選且可挑的履歷;照常判斷職缺,不選履歷、不選語言。'
         selection_fields = ''
     note_text = prefs.ensure_note()
-    parts = [research_skill('judge'), '\n\n', (WIDE_NOTE if mode == 'wide' else ''), choices,
+    import find_terms
+    judged_terms = [k for k in find_terms.JUDGED if k in (terms or {})]
+    parts = [research_skill('judge'), '\n\n', (WIDE_NOTE if mode == 'wide' else ''),
+             ('這輪條件:\n' + find_terms.describe({k: terms[k] for k in judged_terms}) + '\n\n') if judged_terms else '',
+             choices,
              '\n\n【完整偏好筆記】(使用者自訂與 Agent 假設分開;原話優先於假設)\n',
              note_text, '\n\n']
     cites, shown = {}, []
@@ -654,6 +690,7 @@ def judge_prompt(batch, cs, out, mode='', resumes=None):
               '"reasons":[{"text":"一段理由","citation":"逐字引用偏好筆記條目、舊卡原話或 JD 原文(程式會逐字比對);跳過中間的字要用 … 隔開,不要自己接句子;引用不到寫「筆記裡沒有相關的」",'
               '"basis":"JD 原文/使用者原話/偏好筆記/推估"}],',
               selection_fields,
+              (find_terms.judge_fields(judged_terms) if judged_terms else ''),
               '"cat":"' + '/'.join(CATS) + ' 挑一個",',
               '"card":{"fit":"為什麼適合他:他的履歷哪一段對上 JD 哪個需求,1-2 句","co":"公司在做什麼,一句",'
               '"loc":"地點與遠端","deadline":"截止日,沒寫留空字串","salary":"薪資,沒寫留空字串",'
@@ -747,7 +784,8 @@ def fix_note(rows):
 
 
 def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', par=False,
-          launch_all=None, resumes=None, selection_signature=None, finishing=None, board=None, answers=None):
+          launch_all=None, resumes=None, selection_signature=None, finishing=None, board=None, answers=None,
+          terms=None):
     """用程式提供的 JD 文字判斷;判斷階段固定不開瀏覽器。他按了停止(finishing)就不再派下一批,
     已經判完的照常回傳;被停掉的那一批沒有結果,呼叫的人把它存回待判。
     安檢門擋下的那幾張,把對不上的地方告訴它、重交一次;還是對不上的回 wrong(原因照安檢門的原話)。
@@ -768,7 +806,7 @@ def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', pa
     prepared = []
     for bi, b in enumerate(batches):
         out = os.path.join(rd, f'judge_{bi}.json')
-        p, cites = judge_prompt(b, cs, out, mode, resumes)
+        p, cites = judge_prompt(b, cs, out, mode, resumes, terms)
         with open(os.path.join(rd, f'judge_{bi}.prompt.txt'), 'w', encoding='utf-8') as f:
             f.write(p)
         prepared.append((bi, b, out, p, cites))
@@ -823,6 +861,7 @@ def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', pa
                          'cat': said.get('cat') if said.get('cat') in CATS else '其他',
                          'readable': bool(title) and c.get('page_status') != 'unknown',
                          'card': dict(summary, by=gate.JUDGED) if summary else {},
+                         'terms': x.get('terms') if isinstance(x.get('terms'), dict) else {},   # 安檢門核對過原文
                          'resume': selection}
 
     def launch(jobs):
@@ -869,7 +908,7 @@ def judge(cands, cs, rd, browser_required, run_agent, on_batch=None, mode='', pa
         for bi, rows in sorted(again.items()):
             _bi, b, _out, _p, cites = prepared[bi]
             out = os.path.join(rd, f'judge_{bi}_fix.json')
-            p = judge_prompt(b, cs, out, mode, resumes)[0] + fix_note(rows)
+            p = judge_prompt(b, cs, out, mode, resumes, terms)[0] + fix_note(rows)
             with open(os.path.join(rd, f'judge_{bi}_fix.prompt.txt'), 'w', encoding='utf-8') as f:
                 f.write(p)
             fix.append((bi, b, out, p, evidence.Round('research', f'judge_{bi}_fix', [r.c.get('url') for r in rows], board)))
@@ -918,6 +957,8 @@ def job_entry(c, r, src):
             entry['posted_src'] = c['posted_src']
     if c.get('page_status') == 'ok':   # 頁面讀到了就算查過人數(沒寫就是沒寫,之後不重查)
         entry['applicants_at'] = time.strftime('%Y-%m-%d')
+    if c.get('terms_unknown'):   # 這輪條件裡頁面查不到的那幾項:卡上標出來,他自己看
+        entry['terms_unknown'] = list(c['terms_unknown'])
     if c.get('applicants'):   # 人數天天在變:記下是哪天看到的;applicants_log 留每次看到的變化
         entry['applicants'] = c['applicants']
         entry['applicants_log'] = [[entry['applicants_at'], c['applicants']]]
@@ -1006,7 +1047,7 @@ def web_agent(board):
 
 def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent=None,
         ledger=LEDGER, sums=SUMS, seeds=None, turned=TURNED, limit=0, finishing=None, pending=PENDING,
-        minutes=0, time_up=None, tally=None):
+        minutes=0, time_up=None, tally=None, terms=None):
     """跑一輪。回新增幾筆。st(phase, **kw) 回報進度;run_agent(prompt, outfile, browser_required) 派 agent。
     finishing() 為真 = 他按了停止:停在找 → 已經寫進檔的候選存起來,下一輪先判;停在判 → 判完的照常進板,
     沒判到的存起來。
@@ -1016,6 +1057,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
     finishing = finishing or (lambda: False)
     time_up = time_up or (lambda: False)
     cut = False                   # 時間到停在找:偏好筆記沒交齊,這輪不更新
+    terms_missed = collections.Counter()   # 每一項條件擋掉幾張(這一輪紀錄、看板「最近幾輪」)
     import converge as cv       # 硬排除的唯一真相在那邊(EXCLUDE_TITLE)
     import agent_run as ar
     import feedback_dump
@@ -1114,7 +1156,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
                                         browser_required, run_agent, listing, seed_txt,
                                         # 新表態是整理筆記那隻的材料(每張附整份 JD,幾萬字);找的這隻用不到
                                         extra_files={k: extra_files[k] for k in ('偏好筆記.md', '角度地圖.md')},
-                                        known_angles=counts, minutes=minutes)
+                                        known_angles=counts, minutes=minutes, terms=terms)
         except ar.AgentRunError:
             if time_up() and not finishing():
                 cut = True
@@ -1153,6 +1195,8 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
                                           and any(cards.same_company(c['company'], b) for b in blocked))]
         st('fold', step='清洗:去重、硬排除、抓取職缺頁文字')
         ok, drop = clean(cands, have, cv.EXCLUDE_TITLE, turned_down(turned), flag_re=cv.FLAG_TITLE)
+        ok, missed = apply_page_terms(ok, terms, terms_missed)   # 上架天數、應徵人數:程式讀得到,判斷前就過濾
+        drop['不符條件'] = missed
         bad_excerpt = check_excerpts(ok, live)
         if bad_excerpt:
             print(f'找缺 agent 交的 JD 摘錄有 {len(bad_excerpt)} 張跟頁面原文對不上,摘錄不用(職缺照判):'
@@ -1164,7 +1208,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
             ok = ok[:limit]                   # 他在看板上選的「最多判幾張」
         add_repost_hints(ok, jobs, fb)
         par = bool(fb.get('__agentfree__'))     # 他撥了「愛派幾隻就派幾隻」,判斷那幾批就同時跑
-        res = judge(ok, cs, rd, False, run_agent, mode=mode, par=par, finishing=finishing, board=live,
+        res = judge(ok, cs, rd, False, run_agent, mode=mode, par=par, finishing=finishing, board=live, terms=terms,
                     on_batch=lambda i, n, par=False: st('judge', n=n, done=i,
                         step=(f'逐張判斷 {n} 批同時跑' if par else f'逐張判斷 {i + 1}/{n} 批'))) if ok else {}
         left = pending_save([c for c in ok if c['url'] not in res], pending) if finishing() else 0
@@ -1190,12 +1234,14 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
     src = {'round': time.strftime('%Y-%m-%d %H:%M', time.localtime(t0)), 'mode': mode, 'via': 'research'}
     if direction:
         src['direction'] = direction
+    drop['不符條件'] = drop.get('不符條件', []) + apply_judged_terms(ok, res, terms, terms_missed)
     keep = [job_entry(c, res[c['url']], src) for c in ok if res.get(c['url'], {}).get('keep')]
     # 判過、判定不送的記下來:下一輪找到同一張就在清洗那關擋掉,不再花一批判斷
     turned_add([{'url': c['url'], 'at': src['round'], 'mode': mode,
                  'why': (res.get(c['url']) or {}).get('why', '')[:200]}
                 for c in ok if res.get(c['url'], {}).get('readable')
-                and not res.get(c['url'], {}).get('keep')], turned)
+                and not res.get(c['url'], {}).get('keep')
+                and c['url'] not in drop['不符條件']], turned)   # 只是不符這輪條件:條件放寬後還要能再判
     added = add_entries(keep, live, sums) if keep else 0
     rec = {'round': src['round'], 'mode': mode, 'direction': direction, 't0': t0, 't1': time.time(),
            'candidates': len(cands), 'dropped': {k: len(v) for k, v in drop.items()}, 'judged': len(res),
@@ -1203,12 +1249,13 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
            'bad_cite': sum(len(r['bad_cite']) for r in res.values()),
            'bad_evidence': sum(bool(r.get('bad_evidence')) for r in res.values()),
            'stopped': 'time' if cut else ('judge' if finishing() else ''), 'pending': left, 'carried': carried,
-           'angle_reasons': angle_reasons, 'notes': notes[:1500], 'dir': rd}
+           'angle_reasons': angle_reasons, 'notes': notes[:1500], 'dir': rd,
+           'terms': {k: v for k, v in (terms or {}).items() if v not in ([], None)}, 'terms_missed': dict(terms_missed)}
     ledger_add(rec, ledger)
     with open(os.path.join(rd, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(rec, f, ensure_ascii=False, indent=1)
     # 看板上「最近幾輪」讀這個:往哪找、判幾張、送幾張、那輪 agent 自己寫的方向(最近 20 輪)
-    brief = {k: rec[k] for k in ('round', 'mode', 'direction', 'judged', 'kept', 'added', 'dropped')}
+    brief = {k: rec[k] for k in ('round', 'mode', 'direction', 'judged', 'kept', 'added', 'dropped', 'terms_missed')}
     brief['notes'] = notes[:600]
     bd.set_data(lambda data, fb: data.__setitem__('research', (data.get('research') or [])[-19:] + [brief]), live=live)
     prefs.refresh_like(live)      # 新缺進來了,「最可能喜歡」的排序分數跟著重算

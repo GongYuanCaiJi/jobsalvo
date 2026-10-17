@@ -872,6 +872,13 @@ body.scrolled .tab-arr{font-size:12px}
   color:var(--ink);border-radius:10px;padding:8px 10px;font:inherit;font-size:12.5px;line-height:1.4}
 .find-chip{margin-left:8px;font-size:11.5px;font-weight:700;color:var(--accent)}
 .findset{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+/* 這輪條件:一項一組(名字、數字格、單位、查不到就排除),窄螢幕自動換行 */
+.findterms{display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.fterm{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.fterm-k{font-size:13px;color:var(--ink-dim)}
+.fterm .runn{width:6.5em}
+.fterm input[type=text].runn{width:11em}
+.fterm-x{display:inline-flex;align-items:center;gap:3px;font-size:12px;color:var(--ink-dim)}
 .pb-more{margin:2px 0 0}
 .pb-morefold>summary{font-size:12px;color:var(--ink-dim)}
 

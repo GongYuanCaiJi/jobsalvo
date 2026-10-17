@@ -345,6 +345,15 @@ class PageFetchRoutes(unittest.TestCase):
         for html, want in cases.items():
             self.assertEqual(page_fetch._page_applicants(html), want, html)
 
+    def test_dates_with_slashes_are_read(self):
+        import page_fetch
+        # 104 的 appearDate 現在是 2026/10/14(#462);以前是 20261014
+        self.assertEqual(page_fetch._date('2026/10/14'), '2026-10-14')
+        self.assertEqual(page_fetch._date('2026/1/5'), '2026-01-05')
+        self.assertEqual(page_fetch._date('20261014'), '2026-10-14')
+        self.assertEqual(page_fetch._date('2026-10-14T08:00:00Z'), '2026-10-14')
+        self.assertEqual(page_fetch._date('不是日期'), '')
+
     def test_104_official_switch_off_is_closed_without_reading_page(self):
         result = self._api_fetch('104', 'https://www.104.com.tw/job/CLOSED')
 

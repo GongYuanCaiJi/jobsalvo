@@ -118,6 +118,7 @@ def page_cfg():
             'read_lang': C['resume'].get('read_lang') or 'zh',
             'flow': autopilot.flow(),
             'find_minutes': (C.get('search') or {}).get('find_minutes') or 0,
+            'find_terms': (C.get('search') or {}).get('terms') or {},
             # 查應徵進度沒跑成當天自動再試幾次、隔多久(autopilot 照這組跑,看板照這組寫);回報來源怎麼叫、去哪一頁
             'reply_retry': {'max': autopilot.REPLY_RETRY_MAX, 'gap': autopilot.REPLY_RETRY_GAP},
             'inbox_from': agent_report.FROM}
@@ -795,6 +796,7 @@ def run_argv(kind,args):
     for x in (args.get('seeds') or []):
         argv+=(['--seed-co',x['v']] if x.get('k')=='co' else ['--seed-url',x['v']])
     if args.get('minutes'): argv+=['--minutes',str(args['minutes'])]
+    if args.get('terms'): argv+=['--terms',json.dumps(args['terms'],ensure_ascii=False)]
     return argv
 
 def run_status(kind):
@@ -872,7 +874,12 @@ def start_run(kind,args):
             minutes=args.get('minutes')
             if minutes is None or sa.find_minutes_problem(minutes):
                 minutes=(cf.C.get('search') or {}).get('find_minutes') or 0
-            args={'mode':mode,'text':text,'seeds':seeds,'limit':limit,'minutes':minutes,'resume_text':resume_text}
+            # 條件也跟著請求來(同上);壞的或沒帶就讀設定
+            import find_terms
+            terms=args.get('terms')
+            if not isinstance(terms,dict) or find_terms.problem(terms):
+                terms=(cf.C.get('search') or {}).get('terms') or {}
+            args={'mode':mode,'text':text,'seeds':seeds,'limit':limit,'minutes':minutes,'terms':terms,'resume_text':resume_text}
         else:
             args={'resume_text':resume_text}
     if kind=='customize':
@@ -1346,6 +1353,11 @@ class H(BaseHTTPRequestHandler):
             s={'agent.agents':[{'id':new_id,'runtime':rt,'model':'','effort':'max','speed':'standard','browser':chrome}]+old}
             bad=PILOT.save_settings(lambda: sa.save({'set':s})) if PILOT else sa.save({'set':s})
             return self._json(400 if bad else 200,{'ok':not bad,'msg':';'.join(bad) or '改好了,之後會先用它'})
+        if act=='find_terms':
+            # 找缺那一列的條件格:改了就存(同一套驗證、同一條存檔路);空的 = 不限
+            s={'search.terms':body.get('terms') or {}}
+            bad=PILOT.save_settings(lambda: sa.save({'set':s})) if PILOT else sa.save({'set':s})
+            return self._json(400 if bad else 200,{'ok':not bad,'msg':';'.join(bad)})
         if act=='find_minutes':
             # 找缺那一列的「__ 分鐘」格子:改了就存(同一套驗證、同一條存檔路);空的存成 0 = 不限時
             v=body.get('minutes')

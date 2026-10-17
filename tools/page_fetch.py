@@ -287,6 +287,9 @@ def _date(value):
     value = str(value or '').strip()
     if re.fullmatch(r'\d{8}', value):
         value = f'{value[:4]}-{value[4:6]}-{value[6:]}'
+    slash = re.fullmatch(r'(\d{4})/(\d{1,2})/(\d{1,2})', value)   # 104 的 appearDate:2026/10/14
+    if slash:
+        value = '{}-{:0>2}-{:0>2}'.format(*slash.groups())
     candidate = value[:10]
     try:
         return datetime.date.fromisoformat(candidate).isoformat()

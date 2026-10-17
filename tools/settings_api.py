@@ -540,6 +540,9 @@ def _check(settings):
             bad.append('自動填表最多停幾張要寫數字(0 是不限,空的照預設 5)')
     if find_minutes_problem((settings.get('search') or {}).get('find_minutes')):
         bad.append(find_minutes_problem((settings.get('search') or {}).get('find_minutes')))
+    import find_terms
+    if find_terms.problem((settings.get('search') or {}).get('terms')):
+        bad.append(find_terms.problem((settings.get('search') or {}).get('terms')))
     # 跟設定頁那一格的範圍一樣。以前不驗:清空存成 0,下一次查應徵進度就把還沒回音的已投出卡全部記成沒下文
     ghost = (settings.get('replies') or {}).get('ghost_days')
     if ghost is not None and not (isinstance(ghost, int) and not isinstance(ghost, bool) and 7 <= ghost <= 120):

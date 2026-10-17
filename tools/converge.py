@@ -59,6 +59,7 @@ def main():
     ap.add_argument('--explore-only',action='store_true',help='等於 --mode wide(舊的寫法)')
     ap.add_argument('--limit',type=int,default=0,help='這一輪最多判幾張(看板上的「判幾張」)')
     ap.add_argument('--minutes',type=int,default=0,help='找的那一段最多跑幾分鐘(看板上的「__ 分鐘」);0 = 不限時')
+    ap.add_argument('--terms',default='',help='這輪條件(JSON,欄位見 find_terms.py);沒給就讀設定 search.terms')
     a=ap.parse_args()
     if a.explore_only: a.mode='wide'
     direction=re.sub(r'\s+',' ',a.direction).strip()[:300]
@@ -84,6 +85,17 @@ def main():
         except Exception: pass  # noqa: BLE001, S110 — 原因上面已經寫進進度,下一行照樣丟出去;看板回報只是再提醒一次
         raise
 
+def load_terms(raw):
+    """這輪條件:看板帶來的 JSON 優先;沒帶、壞的就讀設定。回 find_terms.normalize 過的。"""
+    import json, find_terms, config as cf
+    try:
+        given=json.loads(raw) if raw else None
+    except ValueError:
+        given=None
+    if not isinstance(given,dict) or find_terms.problem(given):
+        given=(cf.C.get('search') or {}).get('terms') or {}
+    return find_terms.normalize(given)
+
 def _main(a,direction,st,finishing=lambda:False,time_up=lambda:False):
     import prefs, research
     fb,jobs=prefs.load(a.live)
@@ -101,12 +113,14 @@ def _main(a,direction,st,finishing=lambda:False,time_up=lambda:False):
         st('nothing',msg='沒有寫要往哪個方向挖。'); print('沒有寫要往哪個方向挖。'); sys.exit(0)
     # 判準檔跟著板上標記更新(給人看、也給想多了解他口味的 agent 讀;判斷那一段不整包讀它)
     subprocess.run([sys.executable,os.path.join(TOOLS,'feedback_dump.py'),'--live',a.live],cwd=REPO)
+    terms=load_terms(getattr(a,'terms',''))
     added=0
     tally={'found':0,'dropped':0}
     for m in (['deep','wide'] if a.mode=='both' else [a.mode]):
         if finishing() or time_up(): break        # 他按了停止、或時間用完了:不再開下一種找法
         added+=research.run(m,direction if m=='dir' else '',live=a.live,browser_required=True,st=st,seeds=seeds,
-                            limit=a.limit,finishing=finishing,minutes=a.minutes,time_up=time_up,tally=tally)
+                            limit=a.limit,finishing=finishing,minutes=a.minutes,time_up=time_up,tally=tally,
+                            terms=terms)
     # 新缺補上架日:ATS 有日期就直接用;其餘 agent 只讀程式擷取文字,已處理網址不重抓。
     subprocess.run([sys.executable,os.path.join(TOOLS,'posted_age.py'),
                     '--board',a.live],cwd=REPO,check=False)

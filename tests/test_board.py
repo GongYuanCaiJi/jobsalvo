@@ -1122,6 +1122,76 @@ class ResearchPipeline(unittest.TestCase):
         self.assertEqual(self._stop_run(seen, lambda: False, pending, minutes=15, time_up=lambda: False), 2)
         self.assertIn('最多有 15 分鐘找', prompts[0])
 
+    def test_find_terms_drop_cards_the_user_ruled_out_and_flag_what_the_page_never_said(self):
+        """找缺條件(#458):上架太久的在判斷前就丟、不花 agent;薪資低於下限的判完丟、不記成判過不送;
+        頁面沒寫薪資的留著、卡上標出來;每一項擋掉幾張記進這一輪。"""
+        import datetime
+        from unittest.mock import patch
+        day = lambda n: (datetime.date.today() - datetime.timedelta(days=n)).isoformat()
+        old, low, good, silent = ('https://ex.test/old', 'https://ex.test/low', 'https://ex.test/good',
+                                  'https://ex.test/silent')
+        pages = {old: ('Old Job · ACME · 月薪 90,000', day(200)), low: ('Low Job · ACME · 月薪 40,000', day(3)),
+                 good: ('Good Job · ACME · 月薪 60,000', day(3)), silent: ('Silent Job · ACME · 薪資面議', day(3))}
+        cands = [{'url': u, 'title': t.split(' · ')[0], 'company': 'ACME', 'why': 'x', 'via': 'fake',
+                  'angle': '角度'} for u, (t, _d) in pages.items()]
+        judged = {'Low Job': {'salary_month': 40000, 'salary_quote': '月薪 40,000'},
+                  'Good Job': {'salary_month': 60000, 'salary_quote': '月薪 60,000'},
+                  'Silent Job': {'salary_month': None, 'salary_quote': ''}}
+        prompts = []
+
+        def fake_agent(prompt, outfile, browser_required):
+            prompts.append(prompt)
+            searching = '/search_' in outfile
+            if searching:
+                payload = cands
+            else:
+                titles = re.findall(r'=== (J\d+) ===\n職缺:([^·]+)·', prompt)
+                payload = [{'id': jid, 'title': title, 'company': 'ACME', 'keep': True, 'fit': 4, 'cite': [],
+                            'why': 'x', 'cat': self.rs.CATS[0], 'card': {'fit': 'x'}, 'terms': judged[title],
+                            'reasons': [{'text': 'x', 'citation': '筆記裡沒有相關的', 'basis': '推估'}]}
+                           for jid, title in titles]
+            with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False)
+            if searching:
+                with open(outfile[:-4] + '.md', 'w', encoding='utf-8') as f:
+                    f.write('- 角度：x')
+            return None
+
+        terms = __import__('find_terms').normalize({'posted_days': 30, 'salary_min': 50000})
+        turned = os.path.join(self.dir, 'turned.jsonl')
+        with patch.object(self.rs.cf, 'HOME', self.dir), \
+             patch.object(self.rs.prefs, 'PREF', os.path.join(self.dir, 'prefs.md')), \
+             patch.object(self.rs.prefs, 'resume', return_value='CV'), \
+             patch.object(self.rs.prefs, 'hard_rules', return_value=''), \
+             patch.object(self.rs.prefs, 'checked_resumes', return_value=[]), \
+             patch.object(self.rs.prefs, 'resume_selection_signature', return_value='empty'), \
+             patch.object(self.rs, 'search_files', return_value={}), \
+             patch('feedback_dump.feedback_delta', return_value=('', 0)), \
+             patch.object(self.rs.prefs, 'refresh_like'), \
+             patch('page_fetch.fetch', side_effect=lambda url: page_result(
+                 url, pages[url][0], posted_at=pages[url][1], posted_source='test date')):
+            added = self.rs.run('deep', '', live=self.path, run_agent=fake_agent,
+                                ledger=self.ledger, sums=self.sums, turned=turned, terms=terms)
+
+        self.assertEqual(added, 2)
+        search_prompt = prompts[0]
+        self.assertIn('上架最多 30 天', search_prompt, '找的 agent 拿到這輪條件')
+        judge_prompt = next(p for p in prompts if '=== J1 ===' in p)
+        self.assertNotIn('Old Job', judge_prompt, '上架太久的在判斷前就丟,不花 agent')
+        self.assertIn('"salary_month"', judge_prompt)
+        _, jobs = self.rs.prefs.load(self.path)
+        ids = {j['id']: j for j in jobs}
+        self.assertNotIn(old, ids)
+        self.assertNotIn(low, ids)
+        self.assertNotIn('terms_unknown', ids[good])
+        self.assertEqual(ids[silent]['terms_unknown'], ['薪資'], '頁面沒寫薪資:留著、卡上標出來')
+        rows = [json.loads(line) for line in open(turned, encoding='utf-8')] if os.path.exists(turned) else []
+        self.assertNotIn(low, [r['url'] for r in rows], '只是不符這輪條件:條件放寬後還要能再判')
+        with open(self.ledger, encoding='utf-8') as f:
+            rec = json.loads(f.read().strip().splitlines()[-1])
+        self.assertEqual(rec['terms_missed'], {'上架天數': 1, '薪資': 1})
+        self.assertEqual(rec['dropped']['不符條件'], 2)
+
     def test_repost_hint_reaches_fake_judge_and_is_kept_on_the_new_card(self):
         from unittest.mock import patch
         url = 'https://ex.test/reposted'
@@ -1296,13 +1366,14 @@ class ResearchPipeline(unittest.TestCase):
                 self.assertTrue(skill.strip())
                 self.assertNotRegex(skill, r'(?m)(?:^|\s)/[^/\s]+/')
                 self.assertNotRegex(skill, r'(?i)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b')
-        common_path = os.path.join(root, cf.RESEARCH_SKILLS['common']['file'])
-        with open(common_path, encoding='utf-8') as f:
-            common = f.read()
-        self.assertIn('不設比例', common)
-        self.assertIn('不要自創使用者沒說過的禁令或排除條件', common)
-        self.assertIn('使用者自訂條目與任何新表態衝突', common)
-        self.assertIn('列在交件筆記，請使用者決定是否修改', common)
+        read = lambda key: open(os.path.join(root, cf.RESEARCH_SKILLS[key]['file']), encoding='utf-8').read()
+        common, note = read('common'), read('note')
+        # 份量由 agent 照表態分配、限制只用他說過的(正向寫法,writing-for-agents)
+        self.assertIn('份量照表態和角度地圖分配', common)
+        self.assertIn('限制只用使用者說過的', common)
+        # 整理偏好筆記另一份 skill:自訂區照原文、衝突交給他決定
+        self.assertIn('跟「使用者自訂」某條衝突', note)
+        self.assertIn('列在交件筆記，請使用者決定是否修改', note)
 
     def test_find_round_uses_selected_and_default_skills_and_judges_every_candidate(self):
         from copy import deepcopy

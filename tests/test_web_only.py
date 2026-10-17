@@ -353,7 +353,7 @@ class WebOnly(tb.HttpBase):
 
     def test_each_research_skill_can_be_saved_and_bad_paths_are_refused(self):
         import settings_api as sa
-        tasks = ('common', 'deep', 'wide', 'dir', 'judge')
+        tasks = tuple(cf.RESEARCH_SKILLS)
         skills = {}
         for task in tasks:
             rel = f'custom/skills/research-{task}.md'

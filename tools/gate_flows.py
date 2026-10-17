@@ -230,6 +230,22 @@ def _card_summary(said, row, truth):
     return None if quoted(quote, [truth.given]) else '日期／薪資摘要要附指定 JD 的逐字引用 quote'
 
 
+def _terms(said, row, truth):
+    """這輪條件(薪資、經驗、地點)的值是 agent 讀的;每個有值的項目,它抄的那句要在程式給的 JD 原文裡逐字找得到。"""
+    import find_terms
+    if not isinstance(said, dict):
+        return '條件要是物件'
+    bad = []
+    for _key, (value, quote, _what) in find_terms.FIELDS.items():
+        v = said.get(value)
+        if v in (None, '', '看不出'):
+            continue
+        q = str(said.get(quote) or '').strip()
+        if not q or not quoted(q, [truth.given or '']):
+            bad.append(value)
+    return f'{"、".join(bad)} 有值卻沒附 JD 原文裡逐字找得到的那句' if bad else None
+
+
 RESEARCH_SEARCH = {
     'candidates.url': Cell(CHECK, '職缺網址', '單一職缺頁的網址(不是列表、搜尋頁)', _job_page),
     'candidates.title': Cell(WORDS, '找的時候看到的職稱', '只給判斷的人參考;卡片名字用判斷時頁面上的職稱'),
@@ -259,6 +275,8 @@ RESEARCH_JUDGE = {
     'jobs.lang': Cell(JUDGED, '語言', 'JD 是哪種語言是 agent 判斷;只核對是設定裡的語言', _jd_lang),
     'jobs.pick_why': Cell(WORDS, '挑選理由', '卡上照原文給人看'),
     'jobs.cat': Cell(JUDGED, '類別', '分在哪一類是 agent 判斷:他可以改'),
+    'jobs.terms': Cell(CHECK, '這輪條件讀到的值', '薪資、經驗、地點是 agent 讀的,程式照使用者的條件比;值要附 JD 原文逐字引用',
+                       _terms, items=('salary_month', 'salary_quote', 'exp_years', 'exp_quote', 'location', 'location_quote')),
     'jobs.card': Cell(JUDGED, '卡片摘要', 'Agent 讀 JD 寫的摘要；日期與薪資解釋須附原文引用',
                       _card_summary, items=('fit', 'co', 'loc', 'deadline', 'salary', 'bar', 'posted', 'ammo', 'quote')),
 }

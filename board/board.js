@@ -287,6 +287,11 @@
     return '<span class="opened" title="'+esc(tip)+'">'+esc(j.applicants)+'應徵'+
       (log.length>1?'(原 '+esc(log[0][1])+')':'')+'</span>';
   }
+  // 找缺時設了條件、但職缺頁沒寫的那幾項(例如薪資面議):留著讓他自己看,卡上講清楚
+  function termsBadge(j){
+    var u=j.terms_unknown||[]; if(!u.length)return '';
+    return '<span class="opened" title="找這張時設了這幾項條件,但職缺頁上沒寫,沒辦法比">'+esc(u.join('、'))+'查不到</span>';
+  }
   // 104 顯示「企業最後處理履歷時間」、Indeed 自動標 Response seems unlikely。我們沒有雇主端資料,
   // 但手上三個訊號合起來能講同一件事:掛超過半年、死線已過、連結檢查沒過。
   // 死線那一天整天都還來得及:後台認出是哪一天(card.deadline → j.dl),這裡比當地的今天。以前用 Date.parse('2026-09-27')
@@ -1191,7 +1196,7 @@
     // 標題整行就是「去看這個職缺」:一整條可點,行尾補一個 ↗ 當提示。
     function headHTML(withStage){
       var h3='<h3>'+jdTitleHTML(j)+dead+'</h3>';
-      return '<div class="card-top">'+h3+badge+(withStage?apbadge:'')+openedBadge(j)+crowdBadge(j)+addedBadge(j)+'</div>';}
+      return '<div class="card-top">'+h3+badge+(withStage?apbadge:'')+openedBadge(j)+crowdBadge(j)+termsBadge(j)+addedBadge(j)+'</div>';}
     var chan='<span class="pill '+pill(j.chan)+'">'+esc(j.chan)+'</span>';
     var note_t='<textarea class="fb-t" rows="1" placeholder="原因(喜歡/普通/不喜歡都可寫)">'+esc(note)+'</textarea>';
     // 履歷回饋:這份履歷哪裡不對。跟上面那格分開,因為那格講的是這個職缺你喜不喜歡,
@@ -2658,6 +2663,37 @@
       ' title="找的那一段最多跑幾分鐘;空著是不限時(AI 自己決定)。時間到就停止找新的,找到的照樣判完進看板"'+
       ' aria-label="找幾分鐘,空著是不限時" value="'+(FINDMIN||'')+'"><span class="runn-u">分鐘</span>';
   }
+  // 這輪條件(tools/find_terms.py):直接填數字,空著是不限。改了就存進設定(跨重整、跨裝置都一樣),按找缺時也一起帶上。
+  // 頁面查不到那一項的職缺預設留著、卡上標出來;勾「查不到就排除」才丟。
+  var FINDTERMS=CFG.find_terms||{};
+  var TERMS=[['posted_days','上架','天內','number',1],['applicants_max','應徵','人以下','number',0],
+             ['salary_min','月薪','元以上','number',1],['exp_max','經驗要求','年以下','number',0],['location','地點','','text']];
+  function findTermsHTML(){
+    var strict=FINDTERMS.strict||[];
+    return '<div class="findterms" title="這輪條件:空著是不限;頁面查不到的預設留著、卡上標出來">'+
+      TERMS.map(function(t){var v=FINDTERMS[t[0]]; v=(v===undefined||v===null)?'':v;
+        return '<label class="fterm"><span class="fterm-k">'+t[1]+'</span>'+
+          (t[3]==='text'
+            ?'<input class="runn fterm-in" type="text" maxlength="80" data-fterm="'+t[0]+'" placeholder="不限,例如 台北 遠端" value="'+escA(String(v))+'">'
+            :'<input class="runn fterm-in" type="number" inputmode="numeric" min="'+t[4]+'" data-fterm="'+t[0]+'" placeholder="不限" value="'+escA(String(v))+'">'+
+             '<span class="runn-u">'+t[2]+'</span>')+
+          '<span class="fterm-x"><input type="checkbox" data-fstrict="'+t[0]+'"'+(strict.indexOf(t[0])>=0?' checked':'')+'>查不到就排除</span>'+
+          '</label>';}).join('')+'</div>';
+  }
+  // 讀面板上現在填的條件;有一格不合理回 null(並說哪一格)
+  function readFindTerms(){
+    var out={}, strict=[], bad='';
+    TERMS.forEach(function(t){
+      var inp=document.querySelector('#findrow [data-fterm="'+t[0]+'"]'); if(!inp)return;
+      var raw=String(inp.value).trim(); if(raw==='')return;
+      if(t[3]==='text'){out[t[0]]=raw.slice(0,80);}
+      else{var n=Number(raw); if(!Number.isInteger(n)||n<t[4]){bad=bad||(t[1]+'要寫 '+t[4]+' 以上的整數,空著是不限'); return;} out[t[0]]=n;}
+      var cb=document.querySelector('#findrow [data-fstrict="'+t[0]+'"]'); if(cb&&cb.checked)strict.push(t[0]);
+    });
+    if(bad){snack(bad); return null;}
+    if(strict.length)out.strict=strict;
+    return out;
+  }
   function findPanelHTML(){
     var run=!!FIND.running, dis=run?' disabled':'', n=seedList().length;
     var sum='🔎 找新職缺'+
@@ -2683,6 +2719,7 @@
         '</div>'+
         addResultHTML()+
         seedRowsHTML()+
+        findTermsHTML()+
         '<div class="findset">'+findNHTML()+agentFreeHTML()+pvBtn('find')+'</div>'+
         fold('findmore','找過幾輪 · 各找法的成績',
           '<div id="find-score">'+findScoreHTML()+'</div><div id="find-rounds">'+findRoundsHTML()+'</div>',
@@ -2693,6 +2730,10 @@
   // 靠每張新缺記的出處(j.src)算;以前沒記,那一批歸在「更早進板」。
   // 最近幾輪:往哪找、判了幾張、送進板幾張、你後來怎麼表態、那輪 agent 自己寫的方向。
   // 指定方向的那幾輪可以直接說「別再往這找」(FB.__research__.mute),下一輪找缺的 agent 會看到。
+  // 這輪條件擋掉幾張、各是哪一項(research.py 記的 terms_missed)
+  function missedTerms(r){var m=r.terms_missed||{}, ks=Object.keys(m); if(!ks.length)return '';
+    var n=0; ks.forEach(function(k){n+=m[k];});
+    return '、不符條件 '+n+' 張('+ks.map(function(k){return k+' '+m[k];}).join('、')+')';}
   function findRoundsHTML(){
     var rs=(D.research||[]).slice(-5).reverse(); if(!rs.length)return '';
     var mute=((FB['__research__']||{}).mute)||[];
@@ -2702,7 +2743,7 @@
         if(f.s||f.app||f.rm)seen++; if(f.app||f.s==='like'||f.s==='grow')like++; else if(f.s==='dislike')dis++;});
       var what=(FIND_MODE[r.mode]||r.mode)+(r.direction?'「'+r.direction+'」':''), muted=!!r.direction&&mute.indexOf(r.direction)>=0;
       return '<div class="find-r"><div class="find-r1"><b>'+esc(what)+'</b><span class="find-rt">'+esc(r.round||'')+'</span></div>'+
-        '<div class="find-r2">判了 '+(r.judged||0)+' 張、送進板 '+(r.added||[]).length+' 張;你看過 '+seen+'、喜歡 '+like+'、不喜歡 '+dis+
+        '<div class="find-r2">判了 '+(r.judged||0)+' 張、送進板 '+(r.added||[]).length+' 張'+missedTerms(r)+';你看過 '+seen+'、喜歡 '+like+'、不喜歡 '+dis+
         (r.direction?'<button class="cust-b '+(muted?'take':'ask')+'" type="button" data-fmute="'+escA(r.direction)+'">'+
           (muted?'✓ 說過別再找':'別再往這找')+'</button>':'')+'</div>'+
         (r.notes?fold('frn:'+(r.round||''),'那輪 agent 自己寫的','<div>'+esc(r.notes)+'</div>',{cls:'find-rn'}):'')+'</div>';
@@ -3322,6 +3363,14 @@
     var t=e.target; if(t&&(t.tagName==='TEXTAREA'||t.tagName==='INPUT')){flushSave(false); setTimeout(ansRefreshIfIdle,450);}});
   // 切到背景 / 關分頁:iOS 可能直接把分頁回收掉,這時候一定要送出去(keepalive 保證送完)
   document.addEventListener('visibilitychange',function(){if(document.hidden)flushSave(true);});
+  // 找缺條件那幾格:打完(離開格子、按 Enter、勾選)就存進設定
+  document.addEventListener('change',function(e){
+    if(!(e.target.closest&&e.target.closest('#findrow [data-fterm],#findrow [data-fstrict]')))return;
+    var terms=readFindTerms(); if(!terms)return;
+    fetch('/api/settings/find_terms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({terms:terms})})
+      .then(function(r){return r.json();}).then(function(d){
+        if(d.ok)FINDTERMS=terms; else snack(d.msg||'沒存起來,再試一次');}).catch(function(){snack('沒存起來,再試一次');});
+  });
   // 找缺「__ 分鐘」那一格:打完(離開格子或按 Enter)才存進設定,不是每打一個字存一次
   document.addEventListener('change',function(e){
     var fm=e.target.closest&&e.target.closest('input[data-findmin]');
@@ -3681,6 +3730,8 @@
       // 格子的值直接帶上:填完馬上按,存設定那一個請求可能還沒到,不能只靠伺服器讀設定
       var fm=document.querySelector('#findrow input[data-findmin]');
       if(fm){var fv=String(fm.value).trim(); body.minutes=fv===''?0:Number(fv);}
+      var ft=readFindTerms(); if(!ft)return;   // 條件有一格不合理:先改好再找
+      body.terms=ft;
       startRun('research',body,b);});
     renderFind();
   })();
@@ -3956,7 +4007,7 @@
       '<div class="cfg-row"><button class="cfg-b" type="button" data-cfskilladd="1">＋ 新增改履歷的規則</button></div>',{cls:'cfg-d'});
     var researchTasks=CFGD.research_skill_tasks||[], researchSkills=cfgGet('research.skills')||{};
     var RSK=fold('cfg:research-skills','🔎 找缺與判斷的做法',
-      '<p class="cfg-help">五份做法可以分開替換。展開可看產品預設;按「拿這份預設改一份」可直接修改、儲存並選用。每輪仍由程式接上材料位置與交件格式。</p>'+
+      '<p class="cfg-help">每一份做法都可以分開替換。展開可看產品預設;按「拿這份預設改一份」可直接修改、儲存並選用。每輪仍由程式接上材料位置與交件格式。</p>'+
       researchTasks.map(function(x){return cfgResearchSkillHTML(x,researchSkills[x.key]);}).join(''),{cls:'cfg-d'});
     var PRF=fold('cfg:preferences','🧭 你的喜好','<p class="cfg-help">這裡分開顯示使用者自訂與 agent 假設。找缺和判斷會讀整份筆記;agent 不會改使用者自訂。你改過的假設會轉成使用者自訂。</p>'+
       '<div class="cfg-row"><label class="cfg-k">使用者自訂</label><textarea class="cfg-in big" rows="8" data-cft="preferences_custom" placeholder="使用者自己寫或改過的內容">'+esc(CFGT.preferences_custom||'')+'</textarea></div>'+
