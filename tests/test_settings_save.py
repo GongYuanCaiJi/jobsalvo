@@ -32,6 +32,17 @@ class SettingsSave(unittest.TestCase):
         with open(os.path.join(self.home, cf.NAME), encoding='utf-8') as f:
             return json.load(f)
 
+    def test_two_different_files_cannot_share_a_send_name(self):
+        resumes = [{'id': 'a', 'name': 'A', 'files': {}, 'enabled': True, 'send_names': {'zh': '我的履歷'}},
+                   {'id': 'b', 'name': 'B', 'files': {}, 'enabled': True, 'send_names': {'zh': '我的履歷.pdf'}}]
+        bad = sa.save({'set': {'resume.resumes': resumes}})
+        self.assertTrue(any('重複' in x for x in bad))
+        resumes[1]['send_names'] = {'zh': '我的履歷 B'}
+        self.assertTrue(any('{resume}' in x for x in sa.save({'set': {'resume.resumes': resumes,
+                                                                        'resume.merged_name': '合併檔'}})))
+        self.assertEqual(sa.save({'set': {'resume.resumes': resumes, 'resume.merged_name': '{resume}+{n}'}}), [])
+        self.assertEqual(self.saved()['resume']['merged_name'], '{resume}+{n}')
+
     def test_stale_page_cannot_overwrite_a_value_saved_elsewhere(self):
         page = self.page()
         # 在「🆕 新職缺」找缺那一列把分鐘數改成 30(伺服器照最新的檔只改那一格)

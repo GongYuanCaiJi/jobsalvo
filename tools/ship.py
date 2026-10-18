@@ -227,9 +227,10 @@ def documents(j, fb):
                              str(resume.get('name') or cf.resume_name(resume_id) or '履歷'), src,
                              (resume.get('files') or {}).get(lang, ''), str(resume.get('skill') or ''),
                              cf.path((resume.get('styles') or {}).get(lang) or '')))
-        out[-1]['item'] = resume_id
+        out[-1].update(item=resume_id, send_name=send_name(resume, lang))
+    dropped = (fb.get(url) or {}).get('drop_att') or {}    # 這張不寄的附件(職缺要求,原句記在值裡,#449)
     for attachment in cf.ATTACHMENTS:
-        if not attachment.get('enabled', True):
+        if not attachment.get('enabled', True) or str(attachment.get('id') or '') in dropped:
             continue
         allowed = attachment.get('resume_ids') or []
         if allowed and resume_id not in allowed:
@@ -240,7 +241,8 @@ def documents(j, fb):
         out.append(_document(fb, url, item_key('attachment', str(attachment.get('id') or ''), lang), 'attachment',
                              str(attachment.get('name') or os.path.basename(rel)), cf.path(rel), rel,
                              str(attachment.get('skill') or ''), cf.path((attachment.get('styles') or {}).get(lang) or '')))
-        out[-1].update(item=str(attachment.get('id') or ''), short=str(attachment.get('short') or ''))
+        out[-1].update(item=str(attachment.get('id') or ''), short=str(attachment.get('short') or ''),
+                       send_name=send_name(attachment, lang))
     return out
 
 
@@ -308,9 +310,7 @@ def _folders(root, suffix):
 
 
 def folder(url, root=None, name=None, migrate=True):
-    # APPLY_SHIP_ROOT:代投驗收把假的投遞夾放在自己的暫存資料夾;同一個行程裡找投遞夾的每一處都要認它,
-    # 以前只有 apply_run 認,上傳檔核對還去正式的投遞夾找,驗收的檔一律被判「在投遞夾外」
-    root = root or os.environ.get('APPLY_SHIP_ROOT') or cf.SHIP_DIR
+    root = root or cf.SHIP_DIR
     hits = _folders(root, card.card_id_from_url(url))
     if hits:
         if name:
@@ -384,11 +384,39 @@ def source_items(j, fb):
         path = document.get('effective_path')
         if not path:
             continue
-        item = {'id': item_id, 'kind': kind, 'path': path}
+        item = {'id': item_id, 'kind': kind, 'path': path,
+                'send_name': '' if own and kind == 'resume' else document.get('send_name') or ''}
         if kind == 'attachment':
             item['name'] = document.get('name') or os.path.basename(path)
         items.append(item)
     return items
+
+
+def send_name(entry, lang):
+    """設定裡這份履歷/附件這個語言的送出檔名(公司申請頁上看到的);沒填回空字串。"""
+    names = entry.get('send_names') if isinstance(entry, dict) else None
+    return str((names or {}).get(lang) or '').strip() if isinstance(names, dict) else ''
+
+
+def _with_ext(name, source):
+    """送出檔名沒寫副檔名就接上實際檔案的(.pdf)。"""
+    name = str(name or '').strip()
+    if not name:
+        return ''
+    ext = os.path.splitext(source)[1]
+    return name if os.path.splitext(name)[1].lower() == ext.lower() else name + ext
+
+
+def merged_name(info):
+    """合併檔的名字:設定 resume.merged_name 的 {resume}(履歷在這個夾裡的檔名,不含副檔名)、{n}(附件數);沒設定叫 merged.pdf。"""
+    template = str((cf.C.get('resume') or {}).get('merged_name') or '').strip()
+    files = [n for n in info.get('files', []) if isinstance(n, str) and n]
+    if not template or not files:
+        return MERGED_FILE
+    sources = info.get('sources') or {}
+    resume = next((n for k, n in sources.items() if k == 'custom' or str(k).startswith('resume:')), files[0])
+    return _with_ext(template.replace('{resume}', os.path.splitext(resume)[0]).replace('{n}', str(len(files) - 1)),
+                     MERGED_FILE)
 
 
 def _unique_name(name, taken):
@@ -423,10 +451,11 @@ def _write_merged(directory, info, store=None):
     給了 store:合併好的檔也跟別張卡同內容的共用。"""
     files = [n for n in info.get('files', []) if isinstance(n, str) and n]
     old_merged = info.pop('merged', None)
-    if old_merged and old_merged not in files:
+    wanted = merged_name(info)
+    if old_merged and old_merged not in files and wanted == MERGED_FILE:
         name = old_merged
     else:
-        name = _unique_name(MERGED_FILE, files)
+        name = _unique_name(wanted, files)
     paths = [os.path.join(directory, n) for n in files]
     missing = [n for n, p in zip(files, paths) if not os.path.isfile(p)]
     if missing:
@@ -488,14 +517,10 @@ def _swap_dirs(a, b):
 
 
 def _put_in_place(stage, d):
-    """建好的 stage 換成投遞夾 d;d 裡不是這裡建的(代投的截圖與輸出 .apply)搬過去留著。換完 stage 是舊的那一份。"""
-    keep = {'.apply'}                        # 代投的截圖與輸出,不是這裡建的
+    """建好的 stage 換成投遞夾 d。換完 stage 是舊的那一份。"""
     if not os.path.isdir(d):
         os.rename(stage, d)
         return
-    for n in os.listdir(d):
-        if n in keep:
-            os.rename(os.path.join(d, n), os.path.join(stage, n))
     if _swap_dirs(stage, d):
         return
     old = stage + '.old'
@@ -516,7 +541,7 @@ def _fill_package(j, fb, resume_id, lang, own, stage, d):
         if not os.path.isfile(p):
             bad.append(f'附件不見了:{p}')
             continue
-        name = _unique_name(os.path.basename(p), files + [MERGED_FILE])
+        name = _unique_name(_with_ext(item.get('send_name'), p) or os.path.basename(p), files + [MERGED_FILE])
         destination = os.path.join(stage, name)
         shutil.copy2(p, destination)
         _share(destination, store)
@@ -656,8 +681,23 @@ def _sync_report(url, message, board):
         return None
     if message:
         return agent_report.report('可投遞夾建置', '可投遞夾本輪建置失敗', need=message, job=url, live=board)
-    return agent_report.resolve(url, '可投遞夾重新建置並驗收通過', live=board,
-                                only=lambda it: it.get('from') == '可投遞夾建置')
+    return agent_report.resolve(url, '可投遞夾重新建置並驗收通過', live=board, src='可投遞夾建置')
+
+
+def chosen_not_built(j, fb):
+    """卡上選的履歷、語言跟可投遞夾裡建好的不是同一份(他剛換、還沒重建):回那一句,一樣就回 None。
+    夾子還沒建的不算(那是別的問題,check 會講)。"""
+    d = folder(j['id'], name=card.name(j), migrate=False)
+    s = read_info(d) if d else {}
+    if not s.get('files'):
+        return None
+    resume_id, lang = resolve(j, fb)
+    if (s.get('variant'), s.get('lang')) != (resume_id, lang):
+        return (f'看板選的是履歷「{cf.resume_name(resume_id)}」/{lang},可投遞夾裡是 '
+                f'履歷「{cf.resume_name(s.get("variant"))}」/{s.get("lang")}')
+    if isinstance(s.get('sources'), dict) and set(s['sources']) != {x['id'] for x in source_items(j, fb)}:
+        return '這張要寄的檔(哪幾份)變了,可投遞夾還是之前那一套'
+    return None
 
 
 def _package_problems(j, fb, migrate=True):
@@ -667,11 +707,7 @@ def _package_problems(j, fb, migrate=True):
     s = read_info(d)
     if not s.get('files'):
         return ['可投遞夾裡沒有 ship.json 或沒有檔案']
-    resume_id, lang = resolve(j, fb)
-    bad = []
-    if (s.get('variant'), s.get('lang')) != (resume_id, lang):
-        bad.append(f'看板選的是履歷「{cf.resume_name(resume_id)}」/{lang},可投遞夾裡是 '
-                   f'履歷「{cf.resume_name(s.get("variant"))}」/{s.get("lang")}')
+    bad = [x for x in [chosen_not_built(j, fb)] if x]
     for n in s['files']:
         if not os.path.isfile(os.path.join(d, n)):
             bad.append(f'{n} 不見了')
@@ -756,7 +792,9 @@ def reconcile_packages(man, force, check_only, board, timings=False):
         started = time.perf_counter()
         variant, lang = resolve(j, fb)
         src, attachments, _own = sources(j, fb)
-        wanted = _inputs_hash([src or ''] + attachments, f'{variant}/{lang}')
+        # 送出檔名、合併檔名改了也要重建(公司頁上看到的名字跟著變);都沒設定時跟以前同一個記號,不會整批重建
+        names = [d.get('send_name') or '' for d in documents(j, fb)] + [str((cf.C.get('resume') or {}).get('merged_name') or '')]
+        wanted = _inputs_hash([src or ''] + attachments, f'{variant}/{lang}' + ('|' + '|'.join(names) if any(names) else ''))
         key = 'ship:' + card.card_id_from_url(j['id'])
         current = not check(j, fb, migrate=not check_only)
         elapsed['比對'] += time.perf_counter() - started
@@ -853,18 +891,7 @@ def clean_orphans(check_only, board):
             continue
         if not os.path.realpath(full).startswith(root_real + os.sep):
             continue
-        # 代投留下的 .apply(填表截圖、交件紀錄)不是這裡建的、也重生不了,跟 build_default 一樣留著:
-        # 卡退出流程後按復原,填表時的截圖還在。只剩它的夾子不算過期套件,不再每輪報「已清」
-        apply_dir = os.path.join(full, '.apply')
-        rest = [n for n in os.listdir(full) if n != '.apply']
-        if os.path.isdir(apply_dir) and not rest:
-            continue
         if not check_only:
-            if os.path.isdir(apply_dir):
-                for n in rest:
-                    p = os.path.join(full, n)
-                    shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.remove(p)
-            else:
-                shutil.rmtree(full)
+            shutil.rmtree(full)
         cleaned.append(entry)
     return cleaned, unknown

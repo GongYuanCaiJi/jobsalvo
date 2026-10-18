@@ -27,7 +27,6 @@ class FakeDoor:
     def __init__(self, runtime='codex', *, page=None, pages=None, not_now=(), up=(True, ''),
                  prepared=None, agent_id='primary', need='打開 ego lite', attachments=()):
         self.runtime = runtime
-        self.native_json_output = runtime == 'codex'
         self.page = page if page is not None else {'url': '', 'fields': [], 'lines': []}
         self.pages = dict(pages or {})
         self.not_now = set(not_now)
@@ -73,6 +72,14 @@ class FakeDoor:
         self._can('read_page', tab_id)
         return self.page
 
+    def follow_page(self, tab_id):
+        self._can('follow_page', tab_id)
+        space, _, label = str(tab_id).partition(':')
+        if space != str(self.workspace.get('id')) or not label:
+            raise chrome_door.NotNow('agent 說的頁面不在這張卡的工作區裡')
+        self.workspace['page'] = label
+        return tab_id
+
     def read_profile(self, read_url, board=None):
         self._can('read_profile', read_url)
         if read_url not in self.pages:
@@ -105,6 +112,10 @@ class FakeDoor:
 
     def hand_off(self):
         self._can('hand_off')
+        return {'ownership': 'user'}
+
+    def _hand_off_page(self):
+        self._can('_hand_off_page')
         return {'ownership': 'user'}
 
     def human_action(self):

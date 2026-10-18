@@ -439,8 +439,6 @@ a.att-pill:hover{border-color:var(--accent-ink)}
   background:var(--surface);color:var(--ink-dim);cursor:pointer}
 .vd-b:last-child{border-right:0}
 .sentnow .vd-b{padding:10px 13px}   /* 沒進流程的卡上展開的履歷、語言選鈕:跟手機一樣好按 */
-.vd-b.y.on{background:var(--go);color:#fff}
-.vd-b.n.on{background:var(--warn);color:#fff}
 .vd-ship{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;padding-top:6px;
   border-top:1px solid var(--line)}
 .ship-rz{font-size:12px;font-weight:600;padding:5px 11px;border:1px solid var(--accent);
@@ -579,7 +577,7 @@ footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);color:v
 .stbar li em{font-style:normal;opacity:.85;margin-left:8px}
 
 /* 語言切換列(跟版本同一種樣子,兩個都是 agent 先判、使用者最終決定) */
-.vd-b.lg.on{background:var(--accent);color:#fff}
+.vd-b.on{background:var(--accent);color:#fff}
 
 /* 履歷用文字顯示:白底黑字、像一張紙,手機上可選取可換行 */
 .rzm-doc{background:#fff;color:#111;border-radius:8px;padding:22px 24px;
@@ -671,12 +669,21 @@ body.scrolled .tab-arr{font-size:12px}
 .fm-go{font-size:11.5px;font-weight:650;min-height:30px;padding:4px 10px;border-radius:8px;cursor:pointer;
   border:1px solid var(--warn);background:var(--warn-soft);color:var(--warn)}
 .fm-rf{color:var(--warn);font-size:11.5px}
+.fm-fold{margin:2px 0 4px;font-size:12px}
+.fm-list{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr);gap:3px 10px;margin:6px 0 2px}
+.fm-row{display:contents}
+.fm-q{color:var(--ink-dim);overflow-wrap:anywhere}
+.fm-v{overflow-wrap:anywhere;white-space:pre-wrap}
 /* 代投那一塊:可投遞這一階唯一的決定。現在走到哪 → 被什麼擋(原因直接寫,手機沒有滑鼠提示)→ 一顆主按鈕 */
 .ap-line{margin:8px 0 4px;padding:10px 12px;border-radius:11px;border:1px solid var(--line);background:var(--surface-2);
   display:flex;flex-direction:column;gap:8px;font-size:12.5px}
 .ap-line.go{border-color:var(--accent);background:var(--accent-soft)}
 .ap-line.blocked{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
 .ap-st{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;line-height:1.5}
+.ap-sync-row{flex:0 0 100%;white-space:pre-wrap;overflow-wrap:anywhere}
+.ap-sync-shots{display:flex;flex-wrap:wrap;gap:4px 12px}
+.ap-sync-detail summary{cursor:pointer}
+.ap-sync-detail pre{margin:6px 0 2px;white-space:pre-wrap;font:inherit;overflow-wrap:anywhere}
 .ap-why{font-size:12.5px;font-weight:650;color:var(--warn);line-height:1.5;overflow-wrap:anywhere}
 .ap-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .ap-acts .ap-main{flex:1 1 180px;min-height:44px;font-size:14px}
@@ -705,6 +712,8 @@ body.scrolled .tab-arr{font-size:12px}
 #inboxbar{margin:0 0 4px}
 .ib-from{margin-right:7px;font-size:11px;font-weight:700;color:var(--accent-ink);background:var(--accent-soft);
   border-radius:6px;padding:1px 7px}
+.ib-links{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:4px}
+.ib-links:empty{display:none}
 .ib-job{margin:6px 0 0 2px;font-size:12.5px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ib-need{margin:2px 0 6px 2px;font-size:12.5px;font-weight:650;color:var(--warn);line-height:1.55}
 .fm-b{font-size:12px;font-weight:600;padding:5px 11px;border-radius:9px;border:1px dashed var(--line);
@@ -948,6 +957,7 @@ body.scrolled .tab-arr{font-size:12px}
 @media(max-width:720px){ .cfg-in{font-size:16px} }
 .cfg-li{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:5px 0}
 .cfg-file{font-size:13px;color:var(--ink-dim);overflow-wrap:anywhere}
+.cfg-file.pending{color:var(--warn);font-weight:650}
 .cust-pick{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
 .cust-pick label:first-child{display:flex;align-items:center;gap:8px;min-width:0}
 .cust-pick-skill,.cust-pick-state{font-size:12px;color:var(--ink-dim)}
@@ -1151,3 +1161,8 @@ details.ivstage.applygrp{margin:0 0 8px}
 button.iv-st{border:1px solid transparent;font-family:inherit;cursor:pointer}
 button.iv-st:hover{border-color:var(--accent)}
 #ivstmenu .ctlopt[disabled]{opacity:.5;cursor:not-allowed}
+
+/* 送出的履歷在公司申請頁上的那一塊(程式截的公司網頁):卡上直接看,手機不用點 */
+.ap-proof{margin:0 0 8px;width:100%}
+.ap-proof img{display:block;max-width:100%;border:1px solid var(--line);border-radius:8px;background:#fff}
+.ap-proof figcaption{font-size:11.5px;color:var(--ink-dim);margin-top:3px}

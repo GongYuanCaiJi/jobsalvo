@@ -1,6 +1,7 @@
 """副本上的假流程(job_fake)要跟真的一樣照「跑幾張」「只跑這張」,填表要留下表單紀錄與交履歷方式。
 不然副本上走介面時,選了 1 張卻整頁都被填掉,新卡也永遠走不到核准。"""
 import json, os, tempfile, unittest
+from unittest import mock
 import _env  # noqa: F401
 import board_doc as bd
 import demo
@@ -30,6 +31,34 @@ class _FakeBoard(unittest.TestCase):
 
 
 class JobFakeLimitTest(_FakeBoard):
+    def test_board_copy_reports_nothing_when_no_profile_is_behind(self):
+        import sync_profiles as sp
+        slots = [('platform.example', 'zh', 'one', {'read': 'https://platform.example/r/one'})]
+        with mock.patch.object(sp, 'slots', return_value=slots), \
+                mock.patch.object(sp, 'behind', return_value=False):
+            job_fake.sync(self.board, self.dir, 0)
+        with open(os.path.join(self.dir, 'sync_status.json'), encoding='utf-8') as status_file:
+            status = json.load(status_file)
+        self.assertEqual(status['phase'], 'nothing')
+        self.assertEqual(status['results'], [])
+
+    def test_board_copy_only_shows_sync_status_and_never_touches_profile_registry(self):
+        import sync_profiles as sp
+        from _env import read_fb
+        slots = [('platform.example', 'zh', 'one', {'read': 'https://platform.example/r/one'})]
+        with mock.patch.object(sp, 'slots', return_value=slots), \
+             mock.patch.object(sp, 'pending_count', return_value=1), \
+             mock.patch.object(sp, 'behind', return_value=True), \
+             mock.patch.object(sp, 'sync_all') as actual:
+            before = list(read_fb(self.board).get('__inbox__') or [])
+            job_fake.sync(self.board, self.dir, 0)
+            actual.assert_not_called()
+        with open(os.path.join(self.dir, 'sync_status.json'), encoding='utf-8') as status_file:
+            status = json.load(status_file)
+        self.assertEqual(status['phase'], 'incomplete')
+        self.assertIn('副本', status['results'][0]['msg'])
+        self.assertEqual(read_fb(self.board).get('__inbox__') or [], before)
+
     def test_fill_honors_limit_and_leaves_form_and_delivery(self):
         self._set('ship')
         job_fake.apply(self.board, self.dir, 0, 'fill', '', limit=1)

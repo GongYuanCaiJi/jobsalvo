@@ -66,6 +66,28 @@ class Outcomes(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(rd, 'search_wide.json')))
 
 
+class PausedTimeIsNotCounted(unittest.TestCase):
+    def test_every_flow_waiting_for_its_agent_does_not_count_the_time_he_paused(self):
+        # 暫停是把整串行程凍住:這一輪(寫進度檔的那一份)停著的時間不算進等 agent 的時限,每個流程都一樣,
+        # 不靠各流程自己接(以前只有幫你填表接了,準備履歷、查應徵進度暫停久了照樣被判逾時)
+        import jobrun
+        d = self.enterContext(tempfile.TemporaryDirectory())
+        status = os.path.join(d, 'some_status.json')
+        jobrun.write(status, {'phase': 'run'})
+        proc = FakeProcess(pid=7)
+        threading = __import__('threading')
+        threading.Timer(0.4, lambda: setattr(proc, 'returncode', 0)).start()
+        with open(status + '.paused', 'w'):
+            pass                                     # 他按了暫停:從現在起停著
+        result, = ar.wait_done([proc], timeout=0.2)
+        self.assertEqual(result.status, 'completed')
+        os.remove(status + '.paused')
+        late = FakeProcess(pid=8)
+        threading.Timer(0.4, lambda: setattr(late, 'returncode', 0)).start()
+        result, = ar.wait_done([late], timeout=0.2)  # 沒暫停:照時限
+        self.assertEqual(result.status, 'timeout')
+
+
 class BrowserCapability(unittest.TestCase):
     def test_application_agent_disables_native_browser_plugins_and_uses_ego(self):
         agent = {'id': 'browser', 'runtime': 'codex', 'model': '', 'effort': 'low', 'browser': True}
@@ -203,6 +225,23 @@ class OrderedDispatch(unittest.TestCase):
         self.assertEqual([agent_id for agent_id, _ in seen], ['browser-first', 'browser-next'])
         self.assertIn('Beacon 清單第 3 個', text)
 
+    def test_service_disconnect_retries_the_same_agent_once(self):
+        seen = []
+
+        def launch(_prompt, outfile, _repo, agent, **kwargs):
+            seen.append(agent['id'])
+            with open(outfile, 'a', encoding='utf-8') as f:
+                if len(seen) == 1:
+                    f.write('{"type":"turn.failed","error":{"message":"stream disconnected before completion: '
+                            'responses bridge upstream timeout"}}\n')
+            return FakeProcess(pid=100 + len(seen))
+        with patch.object(ar, 'SERVICE_RETRY_WAIT', 0):
+            result, _ = self.dispatch([self.entry('only', browser=True)],
+                                      [[ar.AgentResult('failed', 1, 101)], [ar.AgentResult('completed', 0, 102)]],
+                                      launch, browser_required=True)
+        self.assertEqual(result.status, 'completed')
+        self.assertEqual(seen, ['only', 'only'])
+
     def test_timeout_and_unknown_failure_do_not_handoff(self):
         for outcome in (ar.AgentResult('timeout', pid=101), ar.AgentResult('failed', 9, 101)):
             with self.subTest(status=outcome.status, returncode=outcome.returncode):
@@ -293,30 +332,29 @@ class OrderedDispatch(unittest.TestCase):
         self.assertIn('Beacon 清單第 2 個', text)
         self.assertIn('啟動失敗', text)
 
-    def test_each_agent_gets_the_task_prepared_for_it(self):
-        # #288:代投第一家不能用、換手到另一家(Codex↔Claude)時,prompt 和 Chrome 檢查要照新的那一家做。
-        # prepare(agent) 回給那一家的 prompt;那一家的 Chrome 沒準備好就丟 AgentStartError,照啟動失敗換下一個
-        entries = [self.entry('cx', browser=True), self.entry('cc', 'claude-code', browser=True),
-                   self.entry('cx2', browser=True)]
+    def test_a_handoff_to_claude_saves_its_last_message_as_the_delivery_sheet(self):
+        # #288:填表第一家(Codex)額度用完、換手到 Claude。兩家交件同一種寫法(最後一則訊息就是交件 JSON),
+        # 換手後 prompt 不用重組;Claude 最後的結果由程式存成交件單
+        entries = [self.entry('cx', browser=True), dict(self.entry('cc', browser=True), runtime='claude-code')]
         prompts = []
+        sheet = os.path.join(self.enterContext(tempfile.TemporaryDirectory()), 'fill.json')
 
         def launch(prompt, outfile, _repo, agent, **kwargs):
-            prompts.append((agent['id'], prompt))
+            prompts.append((agent['id'], prompt, kwargs.get('output_last_message')))
             with open(outfile, 'a' if kwargs.get('append') else 'w', encoding='utf-8') as f:
                 if agent['id'] == 'cx':
                     f.write(json.dumps({'type': 'turn.failed', 'error': {'message': 'Quota exceeded'}}) + '\n')
+                else:
+                    f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                        'session_id': 'S2', 'result': '{"tab_id": "42:p1"}'}) + '\n')
             return FakeProcess(pid=100 + len(prompts))
 
-        def prepare(agent):
-            if agent['id'] == 'cc':
-                raise ar.AgentStartError('Claude 90 秒內看不到 agent 的 Chrome')
-            return 'TASK FOR ' + agent['id']
-
-        result, text = self.dispatch(entries, ar.AgentResult('completed', 0, 101), launch, prompt='ORIGINAL',
-                                     browser_required=True, prepare=prepare)
-        self.assertEqual(prompts, [('cx', 'TASK FOR cx'), ('cx2', 'TASK FOR cx2')])
-        self.assertEqual(result.agent_id, 'cx2')
-        self.assertIn('Claude 90 秒內看不到 agent 的 Chrome', text)      # 為什麼沒用 Claude,紀錄裡講得出來
+        result, _text = self.dispatch(entries, ar.AgentResult('completed', 0, 101), launch, prompt='ORIGINAL',
+                                      browser_required=True, output_last_message=sheet)
+        self.assertEqual(result.agent_id, 'cc')
+        self.assertEqual([(a, p) for a, p, _ in prompts], [('cx', 'ORIGINAL'), ('cc', 'ORIGINAL')])
+        with open(sheet, encoding='utf-8') as f:
+            self.assertEqual(json.load(f), {'tab_id': '42:p1'})
 
     def test_pinned_agent_never_falls_through_to_another_entry(self):
         seen = []
@@ -564,6 +602,20 @@ class CodexDispatch(unittest.TestCase):
             self.assertNotIn('private prompt', argv)
             if sid:
                 self.assertEqual(argv[2:4], ['resume', sid])
+
+    def test_empty_final_message_keeps_the_last_reply_with_text(self):
+        import tempfile, json as _json
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, 'open.json')
+            open(out, 'w').close()                                   # codex 最後一則是空白訊息
+            log = '\n'.join(_json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': t}})
+                            for t in ('{"tab_id":"1:p1","ids":[]}', ''))
+            ar._keep_last_reply(out, log)
+            self.assertEqual(open(out).read(), '{"tab_id":"1:p1","ids":[]}')
+            with open(out, 'w') as f:
+                f.write('{"kept": true}')
+            ar._keep_last_reply(out, log)                            # 有字就不動
+            self.assertEqual(open(out).read(), '{"kept": true}')
 
     def test_prompt_is_fed_on_stdin_not_argv(self):
         with patch.object(ar, 'codex_bin', return_value='/bin/codex'):

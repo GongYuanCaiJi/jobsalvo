@@ -27,6 +27,18 @@ def fields(fb, url):
     return fb[url]['form']['f']
 
 
+class ProgramMapsAnOptionThatIsPartOfTheAnswer(unittest.TestCase):
+    def test_a_bilingual_answer_whose_one_half_was_picked_needs_no_agent_round(self):
+        # 2026-10-07 Lever 實測:答案「公司徵才頁 / Company career page」、頁面選「Company career page」,
+        # 以前退回叫 agent 補 choice,多一輪對話 43 秒
+        fb = {'__ans__': [{'k': 'src', 'q': '從哪裡得知', 'v': '公司徵才頁 / Company career page'}]}
+        fr.apply_record(fb, U1, 'x', [{'q': 'How did you hear?', 'k': 'src', 'page_value': 'Company career page'}], today=T)
+        (f,) = fields(fb, U1)
+        self.assertNotIn('choice', f)                                   # 驗收用同一支比對認得,不用另記對應
+        with self.assertRaises(ValueError):                                # 不是原文的一段:照舊退回
+            fr.apply_record(fb, U2, 'x', [{'q': 'How did you hear?', 'k': 'src', 'page_value': 'LinkedIn'}], today=T)
+
+
 class OneTruth(unittest.TestCase):
     def test_answers_live_only_in_the_bank(self):
         fb = {}
@@ -38,6 +50,13 @@ class OneTruth(unittest.TestCase):
         e = [x for x in fb['__ans__'] if x['k'] == why['k']][0]
         self.assertEqual((e['q'], e['v'], e['zh'], e['kind'], e['inf']),
                          ('為什麼對這個職位有興趣', 'Because A.', '因為 A。', 'txt', T))
+        self.assertEqual(fr.validate(fb), [])
+
+    def test_a_translated_question_stays_on_the_form_for_the_confirm_screen(self):
+        fb = {}
+        fr.apply_record(fb, U1, 'Lever', [dict(NAME, qz='全名'), dict(NAT, qz='你的國籍？')], today=T)
+        name, nat = fields(fb, U1)
+        self.assertEqual((name['qz'], nat['qz']), ('全名', '你的國籍？'))
         self.assertEqual(fr.validate(fb), [])
 
     def test_inferred_answer_is_pending_his_words_are_confirmed(self):

@@ -38,7 +38,6 @@ rules:
       - pattern-either:
           - pattern: $M.$FN(<... cf.SHIP_DIR ...>, ...)
           - pattern: $M.$FN(<... SHIP_DIR ...>, ...)
-          - pattern: $M.$FN(<... SHIP_ROOT ...>, ...)
       - metavariable-regex:
           metavariable: $FN
           regex: ^(glob|listdir|scandir|walk|iterdir|rglob)$

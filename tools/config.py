@@ -79,6 +79,9 @@ DEFAULTS = {
         'read_lang': 'zh',
         'resumes': [],                  # {id, name, files:{語言:路徑}, enabled, when, skill}
         'attachments': [],              # {id, name, files:{語言:路徑}, enabled, resume_ids, skill}
+        # 履歷、附件各語言的「送出檔名」寫在各自的 send_names:{語言:檔名}(公司申請頁上看到的名字,空的用上傳的檔名)。
+        # 合併檔(表單只收一個檔時上傳的履歷接附件):{resume} 換成履歷的送出檔名(不含副檔名)、{n} 換成附件數;空的叫 merged.pdf
+        'merged_name': '',
     },
     'search': {
         # 職稱一中就不送(不花 agent)/容易誤中、標出來交給判斷的字。一行一個字,不分大小寫。
@@ -304,6 +307,13 @@ def master(resume_id, lang):
     """某份履歷、某個語言的母稿路徑;沒設定回 None。"""
     files = (RESUMES.get(resume_id) or {}).get('files') or {}
     return path(files[lang]) if files.get(lang) else None
+
+
+def clock(value):
+    """「09:00」這種時刻 → (時, 分);空的、寫錯的回 None。存設定時擋、自動流程排程時算都照這一支。"""
+    import re
+    m = re.fullmatch(r'([0-9]{1,2}):([0-9]{2})', str(value or '').strip())
+    return (int(m.group(1)), int(m.group(2))) if m and int(m.group(1)) < 24 and int(m.group(2)) < 60 else None
 
 
 def resume_name(resume_id):

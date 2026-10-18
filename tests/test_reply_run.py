@@ -88,7 +88,7 @@ class Findings(unittest.TestCase):
                                            'todo': '簽保密協議,對方才會寄測驗'}]}, DAY)
         self.assertEqual(fb[U]['replies']['items'][0]['todo'], '簽保密協議,對方才會寄測驗')
         self.assertNotIn('look', fb[U]['replies'])
-        self.assertIn('要你做', done[U])
+        self.assertIn(('todo', '有要你做的事'), done[U])
 
     def test_rejected_after_interview_keeps_the_interview_date(self):
         fb = board()
@@ -184,7 +184,7 @@ class OneLetterManyCards(unittest.TestCase):
             (item,) = fb[url]['replies']['items']
             self.assertEqual(item['maybe'], [other])       # 卡上寫「同一封也對到哪一張」
         self.assertEqual(ghosts, [])
-        self.assertNotIn('→', ';'.join(res.values()))
+        self.assertFalse([w for what in res.values() for w in what if w[0] == 'moved'])
         self.assertIn('可能是同一封', rr.summary(res, {}))
 
     def test_interview_letter_on_two_auto_ghosted_cards_moves_neither(self):
@@ -257,7 +257,7 @@ class Ghost(unittest.TestCase):
                                 '2026-10-10')
         self.assertNotIn('oc', fb[U])
         self.assertEqual((fb[U]['oc_auto']['s'], fb[U]['oc_auto']['from']), ('', 'ghost'))
-        self.assertIn('沒下文 → 等回音', res[U])
+        self.assertIn(('moved', '沒下文 → 等回音'), res[U])
 
     def test_auto_change_keeps_the_dates_from_before_so_undo_can_put_them_back(self):
         """沒下文被回音改成面試:改之前的日期存著,他按「不對,復原」時看板原封放回,不留面試日期。"""
@@ -341,6 +341,16 @@ class AgentResults(unittest.TestCase):
         self.assertEqual(parsed.checked, set())
         self.assertEqual(rr.apply_ghost(fb, day='2026-10-01', checked=parsed.checked), [])
         self.assertNotIn('oc', fb[U])
+
+    def test_a_source_it_could_not_open_without_what_he_must_do_is_not_taken(self):
+        # 進不去的來源要寫來源、原因、要他做的事:少一樣就不收那一則(回報沒得講),那張卡這一輪不算查完
+        for missing in ('source', 'reason', 'need'):
+            row = {'source': '104', 'reason': '需要登入', 'need': '登入後重跑', 'jobs': [U]}
+            row[missing] = '  ' if missing == 'need' else row.pop(missing) and None   # 只寫空白跟沒寫一樣
+            row = {k: v for k, v in row.items() if v is not None}
+            parsed = rr.parse_result({'checked': [U], 'findings': [], 'job_ids': [], 'inaccessible': [row]}, [U])
+            self.assertEqual((parsed.inaccessible, parsed.checked), ([], set()), missing)
+            self.assertTrue(parsed.dropped, missing)
 
     def test_source_type_is_bound_to_program_captured_source_ref(self):
         """來源種類程式照 source_ref 自己認;寫錯種類、編一個程式沒給的來源代號,那一則都不收、那張不算查完(#317)。"""
@@ -691,6 +701,29 @@ class VerifiedFallback(unittest.TestCase):
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
         self.assertIn('沒核實', self.statuses[-1]['msg'])
 
+    def test_a_complete_page_for_another_thread_does_not_verify_the_requested_one(self):
+        pages = gmail_pages()
+        pages[THREAD]['url'] = THREAD.replace('abc123def', 'zzz999yyy')
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 reread=pages)
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
+        self.assertIn('沒核實', self.statuses[-1]['msg'])
+
+    def test_a_complete_page_for_another_search_does_not_verify_the_requested_one(self):
+        pages = gmail_pages()
+        pages[SEARCH]['url'] = 'https://mail.google.com/mail/u/0/#search/' + 'after%3A2026%2F01%2F01+(%22Other%22)'
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 reread=pages)
+        self.assertNotEqual(fb[U].get('oc'), 'ghost')
+        self.assertIn('沒核實', self.statuses[-1]['msg'])
+
+    def test_gmail_rewriting_the_search_spaces_as_plus_is_the_same_search(self):
+        pages = gmail_pages()
+        pages[SEARCH]['url'] = SEARCH.replace('%20', '+')
+        code, fb = self.run_main({'checked': [U], 'findings': []}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 reread=pages)
+        self.assertEqual(fb[U].get('oc'), 'ghost')
+
     def test_partial_search_keeps_the_checked_date_to_avoid_missing_older_replies(self):
         """搜尋結果一頁放不下，不能縮小下一輪搜尋範圍、漏掉未讀的舊信。"""
         pages = gmail_pages()
@@ -830,6 +863,16 @@ class SourceCapture(unittest.TestCase):
         self.assertEqual(len(missing), 1)
         self.assertEqual(missing[0]['jobs'], [other])
         self.assertIn('沒有可安全用於 Gmail 的搜尋詞', missing[0]['reason'])
+
+    def test_gmail_search_rows_are_not_links_but_carry_their_thread_ids(self):
+        # 真的 Gmail(2026-10-06 用 ego 讀到的):搜尋結果每一列不是連結,對話代號在列上;頁上的連結都是別的東西(#389)
+        page = {'url': rr.GMAIL + '#search/x', 'readyState': 'complete', 'text': '1–4 列 (共 4 列)',
+                'anchors': [{'href': 'https://www.linkedin.com/jobs/view/1', 'text': '查看職缺'}],
+                'emailThreads': ['1a0ec55be680a479', '1a0f023b59ecba87', '1a0ead76fc27f0dd', '1a0f0a1b2c3d4e5f']}
+        self.assertTrue(rr._gmail_search_ready(page))
+        self.assertEqual(rr._gmail_search_problem(page), '')
+        self.assertEqual(len(rr._gmail_search_thread_ids(page)), 4)   # 核實補查讀完時也認得這四封
+        self.assertFalse(rr._gmail_search_ready(dict(page, emailThreads=page['emailThreads'][:3])))
 
     def test_partial_gmail_search_results_are_reported_inaccessible(self):
         sources, missing = self.collect({'text': '1-50 of 100', 'anchors': [

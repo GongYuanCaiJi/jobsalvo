@@ -29,18 +29,18 @@ class Report(unittest.TestCase):
         it = ar.apply_report(fb, '代投', '要登入', job=U, now='t2')
         self.assertEqual((len(fb['__inbox__']), it['n'], it['at']), (1, 2, 't2'))
 
+    def test_sync_result_is_visible_without_becoming_a_task(self):
+        fb = {}
+        it = ar.apply_report(fb, '平台履歷同步', '同步完成：1/1 份通過', info=True, now='t1')
+        self.assertEqual(ar.open_items(fb), [it])
+        self.assertEqual(ar.todo(fb), [])
+
     def test_after_he_handles_it_a_new_report_is_a_new_item(self):
         fb = {}
         ar.apply_report(fb, '代投', '要登入', job=U, now='t1')['done'] = '2026-09-22'
         ar.apply_report(fb, '代投', '要登入', job=U, now='t2')
         self.assertEqual(len(ar.open_items(fb)), 1)
         self.assertEqual(len(fb['__inbox__']), 2)
-
-    def test_a_report_can_carry_what_his_done_confirms(self):
-        fb, first, later = {}, [{'item': 'field:0'}], [{'item': 'field:1'}]
-        ar.apply_report(fb, '代投', '平台上有原稿沒寫的內容', job=U, now='t1', approve=first)
-        it = ar.apply_report(fb, '代投', '平台上有原稿沒寫的內容', job=U, now='t2', approve=later)
-        self.assertEqual((it['n'], it['approve']), (2, later))      # 同一則再報:帶的是這一輪的清單
 
     def test_empty_report_is_refused(self):
         with self.assertRaises(ValueError):
@@ -93,7 +93,7 @@ class Resolve(unittest.TestCase):
         fb = {}
         ar.apply_report(fb, '代投', '送出沒確認成功:沒看到成功頁面', job='J1', now='t1')
         ar.apply_report(fb, '可投遞夾建置', '可投遞夾本輪建置失敗', job='J1', now='t1')
-        self.assertEqual(ar.apply_resolve(fb, 'J1', '建好了', 'd', only=lambda it: it.get('from') == '可投遞夾建置'), 1)
+        self.assertEqual(ar.apply_resolve(fb, 'J1', '建好了', 'd', src='可投遞夾建置'), 1)
         sent, built = fb['__inbox__']
         self.assertNotIn('done', sent)
         self.assertEqual(built['done'], 'd')

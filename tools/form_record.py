@@ -45,8 +45,8 @@ import delivery_state as ds
 
 SRCS = ('rz', 'bank', 'skip')
 KINDS = ('txt', 'op', 'pick', 'val', 'ck')
-BANK_FIELD = ('q', 'src', 'k', 'opt', 'lim', 'refill', 'choice')     # choice 是本輪原生選項對應,不改答案庫
-PLAIN_FIELD = ('q', 'src', 'v', 'why', 'opt', 'lim')        # rz / skip 留在表單上的
+BANK_FIELD = ('q', 'qz', 'src', 'k', 'opt', 'lim', 'refill', 'choice')     # choice 是本輪原生選項對應,不改答案庫
+PLAIN_FIELD = ('q', 'qz', 'src', 'v', 'why', 'opt', 'lim')        # rz / skip 留在表單上的
 
 
 def _today():
@@ -240,6 +240,7 @@ def _answer(fb, url, x, prev_k, today):
 
 def apply_record(fb, url, plat, fields, at=None, today=None):
     """純函式版(測試用):把一張表單記進 fb。回傳這次新開的 k 清單。"""
+    import apply_tab
     today = today or _today()
     cur = fb.setdefault(url, {})
     old = cur.get('form') or {}
@@ -258,12 +259,13 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         if src not in ('bank', 'new'):
             raise ValueError(f"src 要是 rz / skip / bank 其中之一:{x.get('q')!r}")
         e = _answer(fb, url, x, prev.get(x.get('q')), today)
-        shown = ' '.join(str(x.get('page_value') or '').split()).casefold()
-        if x.get('k') and 'choice' not in x and shown not in ('', '<redacted>') and shown not in {
-                ' '.join(str(e.get(kk) or '').split()).casefold() for kk in ('v', 'zh')}:
-            unmapped.append(f"「{x['q'][:40]}」頁面上是 {x['page_value']!r},答案庫 {e['k']} 是 {e.get('v')!r}")
+        shown = x.get('page_value')
+        # 頁面上的值不是答案庫原文、也不是原文裡完整的一段(apply_tab.matches,驗收用同一支):沒有 choice 就退回
+        if (x.get('k') and 'choice' not in x and str(shown or '').strip() not in ('', '<redacted>')
+                and not any(apply_tab.matches(e.get(kk), shown, 'box') for kk in ('v', 'zh'))):
+            unmapped.append(f"「{x['q'][:40]}」頁面上是 {shown!r},答案庫 {e['k']} 是 {e.get('v')!r}")
         y = {'q': x['q'], 'src': 'bank', 'k': e['k']}
-        for kk in ('opt', 'lim', 'choice'):
+        for kk in ('qz', 'opt', 'lim', 'choice'):
             if x.get(kk): y[kk] = x[kk]
         out.append(y)
     if unmapped:
@@ -425,6 +427,29 @@ def answers_pending(fb, url):
     return any(e['k'] in ks for e, _ in waiting(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
 
 
+def platform_answers(fb, url):
+    """這張卡實際選用的那份平台履歷的專用答案。"""
+    delivery = ((fb.get(url) or {}).get('apply') or {}).get('delivery') or {}
+    if delivery.get('method') != 'platform_profile':
+        return []
+    import profile_sync as ps
+    chosen = ps.identity(delivery.get('profile_url'))
+    if not chosen:
+        return []
+    custom = [answer for answer in _bank(fb)
+              if answer.get('profile_url') and ps.identity(answer.get('profile_url')) == chosen]
+    if custom:
+        return custom
+    slot = next(((p, f'{lang}/{v}') for p, lang, v, entry in ps.slots() if ps.identity(entry['read']) == chosen), None)
+    return [answer for answer in _bank(fb) if slot and (answer.get('platform'), answer.get('profile')) == slot
+            and not answer.get('profile_url')]
+
+
+def platform_answers_pending(fb, url):
+    return [answer.get('k') for answer in platform_answers(fb, url)
+            if answer.get('inf') or empty_answer(answer)]
+
+
 def waiting(fb):
     """答案庫裡還沒好的:我推論的(inf),或答案還空著、而且有還沒送出的表單在用(或沒有表單在用)。
     等 agent 重新代填的(redo)不算。"""
@@ -453,6 +478,8 @@ def snapshot(fb, url):
     for x in ((fb.get(url) or {}).get('form') or {}).get('f', []):
         e = bank.get(x.get('k')) if x.get('src') == 'bank' else x
         out[x.get('q') or ''] = (e or {}).get('v') or ''
+    for answer in platform_answers(fb, url):
+        out['平台履歷:' + str(answer.get('k') or '')] = answer.get('v') or ''
     return out
 
 
@@ -538,6 +565,8 @@ def approval_problem(fb, url, status=None):
         # 等他的全是缺證據的(不叫他確認):照實講缺證據,不然他看到「等你確認」卻找不到要確認的那一條(#315)
         asked = any(e['k'] in ks for e, _ in find_pending(fb)) or bool(ks - {e.get('k') for e in _bank(fb)})
         return '還有答案等你確認或填寫' if asked else NO_EVIDENCE
+    if platform_answers_pending(fb, url):
+        return '這份平台履歷還有答案等你確認或填寫'
     if any(e.get('tr') for e in _bank(fb) if e.get('k') in ks):
         return '有答案你改了{},{}還沒照著重翻'.format(*lang_words())
     if any(x.get('refill') for x in f.get('f', [])):
@@ -596,7 +625,8 @@ def confirm_problem(fb, url, status=None):
 
 def find_shared(fb):
     """填新表單之前先讀這份:他確認過、共用、有答案的。這缺專用的不在裡面(不能接到別的職缺)。"""
-    return [e for e in _bank(fb) if not e.get('pj') and not e.get('inf') and not empty_answer(e)]
+    return [e for e in _bank(fb) if not e.get('pj') and not e.get('platform')
+            and not e.get('inf') and not empty_answer(e)]
 
 
 def shared_text(fb):

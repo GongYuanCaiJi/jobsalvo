@@ -73,8 +73,11 @@ def gone_pages(fb, running_url='', proc=None):
 
 
 def sweep_gone(live, running_url='', only=None, by='chrome_door', unreachable=False):
+    """頁不在 ego 裡的卡改標成「頁面不見了,要重填」。副本不動:ego 整台電腦只有一個,副本的卡不是它填的。"""
     import board_doc as bd
     import delivery_state as ds
+    if not bd.is_live(live):
+        return {}
     before = json.loads(bd.load(live)['fb'])
     missing = dict.fromkeys(gone_pages(before, running_url), GONE)
     if unreachable:
@@ -179,6 +182,28 @@ def ego_bin():
     found = shutil.which('ego-browser')
     fallback = os.path.expanduser('~/.local/bin/ego-browser')
     return found or (fallback if os.path.isfile(fallback) and os.access(fallback, os.X_OK) else None)
+
+
+def _osa(script):
+    return subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10).stdout.strip()
+
+
+def _ensure_ego_window():
+    """ego 一個視窗都沒有時，工作區的頁面截不了圖；在背景補開視窗，焦點還給原本在前面的程式。"""
+    count = 'tell application "System Events" to tell process "ego lite" to return (count of windows) as text'
+    try:
+        if _osa(count) != '0':
+            return
+        front = _osa('tell application "System Events" to return name of first process whose frontmost is true')
+        subprocess.run(['open', '-g', '-a', 'ego lite'], timeout=10, capture_output=True)
+        for _ in range(25):
+            if _osa(count) not in ('', '0'):
+                break
+            time.sleep(0.2)
+        if front and front != 'ego lite':
+            _osa(f'tell application "System Events" to set frontmost of process {json.dumps(front)} to true')
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _ego(script, timeout=60):
@@ -291,8 +316,23 @@ def test_workspaces(keep=None):
                 os.environ['JOBSALVO_BROWSER_TEST_RUN'] = previous
 
 
-# 讀頁之前等文件有 body:有些網站載完(domcontentloaded)又把整份文件換掉,那一瞬間 body 是空的(2026-10-06 LinkedIn)
-BODY_READY = 'await page.waitForFunction(() => document.body, undefined, {timeout: 15000}).catch(() => null);\n'
+# 讀頁、判斷之前先等這一頁穩定(每個讀頁入口共用這一段,不各自補一種等法):不在載入中、有 body、
+# 網址和內容連續 quiet 次(每次 300ms)不變,最多 15 秒;逾時照樣讀。網站載完又換掉整份文件(LinkedIn)、
+# 授權視窗先閃登入頁再自己轉授權頁(Lever),都是還沒穩定。
+SETTLE = r"""const settle = async (p, quiet = 1) => {
+  let last = '', same = 0;
+  for (let i = 0; i < 50; i++) {
+    const sig = await p.evaluate(() => document.readyState === 'loading' || !document.body ? '' :
+      location.href + '|' + document.body.innerText.length + '|' + document.getElementsByTagName('*').length).catch(() => '');
+    same = sig && sig === last ? same + 1 : 0;
+    if (same >= quiet) return true;
+    last = sig;
+    await p.waitForTimeout(300);
+  }
+  return false;
+};
+"""
+SETTLED = SETTLE + 'await settle(page);\n'
 
 
 class EgoDoor:
@@ -305,7 +345,6 @@ class EgoDoor:
     def __init__(self, agent_id=None, runtime=CODEX):
         self.agent_id = agent_id     # 要叫的那一個 agent(修改、送出叫回填這張的那一個)
         self.runtime = runtime
-        self.native_json_output = runtime == CODEX
         self.workspace = None
 
     def profile_reader(self, board=None):
@@ -325,6 +364,9 @@ class EgoDoor:
             '  page.goto(url) / page.snapshot()(回 @ref) / page.fill(sel, 文字) / page.selectOption(sel, {label}) / page.click(sel)\n'
             '  sel 可用 @ref、loc=role:button[name="…"]、loc=css:…、text=…;一個 sel 要剛好對到一個元素\n'
             '  按鈕在 iframe 裡:快照裡找到 iframe 的 @ref,再 page.snapshot({scope:"subtree",root:"@ref"}) 拿裡面的 @ref 來點\n'
+            '  自動完成欄(打字後跳出建議清單):先 click 那一格、用 page.keyboard.type 打字(fill 常常不會觸發建議清單)'
+            ' → page.waitForSelector("loc=role:option") → 點對的那一項'
+            '(loc=role:option[name*="…"])→ 同一段腳本讀回確認;沒點建議項,值常常留不住\n'
             '  page.waitForSelector(sel) / page.waitForURL(…) / page.waitForFunction(fn) / page.evaluate(fn, 參數)\n'
             '  page.setInputFiles(sel, [完整路徑]);選檔器:const c = page.waitForFileChooser(); 點上傳; (await c).setFiles(路徑)\n'
             '  點擊回傳 receipt.popups[0].label → task.page(label) 接新開的頁;page.fetch(url,{saveAs}) 取檔\n'
@@ -339,8 +381,14 @@ class EgoDoor:
             '不開 App、不用桌面指令。'
             '輸入文字用 fill 或 keyboard.insertText;不用 keyboard.paste(它在 Mac 上送出真的 ⌘V,ego 會當成使用者在操作,'
             '把工作區轉給他,這一輪就停了)。'
-            '登入與授權依本輪規矩先試已登入帳號的 SSO;確實需要本人處理時照【回報】寫明網站與要做的事;'
-            '保留工作區與頁面,使用者按 👀 接手,按「修改」後才繼續。'
+            '\n【登入與授權】(這一段優先於填表做法與平台筆記)\n'
+            '  按「應徵/Apply」後真的出現登入頁或登入框,才進入登入。頁首的「登入/註冊」只是頁首(會員中心常在別的網域)。\n'
+            '  用這個瀏覽器已登入的帳號完成:Continue with Google(用 Google 繼續)、Sign in with Apple、選已登入的帳號、「Allow/允許」這類選項直接按,'
+            '同一頁也有密碼欄時照樣先按它;「用某某帳號申請」的一鍵帶入也這樣完成。\n'
+            '  授權視窗跟著走到網址和標題不再變的那一頁再判斷(剛打開常先閃一下登入頁)。帶入、SSO、選帳號、同意這一串在同一段腳本做完:'
+            '每一步先存 waitForEvent("popup") 或 waitForURL 的 promise 再點,回到申請表才印快照;等不到預期畫面才停下觀察。\n'
+            '  已登入帳號完成不了、只剩密碼、二步驗證、驗證碼或真人驗證:申請頁有一般表單就關掉登入頁改填它;投不了就照【回報】寫明網站與要本人做的事,'
+            '保留工作區與頁面,使用者按 👀 接手,按「修改」後才繼續。\n'
             '本輪規則優先於 skill 的自動交接建議:不得呼叫 task.handOff 或 takeOverTaskSpace;程式指定的工作區也不要 finish,'
             '卡住或結束都維持 agent 控制權,交接與接回只由程式按使用者的按鈕處理。\n\n'
         )
@@ -376,7 +424,7 @@ class EgoDoor:
     def open_for_agent(self, url, old_tab=None, on_open=None):
         import apply_tab
         if self.workspace is not None:
-            return _ego(self._task(old_tab) + BODY_READY + f'const data=await page.evaluate({apply_tab.PAGE_FN});\n'
+            return _ego(self._task(old_tab) + SETTLED + f'const data=await ({apply_tab.READ_FORM})(page);\n'
                         'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
         name = _workspace_name()
         opened = _ego(
@@ -390,7 +438,7 @@ class EgoDoor:
             on_open(opened)
         return _ego(self._task() +
                     f'await page.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}});\n'
-                    + BODY_READY + f'const data=await page.evaluate({apply_tab.PAGE_FN});\n'
+                    + SETTLED + f'const data=await ({apply_tab.READ_FORM})(page);\n'
                     'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
 
     def fetch_file(self, url, dest):
@@ -442,9 +490,48 @@ class EgoDoor:
             )
         return script
 
+    def fill_fields(self, tab_id, items):
+        """程式自己填這幾格(apply_tab.FILL_FN):[{backend, how, value}] → 每一格 {backend, ok, why}。"""
+        import apply_tab
+        return _ego(self._task(tab_id) + SETTLED + f'return await ({apply_tab.FILL_FN})(page, {json.dumps(items)});',
+                    timeout=60 + 10 * len(items))
+
     def read_page(self, tab_id):
         import apply_tab
-        return _ego(self._task(tab_id) + BODY_READY + f'return await page.evaluate({apply_tab.PAGE_FN});')
+        return _ego(self._task(tab_id) + SETTLED + f'return await ({apply_tab.READ_FORM})(page);')
+
+    def read_profile_page(self, tab_id):
+        """讀 agent 正在編輯的同一頁，保留尚未按儲存的欄位值與實際連結。"""
+        import apply_tab
+        script = self._task(tab_id) + SETTLED + f'return await page.evaluate({apply_tab.PROFILE_FN});'
+        try:
+            return _ego(script)
+        except NotNow as e:
+            # 讀頁不改任何東西；瀏覽器一時卡住（逾時）就重讀一次。
+            if '逾時' not in str(e) and 'timed out' not in str(e):
+                raise
+            return _ego(script)
+
+    def read_shown_page(self, url):
+        """在同一工作區開新分頁讀對外頁面：網站草稿存在原分頁，新分頁看到的才是平台存下的內容。"""
+        import apply_tab
+        return _ego(self._task(page=False) +
+                    'const page = await task.newPage();\n'
+                    'try {\n'
+                    f'const receipt = await page.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}});\n'
+                    'if (receipt?.dialog || (await page.info())?.dialog) await page.acceptDialog();\n'
+                    'await page.waitForLoadState("load").catch(() => null);\n'
+                    + SETTLED +
+                    f'return await page.evaluate({apply_tab.PROFILE_FN});\n'
+                    '} finally { await page.close().catch(() => null); }')
+
+    def reload_profile_page(self, tab_id, url=None):
+        """重新載入並丟棄未存檔編輯；重新開啟編輯處後才讀持久內容。"""
+        return _ego(self._task(tab_id) +
+                    f'const receipt = await page.goto({json.dumps(url) if url else "await page.url()"}, '
+                    '{waitUntil:"domcontentloaded",timeout:30000});\n'
+                    'if (receipt?.dialog || (await page.info())?.dialog) await page.acceptDialog();\n'
+                    'return {url: await page.url()};')
 
     def shot(self, tab_id, out):
         import evidence
@@ -469,6 +556,8 @@ class EgoDoor:
                     raise
                 if attempt == self.SHOT_ATTEMPTS:
                     raise NotNow(f'這張頁面截圖暖機 {attempt} 次仍失敗:{reason}') from e
+                if attempt == 1:
+                    _ensure_ego_window()
             finally:
                 if not ok:
                     with contextlib.suppress(FileNotFoundError):
@@ -478,6 +567,48 @@ class EgoDoor:
                                 limit=self.SHOT_ATTEMPTS, retry_count=attempt - 1, ok=ok, reason=reason,
                                 seconds=round(time.monotonic() - started, 3),
                                 elapsed_seconds=round(time.monotonic() - total_started, 3))
+
+    def shot_proof(self, tab_id, out, names, links=()):
+        """申請頁上寫著送出檔名的那一塊截下來(公司網站本身的畫面);頁上找不到這些檔名回 None。"""
+        import apply_tab
+        found = _ego(self._task(tab_id) + SETTLED +
+                     f'return await page.evaluate(([n, l]) => ({apply_tab.PROOF_FN})(n, l), {json.dumps([list(names), list(links)])});')
+        if not found:
+            return None
+        # 只截目前畫面;座標乘上瀏覽器的縮放倍率(Page.getLayoutMetrics 的 zoom,視窗縮放 125% 時是 1.25)
+        clip = {k: found[k] for k in ('x', 'y', 'width', 'height')}
+        result = _ego(self._task(tab_id) +
+                      'const m = await page.cdp("Page.getLayoutMetrics", {});\n'
+                      'const z = (m.cssVisualViewport && m.cssVisualViewport.zoom) || 1;\n'
+                      f'const c = {json.dumps(clip)};\n'
+                      'return await page.cdp("Page.captureScreenshot", {format: "png", captureBeyondViewport: false, '
+                      'clip: {x: c.x * z, y: c.y * z, width: c.width * z, height: c.height * z, scale: 1}});',
+                      timeout=self.SHOT_TIMEOUT)
+        try:
+            content = base64.b64decode(result['data'], validate=True)
+        except (KeyError, TypeError, ValueError) as error:
+            raise NotNow('ego 沒有傳回有效局部截圖') from error
+        with open(os.path.abspath(out), 'wb') as image:
+            image.write(content)
+        return {'url': found.get('url') or '', 'name': found.get('name') or ''}
+
+    def shot_clip(self, tab_id, out, clip):
+        """在同一個 ego Page 用文件座標截局部，不改視窗或捲動位置。"""
+        out = os.path.abspath(out)
+        params = {'format': 'png', 'captureBeyondViewport': True,
+                  'clip': dict(clip, scale=1)}
+        result = _ego(self._task(tab_id) +
+                      f'return await page.cdp("Page.captureScreenshot",{json.dumps(params)});',
+                      timeout=self.SHOT_TIMEOUT)
+        try:
+            content = base64.b64decode(result['data'], validate=True)
+        except (KeyError, TypeError, ValueError) as error:
+            raise NotNow('ego 沒有傳回有效局部截圖') from error
+        if not content.startswith(b'\x89PNG\r\n\x1a\n'):
+            raise NotNow('ego 沒有傳回有效局部截圖')
+        with open(out, 'wb') as image:
+            image.write(content)
+        return out
 
     def print_pdf(self, html_path, pdf_path, timeout=120):
         """本機排版只用自己的暫時工作區;斷網、印完收掉,不碰卡片的頁。"""
@@ -531,16 +662,16 @@ class EgoDoor:
                 'const reader = binding.reader && tabs.some(t=>t.label===binding.reader) '
                 '? task.page(binding.reader) : await task.newPage();\n'
             )
-        script += (
+        script += SETTLE + (
             f'const urls = {json.dumps(list(urls))}, pages = {{}};\n'
             'for (const url of urls) {\n'
             'await reader.goto(url,{waitUntil:"domcontentloaded",timeout:30000});\n'
-            'let previous="", stable=0, data;\n'
-            'for (let i=0;i<50;i++) {\n'
+            f'await settle(reader, {max(1, int(settle))});\n'
+            # 穩定了內容可能還在跑(單頁應用先畫外框):再等到有正文,最多 10 秒
+            'let data;\n'
+            'for (let i=0;i<20;i++) {\n'
             f'data = await reader.evaluate({apply_tab.PROFILE_FN});\n'
-            'const signature=JSON.stringify(data);\n'
-            'stable=signature===previous ? stable+1 : 0; previous=signature;\n'
-            f'if (data.readyState!=="loading" && data.text.length>200 && stable>={max(0, int(settle))}) break;\n'
+            'if (data.text.length>200) break;\n'
             'await reader.waitForTimeout(500);\n'
             '} pages[url]=data; }\n'
         )
@@ -611,15 +742,17 @@ class EgoDoor:
         return receipt
 
     def human_action(self):
-        return _ego(self._task(page=False) +
+        import apply_tab
+        return _ego(self._task(page=False) + SETTLE +
                     'for (const tab of (await task.tabs()).reverse()) {\n'
                     'if (!tab.label) continue;\n'
                     'const p=task.page(tab.label);\n'
+                    'await settle(p);\n'
                     'const action=await p.evaluate(()=>{\n'
                     'const visible=e=>!!(e.getClientRects().length && getComputedStyle(e).visibility!=="hidden");\n'
                     'const password=[...document.querySelectorAll("input[type=password]")].some(visible);\n'
                     'const text=(document.title+" "+document.body.innerText).toLowerCase();\n'
-                    'const verify=/驗證您是人類|正在執行安全驗證|verify you are human|performing security verification|checking your browser/.test(text)'
+                    f'const verify={json.dumps(list(apply_tab.VERIFY_WORDS))}.some(w=>text.includes(w))'
                     ' || /密碼金鑰.*(?:確認|本人)|passkey.*(?:confirm|verify|verification)|(?:confirm|verify).*passkey/.test(document.title.toLowerCase());\n'
                     'const login=password || /sign in required|請本人登入/.test(text);\n'
                     'if (!login && !verify) return null;\n'

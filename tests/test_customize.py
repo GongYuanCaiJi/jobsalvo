@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import tempfile
 import sys
 import unittest
 from types import SimpleNamespace
@@ -472,6 +473,26 @@ class Customization(unittest.TestCase):
         self.assertEqual(sa._check(settings), [])
         settings['resume']['resumes'][0]['skill'] = 'custom/elsewhere.md'
         self.assertTrue(any('改履歷的規則找不到' in problem for problem in sa._check(settings)))
+
+
+class MarkdownSourcesAreRenderedByTheProgram(unittest.TestCase):
+    """原稿是 Markdown 的:agent 交改好的 Markdown,程式用原稿的樣式排 PDF(agent 自己排的文字層是亂碼,#449)。"""
+
+    def test_markdown_items_get_a_markdown_output_and_are_rendered_with_their_style(self):
+        from unittest import mock
+        import customize as cu
+        d = tempfile.mkdtemp()
+        item = {'id': 'resume:r:zh', 'kind': 'resume', 'name': '履歷', 'source': os.path.join(d, 'r.md'),
+                'output_abs': os.path.join(d, 'out.pdf'), 'style_path': '/s.css'}
+        pdf_item = dict(item, id='attachment:a:zh', source=os.path.join(d, 'a.pdf'), output_abs=os.path.join(d, 'a-out.pdf'))
+        with mock.patch.object(cu, '_read_skill', return_value=('', '')):
+            prompt = cu.build_prompt('u', 't', [item, pdf_item], [], os.path.join(d, 'r.json'))
+        self.assertIn(cu.markdown_output(item), prompt)
+        self.assertIn(pdf_item['output_abs'], prompt)
+        open(cu.markdown_output(item), 'w').write('# 改好的')
+        with mock.patch('markdown_pdf.render') as render:
+            cu.render_markdown_outputs([item, pdf_item])
+        render.assert_called_once_with(cu.markdown_output(item), item['output_abs'], '/s.css', 'zh')
 
 
 if __name__ == '__main__':

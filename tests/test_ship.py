@@ -172,6 +172,26 @@ class PackageReconcile(unittest.TestCase):
             self.assertNotEqual(new_hash, old_hash)
             self.assertTrue(pdf_tools.same_pages(merged, [self.source, attachment]))
 
+    def test_send_names_name_the_uploaded_files_and_a_rename_rebuilds_the_folder(self):
+        attachment = os.path.join(self.home, 'resume', 'letter.pdf')
+        _env.tiny_pdf(attachment, 'letter-v1')
+        self.settings['resume']['attachments'] = [
+            {'id': 'letter', 'name': '求職信', 'files': {'zh': 'resume/letter.pdf'}, 'enabled': True}]
+        self._write_settings()
+        self.assertEqual(self._run(), 0)
+        self.assertEqual((ship.info(self.url)['files'], ship.info(self.url)['merged']),
+                         (['base.pdf', 'letter.pdf'], 'merged.pdf'))     # 沒設定:跟以前一樣
+        self.settings['resume']['resumes'][0]['send_names'] = {'zh': '王小明 履歷 通用版'}
+        self.settings['resume']['attachments'][0]['send_names'] = {'zh': '王小明 求職信.pdf'}
+        self.settings['resume']['merged_name'] = '{resume}+{n}'
+        self._write_settings()
+        self.assertEqual(self._run(), 0)                                 # 改名就重建
+        info = ship.info(self.url)
+        self.assertEqual(info['files'], ['王小明 履歷 通用版.pdf', '王小明 求職信.pdf'])
+        self.assertEqual(info['merged'], '王小明 履歷 通用版+1.pdf')
+        self.assertTrue(pdf_tools.same_pages(os.path.join(ship.folder(self.url), info['merged']),
+                                             [self.source, attachment]))
+
     def _set_mark(self, **kw):
         bd.set_fb(lambda fb: fb[self.url].update(kw), live=self.board)
 
@@ -223,7 +243,7 @@ class PackageReconcile(unittest.TestCase):
         self.assertEqual(pathlib.Path(there, 'base.pdf').read_bytes(), old, '另一張沒重建,它夾裡的檔不能跟著變')
 
     def test_a_sent_cards_folder_is_shared_too_with_the_same_bytes(self):
-        """已投出的卡不重建,但夾子也要統一共用,不能留下各自一份的例外;內容照舊,不是自己的檔(ship.json、.apply)不動。"""
+        """已投出的卡不重建,但夾子也要統一共用,不能留下各自一份的例外;內容照舊,不是自己的檔(ship.json)不動。"""
         _env.make_board(self.board, {self.url: {'app': 'ready', 'resume_id': 'general', 'lang': 'zh'},
                                      'test://jobs/15': {'app': 'sent'}},
                         jobs=[self.job, {'id': 'test://jobs/15', 'target': 'Engineer · Sent'}])
@@ -231,8 +251,6 @@ class PackageReconcile(unittest.TestCase):
         here = ship.folder(self.url)
         sent = ship.path_for({'id': 'test://jobs/15', 'target': 'Engineer · Sent'})
         shutil.copytree(here, sent)
-        os.makedirs(os.path.join(sent, '.apply'))
-        pathlib.Path(sent, '.apply', 'fill.png').write_bytes(b'png')
         before = pathlib.Path(sent, 'base.pdf').read_bytes()
         self.assertFalse(os.path.samefile(os.path.join(here, 'base.pdf'), os.path.join(sent, 'base.pdf')))
         self.assertEqual(self._run(), 0)
@@ -240,7 +258,6 @@ class PackageReconcile(unittest.TestCase):
             self.assertTrue(os.path.samefile(os.path.join(here, name), os.path.join(sent, name)), name)
         self.assertEqual(pathlib.Path(sent, 'base.pdf').read_bytes(), before)
         self.assertFalse(os.path.samefile(os.path.join(here, 'ship.json'), os.path.join(sent, 'ship.json')))
-        self.assertEqual(pathlib.Path(sent, '.apply', 'fill.png').read_bytes(), b'png')
         inode = os.stat(os.path.join(sent, 'base.pdf')).st_ino
         self.assertEqual(self._run(), 0)
         self.assertEqual(os.stat(os.path.join(sent, 'base.pdf')).st_ino, inode, '共用過的不再動')
@@ -722,24 +739,25 @@ class PackageReconcile(unittest.TestCase):
         self.assertFalse(os.path.exists(left))
 
     def test_card_leaving_the_flow_keeps_the_fill_screenshots(self):
-        # 可以投了、填過的卡按 😐/👎 退出流程:可重生的要寄的檔案清掉,代投留下的 .apply(填表截圖、交件紀錄)留著,
-        # 按復原回到流程後「填表時的截圖」還在。以前整個夾子連 .apply 一起刪
+        # 可以投了、填過的卡按 😐/👎 退出流程:可重生的要寄的檔案整夾清掉,按復原回到流程後「填表時的截圖」還在。
+        # 以前截圖放在可投遞夾的 .apply 裡,跟著夾子一起刪;現在填表的工作資料夾在進度目錄、截圖在證據夾
+        import apply_run
+        import evidence
         self.assertEqual(self._run(), 0)
         package = ship.folder(self.url, name=card.name(self.job))
-        shot = os.path.join(package, '.apply', 'fill.png')
-        os.makedirs(os.path.dirname(shot))
-        pathlib.Path(shot).write_bytes(b'png')
+        self.assertFalse(apply_run.out_dir(self.url, self.board).startswith(cf.SHIP_DIR))
+        src = os.path.join(cf.TMP, 'fill.png')
+        pathlib.Path(src).write_bytes(b'png')
+        rnd = evidence.Round('apply', 'fill', [self.url], self.board)
+        rnd.shot(src, '驗收')
         bd.set_fb(lambda fb: fb[self.url].pop('app'), live=self.board, by='test')
 
         cleaned, _unknown = ship.clean_orphans(False, self.board)
         self.assertEqual(cleaned, [os.path.basename(package)])
-        self.assertTrue(os.path.isfile(shot))
-        self.assertEqual(os.listdir(package), ['.apply'])
-        self.assertEqual(ship.clean_orphans(False, self.board)[0], [])   # 只剩 .apply:不再每輪報「已清」
-
+        self.assertFalse(os.path.exists(package))
         bd.set_fb(lambda fb: fb[self.url].update(app='ready'), live=self.board, by='test')
         self.assertEqual(self._run(), 0)
-        self.assertTrue(os.path.isfile(shot))
+        self.assertTrue(evidence.path(self.url, rnd.last_shot(), self.board))
         self.assertTrue(ship.info(self.url).get('files'))
 
     def test_gate_before_sending_catches_a_folder_changed_after_it_was_built(self):
@@ -774,17 +792,39 @@ class PackageReconcile(unittest.TestCase):
         shutil.rmtree(cf.SHIP_DIR, ignore_errors=True)
         self.assertEqual(ship.check(self.job, fb, migrate=False), ['可投遞夾還沒建'])
 
-    def test_rebuilding_where_folders_cannot_be_swapped_keeps_the_fill_screenshots(self):
-        # 不是 macOS(沒有一次對調兩個資料夾):改成三次改名;代投留下的 .apply 照樣搬到新的那一份
+    def test_a_card_switched_to_another_resume_is_not_built_until_rebuilt(self):
+        # 他在卡上換了履歷、還沒重建:夾子裡是舊的那一份,要講出來;沒有夾子不算這一件(#448)
         self.assertEqual(self._run(), 0)
-        shot = os.path.join(ship.folder(self.url), '.apply', 'fill.png')
-        os.makedirs(os.path.dirname(shot))
-        pathlib.Path(shot).write_bytes(b'png')
+        fb = json.loads(read_board(self.board)['fb'])
+        self.assertIsNone(ship.chosen_not_built(self.job, fb))
+        built, lang = ship.resolve(self.job, fb)
+        with mock.patch.object(ship, 'resolve', return_value=('another-' + str(built), lang)):
+            self.assertIn('可投遞夾裡是', ship.chosen_not_built(self.job, fb))
+            shutil.rmtree(cf.SHIP_DIR, ignore_errors=True)
+            self.assertIsNone(ship.chosen_not_built(self.job, fb))
+
+    def test_a_dropped_attachment_leaves_the_card_and_the_folder_must_be_rebuilt(self):
+        # 職缺要求不寄某份附件(#449):要寄的檔少那一份,建好的夾子跟著變成舊的
+        _env.tiny_pdf(os.path.join(self.home, 'resume', 'zh-a.pdf'), 'zh-a')
+        self.settings['resume']['attachments'] = [
+            {'id': 'zh-a', 'name': '附件', 'files': {'zh': 'resume/zh-a.pdf'}, 'enabled': True}]
+        self._write_settings()
+        self.assertEqual(self._run(), 0)
+        fb = json.loads(read_board(self.board)['fb'])
+        atts = [d for d in ship.documents(self.job, fb) if d['kind'] == 'attachment']
+        self.assertTrue(atts)
+        self.assertIsNone(ship.chosen_not_built(self.job, fb))
+        fb[self.url]['drop_att'] = {'zh-a': '不要附件'}
+        self.assertNotIn(atts[0]['id'], [d['id'] for d in ship.documents(self.job, fb)])
+        self.assertIn('變了', ship.chosen_not_built(self.job, fb))
+
+    def test_rebuilding_where_folders_cannot_be_swapped_still_replaces_the_folder(self):
+        # 不是 macOS(沒有一次對調兩個資料夾):改成三次改名
+        self.assertEqual(self._run(), 0)
         _env.tiny_pdf(self.source, 'resume-v2')
         with mock.patch.object(ship.sys, 'platform', 'linux'):
             ship.reconcile_packages({}, force=True, check_only=False, board=self.board)
         package = ship.folder(self.url)
-        self.assertTrue(os.path.isfile(os.path.join(package, '.apply', 'fill.png')))
         self.assertEqual([n for n in os.listdir(os.path.dirname(package)) if n.startswith('.') and n != ship.STORE], [])
         with open(os.path.join(package, 'base.pdf'), 'rb') as f:
             self.assertIn(b'resume-v2', f.read())
@@ -817,7 +857,7 @@ class PackageReconcile(unittest.TestCase):
         self.assertTrue(os.path.isdir(package))
         cleaned, _unknown = ship.clean_orphans(False, self.board)
         self.assertEqual(cleaned, [os.path.basename(package)])
-        self.assertFalse(os.path.exists(package))                         # 沒有 .apply:整個可重生,清掉
+        self.assertFalse(os.path.exists(package))                         # 整個可重生,清掉
 
     def test_folders_nobody_can_account_for_are_reported_not_deleted(self):
         root = cf.SHIP_DIR

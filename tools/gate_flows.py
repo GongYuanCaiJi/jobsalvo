@@ -422,8 +422,9 @@ REPLY = {
     'job_ids.platform': Cell(CHECK, '平台', '程式讀了應徵紀錄的平台之一', _record_platform),
     'job_ids.applied_at': Cell(JUDGED, '應徵日期', 'Agent 理解平台原文的日期；程式驗日曆格式與紀錄身分', _record_date),
     'job_ids.title': Cell(WORDS, '職稱', '只給人看,不拿來配對'),
-    'inaccessible.source': Cell(WORDS, '進不去的來源', '照原文放進回報'),
-    'inaccessible.reason': Cell(WORDS, '進不去的原因', '照原文放進回報'),
-    'inaccessible.need': Cell(WORDS, '要他做的事', '照原文放進回報,標明是 agent 說的'),
+    'inaccessible.source': Cell(WORDS, '進不去的來源', '照原文放進回報', required='進不去的來源沒寫是哪個來源'),
+    'inaccessible.reason': Cell(WORDS, '進不去的原因', '照原文放進回報', required='進不去的來源沒寫原因'),
+    'inaccessible.need': Cell(WORDS, '要他做的事', '照原文放進回報,標明是 agent 說的', required='進不去的來源沒寫要他做的事'),
+    'inaccessible.url': Cell(WORDS, '要他去的那一頁', '照原文放進回報,看板上給他點開(只收 http 開頭的)'),
     'inaccessible.jobs': Cell(CHECK, '影響到的卡', '這一輪查的卡', _in_cards),
 }

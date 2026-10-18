@@ -11,7 +11,7 @@ agent_report —— agent 回報給使用者的唯一管道:做不到、需要�
 同一件事(誰回報、哪張職缺、同一句話)還沒處理之前再回報一次,只把次數加一、時間更新,不會洗版。
 
 用法:
-  uv run python tools/agent_report.py --from 代投 [--job 職缺網址] [--need 他要做什麼] "發生了什麼"
+  uv run python tools/agent_report.py --from 代投 [--job 職缺網址] [--need 他要做什麼] [--url 要去的那一頁] "發生了什麼"
   import agent_report; agent_report.report('代投', '發生了什麼', need='…', job=url)
 看板用哪一份:派 agent 的程式指定的那一份(board_doc.target;agent 只拿到代號、不拿位置),再來是 --board,再沒有就是現行看板。
 """
@@ -28,24 +28,36 @@ REPORT_FROM_ENV = 'JOBSALVO_REPORT_FROM'
 FROM_APPLY = '代投'
 # 回報來源是存在資料裡的代號(舊的回報也是這樣存的):畫面上照 GLOSSARY 現在的叫法,和「去看」跳到哪一頁(看板照這份畫)
 FROM = {'找新職缺': ['找新職缺', 'discover'], '逐張判斷': ['逐張判斷', 'discover'], '跑準備區': ['跑準備區', 'prep'],
+        '平台履歷同步': ['全部同步', 'cfg'],
         '查回音': ['查應徵進度', 'sent'], FROM_APPLY: ['幫你填表', 'ship']}
 NO_SHOT = '這一輪沒有程式自己截的那一頁'
 KEEP_DONE = 200        # 處理好的只留最近這麼多則:看板每次都整份讀寫這一格,永遠不清會越來越肥
 
 
 def _now():
-    return datetime.datetime.now().isoformat(timespec='seconds')
+    # 記到微秒:「這一輪開始之前開的」(resolve 的 before)同一秒內也分得出先後;只記到秒的舊回報照字串比一定算比較早
+    return datetime.datetime.now().isoformat(timespec='microseconds')
 
 
-def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, approve=None):
+def page_of(fb, job):
+    """跟這張卡有關的事要去哪一頁做:agent 填表最後停在的那一頁,沒有就是職缺頁。"""
+    a = (fb.get(job) or {}).get('apply') if isinstance(fb.get(job), dict) else None
+    return next((str(u) for u in ((a or {}).get('tab_url'), job) if str(u or '').startswith(('https://', 'http://'))), '')
+
+
+def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, url='', info=False, ev=None):
     """純函式版(測試用)。回傳那一筆。
+    url:要他處理的那一頁(看板上點得開);沒給、又跟某張卡有關,就照 page_of 附上,回報一定帶得到去處。
     by_agent:agent 自己寫的(不是程式驗出來的):標 agent;還沒附程式自己截的那一頁就標 noev(缺證據),
     不叫他照做(todo 不列),等程式附上截圖(apply_attach)才算數(#315)。
-    approve:他按「處理好了」就算確認的平台內容(apply_run._take_confirmed 下次判讀時收下)。"""
+    """
     now = now or _now()
     msg, need, job, src = (msg or '').strip(), (need or '').strip(), (job or '').strip(), (src or 'agent').strip()
     if not msg:
         raise ValueError('回報要寫發生了什麼')
+    # 只收 http(s):別的(about:、javascript:)看板也不給點,不能吃掉後面那個點得開的
+    url = (url or '').strip()
+    url = url if url.startswith(('https://', 'http://')) else page_of(fb, job)
     box = fb.setdefault(KEY, [])
     for it in box:
         if not it.get('done') and (it.get('from'), it.get('job', ''), it.get('msg')) == (src, job, msg):
@@ -53,8 +65,13 @@ def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, approv
             it['at'] = now
             if need:
                 it['need'] = need
-            if approve:
-                it['approve'] = approve
+            if url:
+                it['url'] = url
+            if info:
+                it['info'] = True
+            if ev:
+                it['ev'] = ev
+                it.pop('noev', None)
             if by_agent:            # 同一句又報一次:這一次要附的是這一輪的截圖
                 it['agent'] = True
                 it.pop('ev', None)
@@ -66,8 +83,12 @@ def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, approv
         it['need'] = need
     if job:
         it['job'] = job
-    if approve:
-        it['approve'] = approve
+    if url:
+        it['url'] = url
+    if info:
+        it['info'] = True
+    if ev:
+        it['ev'] = ev
     if by_agent:
         it['agent'], it['noev'] = True, NO_SHOT
     box.append(it)
@@ -78,46 +99,38 @@ def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, approv
     return it
 
 
-def report(src, msg, need='', job='', live=None, by_agent=False, approve=None):
+def report(src, msg, need='', job='', live=None, by_agent=False, url='', info=False, ev=None):
     live = bd.target(live)
     out = []
-    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job, by_agent=by_agent, approve=approve)), live=live,
-              by='agent_report')
+    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job, by_agent=by_agent,
+                                                 url=url, info=info, ev=ev)),
+              live=live, by='agent_report')
     return out[0]
 
 
-def apply_resolve(fb, job, why, day=None, only=None):
-    """那張卡後來做成功了:它之前還開著的回報都收進「已處理」,寫上為什麼(看板照舊可以改回還沒處理)。回收了幾則。
-    only(回報) 回 True 的才收:例如可投遞夾建好只收建置的回報,不要把「送出沒確認成功」一起收掉。"""
+def apply_resolve(fb, job, why, day=None, src=None, before=None, only=None):
+    """收掉還開著的回報(收進「已處理」,寫上為什麼;看板照舊可以改回還沒處理)。回收了幾則。
+    job:哪一張卡的(None 是不分卡;'' 是沒掛在卡上的)。src:只收這個流程開的(來源開頭一樣)。
+    before:只收這個時間(ISO)之前開的:同一個流程重跑完,這一輪又報的(時間是這一輪的)留著,上一輪的收掉。
+    only(回報) 回 True 的才收:同一個來源裡只有某一種回報講的事不成立了(當掉的那幾則、某一份平台履歷的)。"""
     day = day or datetime.date.today().isoformat()
     n = 0
     for it in fb.get(KEY, []):
-        if not it.get('done') and it.get('job') == job and (only is None or only(it)):
+        if (not it.get('done') and (job is None or it.get('job', '') == job)
+                and (src is None or str(it.get('from', '')).startswith(src))
+                and (before is None or str(it.get('at', '')) < before)
+                and (only is None or only(it))):
             it['done'] = day
             it['res'] = why
             n += 1
     return n
 
 
-def resolve(job, why, live=None, only=None):
-    live = bd.target(live)
+def resolve(job, why, live=None, src=None, before=None, only=None):
     out = []
-    bd.set_fb(lambda fb: out.append(apply_resolve(fb, job, why, only=only)), live=live, by='agent_report')
+    bd.set_fb(lambda fb: out.append(apply_resolve(fb, job, why, src=src, before=before, only=only)), live=bd.target(live),
+              by='agent_report')
     return out[0]
-
-
-def resolve_from(src, why, before, live=None):
-    """同一段流程重跑成功:before(這一輪開始的時間,ISO)之前留下、還開著的回報都收掉。
-    這一輪自己報的不收;上一輪的問題如果還在,這一輪會再報一次。"""
-    day = datetime.date.today().isoformat()
-    n = [0]
-    def f(fb):
-        for it in fb.get(KEY, []):
-            if not it.get('done') and str(it.get('from', '')).startswith(src) and str(it.get('at', '')) < before:
-                it['done'], it['res'] = day, why
-                n[0] += 1
-    bd.set_fb(f, live=bd.target(live), by='agent_report')
-    return n[0]
 
 
 def apply_attach(fb, job, since, ev):
@@ -143,7 +156,7 @@ def open_items(fb):
 def todo(fb):
     """要他處理的:還開著的回報,除了 agent 自己寫、又沒有程式自己截的那一頁的(缺證據,不叫他照做,#315)。
     看板的「要你處理」照它(下一步的 __inbox__)。"""
-    return [it for it in open_items(fb) if not (it.get('agent') and it.get('noev'))]
+    return [it for it in open_items(fb) if not it.get('info') and not (it.get('agent') and it.get('noev'))]
 
 
 def main():
@@ -151,12 +164,13 @@ def main():
     ap.add_argument('--from', dest='src', required=True, help='哪一段在回報:代投、找新職缺、跑準備區…')
     ap.add_argument('--job', default='', help='跟哪一張職缺有關(網址)')
     ap.add_argument('--need', default='', help='他要做什麼')
+    ap.add_argument('--url', default='', help='他要去哪一頁做(網址);跟某張卡有關又沒給,就附 agent 填表停在的那一頁')
     ap.add_argument('--board', default='')
     ap.add_argument('msg', help='發生了什麼(繁體中文、白話、一句講清楚)')
     a = ap.parse_args()
     # 派 agent 的程式給了來源就照它記:agent 自己寫的 --from 不算數(#316;它取的名字程式認不得、收不掉)
     src = os.environ.get(REPORT_FROM_ENV) or a.src
-    it = report(src, a.msg, a.need, a.job, live=a.board or None, by_agent=True)
+    it = report(src, a.msg, a.need, a.job, live=a.board or None, by_agent=True, url=a.url)
     print(f"回報了({it['id']},第 {it['n']} 次):{it['msg']}")
 
 

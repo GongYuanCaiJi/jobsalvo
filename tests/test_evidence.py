@@ -22,7 +22,6 @@ import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import agent_run as ar        # noqa: E402
 import apply_run as run       # noqa: E402
 import board_doc as bd        # noqa: E402
-import chrome_door            # noqa: E402
 import evidence               # noqa: E402
 import fake_door as fc      # noqa: E402
 import form_record as fr      # noqa: E402
@@ -49,20 +48,13 @@ class FakeAgent:
     def __init__(self, fb, out, fill=None, fields=None, report=None):
         self.fb, self.out, self.report = fb, out, report      # report:(發生了什麼, 要他做什麼),它自己跑 agent_report 回報
         self.fill = fill if fill is not None else {'tab_id': '7', 'handoff': True, 'tab_url': U + '/apply',
-                                                   'delivery': {'method': 'direct_upload'}}
+                                                   'delivery': {'method': 'direct_upload'}, 'unmet': []}
         self.fields = fields
         self.tasks = []
 
     def launch(self, task, outfile, repo, agent, **kw):
         self.tasks.append(task)
-        native = chrome_door.of(ar._agent_entry(agent)['runtime']).native_json_output
-        with open(outfile, 'a' if kw.get('append') else 'w', encoding='utf-8') as f:
-            f.write(json.dumps({'type': 'thread.started', 'thread_id': 'S1'}) + '\n')
-            f.write(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '選了 Taiwan'}}, ensure_ascii=False) + '\n')
-            f.write(json.dumps({'type': 'turn.completed'}) + '\n')
-            if not native:
-                f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
-                                    'session_id': 'S1', 'result': '@@DONE@@'}) + '\n')
+        claude = ar._agent_entry(agent)['runtime'] == 'claude-code'
         os.makedirs(self.out, exist_ok=True)
         fields = self.fields or [
             {'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'},
@@ -70,10 +62,16 @@ class FakeAgent:
         bank = {x['k']: x.get('v', '') for x in self.fb.get('__ans__', [])}
         sheet = dict(self.fill, platform='Lever', fields=[
             dict(x, value=x.get('v', bank.get(x.get('k'), ''))) for x in fields])
-        with open(os.path.join(self.out, 'fill.json'), 'w', encoding='utf-8') as f:
-            json.dump(sheet, f, ensure_ascii=False)
-        if not native:
-            fr.apply_record(self.fb, U, 'Lever', fields, at=run.now())
+        with open(outfile, 'a' if kw.get('append') else 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'thread.started', 'thread_id': 'S1'}) + '\n')
+            f.write(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '選了 Taiwan'}}, ensure_ascii=False) + '\n')
+            f.write(json.dumps({'type': 'turn.completed'}) + '\n')
+            if claude:   # 兩家都是最後一則訊息交件:claude 的在串流結果裡,程式存成交件單
+                f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                    'session_id': 'S1', 'result': json.dumps(sheet, ensure_ascii=False)}) + '\n')
+        if not claude:
+            with open(os.path.join(self.out, 'fill.json'), 'w', encoding='utf-8') as f:
+                json.dump(sheet, f, ensure_ascii=False)
         if self.report:
             import agent_report
             with patch.dict(os.environ, {ar.REPORT_FROM_ENV: ar._REPORT_FROM.get() or 'x'}), \
@@ -211,7 +209,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
         return path
 
     def test_a_report_after_a_round_carries_the_page_it_shot(self):
-        page = dict(PAGE, fields=[PAGE['fields'][0]])                     # Nationality 沒填上:驗收不過,程式回報
+        page = dict(PAGE, fields=[PAGE['fields'][0], dict(PAGE['fields'][1], value='')])                     # Nationality 沒填上:驗收不過,程式回報
         (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=page))
         self.assertFalse(ok)
         it = next(x for x in fb['__inbox__'] if not x.get('done') and x.get('job') == U)
@@ -236,7 +234,7 @@ class EveryThingForHimCarriesTheScreenshot(unittest.TestCase):
     def test_the_agents_own_report_during_a_fill_carries_the_page_it_shot(self):
         fb = board()
         agent = FakeAgent(fb, self.out, report=('這一頁要他本人登入', '登入'))
-        page = dict(PAGE, fields=[PAGE['fields'][0]])                     # 沒填完:這張的回報留著給他看
+        page = dict(PAGE, fields=[PAGE['fields'][0], dict(PAGE['fields'][1], value='')])                     # 沒填完:這張的回報留著給他看
         (ok, msg), fb = self.fill(fc.FakeDoor('codex', page=page), agent, fb)
         it = next(x for x in fb['__inbox__'] if x['msg'] == '這一頁要他本人登入')
         self.opens(it['ev'])
@@ -453,3 +451,22 @@ class OtherFlows(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OnePageAfterTheSheet(unittest.TestCase):
+    """agent 說申請表留在同一工作區的另一頁(新分頁、彈出視窗):讀完交件單只改綁一次,截圖和驗收讀的是同一頁。
+    以前三處各自去比、各自改綁,失敗了各自決定照哪一頁。"""
+
+    setUp = Fill.setUp
+    fill = Fill.fill
+
+    def test_the_shot_and_the_check_use_the_page_the_sheet_names(self):
+        door = fc.FakeDoor('codex', page=PAGE)
+        fb = board()
+        agent = FakeAgent(fb, self.out, fill={'tab_id': '1:p2', 'handoff': True, 'tab_url': U + '/apply',
+                                              'delivery': {'method': 'direct_upload'}})
+        self.fill(door, agent, fb)
+        follows = [c for c in door.calls if c[0] == 'follow_page']
+        self.assertEqual(follows, [('follow_page', '1:p2')])
+        used = {c[1] for c in door.calls if c[0] in ('shot', 'read_page')}
+        self.assertEqual(used, {'1:p2'})

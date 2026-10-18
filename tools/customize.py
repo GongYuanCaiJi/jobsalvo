@@ -92,6 +92,25 @@ def feedback_records(fb, jobs=()):
     return rows
 
 
+def is_markdown(item):
+    return str(item.get('source') or '').lower().endswith(('.md', '.markdown'))
+
+
+def markdown_output(item):
+    return os.path.splitext(item['output_abs'])[0] + '.md'
+
+
+def render_markdown_outputs(items):
+    """原稿是 Markdown 的:agent 交的是改好的 Markdown,程式用跟原稿同一套排版排成 PDF。
+    以前叫 agent 自己產 PDF,它拿別的套件排,外觀像但文字層亂碼(公司的履歷系統讀不出字)。沒交、排不出來的就沒有 PDF,收尾照常記失敗。"""
+    import markdown_pdf
+    for item in items:
+        md = markdown_output(item) if is_markdown(item) else ''
+        if md and os.path.isfile(md):
+            with contextlib.suppress(markdown_pdf.RenderError):     # 排不出來:沒有 PDF,finish_outputs 記成這一份失敗
+                markdown_pdf.render(md, item['output_abs'], item.get('style_path'), str(item['id']).rsplit(':', 1)[-1])
+
+
 def build_prompt(url, title, items, feedback, report_path, jd=''):
     payload = []
     for item in items:
@@ -105,17 +124,20 @@ def build_prompt(url, title, items, feedback, report_path, jd=''):
             card_feedback = str((item.get('card_state') or {}).get('rzfb') or '').strip()
             if card_feedback:
                 own_feedback.insert(0, card_feedback)
+        out = ({'output_markdown': markdown_output(item)} if is_markdown(item) else {'output_pdf': item['output_abs']})
         payload.append({
             'id': item['id'], 'type': '履歷' if item['kind'] == 'resume' else '附件',
             'name': item['name'], 'original_file': item['source'],
             'skill_text': skill, 'feedback_for_this_file': own_feedback,
-            'output_pdf': item['output_abs'], 'max_pages': item.get('page_limit_pages'),
+            **out, 'max_pages': item.get('page_limit_pages'),
         })
     return (
         '你正在 jobsalvo 看板替一張卡客製履歷與附件。\n'
         '下面是程式從職缺網址抓好的 JD 原文，按每份檔案自己的客製 skill 修改。這一輪不上網、不開任何瀏覽器。\n'
         '只能讀原檔與 skill；不要改原檔、設定、skill 或看板資料。不要編造使用者沒有的經歷、能力、數字或成果。\n'
-        '每一份檔案都必須輸出一個 PDF 到指定的 output_pdf，頁數不得超過該檔案的 max_pages。Markdown 原稿的頁數是內建排版產生之可投遞 PDF 的頁數。程式會檢查輸出檔及頁數。\n'
+        '原稿是 Markdown 的檔:把改好的 Markdown 寫到 output_markdown(照原稿的格式改字,不要自己產 PDF),'
+        '程式用跟原稿一樣的樣式排成 PDF;其他檔輸出一個 PDF 到 output_pdf。頁數不得超過該檔案的 max_pages'
+        '(Markdown 原稿的頁數是內建排版產生之可投遞 PDF 的頁數)。程式會檢查輸出檔及頁數。\n'
         '一張卡的所有檔案由你一次完成。若某份檔案不能完成，仍需說明原因，其他可完成的檔案照常輸出。\n\n'
         f'卡片:{title}\n職缺網址:{url}\n--- JD 原文開始 ---\n{jd}\n--- JD 原文結束 ---\n\n'
         '本輪檔案與使用者指示(JSON):\n'
@@ -647,6 +669,7 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
         _status({'phase': 'failed', 'n': len(selected), 'done': 0, 'msg': worker_error,
                  't0': t0, 'finished_at': time.time(), 'url': url})
         return {'ok': False, 'msg': worker_error}
+    render_markdown_outputs(selected)
     with (evidence.activated(rnd) if rnd is not None else contextlib.nullcontext()):   # 安檢門的比對結果記進同一輪
         result_data = finish_outputs(
             board, url, selected, run_id, [row['id'] for row in feedback], report_path,

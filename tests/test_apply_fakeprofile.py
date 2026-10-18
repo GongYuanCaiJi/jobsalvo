@@ -8,9 +8,22 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402  測試跑在暫存資料夾
 
-from apply_fakeprofile import FakePlatformProfile, acceptance_scenarios, sha256
+from apply_fakeprofile import (FakePlatformProfile, acceptance_scenarios,
+                               sync_acceptance_scenarios, sha256)
 import profile_sync
 from apply_profile_accept import make_pdf
+
+
+def _open(url):
+    """測試只開本機假平台:別的網址直接失敗。"""
+    if urllib.parse.urlsplit(url).hostname != '127.0.0.1':
+        raise AssertionError(f'測試只准開本機假平台:{url}')
+    return urllib.request.urlopen(url)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  上一行只放行本機假平台
+
+
+def _get(url):
+    with _open(url) as response:
+        return response.read().decode()
 
 
 def _post(url, fields=None, filename=None, content=b''):
@@ -62,7 +75,7 @@ class FakePlatformProfileServer(unittest.TestCase):
         self.assertIn('action="/upload/normal/fixed"', profile_page)
         self.assertIn('name="attachment"', profile_page)
 
-        page = urllib.request.urlopen(self.server.url('normal')).read().decode()
+        page = _get(self.server.url('normal'))
         self.assertIn(self.server.manager_url('normal'), page)
         self.assertIn('沒有直接附件上傳欄', page)
         self.assertIn('本機假驗收頁', page)
@@ -73,6 +86,29 @@ class FakePlatformProfileServer(unittest.TestCase):
         self.assertNotIn('{upload_fields}', page)
         self.assertIn('127.0.0.1', self.server.url('normal'))
         self.assertEqual(profile_sync.platform_of(self.server.url('normal')), '104')
+
+    def test_profile_editor_saves_text_link_and_dropdown_only_after_save(self):
+        profile = self.server.scenarios['normal']['profiles']['fixed']
+        url = self.server.profile_url('normal')
+        page = _get(url)
+        self.assertIn('name="work"', page)
+        self.assertIn('name="video_url"', page)
+        self.assertIn('name="availability"', page)
+        self.assertIn('id="profile-video-preview"', page)
+        self.assertIn('儲存履歷', page)
+        self.assertNotIn('新的作品', page)
+        self.assertFalse(any(e['action'] == 'SAVE_PROFILE' for e in self.server.events(case='normal')))
+
+        saved = _post(url.replace('/profile/', '/save-profile/'), fields={
+            'work': '新的作品', 'video_url': 'https://video.example/watch?v=new',
+            'availability': 'one-month',
+        })
+        self.assertIn('新的作品', saved.read().decode())
+        self.assertEqual(profile['work'], '新的作品')
+        self.assertEqual(profile['video_url'], 'https://video.example/watch?v=new')
+        self.assertEqual(profile['availability'], 'one-month')
+        events = [e for e in self.server.events(case='normal') if e['action'] == 'SAVE_PROFILE']
+        self.assertEqual(len(events), 1)
 
     def test_custom_profile_can_be_created_then_uploaded_from_its_visible_form(self):
         response = _post(
@@ -114,11 +150,11 @@ class FakePlatformProfileServer(unittest.TestCase):
         upload = url.replace('/profile/', '/upload/')
         _post(upload, filename='resume.pdf', content=make_pdf('actual custom resume marker')).read()
         _post(upload, filename='support.pdf', content=make_pdf('support must not replace resume text')).read()
-        page = urllib.request.urlopen(url).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        page = _get(url)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
         self.assertIn('actual custom resume marker', page)
         self.assertNotIn('support must not replace resume text', page)
         _post(upload, filename='resume.pdf', content=make_pdf('updated custom resume marker')).read()
-        page = urllib.request.urlopen(url).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        page = _get(url)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
         self.assertIn('updated custom resume marker', page)
         self.assertNotIn('actual custom resume marker', page)
         self.assertEqual(self.server.fixed_snapshot('normal'), fixed_before)
@@ -132,7 +168,7 @@ class FakePlatformProfileServer(unittest.TestCase):
               fields={'name': 'newly created resume'}).read()
         options = json.loads(urllib.request.urlopen(endpoint).read())  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
         self.assertEqual(options[-1], {'value': 'custom-1', 'name': 'newly created resume'})
-        page = urllib.request.urlopen(self.server.url('normal')).read().decode()  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
+        page = _get(self.server.url('normal'))  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected  本機假伺服器
         self.assertIn('/profile-options?', page)
 
     def test_download_and_same_name_upload_record_hashes_and_replacement(self):
@@ -236,6 +272,88 @@ class FakePlatformProfileServer(unittest.TestCase):
         self.assertEqual(event['sha256'], sha256(self.files['old']))
         self.assertTrue(event['ok'])
         self.assertNotEqual(before, self.server.fixed_snapshot('extra-old'))
+
+
+class FakePlatformSyncServer(unittest.TestCase):
+    def setUp(self):
+        self.server = FakePlatformProfile(scenarios=sync_acceptance_scenarios()).start()
+
+    def tearDown(self):
+        self.server.stop()
+
+    def test_preview_links_to_a_distinct_edit_page(self):
+        preview_url = self.server.profile_url('sync-403-preview-edit')
+        preview = _get(preview_url)
+        self.assertIn('Old Candidate', preview)
+        self.assertNotIn('name="full_name"', preview)
+        self.assertIn('/profile-edit/sync-403-preview-edit/fixed', preview)
+
+        edit_url = self.server.edit_url('sync-403-preview-edit')
+        editor = _get(edit_url)
+        self.assertIn('履歷資料載入中', editor)
+        fragment = _get(
+            edit_url.replace('/profile-edit/', '/profile-content/'))
+        self.assertIn('name="full_name"', fragment)
+
+    def test_one_source_paragraph_is_exposed_as_separate_editable_contact_fields(self):
+        url = self.server.profile_url('sync-403')
+        page = _get(url)
+        self.assertIn('本機假驗收頁', page)
+        self.assertIn('履歷資料載入中', page)
+        self.assertNotIn('name="full_name"', page)
+
+        fragment = _get(url.replace('/profile/', '/profile-content/'))
+        for name, value in (('full_name', 'Old Candidate'),
+                            ('email', 'old@example.invalid'), ('phone', '1111111111')):
+            self.assertIn(f'name="{name}"', fragment)
+            self.assertIn(f'value="{value}"', fragment)
+
+        saved = _post(url.replace('/profile/', '/save-profile/'), {
+            'full_name': 'Test Candidate', 'email': 'test.candidate@example.invalid',
+            'phone': '0000000000', 'location': 'Taipei', 'experience': '2-4 years',
+        })
+        saved.read()
+        fragment = _get(url.replace('/profile/', '/profile-content/'))
+        for value in ('Test Candidate', 'test.candidate@example.invalid', '0000000000'):
+            self.assertIn(f'value="{value}"', fragment)
+
+    def test_unrelated_sidebar_changes_on_every_load_without_changing_profile(self):
+        url = self.server.profile_url('sync-403')
+        first = _get(url)
+        second = _get(url)
+        self.assertIn('data-load-token="1"', first)
+        self.assertIn('data-load-token="2"', second)
+        fragment = _get(url.replace('/profile/', '/profile-content/'))
+        self.assertIn('value="Old Candidate"', fragment)
+
+    def test_profile_content_arrives_after_the_initial_document(self):
+        import time
+        url = self.server.profile_url('sync-403')
+        page = _get(url)
+        self.assertIn('data-load-state="pending"', page)
+        self.assertNotIn('name="experience"', page)
+        fragment = _get(url.replace('/profile/', '/profile-content/'))
+        self.assertIn('name="experience"', fragment)
+        started = time.monotonic()
+        with _open(url.replace('/profile/', '/profile-load-gate/')) as gate:
+            self.assertEqual(gate.status, 200)
+        self.assertGreaterEqual(time.monotonic() - started, 0.35)
+
+    def test_experience_is_limited_to_platform_choices(self):
+        url = self.server.profile_url('sync-403')
+        fragment = _get(url.replace('/profile/', '/profile-content/'))
+        self.assertIn('<select id="experience" name="experience">', fragment)
+        self.assertIn('<option value="2-4 years">2-4 years</option>', fragment)
+        self.assertNotIn('value="3 years"', fragment)
+        with self.assertRaises(urllib.error.HTTPError) as rejected:
+            _post(url.replace('/profile/', '/save-profile/'), {
+                'full_name': 'Old Candidate', 'email': 'old@example.invalid',
+                'phone': '1111111111', 'location': 'Taipei', 'experience': '3 years',
+            })
+        self.assertEqual(rejected.exception.code, 400)
+        rejected.exception.close()
+        fragment = _get(url.replace('/profile/', '/profile-content/'))
+        self.assertIn('<option value="0-2 years" selected>', fragment)
 
 
 if __name__ == '__main__':

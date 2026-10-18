@@ -128,7 +128,7 @@ class Accept:
             fb['__ans__'] = bank + [dict(e, at=today) for e in SEED_ANS.values()]
         bd.set_fb(seed, live=self.board, by='apply_accept')
         self.ship_root = cf.SHIP_DIR
-        self.env = dict(os.environ, APPLY_TMP=os.path.join(self.out, 'sp'), APPLY_SHIP_ROOT=self.ship_root)
+        self.env = dict(os.environ, APPLY_TMP=os.path.join(self.out, 'sp'))
         os.makedirs(self.env['APPLY_TMP'], exist_ok=True)
         source = cf.master(var, 'en')
         ship.markdown_pdf.render(source, ship.markdown_pdf.output_path(source), lang='en')
@@ -136,7 +136,8 @@ class Accept:
         if problems:
             raise RuntimeError('無法建立假表單的投遞夾: ' + '；'.join(problems))
         dst = ship.folder(self.url, root=self.ship_root)
-        with open(os.path.join(dst, MERGED), 'rb') as f:
+        self.merged = ship.read_info(dst).get('merged') or MERGED     # 合併檔名照設定的樣板(#403)
+        with open(os.path.join(dst, self.merged), 'rb') as f:
             self.pdf_sha1 = hashlib.sha1(f.read()).hexdigest()
         self.say(f'假職缺:{self.url}\n看板副本:{self.board}')
 
@@ -321,7 +322,7 @@ class Accept:
                 repr(v.get('nationality')))
         self.ok(1, '簽證用答案庫那一條(visa_sponsor)', v.get('visa') == (bank.get('visa_sponsor') or {}).get('v'), repr(v.get('visa')))
         files = v.get('resume') or []
-        self.ok(1, '上傳欄選了這張指定的合併版 PDF', any(f.get('n') == MERGED for f in files), files)
+        self.ok(1, '上傳欄選了這張指定的合併版 PDF', any(f.get('n') == self.merged for f in files), files)
         # 答案庫:年資、「為什麼」都是推論的新答案(標 inf、附中文);「為什麼」是這缺專用
         form = (fb.get(self.url) or {}).get('form') or {}
         fq = {x.get('q', ''): x for x in form.get('f', [])}

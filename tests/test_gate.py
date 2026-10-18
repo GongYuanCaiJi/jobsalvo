@@ -7,6 +7,7 @@
 指示裡叫 agent 寫、卻沒登記核對方式的格子,測試就失敗。"""
 import ast
 import copy
+import json
 import os
 import re
 import sys
@@ -57,7 +58,6 @@ LIES = {
     'profile.url': (OTHER, ['平台履歷全文頁', 'vno=2', MINE]),
     'profile.edit': ('https://evil.example/edit', ['平台履歷編輯頁', 'evil.example', '不是這個平台']),
     'profile.name': ('English Resume', ['平台履歷名稱', 'English Resume', '中文履歷']),
-    'profile.application_history_url': ('https://evil.example/h', ['應徵紀錄頁', 'evil.example', '不是這個平台']),
     'delivery.method': ('direct_upload', ['投遞方式', 'direct_upload', '中文履歷']),
     'delivery.profile_kind': ('custom', ['固定版還是客製版', 'custom', 'fixed']),
     'delivery.profile_url': (OTHER, ['用的平台履歷', 'vno=2', MINE]),
@@ -66,18 +66,20 @@ LIES = {
     'submitted': (True, ['已送出', 'true', 'reason']),
     'confirm_url': ('https://www.104.com.tw/thanks', ['確認頁網址', 'thanks', FORM]),
     'confirm_text': ('應徵成功', ['確認頁的字', '應徵成功', '頁面上沒有這句話']),
-    'fixed_profile.url': (OTHER, ['固定平台履歷', 'vno=2', MINE]),
+    'unmet': ([{'quote': '履歷請控制在兩頁以內', 'file': 'cv.pdf', 'act': 'adapt'}],
+              ['跟職缺要求不符的地方', '頁面上沒有這句要求']),
     'problems': (['需要登入'], ['卡住', '需要登入']),
 }
+# 不是申請表的一部分、只給之後參考的格子:對不上就不收(不進 facts),不擋這一輪
+DROPPED = {'profile.application_history_url': 'https://evil.example/h'}
 # 核對要讀別的東西(平台履歷頁、下載回來的檔)的那幾格:謊話在那一支核對函式自己的測試裡擋(模組.類別.測試;
 # 找不到那一條測試,這支測試就失敗,不會變成一行沒人管的註解)
 _PA = 'test_apply_profile_attachments.ProfileAttachments.'
 ELSEWHERE = {
+    'profile_choice:tab_id': 'test_profile_choice.ProfileChoice.test_tab_outside_the_card_space_is_blocked',
     'uploaded_files': _PA + 'test_direct_upload_with_a_different_custom_file_is_a_problem',
     'uploaded_from': _PA + 'test_platform_without_readback_rejects_a_file_outside_the_card_folder',
     'upload_readback': _PA + 'test_platform_without_readback_checks_the_local_file_put_into_the_form',
-    'fixed_profile.attachments': _PA + 'test_custom_profile_rechecks_fixed_attachments_and_names_overwrite',
-    'profile_attachments': _PA + 'test_missing_changed_and_extra_attachments_are_named',
     'submit:submitted': 'test_agent_workflow_boundaries.Responsibilities.test_send_result_is_not_inferred_from_success_words_or_retained_form',
 }
 THANKS = {'url': 'https://www.104.com.tw/apply/done', 'title': '應徵成功', 'lines': ['應徵成功', '謝謝'], 'fields': []}
@@ -92,10 +94,6 @@ SUBMIT_LIES = {
 
 # ---- 其他 7 種流程(#317):真相是程式交給 agent 的原文;一列一列的交件單,謊話填在第一列 ----
 A, B = 'https://ex.test/job/a', 'https://ex.test/job/b'
-PROFILE_CHECKS = {MINE: [
-    {'id': 'source:0', 'status': 'complete', 'reason': '原稿完整呈現', 'basis': ['text:0']},
-    {'id': 'text:0', 'status': 'complete', 'reason': '頁面有原稿來源', 'basis': ['source:0']},
-]}
 FLOWS = {
     # 刊登日期:程式從頁面挑出跟日期有關的那幾行交給它
     'posted_at': dict(
@@ -234,13 +232,6 @@ FLOWS = {
               'inaccessible.jobs': (['https://ex.test/job/zzz'], ['影響到的卡', 'job/zzz', '不是這一輪查的卡'])},
         judged={'findings.kind': 'interview', 'findings.todo': '回覆可面談時段',
                 'findings.date': '2026-09-03', 'job_ids.applied_at': '2026-09-01'}),
-    'profile_review': dict(
-        honest={'status': 'complete', 'reason': '重要內容完整', 'quotes': {MINE: '目前履歷內容'}, 'checks': PROFILE_CHECKS},
-        truth=lambda: gate.Truth(given={MINE: '目前履歷內容'}, attachments={'profile_items': {MINE: {
-            'source:0': {'kind': 'source', 'value': '目前履歷內容'}, 'text:0': {'kind': 'text', 'value': '目前履歷內容'},
-        }}}),
-        lies={'quotes': ({MINE: '沒有出現的內容'}, ['指定頁面', '引用'])},
-        judged={'status': 'complete', 'checks': PROFILE_CHECKS}),
 }
 
 
@@ -291,11 +282,11 @@ class LyingAgent(unittest.TestCase):
                 self.assertTrue(hasattr(getattr(mod, cls), name), where)
 
     def test_every_checked_cell_of_every_sheet_has_a_lie(self):
-        lies = {'fill': LIES, 'submit': SUBMIT_LIES}
+        lies = {'fill': LIES, 'submit': SUBMIT_LIES, 'profile_choice': {}}
         lies.update({kind: flow['lies'] for kind, flow in FLOWS.items()})
         for kind, table in gate.SHEETS.items():
             checked = {n for n, c in table.items() if c.how in (gate.CHECK, gate.DECIDED)}
-            missing = checked - set(lies[kind]) - set(ELSEWHERE) - {n.split(':')[1] for n in ELSEWHERE
+            missing = checked - set(lies[kind]) - set(ELSEWHERE) - set(DROPPED if kind == 'fill' else ()) - {n.split(':')[1] for n in ELSEWHERE
                                                                       if n.startswith(kind + ':')}
             self.assertEqual(missing, set(), f'{kind} 這幾格沒有說謊的測試')
 
@@ -320,7 +311,14 @@ class LyingAgent(unittest.TestCase):
 
     def test_every_checked_cell_is_lied_about_once_and_each_lie_is_stopped(self):
         checked = {n for n, c in gate.FILL.items() if c.how in (gate.CHECK, gate.DECIDED)}
-        self.assertEqual(checked - set(LIES) - set(ELSEWHERE), set(), '這幾格沒有說謊的測試')
+        self.assertEqual(checked - set(LIES) - set(ELSEWHERE) - set(DROPPED), set(), '這幾格沒有說謊的測試')
+        for name, lie in DROPPED.items():
+            with self.subTest(cell=name):
+                sheet = copy.deepcopy(HONEST)
+                _set(sheet, name, lie)
+                verdict = gate.inspect('fill', sheet, self.truth(PAGE))
+                self.assertTrue(verdict.ok, verdict.problems)
+                self.assertNotIn(lie, json.dumps(verdict.facts))
         for name, (lie, words, *kind) in LIES.items():
             with self.subTest(cell=name):
                 direct = kind == ['direct']
@@ -416,11 +414,11 @@ class ReadSaysWhatWentWrong(unittest.TestCase):
     def test_malformed_sheet_is_not_reported_as_missing(self):
         import tempfile
         with tempfile.TemporaryDirectory() as out:
-            self.assertEqual(gate.read(out, 'profile_review'), (None, '沒有寫出 profile-review.json'))
+            self.assertEqual(gate.read(out, 'fill'), (None, '沒有寫出 fill.json'))
             def wrote(text):
-                with open(gate.path(out, 'profile_review'), 'w', encoding='utf-8') as f:
+                with open(gate.path(out, 'fill'), 'w', encoding='utf-8') as f:
                     f.write(text)
-                return gate.read(out, 'profile_review')
+                return gate.read(out, 'fill')
             # 物件完整、只多打收尾括號(2026-10-04、10-05 104 實測):意思不變,照收
             self.assertEqual(wrote('{"status": "complete", "quotes": {}}}'), ({'status': 'complete', 'quotes': {}}, ''))
             # 後面接了別的東西、或被截斷:講寫壞了,不說成沒寫
@@ -439,20 +437,6 @@ class CardUrl(unittest.TestCase):
         truth = gate.Truth(url='https://boards.example.test/acme/jobs?gh_jid=1')
         self.assertIsNone(ga._card_url('https://boards.example.test/acme/jobs?gh_jid=1&src=x', {}, truth))
         self.assertTrue(ga._card_url('https://boards.example.test/acme/jobs?gh_jid=2', {}, truth))
-
-
-class ReviewQuotes(unittest.TestCase):
-    def test_quote_may_skip_around_but_every_line_must_be_on_the_page(self):
-        import gate_apply as ga
-        page = '陳亞力\n學歷\n淡江大學\n求職條件\n錄取後一個月可上班\n希望地點\n台北市'
-        truth = gate.Truth(given={'https://p/1': page})
-        sheet = {'status': 'complete'}
-        self.assertIsNone(ga._review_quotes({'https://p/1': '陳亞力\n錄取後一個月可上班\n台北市'}, sheet, truth))  # 跳著摘
-        self.assertTrue(ga._review_quotes({'https://p/1': '陳亞力\n錄取後兩週可上班'}, sheet, truth))           # 編出來的那行擋
-        self.assertTrue(ga._review_quotes({'https://p/1': '  \n '}, sheet, truth))
-        # agent 用「」標每一段、用 … 省略中間:記號不算引用內容
-        self.assertIsNone(ga._review_quotes({'https://p/1': '「陳亞力\n學歷」\n「求職條件…台北市」'}, sheet, truth))
-        self.assertTrue(ga._review_quotes({'https://p/1': '「陳亞力…錄取後兩週可上班」'}, sheet, truth))
 
 
 class FlowsUseTheGate(unittest.TestCase):
@@ -561,7 +545,7 @@ class NoBypass(unittest.TestCase):
             known |= {n.split('.')[1] for n in table if '.' in n}
             for text in prompts:
                 asked = set(re.findall(r'"([a-z_]+)"\s*:', text))
-                asked |= {m for m in re.findall(r'\b(?:delivery|profile|posting|fixed_profile)\.([a-z_]+)', text)}
+                asked |= {m for m in re.findall(r'\b(?:delivery|profile|posting)\.([a-z_]+)', text)}
                 with self.subTest(kind=kind):
                     self.assertEqual(asked - known, set(), f'{kind} 的指示叫 agent 寫這幾格,安檢門沒登記核對方式')
 
@@ -608,14 +592,59 @@ class NoBypass(unittest.TestCase):
 
     def test_every_other_flow_is_covered(self):
         """7 種流程每一種都有交件單登記、說謊測試和指示測試(新加一種流程就要補齊)。"""
-        apply_flows = {'fill', 'submit', 'profile_review'}
-        flows = set(gate.SHEETS) - apply_flows
+        apply_flows = {'fill', 'submit'}
+        flows = set(gate.SHEETS) - apply_flows - {'profile_choice'}
         # 7 種流程:查應徵進度、準備履歷、客製版、找缺(找、判)、職缺關了沒、刊登日期、分類建議
         self.assertEqual(flows, {'reply', 'prepare', 'customize', 'research_search', 'research_judge', 'link_status',
                                  'posted_at', 'suggest_cats'})
-        self.assertEqual(flows, set(FLOWS) - {'profile_review'})
+        self.assertEqual(flows, set(FLOWS))
         self.assertEqual(flows, set(self.other_prompts()))
-        self.assertEqual(flows, set(gate.FILES) - apply_flows)
+        self.assertEqual(flows, set(gate.FILES) - apply_flows - {'profile_choice'})
+        self.assertIn('profile_choice', gate.FILES)
+
+
+class CompanyNameOnThePage(__import__('unittest').TestCase):
+    def test_a_bilingual_company_name_counts_when_one_part_is_on_the_page(self):
+        # 2026-10-07 LinkedIn 實測:agent 寫「聯發科技 (MediaTek)」,頁面上只有 MediaTek,以前整句找不到就擋
+        import gate_apply
+        truth = type('T', (), {'page': {}, 'text': lambda self: 'sr. product security engineer at mediatek'})()
+        self.assertIsNone(gate_apply._on_page('聯發科技 (MediaTek)', {}, truth))
+        self.assertEqual(gate_apply._on_page('台積電 (TSMC)', {}, truth), '頁面上沒有這幾個字')
+
+
+class UnmetRequirement(unittest.TestCase):
+    """跟職缺要求不符的地方(#449):原句要在頁面上(斷成兩行也認得)、檔要是這張要寄的、做法只有不寄或照要求改,履歷本身不能不寄。"""
+
+    def test_each_entry_is_checked_without_knowing_the_kind_of_requirement(self):
+        import gate_apply, gate_cells
+        from unittest import mock
+        truth = gate_cells.Truth(URL, None, {}, page=dict(PAGE, lines=['履歷內容請務必控制在', '兩頁以內(超過兩頁將直接視為資格不符)']))
+        ok = {'quote': '履歷內容請務必控制在兩頁以內(超過兩頁將直接視為資格不符)', 'file': 'a.pdf', 'act': 'drop'}
+        with mock.patch('ship.info', return_value={'files': ['cv.pdf', 'a.pdf']}):
+            self.assertIsNone(gate_apply._unmet([], {}, truth))
+            self.assertIsNone(gate_apply._unmet([ok], {}, truth))
+            # 說明段落只出現在欄位周圍那一段(程式讀頁的 context),一樣算在頁面上
+            near = gate_cells.Truth(URL, None, {}, page=dict(PAGE, lines=[], fields=[{'label': 'Resume', 'context': ok['quote']}]))
+            self.assertIsNone(gate_apply._unmet([ok], {}, near))
+            for change, want in (({'quote': '請附作品集'}, '頁面上沒有這句要求'), ({'file': 'x.pdf'}, '要寄的檔裡沒有'),
+                                 ({'act': 'rewrite'}, '不知道怎麼處理'), ({'file': 'cv.pdf'}, '履歷本身不能不寄')):
+                with self.subTest(change=change):
+                    self.assertIn(want, gate_apply._unmet([dict(ok, **change)], {}, truth))
+
+
+class ConfirmTextNextToField(unittest.TestCase):
+    """送出後頁面把說明放在欄位旁(例如「驗證碼已寄到信箱」只在驗證碼欄周圍),agent 引用這句一樣核對得到,
+    不會因為程式只看一般的行就把「沒送出」判成送出結果不明。"""
+
+    def test_quote_only_in_field_context_is_on_the_page(self):
+        import gate_apply, gate_cells
+        said = 'A verification code was sent to you. To submit your application, enter the 8-character code.'
+        page = dict(PAGE, url=URL, lines=['Security code', 'Submit application'],
+                    fields=[{'label': 'Security code', 'value': '', 'context': said + '\nSecurity code'}])
+        truth = gate_cells.Truth(URL, None, {}, page=page)
+        sheet = {'submitted': False, 'clicked': True, 'reason': '要輸入驗證碼才能送出', 'confirm_url': URL, 'confirm_text': said}
+        self.assertIsNone(gate_apply._submitted(False, sheet, truth))
+        self.assertEqual(gate_apply._confirm_text('Application received', sheet, truth), '頁面上沒有這句話')
 
 
 if __name__ == '__main__':

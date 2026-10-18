@@ -555,9 +555,10 @@
   function isEn(s){s=String(s||''); return READ_CJK?(/[A-Za-z]/.test(s)&&!CJK_RE.test(s)):CJK_RE.test(s);}
   function ansBi(e){if(e.zh||isEn(e.v)||(e.qs||[]).some(isEn))return true;
     return ansUsers(e.k).some(function(u){return (formOf(u.j).f||[]).some(function(x){return x.k===e.k&&isEn(x.q);});});}
-  // 還要他動手的答案:後台照整份看板算(next_step.answers 的 need:推論的、空著又有還沒送出的表單在用;
-  // 等 agent 重新代填的不算)。他在這一頁剛確認、剛填的,存檔回來之前也先不算
-  function ansNeed(e){return !!e&&!e.redo&&(ansPending(e)||ansEmpty(e))&&(ansNext().need||[]).indexOf(e.k)>=0;}
+  // 還要他動手的答案:平台履歷的代填直接等他確認；申請表用到的照 next_step.answers 的 need 算。
+  // 等 agent 重新代填的不算；他在這一頁剛確認、剛填的,存檔回來之前也先不算。
+  function ansNeed(e){return !!e&&!e.redo&&(ansPending(e)||ansEmpty(e))&&
+    ((e.platform&&ansPending(e))||(ansNext().need||[]).indexOf(e.k)>=0);}
   // 共用 / 這缺專用。pj=1 是這缺專用:針對某個 JD 寫的(例如「為什麼你適合這個職位」),不會被接到別的職缺;
   // 沒有 pj 是共用:關於他本人的事、他的看法,同一題直接沿用。我先判斷(pjw 寫理由),他按那顆切換就算他決定。
   function ansWhere(e){if(!e.pj)return ansUseLabel(e.k); var us=ansUsers(e.k); if(!us.length)return '還沒有表單在用';
@@ -579,16 +580,15 @@
   // 卡上那一行、按鈕、要不要列進「這一頁要你處理的」、🚀 填表進度放哪一格,全部是後台下一步的 view(next_step.view),
   // 三處只照它畫,看板不自己比投遞狀態(#293、#343)。這裡只疊上幫你填表正在跑這一張(進度從 /api/rev 來)
   var AP_BTN={fill:'data-runone="apply|',fix:'data-applyfixopen="',clear:'data-applyclear="',actsent:'data-actsent="',
-              submit:'data-applysubmit="',unapprove:'data-unapprove="',approve:'data-approve="'};
+              submit:'data-applysubmit="',unapprove:'data-unapprove="',approve:'data-approve="',rm:'data-rm="1" data-for="'};
   function apBtnHTML(b,u){
     var tip=b.off?' disabled title="'+escA(b.off)+'"':b.b==='approve'?' title="先看過頁面再按;按了之後同一隻 '+AGENT+' 在那一頁送出,8 秒內可以復原"':'';
     return '<button class="stage-b'+(b.b==='approve'?' ap-approve':'')+(b.adv?' adv':'')+(b.main?' ap-main':'')+'" type="button" '+
       AP_BTN[b.b]+u+'"'+tip+'>'+esc(b.label)+'</button>';}
   function apShotHTML(x,id){
     if(x[0]==='live')return '<a class="ap-shot" data-apshot="1" href="/api/live?u='+encodeURIComponent(id)+'" target="_blank" rel="noopener">'+esc(x[2])+'</a>';
-    if(x[0]==='ev')return evLink(id,x[1],x[2]);
-    if(x[0]==='shot')return '<a class="ap-shot" data-apshot="1" href="/api/shot?s=fill&amp;u='+encodeURIComponent(id)+'" target="_blank" rel="noopener">'+esc(x[2])+'</a>';
-    return '<a class="ap-shot" data-humancheck="1" href="'+escA(x[1])+'" target="_blank" rel="noopener">'+esc(x[2])+'</a>';}
+    if(x[0]==='proof')return '<figure class="ap-proof"><a href="/api/evidence?u='+encodeURIComponent(id)+'&amp;f='+encodeURIComponent(x[1])+'" target="_blank" rel="noopener"><img alt="" src="/api/evidence?u='+encodeURIComponent(id)+'&amp;f='+encodeURIComponent(x[1])+'"></a><figcaption>'+esc(x[2])+'</figcaption></figure>';
+    return evLink(id,x[1],x[2]);}
   var NO_VIEW={line:[['idle','還沒拿到這張的下一步,等一下會自己更新']],buttons:[],shots:[],fill:{kind:'todo'}};
   function cardState(j){
     var v=nextOf(j.id).view||NO_VIEW, u=escA(j.id), live=applyBusy(j.id), busy=live||!!v.busy, rs=live?APPLY.stage:v.stage;
@@ -601,9 +601,22 @@
     // 確認後排在後台等著送的那幾秒(還能按復原、取消確認):這時不給「▶ 送出」,他照著按反而跟排好的撞上
     else if(v.soon&&v.due){line=[['okb','✅ 你已確認,幾秒後 '+AGENT+' 開始送出(按下面的「復原」可以取消)']];
       btns=btns.filter(function(b){return b.b!=='submit';}); S.todo='';}
-    var st=line.map(function(x){return x[0]==='okb'?'<b class="ap-ok">'+esc(x[1])+'</b>':'<span class="ap-'+x[0]+'">'+esc(x[1])+'</span>';}).join('');
+    var inlineShots={};
+    var st=line.map(function(x,i){
+      if(x[0]==='okb')return '<b class="ap-ok">'+esc(x[1])+'</b>';
+      var sync=x[2]&&x[2].sync, body=esc(x[1]);
+      if(sync&&x[2].shot_indices){
+        body=x[2].shot_indices.map(function(i){inlineShots[i]=true;return shots[i]?apShotHTML(shots[i],j.id):'';}).join('');
+        return '<span class="ap-sync-row ap-sync-shots">'+body+'</span>';
+      }
+      if(sync&&x[2].full)body=fold('sync:'+j.id+':'+i,esc(x[1]),'<pre>'+esc(x[2].full)+'</pre>',{cls:'ap-sync-detail'});
+      return '<span class="ap-'+x[0]+(sync?' ap-sync-row':'')+'">'+body+'</span>';
+    }).join('');
+    // 公司申請頁上的履歷那一塊(proof)排在第一行狀態正下方:手機打開卡片第一眼就看到,不被後面的平台履歷清單擠到底
+    var proofs=shots.map(function(x,i){return x[0]==='proof'&&!inlineShots[i]?apShotHTML(x,j.id):'';}).join('');
+    if(proofs){var cut=st.indexOf('</span>')+7; st=cut>6?st.slice(0,cut)+proofs+st.slice(cut):proofs+st;}
     S.html='<div class="ap-line'+(btns.some(function(b){return b.main;})&&!why?' go':'')+(why?' blocked':'')+'"><div class="ap-st">'+st+
-      shots.map(function(x){return apShotHTML(x,j.id);}).join('')+'</div>'+
+      shots.filter(function(x,i){return !inlineShots[i]&&x[0]!=='proof';}).map(function(x){return apShotHTML(x,j.id);}).join('')+'</div>'+
       (why?'<div class="ap-why">'+esc(why)+'</div>':'')+
       (btns.length?'<div class="ap-acts">'+btns.map(function(b){return apBtnHTML(b,u);}).join('')+'</div>':'');
     return S;
@@ -628,7 +641,17 @@
     return '<div class="fm-line '+(td.length?'need':'ok')+'">📋 '+head+' · '+
       (td.length?'<b>⚠ '+td.length+' 條答案等你確認</b><button class="fm-go" type="button" data-ansgo="'+escA(td[0])+'">去常用答案看</button>'
                 :'✅ 答案都確認過了')+
-      (rf?'<span class="fm-rf">✎ '+rf+' 欄雇主網頁待重打</span>':'')+'</div>'+applyLineHTML(j);
+      (rf?'<span class="fm-rf">✎ '+rf+' 欄雇主網頁待重打</span>':'')+'</div>'+formListHTML(j,fm)+applyLineHTML(j);
+  }
+  // 表單逐欄對照(他看得懂的語言,設定 resume.read_lang):題目用 agent 交件時給的翻譯(qz),答案用答案庫的翻譯(zh);對著右邊的頁面截圖看
+  function formListHTML(j,fm){
+    var f=fm.f||[]; if(!f.length)return '';
+    var rows=f.map(function(x){
+      var e=x.k?ansOf(x.k):null, val=x.src==='skip'?'(留空'+(x.why?':'+x.why:'')+')':e?(e.zh||e.v||''):(x.v||'');
+      return '<div class="fm-row"><span class="fm-q">'+esc(x.qz||x.q)+'</span><span class="fm-v">'+esc(val)+'</span></div>';
+    }).join('')+((((FB[j.id]||{}).apply||{}).uploaded)||[]).map(function(n){   // 上傳欄不是文字格,另外列:申請頁上就是這個檔名
+      return '<div class="fm-row"><span class="fm-q">📎 上傳的檔</span><span class="fm-v">'+esc(n)+'</span></div>';}).join('');
+    return fold('fmlist:'+j.id,'🈶 逐欄'+RL+'對照('+f.length+' 欄)','<div class="fm-list">'+rows+'</div>',{cls:'fm-fold'});
   }
   // 🗂 答案庫面板。收起時一條一行字(題目或在用的公司、答案前段、「我推論的」、✓),點那一列才展開能改的欄位。
   // 同一題有好幾個答案(各職缺的「為什麼對這個職位有興趣」)排在一起,題目只寫一次。
@@ -665,7 +688,7 @@
   function ansRowHTML(e,title,where){
     var p=ansPending(e), em=ansEmpty(e), k=escA(e.k), us=ansUsers(e.k), lim=ansLim(e.k), n=wordsOf(e.v);
     var long=/^(txt|op)$/.test(e.kind||'')||(e.v||e.zh||'').length>70||/\n/.test(e.v||e.zh||'');
-    var ro=ansLocked(e.k)?' readonly title="有一張用到這條的卡送出結果不明,先確認到底送出沒有再改"':'';
+    var ro=ansLocked(e.k)?' readonly title="有一張用到這條的卡送出結果不明,查應徵進度查清楚送出沒有之前不能改"':'';
     function box(f,val,ph,cls){return long
       ?'<textarea class="ans-t ans-ta'+(cls||'')+'" rows="3" data-ansk="'+k+'" data-ansf="'+f+'" placeholder="'+ph+'"'+ro+'>'+esc(val||'')+'</textarea>'
       :'<input class="ans-t'+(cls||'')+'" data-ansk="'+k+'" data-ansf="'+f+'" value="'+escA(val||'')+'" placeholder="'+ph+'"'+ro+'>';}
@@ -1140,6 +1163,7 @@
       '<button class="fb-b grow'+(sent==='grow'?' on':'')+'" data-s="grow" type="button">💪 差一點</button>'+
       '</div>';}   // 出錯了與移除一律走卡片右側那條(errBtnHTML/rmBtnHTML),不在心情列重複一顆
   // 管線階段用的一行事實:死線最要緊,地點和薪只給一眼。
+  // _EMPTY:卡上已經存的舊摘要裡 agent 寫的佔位字(research.blank 同一組);新的摘要沒值就是空的
   var _EMPTY=/^(無|未明載|未公開|不公開|未提供|未列|查無|n\/a|none|-)([（(].*)?$/i;
   // 這張能不能進可投遞:不能就回原因,能就回空字串(後台的投遞前把關,下一步的 gate:客製還沒處理完、驗收還沒跑完、
   // 驗收沒過;你按「不對,職缺還在」當下就不擋)。單張那顆按鈕和「全部變成可投遞」共用同一份,不要一邊擋一邊放行
@@ -2797,7 +2821,7 @@
       if(rwas&&!rp.running)_runDone.replies=true;
       if(rwas!==!!rp.running)renderAll(); else refreshRepliesUI();}
     // 貼網址加入、分類建議、客製:跑完講一聲;客製也要更新卡片上的檔案狀態。
-    ['add','suggest','customize'].forEach(function(k){var p=v[k]; if(!p)return; var cur=MISC[k]||{};
+    ['add','suggest','customize','sync'].forEach(function(k){var p=v[k]; if(!p)return; var cur=MISC[k]||{};
       if(!p.running&&JSON.stringify(p)===JSON.stringify(cur))return;
       var was=!!cur.running; MISC[k]=p; if(k==='add')renderFind();
       if(was&&!p.running){
@@ -2805,14 +2829,15 @@
         if(k==='add')snack(ok?(p.msg||'加好了'):('貼網址加入沒做完:'+(p.msg||'')),null,
           ok?{label:'去看',fn:function(){switchTab('none');}}:{label:'看紀錄',fn:function(){showLog('add');}});
         else if(k==='suggest') {snack(ok?'分類建議好了,在「⚙ 設定 → 🗂 分類」':('分類建議沒做完:'+(p.msg||'')),null,
-          ok?null:{label:'看紀錄',fn:function(){showLog('suggest');}}); cfgLoad(renderCfg);}
+          ok?null:{label:'看紀錄',fn:function(){showLog('suggest');}}); if(active==='cfg')cfgLoad(renderCfg);}
+        else if(k==='sync') {snack(p.msg||'全部同步完成'); if(active==='cfg'&&!CFGDIRTY)cfgLoad(renderCfg);}
         else _runDone.customize=true;
         srvGen=null;
       } else if(k==='customize'&&was!==!!p.running)renderAll();
-      else if(k==='suggest'&&CFGD)renderCfg();
+      else if(active==='cfg'&&(k==='suggest'||k==='sync')&&CFGD&&!CFGDIRTY)renderCfg();
     });
     clearTimeout(_runTimer); _runTimer=null;
-    if(PREP.running||FIND.running||APPLY.running||REPLIES.running||(MISC.add||{}).running||(MISC.suggest||{}).running||(MISC.customize||{}).running)_runTimer=setTimeout(function(){_runTimer=null; syncFromServer();},4000);
+    if(PREP.running||FIND.running||APPLY.running||REPLIES.running||(MISC.add||{}).running||(MISC.suggest||{}).running||(MISC.customize||{}).running||(MISC.sync||{}).running)_runTimer=setTimeout(function(){_runTimer=null; syncFromServer();},4000);
   }
   // 按之前先把還沒送出的標記存完:cut_tailor 讀的是伺服器上的檔,他剛加進準備區、
   // 還在自動存計時裡的那幾張不先存,這一輪就會漏掉。
@@ -3643,10 +3668,14 @@
   function inboxTodo(it){return ((NEXT.__inbox__||{}).todo||[]).indexOf(it.id)>=0;}
   function inboxRowHTML(it){
     var id=escA(it.id), j=it.job?jobOf(it.job):null, when=String(it.at||'').replace('T',' ').slice(5,16), todo=inboxTodo(it);
+    var go=/^https?:\/\//.test(String(it.url||''))?it.url:'';   // 後台一律附好(agent_report.page_of)
     var head='<span class="ans-hmain"><span class="ans-hq"><span class="ib-from">'+esc((IB_FROM[it.from]||[])[0]||it.from||AGENT)+'</span>'+esc(it.msg)+
-        (it.n>1?'<span class="ans-use">×'+it.n+'</span>':'')+(todo?'':'<span class="ans-tag">缺證據</span>')+'</span>'+
-        (it.need&&!it.done&&todo?'<span class="ans-hv">你要做的:'+esc(it.need)+'</span>':'')+'</span>'+
-        (it.ev?evLink(it.job,it.ev,'那一頁的截圖'):it.noev?'<span class="ans-use">'+esc(it.noev)+'</span>':'');
+        (it.n>1?'<span class="ans-use">×'+it.n+'</span>':'')+(!todo&&!it.info?'<span class="ans-tag">缺證據</span>':'')+'</span>'+
+        (it.need&&!it.done&&todo?'<span class="ans-hv">你要做的:'+esc(it.need)+'</span>':'')+
+        '<span class="ib-links">'+
+        (go&&!it.done?'<a class="ap-shot" href="'+escA(go)+'" target="_blank" rel="noopener">打開要處理的那一頁 ↗</a>':'')+
+        (it.ev?evLink(it.ev.u||it.job,it.ev.f||it.ev,'那一頁的截圖'):it.noev?'<span class="ans-use">'+esc(it.noev)+'</span>':'')+
+        '</span></span>';
     // 還沒處理的「你要做的」標題列已經寫了,展開不再寫一次;處理好的標題不寫,展開才看得到。
     // 缺證據的:只是 agent 說的,照原文放在展開裡,標明不要照做
     var body='<div class="ans-body">'+(it.need&&it.done?'<p class="ib-need">你要做的:'+esc(it.need)+'</p>':'')+
@@ -3654,10 +3683,11 @@
       '<div class="ans-meta">'+esc(when)+(it.done?(it.res?'　'+esc(mdOf(it.done))+' 自動收掉:'+esc(it.res):'　你 '+esc(mdOf(it.done))+' 處理好了'):'')+'</div>'+
       (j?'<div class="ib-job">'+jdTitleHTML(j)+'<button class="ap-undo" type="button" data-inboxgo="'+escA(it.job)+'">去看那張卡</button></div>'
         :(!inboxHere(it)?'<div class="ib-job"><button class="ap-undo" type="button" data-inboxtab="'+escA(inboxTab(it))+'">去「'+esc(tabLabel(inboxTab(it)==='discover'?'none':inboxTab(it)))+'」</button></div>':''))+
-      '<div class="ans-acts"><button class="'+(it.done?'ap-undo':'fm-go')+'" type="button" data-inboxdone="'+id+'">'+
-        (it.done?'改回還沒處理':'處理好了')+'</button></div></div>';
-    return fold('ib:'+it.id,head,body,{cls:'ansrow ibrow'+(it.done?'':' pend'),attr:' data-ib="'+id+'"'});
+      (it.info?'':'<div class="ans-acts"><button class="'+(it.done?'ap-undo':'fm-go')+'" type="button" data-inboxdone="'+id+'">'+
+        (it.done?'改回還沒處理':'處理好了')+'</button></div>')+'</div>';
+    return fold('ib:'+it.id,head,body,{cls:'ansrow ibrow'+(it.done||it.info?'':' pend'),attr:' data-ib="'+id+'"'});
   }
+  // 要他去哪一頁處理:回報附的那一頁(後台 agent_report.page_of 補上的),舊回報沒附就是那張卡的職缺頁;只給 http 開頭的
   function inboxTab(it){
     if(it.job){var f=FB[it.job]||{}; return f.app||'discover';}
     return (IB_FROM[it.from]||[])[1]||'';
@@ -3670,9 +3700,11 @@
     var open=inboxList().filter(function(x){return !x.done&&!(x.job&&removed(x.job));}).sort(function(a,b){
       return (inboxHere(b)-inboxHere(a))||String(b.at).localeCompare(String(a.at));});
     if(!open.length)return '';
-    var todo=open.filter(inboxTodo).length, noev=open.length-todo;
+    var todo=open.filter(inboxTodo).length, noev=open.filter(function(x){return !x.info&&!inboxTodo(x);}).length;
+    var info=open.filter(function(x){return x.info;}).length;
     return fold('inbox','📣 '+AGENT+' 回報'+(todo?'<span class="ans-pendn">⚠ '+todo+' 件要你處理</span>':'')+
-        (noev?'<span class="ans-use">'+noev+' 件缺證據</span>':''),
+        (noev?'<span class="ans-use">'+noev+' 件缺證據</span>':'')+
+        (info?'<span class="ans-use">'+info+' 則結果</span>':''),
       '<div class="cuts">'+open.map(inboxRowHTML).join('')+'</div>',
       {cls:'cuts-d inbox-d',hcls:'cuts-sum'});
   }
@@ -3748,7 +3780,9 @@
     ib.addEventListener('click',function(e){
       var d=e.target.closest('[data-inboxdone]');
       if(d){var id=d.getAttribute('data-inboxdone'), it=inboxList().filter(function(x){return x.id===id;})[0]; if(!it)return;
-        if(it.done)delete it.done; else it.done=today();
+        // 他親手按的:記到幾點幾分(後台 next_step.handed 拿它跟最後一次填表比);之前程式自動收掉的原因(res)清掉
+        if(it.done){delete it.done; delete it.done_at; delete it.res;}
+        else{var n=new Date(); it.done=today(); it.done_at=new Date(n-n.getTimezoneOffset()*6e4).toISOString().slice(0,19); delete it.res;}
         edit(['__inbox__'],it.done?'標成處理好了':'改回還沒處理');
         return;}
       var gt=e.target.closest('[data-inboxtab]');
@@ -3867,7 +3901,8 @@
   // 按了更新:問後台更新、講結果;after(ok) 收尾(成功才是 true)
   function doUpdate(after){fetch('/api/update',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
     snack(d.msg||(d.ok?'更新好了':'沒更新成功')); after(true);}).catch(function(){snack('沒更新成功'); after(false);});}
-  function cfgLangFileRows(kind,id,files,styles){
+  // base:這份在設定裡的位置(resume.resumes.N);每個語言多一格「送出檔名」:公司申請頁上看到的檔名,他自己取
+  function cfgLangFileRows(kind,id,files,styles,base,names){
     var langs=CFGW.resume.langs||[];
     return langs.map(function(l){var f=(files||{})[l], which=kind+'|'+id+'|'+l;
       var preview=f&&/\.(pdf|md|markdown)$/i.test(f)?'<button class="cfg-b" type="button" data-srcpv="'+escA('/api/source-preview?kind='+
@@ -3879,13 +3914,24 @@
       var styleRow=markdown?'<div class="cfg-row"><label class="cfg-k">PDF 樣式</label><span class="cfg-file">'+
         (style?'🎨 '+esc(fileName(style)):'<i>未指定，使用瀏覽器原生排版</i>')+'</span><label class="cfg-b">'+
         (style?'換樣式':'上傳 CSS')+'<input type="file" accept=".css,text/css" data-cfstyle="'+escA(which)+'" hidden></label></div>':'';
-      // 平台上這個語言的那一份:只有上次判讀發現問題才是 ⚠;母稿改過是下次填這個平台的卡時自動同步(只講一句),還沒判讀過不講
-      var platformRows=kind!=='resume'?'':(CFGD.profile_status||[]).filter(function(r){return r.variant===id&&r.lang===l&&(r.state==='differs'||r.state==='master-changed');}).map(function(r){
-        return '<div class="cfg-row"><span class="cfg-help">'+(r.state==='differs'?'⚠ '+esc(r.platform)+' 上的'+esc(langName(l))+'版上次判讀跟母稿對不上,下次填這個平台的卡時會照母稿改':
-          esc(r.platform)+' 上的'+esc(langName(l))+'版還是改之前的母稿,下次填這個平台的卡時只改有變的地方')+'</span></div>';}).join('');
       var pageWarning=warning?'<div class="cfg-row"><span class="cfg-file">⚠ '+esc(fileName(f))+' 排成 '+warning.pages+' 頁；建議檢查版面。</span></div>':'';
       return '<div class="cfg-row"><label class="cfg-k">'+esc(langName(l))+'版</label><span class="cfg-file'+(gone?' gone':'')+'">'+(f?(gone?'⚠ 找不到檔案:':'📄 ')+esc(fileName(f)):'<i>還沒上傳</i>')+'</span>'+
-        (gone?'':preview)+'<label class="cfg-b">'+(f&&!gone?'換一份':(gone?'重新上傳':'上傳'))+'<input type="file" data-cfup="'+escA(which)+'" hidden></label></div>'+styleRow+pageWarning+platformRows;}).join('');
+        (gone?'':preview)+'<label class="cfg-b">'+(f&&!gone?'換一份':(gone?'重新上傳':'上傳'))+'<input type="file" data-cfup="'+escA(which)+'" hidden></label></div>'+styleRow+pageWarning+
+        (base?'<div class="cfg-row"><label class="cfg-k">'+esc(langName(l))+'版送出檔名</label><input class="cfg-in" data-cf="'+escA(base+'.send_names.'+l)+'" value="'+escA((names||{})[l]||'')+'" placeholder="空白就用上傳的檔名'+(f?':'+escA(fileName(f).replace(/\.(md|markdown)$/i,'.pdf')):'')+'"></div>':'');}).join('');
+  }
+  function cfgSyncHTML(){
+    var progress=MISC.sync||{}, states=CFGD.profile_status||[];
+    var label={ok:'已同步','master-changed':'落後',unchecked:'還沒同步'};
+    var rows=states.map(function(r){
+      var last=(progress.results||[]).filter(function(x){return x.platform===r.platform&&x.lang===r.lang&&x.variant===r.variant;})[0];
+      var blocked=last&&!last.ok?'<div class="cfg-help">卡住：'+esc(last.msg||'請看回報')+'</div>':'';
+      return '<div class="cfg-row"><span class="cfg-k">'+esc(r.platform)+' · '+esc(langName(r.lang))+' · '+esc(r.variant)+'</span>'+
+        '<span class="cfg-file'+(r.confirmation_pending?' pending':'')+'">'+
+        esc(r.confirmation_pending?'⚠ 等你確認代填內容':(label[r.state]||r.state))+'</span>'+blocked+'</div>';}).join('');
+    return '<div class="cfg-row"><button class="cfg-b go" type="button" data-cfsync="1"'+(progress.running?' disabled':'')+'>'+
+      (progress.running?'⏳ 全部同步中…':'全部同步')+'</button><span class="cfg-file" id="cfg-sync-status">'+
+      esc(progress.msg||'只同步原始履歷與常用答案這次改到的地方')+'</span></div>'+
+      (rows||'<p class="cfg-help">還沒有登記的平台履歷</p>');
   }
   // 他看得懂的語言:附翻譯用它,選简体中文時看板介面也整個換成簡體(zhView)。清單外的舊值照樣留著、選得到。
   // 履歷有哪些語言:勾選,不用他打「zh, en」這種代碼;設定檔裡原本就有的其他語言也列出來
@@ -3926,7 +3972,7 @@
       '<label class="cfg-row"><input type="checkbox" data-cfcheck="resume.resumes.'+index+'.enabled"'+(r.enabled===false?'':' checked')+'> 使用這份履歷</label>'+
       '<div class="cfg-row"><label class="cfg-k">什麼時候用</label><textarea class="cfg-in" rows="2" data-cf="resume.resumes.'+index+'.when" placeholder="例:工程、資料這類要看技術細節的職缺">'+esc(r.when||'')+'</textarea></div>'+
       cfgSkillSelect('resume.resumes.'+index+'.skill',r.skill)+
-      cfgLangFileRows('resume',id,files,r.styles)+
+      cfgLangFileRows('resume',id,files,r.styles,'resume.resumes.'+index,r.send_names)+
       '<div class="cfg-row end"><button class="cfg-b warn" type="button" data-cfresdel="'+escA(id)+'">🗑 刪掉這份履歷</button></div></div>';
   }
   function cfgAttachmentHTML(a,index,resumes){
@@ -3936,7 +3982,7 @@
     return '<div class="cfg-card"><div class="cfg-row"><label class="cfg-k">名稱</label><input class="cfg-in" data-cf="resume.attachments.'+index+'.name" value="'+escA(a.name||'')+'" placeholder="例:作品集"></div>'+
       '<label class="cfg-row"><input type="checkbox" data-cfcheck="resume.attachments.'+index+'.enabled"'+(a.enabled===false?'':' checked')+'> 附上這份附件</label>'+
       '<div class="cfg-row"><span class="cfg-k">能搭哪幾份履歷</span><span class="cfg-file">沒勾就是全部</span></div>'+
-      '<div class="cfg-picks">'+choices+'</div>'+cfgSkillSelect('resume.attachments.'+index+'.skill',a.skill)+cfgLangFileRows('attachment',id,files,a.styles)+
+      '<div class="cfg-picks">'+choices+'</div>'+cfgSkillSelect('resume.attachments.'+index+'.skill',a.skill)+cfgLangFileRows('attachment',id,files,a.styles,'resume.attachments.'+index,a.send_names)+
       '<div class="cfg-row end"><button class="cfg-b warn" type="button" data-cfattdel="'+escA(id)+'">🗑 刪掉這份附件</button></div></div>';
   }
   function cfgListHTML(key,withIcon){
@@ -3986,9 +4032,11 @@
     var a=CFGW.agent||{}, agents=a.agents||[], b=CFGW.browser||{}, s=CFGW.search||{};
     var h=cfgChecklist()+cfgDoctorHTML();
     var RES=fold('cfg:resumes','📄 你的履歷 <span class="n">'+resumes.length+'</span>',
-      '<p class="cfg-help">勾選要使用的履歷,寫一句「什麼時候用」幫 '+esc(AGENT)+' 挑選;卡片上也能改用哪一份。每份履歷可放各語言的檔案。</p>'+
+      '<p class="cfg-help">勾選要使用的履歷,寫一句「什麼時候用」幫 '+esc(AGENT)+' 挑選;卡片上也能改用哪一份。每份履歷可放各語言的檔案。</p>'+cfgSyncHTML()+
       resumes.map(function(r,i){return cfgResumeHTML(r,i);}).join('')+
       '<div class="cfg-row"><input class="cfg-in" id="cfg-rnew" placeholder="新履歷名稱,例:工程版"><button class="cfg-b" type="button" data-cfresadd="1">＋ 新增履歷</button></div>'+
+      '<div class="cfg-row"><label class="cfg-k">合併檔名稱</label><input class="cfg-in" data-cf="resume.merged_name" value="'+escA(CFGW.resume.merged_name||'')+'" placeholder="空白就叫 merged.pdf;例:{resume}+{n}"></div>'+
+      '<p class="cfg-help">表單只收一個檔時,'+esc(AGENT)+' 上傳履歷接附件的合併檔。{resume} 換成履歷的送出檔名(不含 .pdf),{n} 換成附件數。內容不同的檔不能同名:你在公司申請頁上看檔名,就分得出送的是哪一份。</p>'+
       '<div class="cfg-row"><label class="cfg-k">履歷有哪些語言</label>'+cfgLangChecks(CFGW.resume.langs||[])+'</div>'+
       '<div class="cfg-row"><label class="cfg-k">你看得懂的</label>'+cfgReadLang(CFGW.resume.read_lang||'zh')+'</div>'+
       '<p class="cfg-help">常用答案裡跟這個語言不是同一套文字的答案(例:你看中文、表單是英文),會多附一份這個語言的給你看、給你改。</p>',
@@ -4185,6 +4233,13 @@
     var g;
     if((g=t.getAttribute('data-cfgo'))){cfgGo(g); return;}
     if(t.hasAttribute('data-cfsave')){cfgSave(true).catch(function(err){snack('沒存成('+err.message+'),照上面說的改好再按一次「💾 儲存設定」');}); return;}
+    if(t.hasAttribute('data-cfsync')){
+      var startSync=function(){fetch('/api/run/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+        .then(function(r){return r.json().then(function(d){if(!r.ok)throw Error(d.msg||'同步沒開始'); return d;});})
+        .then(function(d){MISC.sync=d; renderCfg(); snack('全部同步已在背景開始'); setTimeout(syncFromServer,1000);})
+        .catch(function(err){snack('全部同步沒開始：'+err.message);});};
+      if(CFGDIRTY)cfgSave(false).then(startSync).catch(function(err){snack('設定沒存成：'+err.message+'。改好設定後再按「全部同步」');}); else startSync();
+      return;}
     if(t.hasAttribute('data-cfreload')){CFGDIRTY=false; cfgLoad(renderCfg); return;}
     if(t.hasAttribute('data-cfagentadd')){var entries=CFGW.agent.agents, id;
       do{id='agent-'+Date.now().toString(36)+'-'+Math.floor(Math.random()*1e9).toString(36);}

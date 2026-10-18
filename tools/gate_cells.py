@@ -32,7 +32,7 @@ class Truth:
 
     幫你填表(開了 agent 的 Chrome):
       page:程式自己讀到的那一頁(讀不到是 None,page_why 是原因);tab_id:程式讀的是哪一個分頁;form_url:填好的申請表網址。
-      job、fb:這張卡和看板;download_dir、attachments:比對附件用(profile_sync.check_attachments 的參數)。
+      job、fb:這張卡和看板;download_dir:申請表收到的檔下載到哪(profile_sync.check_attachments 比)。
       decision:這張卡該用哪一份平台履歷(profile_sync.decided);不給就照 job、fb 算。
     其他 7 種流程(沒開 agent 的 Chrome,真相就是程式交給 agent 的東西):
       given:{那一列是誰: 程式給它的原文};一列一列核對時各列拿到自己那一段(RowTruth)。
@@ -45,11 +45,11 @@ class Truth:
     PER_ROW = ('given', 'fetched_on', 'cites', 'sources', 'flags')
 
     def __init__(self, url=None, job=None, fb=None, page=None, page_why='', tab_id=None, download_dir=None,
-                 attachments=None, decision=None, form_url=None, given=None, fetched_on=None, cites=None,
+                 decision=None, form_url=None, given=None, fetched_on=None, cites=None,
                  sources=None, flags=None, feedback=None, cards=None, texts=None, source_types=None, resumes=None):
         self.url, self.job, self.fb = url, job, fb if fb is not None else {}
         self.page, self.page_why, self.tab_id, self.form_url = page, page_why, tab_id, form_url
-        self.download_dir, self.attachments = download_dir, dict(attachments or {})
+        self.download_dir = download_dir
         self._decision = decision
         self.given, self.fetched_on, self.cites = dict(given or {}), dict(fetched_on or {}), dict(cites or {})
         self.sources, self.flags, self.feedback = dict(sources or {}), dict(flags or {}), dict(feedback or {})
@@ -63,11 +63,13 @@ class Truth:
         return self._decision
 
     def text(self):
-        """頁面上看得到的字(標題、每一行、每一格的值)正規化後接在一起。"""
+        """頁面上看得到的字(標題、每一行、每一格的值、每一格周圍的說明)正規化後接在一起。
+        欄位旁的說明(例如「驗證碼已寄到你的信箱」)常只出現在欄位周圍那一段,不在一般的行裡。"""
         p = self.page or {}
+        fields = [f for f in p.get('fields') or [] if isinstance(f, dict)]
         parts = [p.get('title')] + list(p.get('lines') or [])
-        parts += [f.get('shown') or f.get('value') for f in p.get('fields') or [] if isinstance(f, dict)
-                  and not isinstance(f.get('value'), list)]
+        parts += [f.get('shown') or f.get('value') for f in fields if not isinstance(f.get('value'), list)]
+        parts += [f.get('context') for f in fields]
         return '\n'.join(norm(x) for x in parts if x)
 
 
@@ -111,6 +113,35 @@ class Row:
     @property
     def ok(self):
         return not self.problems
+
+
+class Problem(str):
+    """程式驗出來的一個問題:字給他看;kind 給程式分類(要不要自動改、是不是要本人做),不從字去猜。
+    存進看板時只剩字(kind 只在這一輪的程式裡用)。"""
+
+    def __new__(cls, msg, kind):
+        self = super().__new__(cls, msg)
+        self.kind = kind
+        return self
+
+    def __getnewargs__(self):          # 深拷貝、跨程序傳時種類跟著走
+        return str(self), self.kind
+
+
+def kind(problem):
+    return getattr(problem, 'kind', None)
+
+
+class Problems(str):
+    """好幾條問題接成一句給人看;items 留著每一條(和它的種類)給程式判斷。"""
+
+    def __new__(cls, items, sep='; '):
+        self = super().__new__(cls, sep.join(items))
+        self.items = list(items)
+        return self
+
+    def __getnewargs__(self):
+        return (self.items,)
 
 
 def norm(s):

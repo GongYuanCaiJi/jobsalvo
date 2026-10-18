@@ -28,8 +28,8 @@ def folder():
     return glob.glob(os.path.join(cf.SHIP_DIR, '*'))
 
 
-def allowed(url, job, SHIP_ROOT):
+def allowed(url, job):
     # ok: ship-folder-scan-outside-ship
-    d = ship.folder(url, root=SHIP_ROOT)
+    d = ship.folder(url)
     # ok: card-name-cleanup-outside-card
     return card.name(job), d

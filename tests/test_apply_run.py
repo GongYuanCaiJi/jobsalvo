@@ -103,7 +103,7 @@ class Approval(unittest.TestCase):
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S1'), patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], result)), \
-             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run, '_profile_check', return_value=[]), \
              patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
             run._run_one('fill', U, '/tmp/board.html')
         self.assertEqual(fb[U]['apply']['workspace'], workspace)
@@ -136,7 +136,7 @@ class Approval(unittest.TestCase):
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, agent_id='claude')) as launch, \
              patch.object(ar, 'session_id', return_value='CLAUDE-NEW'), patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '42:p1'})), \
-             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run, '_profile_check', return_value=[]), \
              patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
             run._run_one('fix', U, '/tmp/board.html')
         self.assertIsNone(launch.call_args.kwargs['resume'])
@@ -251,18 +251,36 @@ class Checks(unittest.TestCase):
                 self.assertIn('不要另開分頁重做申請表', prompt)
                 self.assertNotIn('其他分頁不要動', prompt)
 
+    def test_fill_prompt_lists_registered_profile_pages_for_links_missing_from_the_master(self):
+        with patch.object(run, 'profile_pages', return_value='- linkedin en/one:https://www.linkedin.com/in/someone/'):
+            prompt, _ = run.prompt_for('fill', U, {'id': U}, board(), '/tmp/board.html', door=chrome_door.of('codex'))
+        self.assertIn('https://www.linkedin.com/in/someone/', prompt)
+        self.assertIn('母稿沒寫的個人連結用程式登記的', prompt)
+        self.assertIn('"qz"', prompt)                       # 題目不是他讀的語言時,交件附中文題目
+
+    def test_profile_pages_list_the_registry_and_an_unreadable_registry_is_not_shown_as_none(self):
+        reg = {'_說明': 'x', 'linkedin': {'en/one': {'read': 'https://www.linkedin.com/in/someone/'}, 'en/two': {}},
+               'cake': {'zh/one': {'read': 'https://www.cake.me/me/someone'}}}
+        with patch('profile_sync.registry', return_value=reg):
+            self.assertEqual(run.profile_pages(U), '- linkedin en/one:https://www.linkedin.com/in/someone/\n'
+                                                   '- cake zh/one:https://www.cake.me/me/someone')
+        with patch('profile_sync.registry', side_effect=ValueError('平台履歷登記資料不是物件')), \
+                self.assertRaisesRegex(ValueError, '平台履歷登記資料不是物件'):
+            run.profile_pages(U)
+
     def test_login_and_resume_try_an_already_signed_in_provider_before_requesting_credentials(self):
         for runtime in ('codex', 'claude-code'):
             for stage in ('fill', 'fix'):
                 with self.subTest(runtime=runtime, stage=stage):
                     prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
                                                door=chrome_door.of(runtime))
-                    self.assertIn('Continue with Google', prompt)
-                    self.assertIn('Sign in with Apple', prompt)
-                    self.assertIn('已登入', prompt)
-                    self.assertIn('完成授權', prompt)
-                    self.assertIn('要輸入密碼、二步驗證或驗證碼時才停下', prompt)
-                    self.assertIn('一鍵帶入只是捷徑', prompt)
+                    # 登入規則只有一份,在每個開瀏覽器的 agent 派工時都會帶的那段(agent_run 啟動時接上;同步平台履歷的 agent 也拿這段)
+                    login = chrome_door.of(runtime).apply_rule()
+                    self.assertIn('【登入與授權】', login)
+                    self.assertNotIn('Sign in with Apple', prompt)          # 填表指示裡不再另抄一份
+                    for words in ('Continue with Google', 'Sign in with Apple', '已登入的帳號完成', '一鍵帶入也這樣完成',
+                                  '只剩密碼、二步驗證、驗證碼'):
+                        self.assertIn(words, login)
                     self.assertNotIn('需要登入、遇到驗證碼、頁面要密碼:停下', prompt)
                     self.assertNotIn('遇到登入、密碼或真人驗證,停下', prompt)
 
@@ -273,7 +291,21 @@ class Checks(unittest.TestCase):
         with patch.object(run.cf, 'APPLY_RULES', rules):
             prompt, _ = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
                                        door=chrome_door.current())
-        self.assertIn('本輪登入規則優先於舊填表做法及平台筆記', prompt)
+        self.assertIn('需要登入、遇到驗證碼、頁面要密碼:停下', prompt)               # 他的舊做法照樣附上
+        self.assertIn('這一段優先於填表做法與平台筆記', chrome_door.current().apply_rule())
+
+    def test_the_agent_sent_to_fill_or_fix_gets_the_sso_rule_over_an_old_stop_at_login_note(self):
+        # #372:他的填表做法寫著「要登入就停下」,派出去的那一份(跟 _run 一樣 chrome=True 接上規矩)要同時帶著優先的 SSO 規則
+        rules = os.path.join(self.d, 'apply-rules.md')
+        with open(rules, 'w', encoding='utf-8') as output:
+            output.write('需要登入、遇到驗證碼、頁面要密碼:停下。')
+        for stage in ('fill', 'fix'):
+            with self.subTest(stage=stage), patch.object(run.cf, 'APPLY_RULES', rules):
+                p, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html', door=chrome_door.current())
+                fed = ar.prompt_stdin('main', p, browser=ar.apply_overrides(), board='/tmp/board.html', chrome=True)
+                self.assertIn('需要登入、遇到驗證碼、頁面要密碼:停下', fed)
+                for words in ('這一段優先於填表做法與平台筆記', 'Continue with Google', '已登入的帳號完成'):
+                    self.assertIn(words, fed)
 
     def test_fill_and_login_resume_follow_the_users_import_rules_before_batch_fill(self):
         rules = os.path.join(self.d, 'apply-rules.md')
@@ -289,6 +321,41 @@ class Checks(unittest.TestCase):
                     self.assertIn('先完成使用者要求的資料帶入', prompt)
                     self.assertIn('使用者明確要求保留的帶入值依其規則保留', prompt)
 
+    def test_a_second_run_does_not_start_while_another_one_is_live(self):
+        # 2026-10-14:命令列手動跑的那一輪撞斷了看板自動流程正在填的那一張
+        other = {'running': True, 'pid': os.getpid() + 99999, 'stage': 'fill', 'url': 'https://x/1'}
+        with patch('jobrun.read', return_value=other), patch.object(run, 'load') as load, \
+                patch.object(sys, 'argv', ['apply_run.py', '--stage', 'fix', '--url', U]):
+            run.main()
+        load.assert_not_called()
+        with patch('jobrun.read', return_value=dict(other, pid=os.getppid())), \
+                patch.object(run, 'load', return_value=([], {})) as load, patch.object(run, 'eligible', return_value=[]), \
+                patch.object(sys, 'argv', ['apply_run.py', '--stage', 'fix', '--url', U]):
+            run.main()                                         # 看板替這一輪記的就是它自己:照常跑
+        load.assert_called_once()
+
+    def test_the_resume_crop_from_the_employer_page_is_kept_as_evidence(self):
+        import evidence
+        class Door:
+            def shot_proof(self, tab, out, names, links=()):
+                with open(out, 'wb') as f:
+                    f.write(b'\x89PNG\r\n\x1a\n')
+                return {'url': 'https://job-boards.example/apply', 'name': names[0]}
+        out = tempfile.mkdtemp()
+        with patch.object(run, 'proof_names', return_value=['EN-noCEX.pdf']), \
+                evidence.opened('apply', 'fill', [U], self.board if hasattr(self, 'board') else None):
+            got = run._proof_shot(U, out, time.time() - 5, Door(), '1:p1')
+        self.assertEqual((got['name'], got['url']), ('EN-noCEX.pdf', 'https://job-boards.example/apply'))
+        self.assertTrue(got['ev'].endswith('.png'))
+
+    def test_a_chosen_platform_resume_is_found_by_its_id_in_the_page_links(self):
+        import profile_sync as ps
+        decision = {'profile_kind': 'fixed', 'fixed_url': 'https://pda.example/profile/preview?vno=abc123'}
+        with patch.object(ps, 'decided', return_value=decision), \
+                patch.object(ps, 'ID_PARAMS', {'example': 'vno'}):
+            self.assertEqual(run.proof_links(U, {'id': U}, {}), ['vno=abc123'])
+        self.assertEqual(run.proof_links(U, None, {}), [])
+
     def test_fix_after_a_login_barrier_gets_the_current_upload_paths(self):
         folder = os.path.join(self.d, 'Acceptance-' + run.card.card_id_from_url(U))
         os.makedirs(folder)
@@ -297,7 +364,7 @@ class Checks(unittest.TestCase):
                 output.write(b'local upload fixture')
         with open(os.path.join(folder, 'ship.json'), 'w') as output:
             json.dump({'files': ['resume.pdf', 'support.pdf'], 'merged': 'merged.pdf'}, output)
-        with patch.object(run, 'SHIP_ROOT', self.d):
+        with patch.object(run.cf, 'SHIP_DIR', self.d):
             prompt, _out = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
                                          note='本人已完成登入,接著填', door=chrome_door.current())
         for name in ('resume.pdf', 'support.pdf', 'merged.pdf'):
@@ -336,7 +403,9 @@ class Checks(unittest.TestCase):
             self.assertEqual(bd.target(), os.path.realpath(copy))
 
     def page(self, **vals):
-        return {'url': U + '/apply', 'fields': [{'name': k, 'value': v} for k, v in vals.items()]}
+        labels = {'name': 'Full name', 'nat': 'Nationality'}
+        return {'url': U + '/apply', 'fields': [dict({'name': k, 'value': v}, **({'type': 'file'} if isinstance(v, list) else {'label': labels.get(k, k)}))
+                                               for k, v in vals.items()]}
 
     def test_radio_display_answer_belongs_to_its_question(self):
         import apply_tab
@@ -344,33 +413,55 @@ class Checks(unittest.TestCase):
         answer = 'Company career page'
         fb = {'__ans__': [{'k': 'source', 'v': answer}],
               U: {'form': {'f': [{'q': q, 'src': 'bank', 'k': 'source'}]}}}
-        choice = {'type': 'radio', 'name': 'source', 'label': answer, 'value': answer,
-                  'shown': answer, 'context': q + '\nLinkedIn\n' + answer}
-        page = {'url': U, 'fields': [choice], 'lines': [answer]}
+        radio = lambda label, name='source', context=q: {'type': 'radio', 'name': name, 'label': label, 'value': '',
+                                                          'context': context, 'choiceControl': True}
+        li, choice = radio('LinkedIn'), radio(answer)
+        choice.update(value=answer, shown=answer)
+        page = {'url': U, 'fields': [li, choice], 'lines': [q, 'LinkedIn', answer]}
         self.assertEqual(apply_tab.page_problems(page, fb, U), [])
-        page['fields'].append(dict(choice, name='other', context='Preferred channel?\n' + answer))
-        choice.update(value='LinkedIn', shown='LinkedIn')
-        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 別題同值不算。
+        other = dict(radio(answer, 'other', 'Preferred channel?'), value=answer, shown=answer)
+        page['fields'].append(other)
         choice.update(value='', shown=None)
+        li.update(value='LinkedIn', shown='LinkedIn')
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 別題同值不算。
+        li.update(value='', shown=None)
         self.assertTrue(apply_tab.page_problems(page, fb, U))  # 沒選,可見選項也不算。
-        choice.update(value=answer, shown=answer, context='')
+        choice.update(value=answer, shown=answer)
+        li['context'] = choice['context'] = ''
         page['fields'].append({'type': 'textarea', 'label': 'Other notes', 'value': answer})
-        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 讀不到題目關聯不算。
-        choice['context'] = q + '\n' + answer
+        self.assertTrue(apply_tab.page_problems(page, fb, U))  # 讀不到題目關聯不算(題目在頁上,下一行不是答案)。
+        li['context'] = choice['context'] = q + '\nLinkedIn\n' + answer   # 選項字排在選項前面:這一組自己的選項字不算題目
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
         fb['__ans__'][0]['v'] = 'Do not choose Company career page; choose LinkedIn'
         self.assertTrue(apply_tab.page_problems(page, fb, U))  # 答案庫變了要擋。
         fb['__ans__'][0]['v'] = answer
         choice.update(value='', shown=None)
         self.assertTrue(apply_tab.page_problems(page, fb, U))  # 單語也不能採信全頁選項文字。
 
+    def test_text_field_with_one_language_of_a_bilingual_answer_matches(self):
+        import apply_tab
+        q = 'How did you hear about this job?'
+        fb = {'__ans__': [{'k': 'source', 'v': '公司徵才頁 / company career page'}],
+              U: {'form': {'f': [{'q': q, 'src': 'bank', 'k': 'source'}]}}}
+        field = {'type': 'text', 'name': 'q1', 'label': q, 'value': 'Company career page', 'context': q,
+                 'choiceControl': False}
+        page = {'url': U, 'fields': [field], 'fieldContexts': True, 'lines': [q]}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        fb['__ans__'][0]['v'] = 'Mandarin / English'                    # 不是一中一英:只填一段不算
+        field['value'] = 'Mandarin'
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+
     def test_bank_value_differing_without_choice_is_sent_back_at_handoff(self):
         q = 'How did you hear about our job opening?'
         entry = {'k': 'src', 'q': '來源', 'v': '公司徵才頁 / Company career page', 'at': '2026-09-20'}
         fb = {'__ans__': [entry]}
-        field = {'q': q, 'src': 'bank', 'k': 'src', 'value': 'Company career page'}
+        field = {'q': q, 'src': 'bank', 'k': 'src', 'value': 'Referral'}
         with self.assertRaisesRegex(ValueError, 'choice'):   # 忘了附對應:交件就退回,不等最後驗收擋
             fr.apply_record(fb, U, 'Lever', fr.fields_from_fill({'fields': [field]}))
         self.assertNotIn('form', fb.get(U, {}))
+        field['value'] = 'Company career page'               # 是原文裡完整的一段:驗收也認得(同一支 matches),不退回、不用對應
+        fr.apply_record(fb, U, 'Lever', fr.fields_from_fill({'fields': [field]}))
+        self.assertNotIn('choice', fb[U]['form']['f'][0])
         field['value'] = '公司徵才頁 / Company career page'   # 跟原文一樣不用對應
         fr.apply_record(fb, U, 'Lever', fr.fields_from_fill({'fields': [field]}))
         self.assertNotIn('page_value', fb[U]['form']['f'][0])
@@ -398,8 +489,10 @@ class Checks(unittest.TestCase):
         self.assertTrue(apply_tab.page_problems(page, fb, U))
         native['choiceControl'] = True
         native['label'] = 'Preferred channel?'
+        page['lines'] = [q, 'LinkedIn']           # 題目在頁上,選中的那一格卻是別題
         self.assertTrue(apply_tab.page_problems(page, fb, U))
         native['label'] = q
+        page.pop('lines')
         native['shown'] = 'LinkedIn'
         self.assertTrue(apply_tab.page_problems(page, fb, U))
         native['shown'] = 'Example Career Page'
@@ -534,26 +627,174 @@ class Checks(unittest.TestCase):
     def test_question_text_with_required_mark_and_counter_is_the_same_question(self):
         import apply_tab
         field = {'label': '', 'context': '您是否已詳閱職缺描述？*(16/1500)'}   # 必填記號、字數計數器不是題目
-        self.assertTrue(apply_tab._same_question('您是否已詳閱職缺描述？', field))
-        self.assertFalse(apply_tab._same_question('您是否可以出差？', field))
+        (asked,) = apply_tab.questions([field])
+        self.assertEqual(apply_tab.qkey(asked), apply_tab.qkey('您是否已詳閱職缺描述？'))
+        self.assertNotEqual(apply_tab.qkey(asked), apply_tab.qkey('您是否可以出差？'))
 
-    def test_a_rich_text_editor_is_read_as_a_field(self):
+    def read_form(self, nodes, dom=None, frames_fail=()):
+        """在 node 跑 READ_FORM:假的 page 照 CDP 回無障礙樹(nodes)、DOM 細節(dom:{backend: 屬性})。"""
         import apply_tab, subprocess
         script = """
-const body = {tagName: 'BODY', isContentEditable: false};
-const editor = {tagName: 'DIV', id: '', name: '', isContentEditable: true, parentElement: body, innerText: '您好,我是候選人',
-  getClientRects: () => [{}], matches: () => false, getAttribute: () => null, hasAttribute: () => false, closest: () => null,
-  previousElementSibling: null, querySelectorAll: () => [{getClientRects: () => []}]};   // 編輯器裡藏著同步用的 textarea
-global.CSS = {escape: s => s};
-global.getComputedStyle = () => ({display: 'block', visibility: 'visible'});
-global.location = {href: 'https://jobs.example.test/apply'};
-global.document = {title: 't', body: {innerText: '求職信'}, links: [], querySelector: () => null,
-  querySelectorAll: sel => sel.includes('contenteditable') ? [editor] : []};
-const r = (READER)();
-if (!r.fields.some(f => f.value === '您好,我是候選人' && f.type === 'textarea')) throw new Error(JSON.stringify(r.fields));
-""".replace('READER', apply_tab.PAGE_FN)
-        result = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+const NODES = %s, DOM = %s, FAIL = %s;
+const page = {
+  cdp: async (m, p) => {
+    if (m === 'Page.getFrameTree') return {frameTree: {frame: {id: 'F'}, childFrames: [{frame: {id: 'X'}}]}};
+    if (m === 'Accessibility.getFullAXTree') { if (FAIL.includes(p.frameId)) throw new Error('跨網域'); return {nodes: p.frameId === 'F' ? NODES : []}; }
+    if (m === 'DOM.describeNode') { const a = DOM[p.backendNodeId] || {}; return {node: {nodeName: a.tag || 'INPUT', attributes: Object.entries(a).filter(([k]) => k !== 'tag').flat()}}; }
+  },
+  evaluate: async () => [], url: async () => 'https://jobs.example.test/apply', title: async () => 't'};
+(READER)(page).then(r => console.log(JSON.stringify(r)));
+""".replace('READER', apply_tab.READ_FORM) % (json.dumps(nodes), json.dumps(dom or {}), json.dumps(list(frames_fail)))
+        out = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    @staticmethod
+    def ax(*rows):
+        """(角色, 名稱, 值, 子節點 id 清單, 其他) → CDP 的無障礙樹節點;id 從 1 起,第一個是根。"""
+        nodes = []
+        for i, (role, name, value, kids, extra) in enumerate(rows, 1):
+            n = {'nodeId': str(i), 'role': {'value': role}, 'name': {'value': name}, 'childIds': [str(k) for k in kids],
+                 'backendDOMNodeId': i, 'properties': [{'name': k, 'value': {'value': v}} for k, v in (extra or {}).items() if k != 'ignored']}
+            if value is not None:
+                n['value'] = {'value': value}
+            if (extra or {}).get('ignored'):
+                n['ignored'] = True
+            nodes.append(n)
+        for n in nodes:
+            for k in n['childIds']:
+                nodes[int(k) - 1]['parentId'] = n['nodeId']
+        return nodes
+
+    def test_the_form_is_read_from_the_accessibility_tree_in_reading_order(self):
+        # 題目沒綁在格子上(名稱空的):照閱讀順序,前面那幾行字就是題目;格子裡的字不是下一題的題目;只有 ✱ 的不算一行
+        nodes = self.ax(
+            ('RootWebArea', '', None, [2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14], None),
+            ('StaticText', 'Email', None, [], None),
+            ('StaticText', '✱', None, [], None),
+            ('textbox', 'Email', 'a@b.test', [5], {'required': True}),
+            ('StaticText', 'a@b.test', None, [], None),
+            ('StaticText', 'Are you eligible?', None, [], None),
+            ('radio', 'Yes', None, [], {'checked': 'true'}),
+            ('StaticText', 'Yes', None, [], None),
+            ('radio', 'No', None, [], {'checked': 'false'}),
+            ('StaticText', 'Cover letter', None, [], None),
+            ('textbox', '', '您好,我是候選人', [], {'multiline': True}),   # 富文字編輯器:瀏覽器一樣給它角色和值
+            ('StaticText', 'hidden', None, [], {'ignored': True}),
+            ('textbox', 'Hidden field', '', [], {'ignored': True}),       # 藏起來的不在樹上
+            ('button', 'Submit application', None, [], None),
+        )
+        dom = {7: {'name': 'elig', 'type': 'radio'}, 9: {'name': 'elig', 'type': 'radio'}, 11: {'tag': 'DIV'}}
+        r = self.read_form(nodes, dom, frames_fail=['X'])                     # 跨網域 iframe 讀不到:略過,不整支壞掉
+        f = {x['label'] or x['context']: x for x in r['fields']}
+        self.assertEqual(f['Email']['value'], 'a@b.test')
+        self.assertEqual(f['Yes']['context'], 'Are you eligible?')
+        self.assertEqual(f['No']['context'], 'Are you eligible?')             # 同一組的選項帶同一題
+        self.assertEqual((f['Yes']['value'], f['No']['value']), ('Yes', ''))
+        self.assertEqual(f['Cover letter']['value'], '您好,我是候選人')
+        self.assertEqual(f['Cover letter']['type'], 'textarea')
+        self.assertNotIn('Hidden field', f)
+        self.assertNotIn('✱', r['lines'])
+        self.assertNotIn('a@b.test', r['lines'])
+        import apply_tab
+        self.assertEqual(apply_tab.questions([f['Yes'], f['No']]), ['Are you eligible?'] * 2)
+
+    def test_a_rich_editor_and_the_second_box_of_one_question_are_read(self):
+        # 2026-10-06 Cake 實測:求職信是沒標角色的編輯區塊(瀏覽器標成可編輯);電話是國碼選單加號碼兩格共用一題
+        nodes = self.ax(
+            ('RootWebArea', '', None, [2, 3, 4, 5, 6], None),
+            ('StaticText', '電話號碼', None, [], None),
+            ('combobox', 'Phone number country', 'Japan (+81)', [], None),
+            ('textbox', '', '090 1234 5678', [], None),
+            ('StaticText', '求職信', None, [], None),
+            ('generic', '', None, [7, 9], {'editable': 'richtext', 'focusable': True}),
+            ('paragraph', '', None, [8], {'editable': 'richtext'}),
+            ('StaticText', '您好,', None, [], None),
+            ('StaticText', '我是候選人。', None, [], None),
+        )
+        r = self.read_form(nodes, {6: {'tag': 'DIV'}})
+        import apply_tab
+        tel = next(f for f in r['fields'] if f['value'] == '090 1234 5678')
+        letter = next(f for f in r['fields'] if f['type'] == 'textarea')
+        self.assertEqual(letter['value'], '您好,我是候選人。')
+        self.assertEqual(apply_tab.questions([tel, letter]), ['電話號碼', '求職信'])
+        self.assertNotIn('我是候選人。', r['lines'])                          # 編輯區塊裡的字是那一格的值
+
+    def test_an_option_that_is_one_part_of_a_bilingual_answer_matches_without_a_mapping(self):
+        # 2026-10-07 Lever 實測:沒有這條,程式判對不上、又叫 agent 改一輪(333 秒)
+        import apply_tab
+        fb = board()
+        fb['__ans__'].append({'k': 'src', 'q': '從哪裡得知', 'v': '公司徵才頁 / Company career page'})
+        fb[U]['form']['f'] = [{'q': 'How did you hear?', 'src': 'bank', 'k': 'src'}]
+        radio = lambda label, on: {'label': label, 'type': 'radio', 'value': label if on else '', 'context': 'How did you hear?',
+                                   'choiceControl': True, 'shown': label if on else None}
+        page = {'url': U + '/apply', 'fieldContexts': True, 'lines': ['How did you hear?'], 'fields': [
+            radio('LinkedIn job posting', False), radio('Company career page', True)]}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        page['fields'] = [radio('LinkedIn job posting', True), radio('Company career page', False)]
+        self.assertTrue(apply_tab.page_problems(page, fb, U))                # 選錯照樣擋
+
+    def test_a_picker_that_is_not_a_form_field_shows_its_value_on_the_next_line(self):
+        # 2026-10-06 實測:「選擇履歷」不是表單欄位,選好的那一份只是下一行字
+        import apply_tab
+        fb = board()
+        fb['__ans__'].append({'k': 'pick_resume', 'q': '選擇履歷', 'v': '紅隊｜中文'})
+        fb[U]['form']['f'] = [{'q': '選擇履歷', 'src': 'bank', 'k': 'pick_resume', 'v': '紅隊｜中文'}]
+        page = {'url': U + '/apply', 'fieldContexts': True, 'submits': ['送出'], 'fields': [],
+                'lines': ['選擇履歷', '紅隊｜中文', '預覽履歷']}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        page['lines'] = ['選擇履歷', '藍隊｜中文', '預覽履歷']
+        self.assertTrue(apply_tab.page_problems(page, fb, U))                # 選的是別份:照樣擋
+        # 下一格(求職信)的前文把這一題也包進去:照樣看下一行
+        page['lines'] = ['選擇履歷', '紅隊｜中文', '自我推薦信']
+        page['fields'] = [{'label': '', 'type': 'textarea', 'value': '您好', 'context': '選擇履歷\n紅隊｜中文\n自我推薦信'}]
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        # 對到的是選項:下一行可能只是沒被選的選項,不採信
+        page['lines'] = ['選擇履歷', '紅隊｜中文', '藍隊｜中文']
+        page['fields'] = [{'label': '紅隊｜中文', 'type': 'radio', 'value': '', 'context': '選擇履歷', 'choiceControl': True},
+                          {'label': '藍隊｜中文', 'type': 'radio', 'value': '藍隊｜中文', 'context': '選擇履歷', 'choiceControl': True}]
+        self.assertTrue(apply_tab.page_problems(page, fb, U))
+
+    def test_a_rich_editor_reading_back_paragraphs_joined_still_matches(self):
+        # 2026-10-06 Cake 實測:編輯區塊讀回來分段處接在一起,答案庫是分段寫的
+        import apply_tab
+        fb = board()
+        fb['__ans__'].append({'k': 'letter', 'q': '求職信', 'v': '您好,我是候選人。\n我做過計費漏洞研究。'})
+        fb[U]['form']['f'] = [{'q': '求職信', 'src': 'bank', 'k': 'letter'}]
+        page = {'url': U + '/apply', 'fieldContexts': True, 'lines': ['求職信'], 'fields': [
+            {'label': '', 'type': 'textarea', 'context': '求職信', 'value': '您好,我是候選人。我做過計費漏洞研究。'}]}
+        self.assertEqual(apply_tab.page_problems(page, fb, U), [])
+        page['fields'][0]['value'] = '您好,我是候選人。'
+        self.assertTrue(apply_tab.page_problems(page, fb, U))                # 少了一段:照樣擋
+
+    def test_a_dropdown_showing_only_part_of_the_picked_option_still_matches(self):
+        import apply_tab
+        self.assertTrue(apply_tab.matches('Japan +81', '+81', 'box'))         # 選單框裡只顯示國碼
+        self.assertFalse(apply_tab.matches('Japan +81', '+8', 'box'))         # 不是完整的一段
+        self.assertFalse(apply_tab.matches('No, but willing', 'No', 'box'))   # 太短的不算
+        self.assertFalse(apply_tab.matches('Japan +81', '+81', 'option'))     # radio、勾選是整個選項
+        self.assertFalse(apply_tab.matches('Japan +81', '+81'))               # 文字格要整段
+        self.assertTrue(apply_tab.matches('United Kingdom (+44)', '+44', 'option'))
+        self.assertFalse(apply_tab.matches('+44 7700 900123', '+44', 'box'))  # 電話不放寬
+        self.assertTrue(apply_tab.matches('公司徵才頁 / Company career page', 'Company career page'))  # 雙語填一種
+        self.assertFalse(apply_tab.matches('第一段。\n第二段。', '第一段。'))   # 分段的長答案少一段不算
+
+    def test_a_custom_dropdown_shows_its_choice_in_its_own_box(self):
+        # 自製下拉選單(2026-10-06 Greenhouse 實測):瀏覽器給這一格的值是空的,選好的字在同一個框裡;
+        # 播報區「option X, selected.」不算頁面上的字
+        nodes = self.ax(
+            ('RootWebArea', '', None, [2, 3, 6], None),
+            ('StaticText', 'How did you learn about this opportunity?', None, [], None),
+            ('generic', '', None, [4, 5], None),
+            ('StaticText', 'Career Page', None, [], None),
+            ('combobox', 'How did you learn about this opportunity?', None, [], {'expanded': False}),
+            ('generic', '', None, [7], {'live': 'polite'}),
+            ('StaticText', 'option Career Page, selected.', None, [], None),
+        )
+        r = self.read_form(nodes)
+        (f,) = r['fields']
+        self.assertEqual((f['value'], f['shown'], f['choiceControl']), ('Career Page', 'Career Page', True))
+        self.assertNotIn('option Career Page, selected.', r['lines'])
 
     def test_a_text_answer_carrying_an_option_mapping_is_checked_as_text(self):
         import apply_tab
@@ -588,7 +829,9 @@ if (!r.fields.some(f => f.value === '您好,我是候選人' && f.type === 'text
         self.write('fill.png')
         self.write('fill.json', {'fields': [], 'submitted': False, 'tab_id': '7', 'tab_url': U + '/apply', 'handoff': True,
                                  'posting': {'title': 'DevSecOps Engineer', 'same_job': False}})
-        self.assertIn('不是這張卡的職缺', ' '.join(run.check_fill(board(), U, self.d, t0)[0]))
+        bad = run.check_fill(board(), U, self.d, t0, reader=lambda _t: {'url': U + '/apply', 'fields': [], 'lines': []})[0]
+        self.assertIn('不是這張卡的職缺', ' '.join(bad))
+        self.assertNotIn('沒有任何欄位', ' '.join(bad))                     # 沒填就沒欄位:不另外列
 
     def test_same_job_with_a_stale_card_name_is_renamed_keeping_the_link(self):
         path = _env.make_board(os.path.join(self.d, 'b.html'), jobs=[
@@ -626,19 +869,21 @@ if (!r.fields.some(f => f.value === '您好,我是候選人' && f.type === 'text
         lever = {'url': U + '/apply', 'fields': [{'type': 'file', 'value': [], 'label': 'Resume/CV CV'}, {'value': 'Alex Chen'}, {'value': 'Taiwan'}]}
         self.assertEqual(apply_tab.page_problems(lever, fb, U, ['cv.pdf']), [])
         # 程式讀到空的 email 必須擋住;不再套外掛藏個資的例外。
-        hid = {'url': U + '/apply', 'fields': [{'type': 'email', 'value': ''}, {'type': 'text', 'value': 'Someone'}]}
+        hid = {'url': U + '/apply', 'fields': [{'type': 'email', 'label': 'Email', 'value': ''},
+                                               {'type': 'text', 'label': 'Full name', 'value': 'Someone'}]}
         fb2 = board()
         fb2[U]['form']['f'].append({'q': 'Email', 'src': 'rz', 'v': 'you@example.com'})
         probs = apply_tab.page_problems(hid, fb2, U)
         self.assertTrue([p for p in probs if 'Email' in p])
         self.assertTrue([p for p in probs if 'Full name' in p])
         # 中文表單填的是中文翻譯,也算對上;下拉選單看顯示的字
-        zh = {'url': U + '/apply', 'fields': [{'value': 'Alex Chen'}, {'value': '2', 'shown': '台灣'}]}
+        zh = {'url': U + '/apply', 'fields': [{'label': 'Full name', 'value': 'Alex Chen'},
+                                              {'label': 'Nationality', 'value': '2', 'shown': '台灣', 'choiceControl': True}]}
         self.assertEqual(apply_tab.page_problems(zh, fb, U), [])
         # Greenhouse 的 Email 即使是一般文字框也必須有實際值。
         gh = {'url': U + '/apply', 'fields': [
-            {'type': 'text', 'label': 'Email', 'value': 'you@example.com'}, {'value': 'Alex Chen'},
-            {'type': 'text', 'label': 'Country', 'value': '', 'shown': '+44'}]}
+            {'type': 'text', 'label': 'Email', 'value': 'you@example.com'}, {'label': 'Full name', 'value': 'Alex Chen'},
+            {'type': 'combobox', 'label': 'Country', 'value': '', 'shown': '+44', 'choiceControl': True}]}
         fb3 = board()
         fb3[U]['form']['f'] = [{'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'},
                                {'q': 'Email', 'src': 'rz', 'v': 'you@example.com'},
@@ -655,7 +900,9 @@ if (!r.fields.some(f => f.value === '您好,我是候選人' && f.type === 'text
         gh['fields'][-1]['value'] = '+44 7700 900000'
         self.assertEqual(apply_tab.page_problems(gh, fb3, U), [])
         gh['fields'][-1] = {'type': 'text', 'label': 'Mobile', 'value': 'Alex Chen'}
+        gh['lines'] = ['Phone', 'Mobile']           # 題目在頁上,卻沒有一格是它
         self.assertIn('Phone', ' '.join(apply_tab.page_problems(gh, fb3, U)))
+        gh.pop('lines')
         # 104「選擇履歷」不是表單欄位,選好的值只是一行字:整行一樣才算;選到別份還是抓得到
         fb4 = board()
         fb4[U]['form']['f'] = [{'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'},
@@ -772,6 +1019,29 @@ class Dispatch(unittest.TestCase):
         self.assertEqual([call['resume'] for call in calls], ['S1', 'S1'])
         self.assertTrue(all(call['browser_required'] for call in calls))
 
+    def test_an_unreadable_profile_registry_fails_this_card_with_its_reason_instead_of_ending_the_batch(self):
+        # 登記表壞了就不填(指示要列他的平台履歷頁);但卡已經記成正在填,這一張要照實記失敗,批次的下一張照跑
+        import profile_sync as ps
+        fb = board()
+        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
+        with tempfile.TemporaryDirectory(prefix='apply-registry-') as directory:
+            broken = os.path.join(directory, 'profiles.json')
+            with open(broken, 'w', encoding='utf-8') as f:
+                f.write('{"104": ')
+            with fc.installed(fc.FakeDoor('codex', page=copy.deepcopy(FORM_PAGE))), \
+                 patch.object(ps, 'REG', broken), \
+                 patch.object(run, 'load', return_value=(jobs, fb)), \
+                 patch.object(run, 'out_dir', return_value=directory), \
+                 patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
+                 patch.object(run, '_run_agent', side_effect=AssertionError('登記表讀不到還派了 agent')), \
+                 patch.object(run, 'shoot'), \
+                 patch.object(run.agent_report, 'report'), \
+                 patch.object(run.agent_report, 'resolve'):
+                ok, msg = run.run_one('fill', U, '/tmp/board.html')
+        self.assertFalse(ok)
+        self.assertIn('平台履歷登記表讀不出來', msg)
+        self.assertEqual(fb[U]['apply']['issues'], [msg])                  # 卡上是這個原因,不是「這一輪沒跑完」
+
     def test_fill_that_hits_the_time_limit_is_wrapped_up_in_the_same_conversation(self):
         # 填完、交接了分頁,卻在寫交件檔前被 40 分鐘上限砍掉:不整輪作廢,叫回同一段對話把結果寫下來
         fb = board()
@@ -804,90 +1074,40 @@ class Dispatch(unittest.TestCase):
         self.assertIn('時間到了', wrap['prompt'])
         self.assertIn('不要送出', wrap['prompt'])
 
-    def test_fill_handed_to_the_other_vendor_gets_its_own_prompt_and_chrome_check(self):
-        # #288:填表第一家(Codex)額度用完、換手到 Claude:prompt 照 Claude 那一家重組(它自己開頁),
-        # 瀏覽器檢查改做 Claude 的。以前照第一家組的,換手後卡上寫填表卡住
+    def test_a_fill_handed_to_the_other_vendor_keeps_the_same_prompt_and_records_who_filled(self):
+        # #288:填表第一家(Codex)額度用完、換手到 Claude。以前 prompt 照第一家組(交件寫法不同),換手後卡上寫填表卡住。
+        # 現在兩家交件同一種寫法(最後一則訊息就是交件單),同一份 prompt;卡上記的是真的填的那一家
         fb = board()
         jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
         codex = fc.FakeDoor('codex', prepared={'tab_id': '5', 'page': {}})
         claude = fc.FakeDoor('claude-code', agent_id='cc')
         got = []
 
-        def prompt_for(stage, url, j, fb_, board_, note='', profile=None, attachment_download_dir=None, prepared=None,
-                       *, door):
-            return ('FILL prepared=' + ('yes' if prepared else 'no') + ' for ' + door.runtime, self.d)
-
         def agent(prompt, log, home, board_path, **kw):
-            got.append(prompt)
-            got.append(kw['prepare']({'id': 'primary', 'runtime': 'codex'}))
-            got.append(kw['prepare']({'id': 'cc', 'runtime': 'claude-code'}))
-            claude.up = (False, 'ego 指令連不上')
-            with self.assertRaises(ar.AgentStartError):
-                kw['prepare']({'id': 'cc', 'runtime': 'claude-code'})
+            got.append((prompt, kw))
+            with open(kw['output_last_message'], 'w', encoding='utf-8') as f:   # 換手那一家最後一則訊息存成交件單
+                f.write('{"tab_id": "7", "handoff": true, "fields": []}')
             return SimpleNamespace(ok=True, status='completed', agent_id='cc')
 
         self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-handoff-'))
         with fc.installed(codex, claude), \
              patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', side_effect=prompt_for), \
-             patch.object(run, 'profile_check', return_value=None), \
+             patch.object(run, 'prompt_for', return_value=('FILL', self.d)) as built, \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
-             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run, '_profile_check', return_value=[]), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'):
             ok, _message = run.run_one('fill', U, '/tmp/board.html')
-        self.assertTrue(ok)
-        self.assertEqual(got[0], 'FILL prepared=yes for codex')           # 第一家 Codex:程式先開好申請頁
-        self.assertEqual(got[1], got[0])                                  # 同一家不重做
-        self.assertTrue(got[2].startswith('FILL prepared=no for claude-code'))   # 換手那一家照它自己的門路組
-        self.assertEqual([c[0] for c in codex.calls if c[0] in ('ready', 'open_for_agent')], ['ready', 'open_for_agent'])
-        self.assertEqual([c[0] for c in claude.calls if c[0] in ('ready', 'open_for_agent')],
-                         ['ready', 'open_for_agent', 'ready'])
+        self.assertTrue(ok, _message)
+        self.assertEqual(built.call_count, 1)                             # prompt 只組一次,不照換手那一家重組
+        (prompt, kw), = got
+        self.assertEqual(kw['output_last_message'], os.path.join(self.d, 'fill.json'))
+        self.assertNotIn('prepare', kw)
         self.assertEqual(fb[U]['apply']['runtime'], 'claude-code')         # 卡上記的是真的填的那一家
-
-    def test_fix_rechecks_the_platform_profile_and_keeps_it_blocked_on_a_mismatch(self):
-        fb = board()
-        delivery = {
-            'method': 'platform_profile', 'profile_kind': 'fixed',
-            'profile_url': U + '/profile',
-        }
-        fb[U]['ds'] = 'stuck'
-        fb[U]['apply'] = {
-            'stage': 'fill', 'session': 'S1', 'agent_id': 'browser-two', 'runtime': 'codex',
-            'tab_id': '7', 'delivery': delivery,
-        }
-        jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
-        outcome = SimpleNamespace(ok=True, agent_id='browser-two')
-        fix_result = {'delivery': None, 'fixed': ['Summary'], 'tab_id': '7'}
-
-        with tempfile.TemporaryDirectory(prefix='apply-profile-fix-') as directory, \
-             fc.installed(fc.FakeDoor('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
-             loaded(jobs, fb, directory), \
-             patch.object(run, '_run_agent', return_value=outcome), \
-             patch.object(ar, 'session_id', return_value='S1'), \
-             patch.object(run, 'shoot'), \
-             patch.object(run, 'check_fill', return_value=([], fix_result)), \
-             patch.object(run, 'profile_after', return_value=['Summary still differs']) as verify, \
-             patch.object(run.agent_report, 'report') as report, \
-             patch.object(run.agent_report, 'resolve') as resolve:
-            ok, message = run.run_one('fix', U, '/tmp/board.html')
-
-        self.assertFalse(ok)
-        self.assertIn('Summary still differs', message)
-        verify.assert_called_once()
-        # 用哪一份、固定版還是客製版照程式決定的(#313):程式沒登記這一份,就沒有網址可以照 agent 的填
-        checked = verify.call_args.args[1]['delivery']
-        self.assertEqual((checked['method'], checked['profile_kind']), ('platform_profile', 'fixed'))
-        self.assertEqual(ds.state(fb[U]), 'stuck')
-        self.assertEqual(fb[U]['apply']['delivery'], checked)
-        report.assert_called_once()
-        # 開跑時收掉這張的舊回報(作廢)是對的;沒改好就不能用「改好了」把問題收掉
-        self.assertFalse([c for c in resolve.call_args_list if '已經解決' in str(c.args[1])])
-        self.assertTrue([c for c in resolve.call_args_list if '作廢' in str(c.args[1])])   # 重跑時舊的回報收掉,不會越堆越多
 
     def test_preview_is_exactly_what_agent_gets(self):
         """看板按鈕底下顯示的 prompt,跟真的派出去的一字不差。"""
@@ -1042,6 +1262,21 @@ class SubmitOutcomes(unittest.TestCase):
         self.assertIn('不是填這張的那段對話', sf['problems'][0])
         self.assertIsNotNone(fr.approval_problem(self.fb, U, OKST))
 
+    def test_a_crash_after_sending_started_leaves_the_send_result_unknown_with_the_real_reason(self):
+        # 送出開始後程式自己出錯:可能已經按了送出,卡要停在送出結果不明,原因是這次的錯,不是之後收尾寫的「送出途中停掉了」
+        with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, '_run_agent', side_effect=RuntimeError('送出執行器斷線')), \
+             patch.object(run.ship, 'read_info', return_value={}), \
+             patch.object(run.agent_report, 'report'), \
+             patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(self.fb)):
+            ok, msg = run.run_one('submit', U, os.path.join(self.d, 'board.html'))
+        self.assertFalse(ok)
+        self.assertIn('送出執行器斷線', msg)
+        run.settle(self.fb, None)
+        self.assertEqual(ds.state(self.fb[U]), 'unsure')
+        self.assertIn('送出執行器斷線', self.fb[U]['apply']['submit_fail']['problems'][0])
+
     def test_runner_failure_does_not_read_partial_submit_evidence_or_release_tab(self):
         os.makedirs(self.d, exist_ok=True)
         with open(os.path.join(self.d, 'submit.json'), 'w', encoding='utf-8') as f:
@@ -1060,7 +1295,7 @@ class SubmitOutcomes(unittest.TestCase):
         self.assertEqual(self.fb[U]['app'], 'ship')
         self.assertEqual(self.fb[U]['apply']['submit_fail']['runner_outcome'], 'failed')
         check.assert_not_called()
-        self.assertTrue(report.called)
+        report.assert_not_called()          # 送出結果不明不叫他去查:查應徵進度會去查(#389)
 
     def test_the_checklist_is_run_again_the_moment_sending_starts(self):
         """你已確認 → 正在送出 那一刻再跑一次檢查清單(修正 5):按確認之後答案又改了,就不送、留在你已確認。"""
@@ -1112,7 +1347,7 @@ class SubmitOutcomes(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(self.fb[U]['app'], 'ship')
         self.assertTrue(self.fb[U]['apply']['submit_fail']['clicked'])
-        self.assertTrue(report.called)
+        report.assert_not_called()          # 送出結果不明不叫他去查:查應徵進度會去查(#389)
 
 
 
@@ -1145,7 +1380,6 @@ class RoundInProgress(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix='apply-stop-') as directory, \
              loaded(jobs, fb, directory), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
@@ -1187,13 +1421,12 @@ class RoundInProgress(unittest.TestCase):
         cfg = {'auto_fill': True}
 
         def plan():
-            return ap.plan(data, fb, verified_gen=0, build_running=False, running={}, cfg=cfg)
+            return ap.plan(data, fb, running={}, cfg=cfg)
         first = plan()
         self.assertEqual(first['fill'], U)
         fb['__auto__']['tried'] = first['tried']
         down = fc.FakeDoor(up=(False, 'agent 的 Chrome 沒連上'))
         with patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.agent_report, 'resolve'), \
@@ -1219,7 +1452,6 @@ class WriteBackKeepsWhatOthersMarked(unittest.TestCase):
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-writeback-') as directory, \
              loaded(jobs, fb, directory), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S1' if stage == 'fix' else 'S2'), \
              patch.object(run, 'shoot'), \
@@ -1249,11 +1481,71 @@ class WriteBackKeepsWhatOthersMarked(unittest.TestCase):
         self.assertIn('送出沒確認成功', fr.approval_problem(fb, U, OKST))
 
 
+class SelfFix(unittest.TestCase):
+    """填表核對沒過、agent 改得了的:同一隻 agent 在原頁照問題改一次,不停下來等他按「修改」。"""
+
+    def test_a_correctable_fill_failure_gets_one_fix_round(self):
+        rounds = []
+        def round_(stage, url, board, dry, status, note):
+            rounds.append((stage, note))
+            return (False, '頁面上找不到「Nationality」的答案') if stage == 'fill' else (True, '改好了')
+        with patch.object(run, '_run_one_round', side_effect=round_), \
+             patch.object(run, '_self_fixable', return_value=['頁面上找不到「Nationality」的答案 \'taiwan\'']):
+            self.assertEqual(run.run_one('fill', U, '/tmp/b.html'), (True, '改好了'))
+        self.assertEqual([r[0] for r in rounds], ['fill', 'fix'])
+        self.assertTrue(rounds[1][1].startswith(run.SELF_FIX) and 'Nationality' in rounds[1][1])
+        rounds.clear()
+        with patch.object(run, '_run_one_round', side_effect=round_), patch.object(run, '_self_fixable', return_value=[]):
+            self.assertFalse(run.run_one('fill', U, '/tmp/b.html')[0])
+        self.assertEqual([r[0] for r in rounds], ['fill'])                 # 改不了的不自動改
+
+    def test_only_problems_the_agent_can_fix_on_the_page_qualify(self):
+        import apply_tab
+        from gate_cells import Problem
+        # 看問題的種類(程式產生時就標好),不看字:字改了、或別的問題剛好寫成同樣的開頭,判斷都不變
+        def card(**apply):
+            return {U: {'app': 'ship', 'ds': 'stuck', 'apply': dict({'session': 'S1', 'tab_id': '7'}, **apply)}}
+        wrong = Problem('頁面上找不到「Nationality」的答案 \'taiwan\'', 'answer')
+        for fb, issues, want in ((card(), [wrong], [wrong]),
+                                 (card(), [Problem('答案沒打對', 'answer'), Problem('上傳欄裡少一份', 'upload')], 2),
+                                 (card(), [wrong, Problem('卡住:要本人登入', 'stuck')], []),      # agent 自己說卡住
+                                 (card(workspace={'handoff_page': 'p2'}), [wrong], []),           # 停在要本人登入的頁
+                                 (card(), [wrong, '頁面上找不到「平台履歷」的答案'], []),          # 沒標種類(平台履歷核對等)不自動改
+                                 (card(), [apply_tab.HUMAN_CHECK], []),
+                                 (card(tab_id=''), [wrong], []),                                  # 頁已經不在
+                                 (dict(card(), __inbox__=[{'id': 'r1', 'job': U, 'msg': '要登入', 'agent': True}]), [wrong], [])):
+            with patch.object(run, 'load', return_value=({}, fb)):
+                got = run._self_fixable('/tmp/b.html', U, issues)
+                self.assertEqual(len(got) if isinstance(want, int) else got, want)
+
+    def test_a_wrong_answer_the_page_check_finds_gets_one_fix_round(self):
+        # #387:填表核對讀到 Nationality 不是答案(agent 改得了),同一隻 agent 接著在原頁改一次。
+        # 問題的種類從 page_problems 一路帶到 run_one 的那一輪結果,中間沒被變回純字
+        import apply_tab
+        fb = board()
+        page = copy.deepcopy(FORM_PAGE)
+        page['fields'][1]['value'] = 'Japan'
+        res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
+        rounds = []
+        with tempfile.TemporaryDirectory(prefix='apply-selffix-') as d, fc.installed(fc.FakeDoor()), \
+             loaded({U: {'id': U, 'target': 'Example · Engineer'}}, fb, d), \
+             patch.object(run, 'prompt_for', side_effect=lambda stage, url, job, fb_, board_, note='', **k:
+                          rounds.append((stage, note)) or ('prompt', d)), \
+             patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
+             patch.object(ar, 'session_id', return_value='S1'), patch.object(run, 'shoot'), \
+             patch.object(run, 'check_fill', side_effect=lambda fb_, url, *a, **k: (apply_tab.page_problems(page, fb_, url), res)), \
+             patch.object(run.agent_report, 'report'):
+            run.run_one('fill', U, '/tmp/board.html')
+        self.assertEqual([stage for stage, _ in rounds], ['fill', 'fix'])
+        self.assertTrue(rounds[1][1].startswith(run.SELF_FIX) and 'Nationality' in rounds[1][1])
+
+
 class RefillOnlyClosesItsOwnReports(unittest.TestCase):
     """重填、修改只收「代投」自己的回報:客製流程、可投遞夾建置那些不是填表解決的,不能寫成「作廢」「已經解決」。
     送出沒確認成功要他確認過才收;送出前平台履歷比對沒過,重填、改好了就算解決。"""
 
     def test_login_popup_reports_its_website_and_keeps_the_application_page_for_resume(self):
+        from gate_cells import Problem
         fb = board()
         workspace = {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}
         fake = fc.FakeDoor(prepared={'workspace': workspace, 'tab_id': '42:p1', 'page': FORM_PAGE})
@@ -1262,10 +1554,10 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
         result = {'tab_id': '42:p1', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory() as directory, fc.installed(fake), \
              loaded({U: {'id': U, 'target': 'Example · Engineer'}}, fb, directory), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S2'), patch.object(run, 'shoot'), \
-             patch.object(run, 'check_fill', return_value=(['LinkedIn 登入尚未完成'], result)), \
+             patch.object(run, 'check_fill', return_value=([Problem('卡住:要本人登入', 'stuck'), Problem('申請表少了「cv.pdf」', 'upload')],
+                                                           result)), \
              patch.object(run.agent_report, 'report') as report:
             ok, _ = run.run_one('fill', U, '/tmp/board.html')
         self.assertFalse(ok)
@@ -1274,21 +1566,23 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
         self.assertEqual(fb[U]['apply']['workspace']['page'], 'p1')
         self.assertEqual(fb[U]['apply']['workspace'].get('handoff_page'), 'p2')
         self.assertIn('在 www.linkedin.com 完成登入', '\n'.join(fb[U]['apply']['issues']))
+        self.assertIn('卡住:要本人登入', fb[U]['apply']['issues'])
+        self.assertNotIn('申請表少了「cv.pdf」', fb[U]['apply']['issues'])      # 還沒登入就還沒開始填:不另外列
         self.assertIn('在 www.linkedin.com 完成登入', report.call_args.kwargs['need'])
         self.assertIn('修改', report.call_args.kwargs['need'])
 
-    def test_other_flows_and_uncertain_submits_stay_open(self):
+    def test_other_flows_stay_open(self):
+        # 「送出沒確認成功」那類回報現在不會再產生(送出結果不明記在卡上、由查應徵進度查);
+        # 那張卡在查清楚之前狀態表也不准重填,所以重填只收自己流程(代投)的
         import agent_report
         fb = filled('stuck')
         for src, msg in (('客製流程', '沒有可收下的客製版'), ('可投遞夾建置', '可投遞夾本輪建置失敗'),
-                         ('代投', '送出前平台履歷或附件比對沒通過:附件不符'), ('代投', '送出沒確認成功:沒看到成功頁面'),
-                         ('代投', '填表沒完成:舊的')):
+                         ('代投', '送出前平台履歷或附件比對沒通過:附件不符'), ('代投', '填表沒完成:舊的')):
             agent_report.apply_report(fb, src, msg, job=U, now='2026-01-01T00:00:00')
         jobs = {U: {'id': U, 'target': 'X'}}
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-reports-') as directory, \
              loaded(jobs, fb, directory), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S2'), \
              patch.object(run, 'shoot'), \
@@ -1296,7 +1590,7 @@ class RefillOnlyClosesItsOwnReports(unittest.TestCase):
              fc.installed(fc.FakeDoor()):
             self.assertTrue(run.run_one('fill', U, '/tmp/board.html')[0])
         still = sorted(it['msg'] for it in fb['__inbox__'] if not it.get('done'))
-        self.assertEqual(still, ['可投遞夾本輪建置失敗', '沒有可收下的客製版', '送出沒確認成功:沒看到成功頁面'])
+        self.assertEqual(still, ['可投遞夾本輪建置失敗', '沒有可收下的客製版'])
 
 
 class RetypedMarksOnly(unittest.TestCase):
@@ -1357,7 +1651,6 @@ class EachCardIsCheckedWhenItsTurnComes(unittest.TestCase):
         fb = filled('parked')                                # 排進這一批之後,他已經看過、停著等確認
         launched = []
         with patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', side_effect=lambda *a, **k: launched.append(1)), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \
              patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
@@ -1377,7 +1670,6 @@ class SubmittedWhileFilling(unittest.TestCase):
                'confirm_text': 'Application received'}
         with tempfile.TemporaryDirectory(prefix='apply-violation-') as directory, \
              loaded(jobs, fb, directory), \
-             patch.object(run, 'profile_check', return_value=None), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S2'), \
              patch.object(run, 'shoot'), \
@@ -1401,8 +1693,7 @@ class SubmittedWhileFilling(unittest.TestCase):
                 json.dump({'submitted': None, 'clicked': False, 'reason': '無法確認本次是否已收到'}, f)
             checked = run.check_fill(fb, U, directory, 0)
             self.assertTrue(checked[1]['submit_claimed'])
-            with patch.object(run, 'profile_check', return_value=None), \
-                 patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
+            with patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
                  patch.object(ar, 'session_id', return_value='S2'), patch.object(run, 'shoot'), \
                  patch.object(run, 'check_fill', return_value=checked), \
                  patch.object(run.ship, 'read_info', return_value={}), \
@@ -1515,7 +1806,8 @@ class PreparedPageIsNotReloaded(unittest.TestCase):
         prompt = run.FILL + run.FIX + run.SUBMIT + run.BATCH_FILL + run.OPEN_STEP
         for obsolete in ('markHandoff', 'cua.', 'getByLabel', 'setChecked', 'curl multipart', '外掛'):
             self.assertNotIn(obsolete, prompt)
-        self.assertIn('snapshot', run.BATCH_FILL)
+        self.assertIn('--fill', run.BATCH_FILL)          # 配好的格子程式自己填(form_plan --fill)
+        self.assertIn('--set', run.BATCH_FILL)
         self.assertIn('check', run.BATCH_FILL)
 
     def test_prompt_tells_the_truth_about_the_old_tabs(self):
@@ -1523,6 +1815,89 @@ class PreparedPageIsNotReloaded(unittest.TestCase):
                                   'tab_id': '42:p1', 'page': {}})
         self.assertNotIn('關了', step)
         self.assertIn('其他卡與使用者的分頁不要動', step)
+
+
+class Blocking(unittest.TestCase):
+    """填表沒成功時,擋住它的是職缺或網站的事實才記成 block(職缺關了或換了、要本人登入);程式或 agent 的錯不記(#446)。"""
+
+    def test_only_facts_about_the_job_or_site_block_a_card(self):
+        closed = {'posting': {'same_job': False, 'title': '別的職缺'}}
+        self.assertEqual(run.blocking(['卡住'], closed, None)['kind'], 'posting')
+        self.assertIn('別的職缺', run.blocking(['卡住'], closed, None)['text'])
+        self.assertEqual(run.blocking(['要登入'], {}, {'need': '在那一頁登入', 'page': 'https://x'}),
+                         {'kind': 'human', 'text': '在那一頁登入'})
+        self.assertIsNone(run.blocking(['沒有這一輪的截圖'], {'posting': {'same_job': True}}, None))
+        self.assertIsNone(run.blocking([], closed, None))
+
+
+class StaleFolderIsNotSent(unittest.TestCase):
+    """卡上換了履歷、可投遞夾還是舊的那一份:不派 agent,不然它把舊檔傳上去,卡上還寫填好了(#448)。"""
+
+    def test_fill_and_fix_wait_for_the_rebuild(self):
+        for stage in ('fill', 'fix'):
+            fb = board()
+            fb[U]['apply'] = {'session': 'S1', 'agent_id': 'browser-two', 'runtime': 'codex'}
+            jobs = {U: {'id': U, 'target': 'Example · Engineer'}}
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as d, \
+                    fc.installed(fc.FakeDoor('codex', agent_id='browser-two', page=copy.deepcopy(FORM_PAGE))), \
+                    loaded(jobs, fb, d), patch.object(run.agent_report, 'report'), \
+                    patch('ship.chosen_not_built', return_value='看板選的是 B 版,可投遞夾裡是 A 版'), \
+                    patch.object(ar, 'run') as agent:
+                ok, msg = run.run_one(stage, U, '/tmp/board.html')
+                self.assertFalse(ok)
+                self.assertIn('可投遞夾還沒照卡上的選擇建好', msg)
+                agent.assert_not_called()
+
+
+class TakeUnmet(unittest.TestCase):
+    """agent 列的不符(#449):不寄的附件記在卡上(值是原句),要改的檔排一輪自動客製,指示就是那句要求。"""
+
+    def test_drop_and_adapt_become_card_changes(self):
+        fb = {U: {'app': 'ship'}}
+        info = {'files': ['cv.pdf', 'a.pdf'], 'sources': {'resume:r:zh': 'cv.pdf', 'attachment:att-a': 'a.pdf'}}
+        docs = [{'id': 'resume:r:zh', 'kind': 'resume', 'name': '履歷'}, {'id': 'attachment:att-a:zh', 'kind': 'attachment', 'name': 'A'}]
+        unmet = [{'quote': '履歷兩頁以內', 'file': 'a.pdf', 'act': 'drop'},
+                 {'quote': '履歷兩頁以內', 'file': 'cv.pdf', 'act': 'adapt', 'why': '內文提到附件'}]
+        with patch('ship.info', return_value=info), patch('ship.documents', return_value=docs):
+            queued = run.take_unmet(fb, U, {'id': U}, unmet)
+        self.assertEqual(fb[U]['drop_att'], {'att-a': '履歷兩頁以內'})
+        self.assertEqual(queued, ['resume:r:zh'])
+        entry = fb[U]['custom_docs']['resume:r:zh']
+        self.assertEqual((entry['status'], entry['auto']), ('queued', True))
+        self.assertIn('「履歷兩頁以內」', entry['feedbacks'][0]['text'])
+
+
+class LiveViewIsNotEvidence(unittest.TestCase):
+    """👀 看現在的頁面每幾秒截一次:不記成證據的一輪,不然每張卡只留 30 輪,題目附的截圖會被擠掉(#447)。"""
+
+    def test_live_shots_open_no_round_but_reads_do(self):
+        import apply_tab
+        door = unittest.mock.Mock()
+        for cmd, rounds in (('shot', 0), ('read', 1)):
+            with self.subTest(cmd=cmd), patch.object(sys, 'argv', ['apply_tab', cmd, '--url', 'https://x/1']), \
+                    patch.object(apply_tab, '_lookup', return_value=('t', door)), \
+                    patch('evidence.opened') as opened, patch('builtins.print'):
+                door.read_page.return_value = {}
+                apply_tab.main()
+                self.assertEqual(opened.call_count, rounds)
+
+
+class EvidenceStaysWhileUsed(unittest.TestCase):
+    """每張卡只留最近幾輪,但看板還指著的那一輪(題目、卡上附的截圖)不刪;讀不到看板就都不刪(#447)。"""
+
+    def test_prune_keeps_rounds_the_board_points_at(self):
+        import evidence
+        home = tempfile.mkdtemp()
+        names = [f'20260101-0000{i:02d}-000000-apply-fill' for i in range(evidence.KEEP + 3)]
+        for n in names:
+            os.makedirs(os.path.join(home, n))
+        board = '{"ev": {"f": "' + names[1] + '/shot-1.png"}}'
+        with patch('board_doc.read_doc', return_value=board):
+            evidence._prune(home)
+        self.assertEqual(sorted(os.listdir(home)), sorted([names[1]] + names[3:]))
+        with patch('board_doc.read_doc', side_effect=OSError('讀不到')), patch('builtins.print'):
+            evidence._prune(home)
+        self.assertIn(names[1], os.listdir(home))
 
 
 if __name__ == '__main__':
@@ -1535,6 +1910,7 @@ class PauseDoesNotEatTheTimeLimit(unittest.TestCase):
     def test_paused_time_is_not_counted(self):
         sp = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-pause-'))
         status = os.path.join(sp, run.STATUS)
+        run.jobrun.write(status, {'phase': 'fill'})          # 這一輪派 agent 前先寫進度(真的流程一定先寫)
         started = time.monotonic()
 
         class Agent:
@@ -1626,7 +2002,7 @@ class LateResult(unittest.TestCase):
              patch.object(ar, 'session_id', return_value='S9'), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', return_value=([], {'tab_id': '7'})), \
-             patch.object(run, '_profile_check_after_fill', return_value=[]), \
+             patch.object(run, '_profile_check', return_value=[]), \
              patch.object(run.agent_report, 'report'), patch.object(run.agent_report, 'resolve'):
             run.run_one('fill', U, '/tmp/board.html')
         self.assertEqual(ds.state(fb[U]), 'sent')

@@ -123,7 +123,7 @@ def create_skill(name, content, kind=''):
     return {'path': rel, 'name': name, 'kind': kind}, ''
 
 
-def get():
+def get(board=None):
     import chrome_door
     import doctor
     import prefs
@@ -152,7 +152,7 @@ def get():
         'doctor': doctor.check_environment(),
         'service': os.path.exists(__import__('install_service').plist_path()),
         'render_warnings': render_warnings,
-        'profile_status': profile_sync.status(),   # 平台上那份履歷跟母稿的關係,母稿一改就變
+        'profile_status': profile_sync.status(board),
         'git_history': _git_history_status(),
         'version': version(),          # 放最後:上面讀設定時可能順手把舊格式改寫進檔
     }
@@ -427,6 +427,43 @@ def _check_files(item, label, langs, bad):
         bad.append(f'{label} 的樣式檔只能用已設定語言的 CSS 路徑')
 
 
+def _check_send_names(r, resumes, attachments, langs, bad):
+    """送出檔名(公司申請頁上看到的):內容不同的檔不能同名,不然他在申請頁上看檔名分不出送的是哪一份。"""
+    used = {}
+    for kind, items in (('履歷', resumes), ('附件', attachments)):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            names = item.get('send_names') or {}
+            label = f'{kind}「{item.get("name") or item.get("id")}」'
+            if not isinstance(names, dict) or any(not isinstance(v, str) for v in names.values()):
+                bad.append(f'{label} 的送出檔名格式不對')
+                continue
+            for lang, name in names.items():
+                name = name.strip()
+                if not name:
+                    continue
+                if lang not in langs:
+                    bad.append(f'{label} 有沒勾的語言({lang})的送出檔名')
+                if re.search(r'[/\\:\x00-\x1f]', name) or name in ('.', '..'):
+                    bad.append(f'{label} 的送出檔名「{name}」不能有 / \\ : 或控制字元')
+                key = os.path.splitext(name)[0].casefold()     # 不分語言:中英版同名,申請頁上一樣分不出
+                if key in used and used[key] != (kind, item.get('id'), lang):
+                    bad.append(f'送出檔名「{name}」重複了:內容不同的檔取不同名字,你在申請頁上才分得出送的是哪一份')
+                used.setdefault(key, (kind, item.get('id'), lang))
+    template = r.get('merged_name', '')
+    if not isinstance(template, str):
+        bad.append('合併檔名稱格式不對')
+    elif template.strip():
+        if re.search(r'\{(?!resume\}|n\})[^}]*\}', template):
+            bad.append('合併檔名稱只能用 {resume}(履歷的送出檔名)和 {n}(附件數)')
+        if re.search(r'[/\\:\x00-\x1f]', template):
+            bad.append('合併檔名稱不能有 / \\ : 或控制字元')
+        enabled = [x for x in resumes if isinstance(x, dict) and x.get('enabled', True)]
+        if len(enabled) > 1 and '{resume}' not in template:
+            bad.append('合併檔名稱要有 {resume}:不然不同履歷的合併檔同名,申請頁上分不出送的是哪一份')
+
+
 def _check(settings):
     """擋掉會讓程式壞掉的設定;回問題清單。"""
     bad = []
@@ -527,14 +564,14 @@ def _check(settings):
         if not isinstance(eligible, list) or any(not isinstance(rid, str) or not SLUG.match(rid) for rid in eligible):
             bad.append(f'附件 {aid!r} 的履歷限制格式不對')
 
+    _check_send_names(r, resumes, attachments, langs, bad)
+
     fl = settings.get('flow') or {}
     if not isinstance(fl, dict):
         bad.append('自動流程設定格式不對')
     else:
-        if fl.get('replies_at'):
-            at = re.fullmatch(r'([0-9]{1,2}):([0-9]{2})', str(fl['replies_at']))
-            if not at or int(at.group(1)) > 23 or int(at.group(2)) > 59:
-                bad.append('每天查應徵進度的時間要寫成 09:00 這種格式,或留空不自動查')
+        if fl.get('replies_at') and not cf.clock(fl['replies_at']):
+            bad.append('每天查應徵進度的時間要寫成 09:00 這種格式,或留空不自動查')
         cap = fl.get('fill_max')
         if cap not in (None, '') and not re.fullmatch(r'[0-9]{1,3}', str(cap).strip()):
             bad.append('自動填表最多停幾張要寫數字(0 是不限,空的照預設 5)')

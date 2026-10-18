@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -317,8 +318,9 @@ class GoneSweepInLock(Tmp):
         old_gone = lambda fb, *a, **k: [u for u, m in fb.items()                       # noqa: E731 — 只有舊工作區不在了
                                         if ((m.get('apply') or {}).get('workspace') or {}).get('id') == self.OLD['id']]
         pilot = ap.Pilot(self.path, None, lambda k: {}, None, lambda: True)
-        with mock.patch.object(chrome_door, 'gone_pages', old_gone):
-            pilot._sweep_gone(snapshot)
+        import board_doc as bd
+        with mock.patch.object(chrome_door, 'gone_pages', old_gone), mock.patch.object(bd, 'LIVE', self.path):
+            pilot._sweep_gone(snapshot)                             # 這份是現行看板(副本 sweep_gone 不動)
 
     def test_a_page_filled_after_the_snapshot_is_not_marked_gone(self):
         self.seed(self.OLD)
@@ -427,6 +429,19 @@ class BackgroundBuild(Tmp):
         self.assertEqual(len(calls), 2)
         self.assertEqual(self.bs._build_state['gen'], gen + 2)
 
+    def test_the_flow_sees_when_the_last_finished_round_started(self):
+        # 自動流程照「最近跑完那一輪幾點開始」判斷卡進待你決定之後驗收跑過了沒;沒跑完的那一輪只算試過
+        codes = iter([0, 1])
+        before = time.time()
+        with mock.patch('subprocess.run', side_effect=lambda *a, **k: mock.Mock(returncode=next(codes))):
+            self.bs.trigger_build(); self.wait_idle()
+            done = self.bs.build_state()
+            self.bs.trigger_build(); self.wait_idle()
+        failed = self.bs.build_state()
+        self.assertGreaterEqual(done['built'], before)
+        self.assertEqual(failed['built'], done['built'])
+        self.assertGreater(failed['tried'], done['built'])
+
     def test_a_sandbox_never_builds(self):
         with mock.patch.object(bd, 'LIVE', os.path.join(self.dir, 'other.html')), \
              mock.patch('subprocess.run', side_effect=AssertionError('副本不該建')):
@@ -440,6 +455,16 @@ class SandboxPageLost(Tmp):
         with mock.patch.multiple(bs, STATE=self.path, is_real=lambda: False), \
              mock.patch.object(bd, 'set_fb', side_effect=AssertionError('副本不該改')):
             self.assertEqual(bs.agent_swapped(U, '換掉了'), '')
+
+    def test_a_sandbox_is_never_swept_whoever_calls(self):
+        # ego 整台電腦只有一個,副本的卡不是它填的:不問 ego、不動副本的卡(以前每個呼叫端自己先問,👀 那條忘了問過,c49541a)
+        import chrome_door
+        make_board(self.path, {U: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '1:p1',
+                                                                          'workspace': {'id': 1, 'name': 'w', 'page': 'p1'}}}})
+        with mock.patch.object(bd, 'LIVE', os.path.join(self.dir, 'other.html')), \
+             mock.patch.object(chrome_door, '_ego', side_effect=AssertionError('副本不該問 ego')):
+            self.assertEqual(chrome_door.sweep_gone(self.path, unreachable=True), {})
+        self.assertEqual(read_fb(self.path)[U]['ds'], 'parked')
 
 
 

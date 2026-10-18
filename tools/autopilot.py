@@ -11,6 +11,8 @@ Chrome 沒連的檢查都一樣)。
   準備區有新卡        → 跑準備區(cut_tailor)
   待你決定、驗收過了  → 推到可投遞(跟「🚀 全部變成可投遞」同一條規則;被擋的留著、原因寫在卡上)
   可投遞、還沒填過    → 讓 agent 填這一張(一次一張,停在送出前)
+  回報按了處理好了    → 那張沒填成、卡住、頁不見的接著重填(next_step.handed,同一則只接一次)
+  送出結果不明        → 送出一小時後查應徵進度查這一張:查到證據改已投出,查完沒有改成要重填
   填好了、答案又改過  → 他停手一分鐘後,叫回填這張的 agent 照新答案重打(一次一張)
   每天 flow.replies_at → 查回音;那一輪沒跑成(failed/died),當天每小時再試一次,最多再試 REPLY_RETRY_MAX 次
 
@@ -23,14 +25,16 @@ Chrome 沒連的檢查都一樣)。
     不拿舊的驗收結果放行。
 狀態記在標記的 __auto__(跟看板同一份檔,手機電腦都看得到,流水帳查得到)。
 """
-import copy, datetime, json, re, threading, time
+import copy, datetime, json, threading, time
 
 import board_doc as bd
+import jobrun
 import delivery_state as ds
 import config as cf
 import next_step
 
 KEY = '__auto__'
+CRASH = '自動流程這一步出錯了:'
 # 排程的查應徵進度沒跑成:隔多久再試、當天最多再試幾次(#289 決定)。看板那一列用同一組數字寫「幾點再試」
 REPLY_RETRY_MAX = 3
 REPLY_RETRY_GAP = 3600
@@ -47,19 +51,21 @@ def flow_modes(cfg):
     return {key: bool(cfg.get(key)) for key in ('auto_prep', 'auto_advance', 'auto_fill')}
 
 
-def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, real=True, replies_last=None,
+def plan(data, fb, *, running, build=None, now=None, cfg=None, real=True, replies_last=None,
          add_waiting=0, add_last=None):
     """看現在的看板,決定要替他按哪幾下。純函式:不寫檔、不派東西(測試直接測它)。
 
-    verified_gen:伺服器建置(reconcile,含投遞前驗收)已經跑完幾輪;build_running:現在有沒有在跑。
-    running:{'prep': bool, 'apply': bool, 'replies': bool}。real:是不是真的看板(副本沒有建置)。
+    build:伺服器建置(reconcile,含投遞前驗收)的狀態,{'built': 最近跑完那一輪幾點開始的, 'tried': 最近一輪(不管跑完沒)
+    幾點開始的, 'running': 現在有沒有在跑}。running:{'prep': bool, 'apply': bool, 'replies': bool}。
+    real:是不是真的看板(副本沒有建置)。
     replies_last:上一輪查應徵進度的狀態(phase、finished_at/t0),沒跑成的當天要不要再試看它。
     add_waiting、add_last:貼網址加入上次 agent 都不能用、存著還沒寫卡片的張數,和上一輪的狀態。
-    回傳 {'init':第一次的 __auto__ 或 None, 'seen':{id: 要等到第幾輪}, 'advance':[ids],
-          'prep': 'all'|[id]|None, 'fix': id|None, 'fill': id|None, 'replies': bool, 'replies_retry': bool, 'add': bool, 'tried':[key],
+    回傳 {'init':第一次的 __auto__ 或 None, 'seen':{id: 幾點看到它進待你決定}, 'advance':[ids], 'build': 要不要補建一輪,
+          'prep': 'all'|[id]|None, 'fix': id|None, 'fill': id|None, 'unsure': 送出結果不明要查的那一張|None, 'replies': bool, 'replies_retry': bool, 'add': bool, 'tried':[key],
           'rf':{id: {sig, since}} 新看到的待重打, 'wait': 幾秒後再看一次(等他停手)|None}。"""
     cfg = cfg or flow()
     now = now or datetime.datetime.now()
+    build = build or {'built': 0, 'tried': 0, 'running': False}
     auto = fb.get(KEY) if isinstance(fb.get(KEY), dict) else None
     jobs = {j['id']: j for j in data.get('jobs') or []}
 
@@ -70,8 +76,9 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
     def live(i):
         return i in jobs and ds.app_of(fb.get(i)) != 'rm'
 
-    out = {'init': None, 'seen': {}, 'advance': [], 'prep': None, 'fix': None, 'fill': None, 'replies': False, 'replies_retry': False,
-           'add': False,
+    out = {'init': None, 'seen': {}, 'advance': [], 'build': False, 'prep': None, 'fix': None, 'fill': None, 'unsure': None,
+           'customize': None, 'accept': [],
+           'replies': False, 'replies_retry': False, 'add': False,
            'tried': [], 'rf': {}, 'wait': None}
     # 貼網址加入上次 agent 都不能用、存著還沒寫的:隔一小時自己接著寫(是他自己貼的,不管自動流程開沒開)
     last = add_last or {}
@@ -84,23 +91,27 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
                        'seen': {}, 'flow': flow_modes(cfg)}
         return out
     tried, seen = set(auto.get('tried') or []), auto.get('seen') or {}
-    nexts = next_step.of(fb, data.get('jobs'), data.get('status'), flow=cfg, now=now, real=real,
-                         gen=verified_gen, building=build_running)
+    nexts = next_step.of(fb, data.get('jobs'), data.get('status'), flow=cfg, now=now, real=real, build=build)
 
     def does(i):
         return (nexts[i]['auto'] or {}).get('do') if i in nexts else None
 
     if cfg.get('auto_advance'):
         for i in jobs:
-            # 新進待你決定的卡:記下要等到第幾輪建置(這張進來之後才開始、或正在跑的那一輪);被把關擋住的也記,
-            # 有新的才補建一輪。推過一次、他又手動退回來的,留在原地
+            # 新進待你決定的卡:記下幾點看到的,要等這之後才開始的那一輪建置跑完;被把關擋住的也記。
+            # 推過一次、他又手動退回來的,留在原地
             if stage(i) == 'ready' and i not in seen and next_step.mine(fb, jobs[i]) and ('adv:' + i) not in tried:
-                out['seen'][i] = verified_gen + (1 if build_running else 0)
+                out['seen'][i] = now.timestamp()
         # 推哪幾張、等不等驗收跑完只照下一步(被投遞前把關擋住的留著,原因寫在卡上)
         for i, x in nexts.items():
             if does(i) == 'advance' and not x['auto']['wait']:
                 out['advance'].append(i)
                 out['tried'].append(x['auto']['mark'])
+        # 有卡在等建置,而看到它之後還沒有開始過任何一輪(剛進來、伺服器重開過):補建一輪。
+        # 開始過但沒跑完的(來源壞了)不在這裡重試,改了東西存檔會再建
+        since = dict(seen, **out['seen'])
+        out['build'] = not build['running'] and any(
+            does(i) == 'advance' and x['auto']['wait'] and float(since[i]) >= build['tried'] for i, x in nexts.items())
 
     if cfg.get('auto_prep') and not running.get('prep'):
         todo = [i for i in jobs if does(i) == 'prep']
@@ -112,7 +123,7 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
             out['tried'] += ['prep:' + i for i in batch]
 
     # 幫你填表和查應徵進度都用 agent 的 Chrome,一邊收尾會把 Chrome 關掉:一次只排一件
-    chrome_busy = running.get('apply') or running.get('replies')
+    chrome_busy = any(running.get(k) for k in jobrun.BROWSER_JOBS)
 
     if cfg.get('auto_fill') and not chrome_busy:
         # 先重打:這幾張離確認只差一步。只重打停著等你的(填好了):卡住的原因在卡上等他;
@@ -132,6 +143,18 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
             out['fix'] = i
             break
 
+    if cfg.get('auto_fill'):
+        # 要寄的檔跟職缺要求不符(#449):自動客製(不用 Chrome,跟填表可以同時)、通過的自動收下、可投遞夾補建
+        for i, x in nexts.items():
+            x = x['auto'] or {}
+            if x.get('do') == 'customize' and not running.get('customize') and not out['customize']:
+                out['customize'] = {'url': i, 'items': x['items']}
+                out['tried'].append(x['mark'])
+            elif x.get('do') == 'accept':
+                out['accept'].append((i, x['items']))
+            elif x.get('do') == 'build':
+                out['build'] = True
+
     if cfg.get('auto_fill') and not chrome_busy and not out['fix']:
         # 填哪一張只照下一步(next_step 的 auto):卡上寫「排隊中、會自動重填」的就是這幾張,停著的頁上限也在那裡算
         for i, x in nexts.items():
@@ -140,24 +163,38 @@ def plan(data, fb, *, verified_gen, build_running, running, now=None, cfg=None, 
                 out['tried'].append(x['auto']['mark'])
                 break
 
-    at = str(cfg.get('replies_at') or '').strip()
-    mt = re.fullmatch(r'([0-9]{1,2}):([0-9]{2})', at)
-    if mt and int(mt.group(1)) < 24 and int(mt.group(2)) < 60 and not chrome_busy \
-            and not out['fill'] and not out['fix']:
-        due = now.replace(hour=int(mt.group(1)), minute=int(mt.group(2)), second=0, microsecond=0)
-        today = now.date().isoformat()
-        retry = auto.get('replies_retry') if isinstance(auto.get('replies_retry'), dict) else {}
-        last = replies_last or {}
-        ended = last.get('finished_at') or last.get('t0')
+    today = now.date().isoformat()
+    retry = auto.get('replies_retry') if isinstance(auto.get('replies_retry'), dict) else {}
+    last = replies_last or {}
+    ended = last.get('finished_at') or last.get('t0')
+    # 今天排程那一輪沒跑成、今天還會再試(沒試滿 REPLY_RETRY_MAX 次):送出結果不明的卡交給那一輪一起查,不另外排
+    # (單查一張會蓋掉那一輪的結果,看起來像跑成了,其他卡今天就不再試)。試滿了就照常單查
+    retry_left = (auto.get('replies_day') == today and last.get('phase') in ('failed', 'died')
+                  and isinstance(ended, (int, float))
+                  and datetime.datetime.fromtimestamp(ended).date() == now.date()
+                  and (retry.get('n', 0) if retry.get('day') == today else 0) < REPLY_RETRY_MAX)
+    if not chrome_busy and not out['fill'] and not out['fix'] and not retry_left:
+        # 送出結果不明的卡:按下送出過了 UNSURE_WAIT(確認信來得及到),就叫查應徵進度去信箱和平台應徵紀錄查這一張。
+        # 每一次送出只查一次(記號帶送出時間);沒查出結果的,每天那一輪查應徵進度會再一起查
+        import reply_run
+        for i in reply_run.unsure_cards(fb):
+            tried_at = reply_run.submit_tried_at(fb[i])
+            mark = 'unsure:' + i + ':' + tried_at
+            t = reply_run._local_time(tried_at)
+            due = t is None or (now - t).total_seconds() >= reply_run.UNSURE_WAIT
+            if due and mark not in tried and i in jobs:
+                out['unsure'] = i
+                out['tried'].append(mark)
+                break
+
+    at = cf.clock(cfg.get('replies_at'))
+    if at and not chrome_busy and not out['fill'] and not out['fix'] and not out['unsure']:
+        due = now.replace(hour=at[0], minute=at[1], second=0, microsecond=0)
         # 今天排程那一輪已經開跑過:只有上一輪是今天沒跑成的(不是部分完成),隔滿一小時、今天還沒再試滿幾次,才再試
-        again = (auto.get('replies_day') == today and last.get('phase') in ('failed', 'died')
-                 and isinstance(ended, (int, float))
-                 and datetime.datetime.fromtimestamp(ended).date() == now.date()
-                 and now.timestamp() - ended >= REPLY_RETRY_GAP
-                 and (retry.get('n', 0) if retry.get('day') == today else 0) < REPLY_RETRY_MAX)
+        again = retry_left and now.timestamp() - ended >= REPLY_RETRY_GAP
         if now >= due and (auto.get('replies_day') != today or again):
-            waiting = [i for i in jobs if stage(i) == 'sent' and live(i)
-                       and (fb.get(i) or {}).get('oc') not in ('rej', 'wd')]
+            waiting = [i for i in jobs if (stage(i) == 'sent' and (fb.get(i) or {}).get('oc') not in ('rej', 'wd')
+                                           or stage(i) == 'ship' and ds.state(fb.get(i)) == 'unsure') and live(i)]
             out['replies'] = bool(waiting)
             out['replies_retry'] = bool(waiting and again)
     return out
@@ -172,8 +209,8 @@ class Pilot:
         self._lock = threading.Lock()
         self._step_lock = threading.RLock()
         self._timer = None
-        self._fresh = True
         self._stopped = False
+        self._crash_cleared = False
         self.last = {}
 
     def kick(self, delay=1.5):
@@ -201,13 +238,25 @@ class Pilot:
     def _safe_step(self):
         if self._stopped:
             return
+        started = datetime.datetime.now().isoformat(timespec='seconds')
+        # 這個行程第一次整步跑完、或上一次出錯:收掉之前的「這一步出錯了」(伺服器重開前留下的也算)
+        recheck = not self._crash_cleared or bool((self.last or {}).get('error'))
         try:
             self.step()
         except Exception as e:  # noqa: BLE001 — 自動流程最外層:出錯不能拖垮伺服器、下一次觸發再試,原因照實寫進看板的回報
             self.last = {'error': str(e)[:200], 't': time.time()}
             if self.report:                          # 同一句還沒處理前再報只加次數,不會每分鐘洗版
-                self.report('自動流程', f'自動流程這一步出錯了:{type(e).__name__}: {str(e)[:160]}',
+                self.report('自動流程', CRASH + f'{type(e).__name__}: {str(e)[:160]}',
                             need='下一次存檔或每分鐘會再試;一直出現就重開看板伺服器')
+            return
+        if recheck and self.report:
+            # 之前那幾則講的是已經不在的問題(多半是程式改版前的錯)
+            import agent_report
+            agent_report.resolve(None, '後來自動流程整步跑完沒出錯', live=self.state, src='自動流程', before=started,
+                                 only=lambda it: str(it.get('msg', '')).startswith(CRASH))
+            self._crash_cleared = True
+            if (self.last or {}).get('error'):
+                self.last = {}
 
     def _sync_flow(self, data, fb):
         a = fb.get(KEY)
@@ -279,23 +328,14 @@ class Pilot:
         with open(self.state, encoding='utf-8') as f:
             p = bd.parse(f.read())
         fb = json.loads(p['fb'])
-        if self._fresh:
-            # seen 的世代只在本次服務程序有效；重啟後清掉舊基準，再替 ready 卡補跑驗收。
-            if isinstance(fb.get(KEY), dict) and fb[KEY].get('seen'):
-                def reset_seen(current):
-                    if isinstance(current.get(KEY), dict): current[KEY]['seen'] = {}
-                bd.set_fb(reset_seen, live=self.state, by='autopilot')
-                fb[KEY]['seen'] = {}
-            self._fresh = False
         self._sync_flow(p['data'], fb)
         bs = self.build_state()
-        status = {k: self.run_status(k) or {} for k in ('prep', 'apply', 'replies', 'add')}
+        status = {k: self.run_status(k) or {} for k in ('prep', 'add', 'customize') + jobrun.BROWSER_JOBS}
         running = {k: bool(st.get('running')) for k, st in status.items()}
         self._settle(fb)
-        if self.is_real():
-            self._sweep_gone(fb)
+        self._sweep_gone(fb)
         import add_job
-        pl = plan(p['data'], fb, verified_gen=bs['gen'], build_running=bs['running'], running=running,
+        pl = plan(p['data'], fb, build=bs, running=running,
                   real=self.is_real(), replies_last=status['replies'],
                   add_waiting=add_job.waiting() if self.is_real() else 0, add_last=status['add'])
         self.last = {'plan': {k: v for k, v in pl.items() if k != 'init'}, 't': time.time()}
@@ -306,10 +346,21 @@ class Pilot:
             started['fix'] = self.start_run('apply', {'stage': 'fix', 'url': pl['fix']})
         elif pl['fill']:
             started['fill'] = self.start_run('apply', {'stage': 'fill', 'url': pl['fill']})
-        if pl['replies']:
+        if pl['unsure']:
+            started['unsure'] = self.start_run('replies', {'url': pl['unsure']})
+        elif pl['replies']:
             started['replies'] = self.start_run('replies', {})
         if pl['add']:
             started['add'] = self.start_run('add', {})
+        if pl['customize']:
+            started['cust'] = self.start_run('customize', pl['customize'])
+        if pl['accept']:
+            import customize as cu
+            for url, items in pl['accept']:
+                for item in items:
+                    cu.accept(url, item, board=self.state)
+        if pl['accept'] and not pl['build'] and self.build and self.is_real():
+            self.build()                              # 收下的客製版、不寄的附件要進可投遞夾(要建的話下面那一輪一起建)
         ok = {k: code == 200 for k, (code, _st) in started.items()}
         need_browser = [k for k, (code, st) in started.items() if code == 409 and (st or {}).get('needs_browser')]
         was_blocked = (fb.get(KEY) or {}).get('blocked')
@@ -341,7 +392,7 @@ class Pilot:
                                       + (1 if pl.get('replies_retry') else 0)}
             if need_browser:
                 a['blocked'] = 'ego 沒準備好'
-            elif ok.get('fill') or ok.get('fix') or ok.get('replies'):
+            elif ok.get('fill') or ok.get('fix') or ok.get('replies') or ok.get('unsure'):
                 a.pop('blocked', None)
             for i in pl['advance']:
                 if (f.get(i) or {}).get('app') == 'ready':
@@ -354,13 +405,12 @@ class Pilot:
         if was_blocked and not need_browser and (ok.get('fill') or ok.get('fix') or ok.get('replies')):
             # 連上了、自動的步驟接著跑:之前「ego 沒準備好」那則回報收掉,不留著讓他以為還要處理
             import agent_report
-            agent_report.resolve_from('自動流程', 'agent 的瀏覽器準備好了,自動的步驟接著跑',
-                                      datetime.datetime.now().isoformat(timespec='seconds'), live=self.state)
+            agent_report.resolve(None, 'agent 的瀏覽器準備好了,自動的步驟接著跑', live=self.state, src='自動流程')
         if need_browser and self.report and not was_blocked:
             # 只講一次:連上之前不會每一分鐘都再講
             self.report('自動流程', '要讓 agent 填表或查回音,但 agent 的瀏覽器(ego)沒準備好,自動的這幾步先停著',
                         need='到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「連接」')
-        if pl['seen'] and self.build and self.is_real():
+        if pl['build'] and self.build:
             # 準備區跑完是 cut_tailor 直接寫檔推進待你決定,不經過存檔,伺服器不會自己建;這裡補一輪
             self.build()
         if pl['advance'] or pl['init']:

@@ -1,0 +1,97 @@
+{
+ "url": "http://127.0.0.1:61334/profile/normal/fixed?platform=104.com.tw",
+ "title": "固定平台履歷",
+ "readyState": "complete",
+ "text": "本機假驗收頁 (127.0.0.1) / Local acceptance-test platform. Changes affect only disposable test data.\n固定平台履歷\n作品\n作品影片連結觀看\n求職\n可到職時間\n即刻\n兩週內\n一個月內\n儲存履歷\n\n類型:fixed\n\n沒有附件\n上傳或取代同名附件上傳附件\n返回履歷清單\n即刻\n兩週內\n一個月內",
+ "emailThreadPrintView": false,
+ "emailThreads": [],
+ "emailMessageCount": 0,
+ "emailBodies": [],
+ "links": [
+  "https://video.example/watch?v=old",
+  "http://127.0.0.1:61334/profiles/normal"
+ ],
+ "media": [],
+ "anchors": [
+  {
+   "href": "https://video.example/watch?v=old",
+   "text": "觀看"
+  },
+  {
+   "href": "http://127.0.0.1:61334/profiles/normal",
+   "text": "返回履歷清單"
+  }
+ ],
+ "fields": [
+  {
+   "id": "work",
+   "label": "作品",
+   "section": "作品",
+   "role": "",
+   "type": "text",
+   "autocomplete": "",
+   "text": "",
+   "parentText": "作品",
+   "value": "舊影片",
+   "aria": {
+    "aria-selected": null,
+    "aria-checked": null,
+    "aria-pressed": null,
+    "aria-expanded": null,
+    "aria-activedescendant": null,
+    "aria-valuenow": null,
+    "aria-valuetext": null,
+    "aria-controls": null,
+    "aria-labelledby": null,
+    "aria-describedby": null
+   }
+  },
+  {
+   "id": "video_url",
+   "label": "影片連結",
+   "section": "作品",
+   "role": "",
+   "type": "url",
+   "autocomplete": "",
+   "text": "",
+   "parentText": "影片連結",
+   "value": "https://video.example/watch?v=old",
+   "aria": {
+    "aria-selected": null,
+    "aria-checked": null,
+    "aria-pressed": null,
+    "aria-expanded": null,
+    "aria-activedescendant": null,
+    "aria-valuenow": null,
+    "aria-valuetext": null,
+    "aria-controls": null,
+    "aria-labelledby": null,
+    "aria-describedby": null
+   }
+  },
+  {
+   "id": "availability",
+   "label": "可到職時間\n即刻\n兩週內\n一個月內",
+   "section": "求職",
+   "role": "",
+   "type": "select-one",
+   "autocomplete": "",
+   "text": "即刻\n兩週內\n一個月內",
+   "parentText": "可到職時間\n即刻\n兩週內\n一個月內",
+   "value": "two-weeks",
+   "shown": "兩週內",
+   "aria": {
+    "aria-selected": null,
+    "aria-checked": null,
+    "aria-pressed": null,
+    "aria-expanded": null,
+    "aria-activedescendant": null,
+    "aria-valuenow": null,
+    "aria-valuetext": null,
+    "aria-controls": null,
+    "aria-labelledby": null,
+    "aria-describedby": null
+   }
+  }
+ ]
+}

@@ -1261,7 +1261,7 @@ def run(mode, direction, live=bd.LIVE, browser_required=True, st=None, run_agent
     prefs.refresh_like(live)      # 新缺進來了,「最可能喜歡」的排序分數跟著重算
     try:                          # 這一輪跑完了:上一輪留下的「找新職缺」回報收掉(這一輪自己報的留著)
         import agent_report
-        agent_report.resolve_from('找新職缺', '後來那一輪找新職缺跑完了', started, live=live)
+        agent_report.resolve(None, '後來那一輪找新職缺跑完了', live=live, src='找新職缺', before=started)
     except Exception:  # noqa: BLE001, S110 — 收不掉的舊回報照樣開在看板上,他看得到、可以自己按已處理
         pass
     return added

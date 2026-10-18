@@ -27,7 +27,7 @@ RUNTIMES = {
 NOT_CHECKED = {
     'ps': 'macOS 內建',
     'open': 'macOS 內建', 'lsappinfo': 'macOS 內建', 'launchctl': 'macOS 內建',
-    'osascript': 'macOS 內建', 'qlmanage': 'macOS 內建', 'screencapture': 'macOS 內建',
+    'osascript': 'macOS 內建', 'sips': 'macOS 內建;裁平台履歷改前的局部截圖', 'qlmanage': 'macOS 內建', 'screencapture': 'macOS 內建',
     '/usr/bin/log': 'macOS 內建;只有驗收工具查是不是使用者自己切了桌面',
     'gh': '只有開發時開 issue 用,使用者不需要',
     'tailscale': '選用:沒裝就只開在本機 127.0.0.1',

@@ -257,8 +257,7 @@ class Walk:
 
     def auto_pick(self):
         cfg = {'auto_prep': False, 'auto_advance': False, 'auto_fill': True, 'fill_max': CAP, 'replies_at': ''}
-        return autopilot.plan({'jobs': JOBS, 'status': STATUS}, copy.deepcopy(self.fb), verified_gen=0,
-                              build_running=False, running={}, real=False, cfg=cfg).get('fill')
+        return autopilot.plan({'jobs': JOBS, 'status': STATUS}, copy.deepcopy(self.fb), running={}, real=False, cfg=cfg).get('fill')
 
 
 SEED, WALKS, STEPS = 302, 1500, 30

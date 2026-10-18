@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apply_tab               # noqa: E402
 import profile_sync as ps      # noqa: E402
-from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm, same_url, short  # noqa: E402
+from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, Problem, norm, same_url, short  # noqa: E402
 
 def _card_url(said, sheet, truth):
     """同一張職缺:路徑相同,卡片網址原有的參數都在(職缺編號可能就在參數裡);agent 多帶的參數(例如 ?apply=form)不算換了職缺。"""
@@ -50,13 +50,16 @@ def _on_page(said, sheet, truth):
         return None
     if truth.page is None:
         return UNUSED                  # 程式沒讀到那一頁:這一格這一次不收;讀不到的原因在「分頁」那一格講過
-    return None if norm(said) in truth.text() else '頁面上沒有這幾個字'
+    # 中英名稱併在一起寫(「聯發科技 (MediaTek)」「甲 / A」):其中一段逐字在頁面上就算;每一段都找不到照樣擋
+    parts = apply_tab.segments(said)
+    text = truth.text()
+    return None if norm(said) in text or any(len(x) >= 2 and x in text for x in parts) else '頁面上沒有這幾個字'
 
 
 def _same_job(said, sheet, truth):
     if said is False:   # agent 自己說不是這個缺、沒填:沒有東西可以收(它沒填,不是拿它當事實放行)
-        return [('agent 判斷這一頁不是這張卡的職缺(或已經關了),沒有填:'
-                 + str((sheet.get('posting') or {}).get('title') or '')[:60])]
+        return [Problem('agent 判斷這一頁不是這張卡的職缺(或已經關了),沒有填:'
+                        + str((sheet.get('posting') or {}).get('title') or '')[:60], 'not_same_job')]
     return None
 
 
@@ -67,6 +70,11 @@ def _platform_url(said, sheet, truth):
     if not plat or not ps.same_platform_url(said, plat, allow_local=ps.loopback_url(truth.url)):
         return f'不是這個平台({plat or "沒有登記平台"})的網址'
     return None
+
+
+def _history_url(said, sheet, truth):
+    """應徵紀錄頁只給之後查應徵進度參考,不是申請表的一部分:對不上這個平台就不收,不擋這一輪填表。"""
+    return UNUSED if _platform_url(said, sheet, truth) else None
 
 
 def _fixed_location(said, sheet, truth):
@@ -110,7 +118,7 @@ def _delivery(said, sheet, truth):
     bad = _method(said, sheet, truth)
     if bad or truth.job is None or said == 'platform_profile':
         return bad
-    return _attachments(sheet, truth, **dict(truth.attachments, verify_profile=False))
+    return _attachments(sheet, truth, verify_profile=False)
 
 
 def _profile_kind(said, sheet, truth):
@@ -146,13 +154,6 @@ def _uploaded(said, sheet, truth):
 
 
 
-def _profile_attachments(said, sheet, truth):
-    """平台履歷上的附件(送出前核對那一輪下載或算雜湊):逐位元組跟這張卡該附的檔比;投遞方式要跟核准時一樣。"""
-    if truth.job is None:
-        return None
-    return _attachments(sheet, truth, **truth.attachments)
-
-
 def _attachments(sheet, truth, **options):
     """實際收到的檔逐位元組跟這張卡該附的比(profile_sync.check_attachments);比對出錯照實當成這張的問題。"""
     try:
@@ -169,7 +170,7 @@ def _fields(said, sheet, truth):
         out = []
         for x in rows:
             e = bank.get(x.get('k'))
-            if e and e.get('v') and norm(x.get('value')) not in (norm(e.get('v')), norm(e.get('zh'))):
+            if e and e.get('v') and not any(apply_tab.matches(w, x.get('value'), 'box') for w in (e.get('v'), e.get('zh'))):
                 out.append(f'「{x.get("q")}」頁面上是 {str(x.get("value"))[:40]!r},常用答案是 {str(e.get("v"))[:40]!r}')
         return out or None
     # agent 這一輪說頁面上現在的值:常用答案的那幾題看常用答案(看板上記的表單那一段由程式另外比),其他照它抄的值要在頁面上
@@ -205,7 +206,41 @@ def _submitted(said, sheet, truth):
 def _confirm_text(said, sheet, truth):
     if not str(said or '').strip() or truth.page is None:
         return None
-    return None if norm(said) in norm(truth.text()) else '頁面上沒有這句話'
+    # 頁面常把一句話斷成兩行
+    return None if re.sub(r'\s+', '', norm(said)) in re.sub(r'\s+', '', truth.text()) else '頁面上沒有這句話'
+
+
+UNMET_ACTS = ('drop', 'adapt')
+
+
+def _unmet(said, sheet, truth):
+    """職缺或申請頁的要求跟要寄的檔不符(#449):每一條的原句要在程式讀到的那一頁上,檔要是這張可投遞夾裡的,
+    做法只有不寄(drop,不能是履歷本身)或照要求改(adapt)。程式不認要求的種類,只核對這幾件。"""
+    if said is None:
+        return None
+    if not isinstance(said, list):
+        return 'unmet 要是清單(沒有不符就給空清單)'
+    if said and truth.page is None:
+        return '程式沒讀到那一頁,核對不了要求的原句'
+
+    def flat(x):        # 頁面常把一句話斷成兩行
+        return re.sub(r'\s+', '', norm(x))
+    import ship
+    files = (ship.info(truth.url) or {}).get('files') or [] if truth.url else []
+    seen = flat(truth.text())
+    bad = []
+    for x in said:
+        x = x if isinstance(x, dict) else {}
+        quote, name, act = str(x.get('quote') or ''), str(x.get('file') or ''), x.get('act')
+        if not quote.strip() or flat(quote) not in seen:
+            bad.append(f'頁面上沒有這句要求:{short(quote)}')
+        if act not in UNMET_ACTS:
+            bad.append(f'不知道怎麼處理:{act}')
+        if name not in files:
+            bad.append(f'這張要寄的檔裡沒有「{short(name)}」')
+        elif act == 'drop' and files and name == files[0]:
+            bad.append('履歷本身不能不寄')
+    return '；'.join(bad) or None
 
 
 def _confirm_url(said, sheet, truth):
@@ -219,7 +254,7 @@ def _board_tab(said, sheet, truth):
 
 
 def _problems(said, sheet, truth):
-    return [f'卡住:{p}' for p in (said if isinstance(said, list) else [said] if said else [])] or None
+    return [Problem(f'卡住:{p}', 'stuck') for p in (said if isinstance(said, list) else [said] if said else [])] or None
 
 
 def _delivery_required(truth):
@@ -227,7 +262,7 @@ def _delivery_required(truth):
     return truth.job is not None and ps.NO_DELIVERY
 
 
-FIELD_ITEMS = ('q', 'value', 'src', 'k', 'why', 'zh', 'kind', 'pj', 'pjw', 'bank_q', 'v', 'choice', 'name', 'source_hash')
+FIELD_ITEMS = ('q', 'qz', 'value', 'src', 'k', 'why', 'zh', 'kind', 'pj', 'pjw', 'bank_q', 'v', 'choice', 'name', 'source_hash')
 FILE_ITEMS = ('name', 'path')
 _TAB_GONE = '填好的分頁沒有留在他的 Chrome(他要在真的頁面上檢查)'
 
@@ -247,7 +282,7 @@ FILL = {
     'profile.edit': Cell(CHECK, '平台履歷編輯頁', '這個平台的網址', _platform_url),
     'profile.name': Cell(CHECK, '平台履歷名稱', '程式記過就要一樣;沒記過,在那一份的頁面上看到才記(profile_sync.check)',
                          _profile_name),
-    'profile.application_history_url': Cell(CHECK, '應徵紀錄頁', '這個平台的網址', _platform_url),
+    'profile.application_history_url': Cell(CHECK, '應徵紀錄頁', '這個平台的網址', _history_url),
     'profile.note': Cell(WORDS, '平台履歷備註', '只給人看'),
     'delivery.method': Cell(CHECK, '投遞方式', '程式讀到的申請頁:選了平台履歷就要是 platform_profile,而且是該選的那一份;'
                             '直接上傳的,申請表收到的檔逐位元組跟這張卡的檔比', _delivery,
@@ -261,6 +296,9 @@ FILL = {
                            items=FILE_ITEMS),
     'uploaded_from': Cell(CHECK, '放進上傳欄的本機檔', '要在這張卡要寄的檔案裡、跟這張卡的檔一樣(同上)', items=FILE_ITEMS),
     'upload_readback': Cell(CHECK, '讀不讀得回上傳檔', '讀不回就改比放進上傳欄的本機檔(同上)'),
+    'unmet': Cell(CHECK, '跟職缺要求不符的地方', '原句在程式讀到的那一頁上、檔是這張要寄的、做法是不寄或照要求改(#449)', _unmet,
+                  required=lambda truth: truth.job is not None and '沒回答要寄的檔有沒有跟職缺要求不符(沒有就給空清單)',
+                  items=('quote', 'file', 'act', 'why')),
     'fields': Cell(CHECK, '表單每一欄', '程式讀到的那一頁上有常用答案(讀不到才比 agent 抄的值)', _fields,
                    items=FIELD_ITEMS),
     'blank_for_him': Cell(WORDS, '留給他填的欄', '只給人看'),
@@ -274,9 +312,6 @@ FILL = {
     'reason': Cell(WORDS, '送出結果說明', '只給人看；有送出宣稱時必須說明'),
     'confirm_url': Cell(CHECK, '確認頁網址', '程式讀到的那一頁網址', _confirm_url),
     'confirm_text': Cell(CHECK, '確認頁的字', '程式讀到的那一頁上有這句話', _confirm_text),
-    'fixed_profile.url': Cell(CHECK, '固定平台履歷', '程式登記的那一份', _fixed_location),
-    'fixed_profile.attachments': Cell(CHECK, '固定平台履歷上的附件', '逐位元組跟這張卡該附的檔比(送出前核對那一輪)',
-                                      items=FILE_ITEMS),
 }
 
 SUBMIT = {
@@ -288,66 +323,6 @@ SUBMIT = {
     'problems': Cell(WORDS, '卡住的地方', '只給人看'),
     'notes': FILL['notes'],
     'reason': Cell(WORDS, '送出結果說明', '說明 sent／not_sent／unknown', required='沒有 reason 結果說明'),
-}
-
-
-def _review_status(said, sheet, truth):
-    return None if said in ('complete', 'issues', 'unknown') else 'status 只能是 complete、issues 或 unknown'
-
-
-def _review_reason(said, sheet, truth):
-    return None if isinstance(said, str) and said.strip() else 'reason 要是非空文字'
-
-
-def _review_quotes(said, sheet, truth):
-    if sheet.get('status') != 'complete':
-        return None
-    if not truth.given or not isinstance(said, dict):
-        return '沒有本輪指定頁面的引用'
-    def quoted(quote, text):
-        # 引用可以跳著摘(2026-10-04 104:agent 把好幾段接成一段),但每一行都要在那一頁讀得到,不准編
-        # 行首行尾的「」/引號是 agent 標引用的記號;中間用 … 省略的,每一段各自要讀得到
-        parts = [norm(part.strip(' \t「」『』"“”\'')) for line in quote.splitlines()
-                 for part in re.split(r'…|\.\.\.', line)]
-        parts = [p for p in parts if p]
-        return bool(parts) and all(p in norm(text) for p in parts)
-    missing = [url for url, text in truth.given.items()
-               if not isinstance(said.get(url), str) or not quoted(said[url], text)]
-    return '指定頁面缺少可驗引用：' + '、'.join(missing) if missing else None
-
-
-def _review_checks(said, sheet, truth):
-    """只驗逐頁覆蓋與引用身分；每項意思仍是 Agent 判讀。"""
-    pages = (truth.attachments or {}).get('profile_items')
-    if not pages or not isinstance(said, dict) or set(said) != set(pages):
-        return '逐項判讀沒有涵蓋全部指定頁面'
-    for url, items in pages.items():
-        rows = said[url]
-        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
-            return f'{url} 的逐項判讀格式不正確'
-        ids = [r.get('id') for r in rows]
-        wanted = {i for i, item in items.items() if item['kind'] != 'approved'}
-        if any(not isinstance(i, str) for i in ids) or len(ids) != len(set(ids)) or set(ids) != wanted:
-            return f'{url} 的逐項判讀有漏項、重複或不屬於本輪的項目'
-        for row in rows:
-            status, basis = row.get('status'), row.get('basis')
-            # unsourced:頁面上有、原稿與核准來源都沒有的內容,交使用者在回報確認一次;原稿寫了卻不一樣是 issues
-            if status not in ('complete', 'issues', 'unknown', 'unsourced') or _review_reason(row.get('reason'), sheet, truth):
-                return f'{url} {row["id"]} 沒有有效判讀結果或理由'
-            if not isinstance(basis, list) or any(not isinstance(i, str) or i not in items for i in basis):
-                return f'{url} {row["id"]} 引用的依據不在本輪材料'
-            if status == 'complete' and not basis:
-                return f'{url} {row["id"]} 的 complete 沒有判讀依據'
-            if sheet.get('status') == 'complete' and status != 'complete':
-                return f'{url} {row["id"]} 尚有 {status}：{row["reason"]}'
-    return None
-
-
-PROFILE_REVIEW = {
-    'status': Cell(JUDGED, '履歷內容是否完整', 'Agent 對本輪指定原稿與讀回內容的判斷', _review_status, required='沒有 status 判讀結果'),
-    'reason': Cell(WORDS, '判讀說明', '保留給人核對', _review_reason, required='沒有 reason 判讀說明'),
-    'quotes': Cell(CHECK, '各頁引用', '每一份指定讀回頁面上的逐字引用', _review_quotes, required='沒有 quotes 引用'),
-    'checks': Cell(JUDGED, '逐項內容判讀', 'Agent 判斷；程式核對覆蓋與本輪依據', _review_checks, required='沒有 checks 逐項判讀'),
 }
 
 

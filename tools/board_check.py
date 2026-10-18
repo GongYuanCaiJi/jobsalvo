@@ -292,6 +292,18 @@ CHECKS=[
    if(ok){s.querySelector('.snack-undo').click(); await T.frame(); await T.idle();}
    return ok?'':'移除後沒有就地可復原的提示';
  """),
+ ('設定頁全部同步按鈕會啟動背景工作並回報結果',"""
+   var tab=document.querySelector('[data-tab="cfg"]'); if(!tab)return '沒有設定頁';
+   tab.click(); await T.until(function(){return document.querySelector('[data-cfsync]');},15000);
+   var button=document.querySelector('[data-cfsync]'); if(!button)return '沒有全部同步按鈕';
+   var before=await fetch('/api/rev').then(function(x){return x.json();});
+   var old=(before.sync||{}).t0||0;
+   button.click();
+   var result=await T.until(async function(){var r=await fetch('/api/rev').then(function(x){return x.json();});
+     return r.sync&&r.sync.t0>old&&['done','nothing','incomplete'].indexOf(r.sync.phase)>=0?r.sync:null;},15000);
+   if(document.querySelector('[data-tab="none"]'))document.querySelector('[data-tab="none"]').click();
+   return result&&result.msg?'':'全部同步沒有背景結果';
+ """),
 ]
 
 # ---- 存檔這條路:每一條都是他先撞到才發現、而且會安靜掉資料的 bug ----
@@ -837,7 +849,7 @@ ANS_CHECKS = [
    [A,B].forEach(function(c,i){var l=line(c);
      if(!l)bad.push('第 '+(i+1)+' 張卡沒有表單那一行');
      else if(!/1 條答案等你確認/.test(l.textContent))bad.push('第 '+(i+1)+' 張卡沒說還有 1 條答案等他確認('+l.textContent+')');
-     if(!T.absent('.fm-q,.fm-list,.fm-auto,[data-fmt],[data-fmok]',c))bad.push('第 '+(i+1)+' 張卡上還攤著表單欄位(答案只該在答案庫)');});
+     if(!T.absent('.fm-auto,[data-fmt],[data-fmok],details.fm-fold[open]',c))bad.push('第 '+(i+1)+' 張卡上還攤著表單欄位(答案只該在答案庫)');});
    var go=line(A)&&line(A).querySelector('[data-ansgo]');
    if(!go)bad.push('卡上沒有「去答案庫看」');
    else{go.click(); await T.idle();
@@ -1053,10 +1065,10 @@ ANS_CHECKS = [
      if(!card||!shown(card))bad.push('點「要你處理的」那一條,沒有跳到那張卡');}
    return await done();
  """, 'ans_cards'),
- ('agent 回報:每一頁最上面、預設收起,標題亮待處理件數;每一頁都列全部(這一頁有關的排前面,別頁的有「去那一頁」);按「處理好了」會收進已處理,可以復原', r"""
+ ('agent 回報:每一頁最上面、預設收起,標題亮待處理件數;每一頁都列全部(這一頁有關的排前面,別頁的有「去那一頁」);要他處理的附點得開的那一頁;按「處理好了」會收進已處理,可以復原', r"""
    await T.idle();
    var jobs=JSON.parse(document.getElementById('data-jobs').textContent).jobs.filter(function(j){return !j.bk;});
-   var box=[{id:'rzz1',at:'2026-01-01T09:00:00',from:'代投',msg:'測試:被網站的機器人驗證擋住 '+Date.now(),need:'測試用',n:1},   // 代投的回報屬於可投遞那一頁
+   var box=[{id:'rzz1',at:'2026-01-01T09:00:00',from:'代投',msg:'測試:被網站的機器人驗證擋住 '+Date.now(),need:'測試用',n:1,url:'https://example.com/login'},   // 代投的回報屬於可投遞那一頁
             // agent 自己寫、沒有程式自己截的那一頁:列出來但標缺證據,不算要他處理、不寫「你要做的」(#315)
             {id:'rzz2',at:'2026-01-01T09:01:00',from:'查回音',msg:'測試:信箱要登入 '+Date.now(),need:'去登入信箱',n:1,agent:true,noev:'這一輪沒有程式自己截的那一頁'}];
    await T.put('__inbox__',box);
@@ -1068,6 +1080,9 @@ ANS_CHECKS = [
    if(!/1 件要你處理/.test(d.querySelector('summary').textContent))bad.push('標題看不出有 1 件要他處理(缺證據的那則不算)');
    if(!/1 件缺證據/.test(d.querySelector('summary').textContent))bad.push('標題沒寫有 1 件缺證據');
    var r2=document.querySelector('#inboxbar [data-ib="rzz2"]');
+   // 要他處理的回報一定附他要去的那一頁(#389):標題列就點得開,開新分頁
+   var link=document.querySelector('#inboxbar [data-ib="rzz1"] summary a[href="https://example.com/login"]');
+   if(!link||link.target!=='_blank')bad.push('要他處理的回報沒附點得開的那一頁');
    if(!r2)bad.push('缺證據的回報沒列出來');
    else{if(/你要做的/.test(r2.querySelector('summary').textContent))bad.push('缺證據的回報還寫「你要做的」');
      if(!/缺證據/.test(r2.querySelector('summary').textContent))bad.push('缺證據的回報沒標缺證據');}
@@ -4487,6 +4502,105 @@ def _filled(state='parked', **apply):
     return {'app': 'ship', 'ds': state, 'form': {'plat': '測試', 'at': '2026-01-01', 'f': []}, 'apply': a}
 
 
+def profile_visuals_case(board):
+    return _seed(board, [_filled(delivery={'method': 'platform_profile',
+                                           'profile_url': 'https://platform.example/resume/one'})])
+
+
+APPLY_PRE['profile_visuals_case'] = profile_visuals_case
+APPLY_CHECKS.append((
+    '確認送出畫面逐處列判定、平台結果、全文與相鄰局部截圖',
+    OPEN_SHIP + r"""
+      var id=P.ids[0], original=window.fetch, bad=[];
+      window.fetch=function(input,init){
+        var request=original.apply(this,arguments);
+        // 看板只在 /api/rev 的 rev 變了才重拿 /api/next:讓這次輪詢看到一個新 rev,注入的那份才會被拿去畫
+        if(/^\/api\/rev(?:\?|$)/.test(String(input)))return request.then(async function(response){
+          var v=await response.clone().json(); v.rev=String(v.rev)+'+check';
+          return new Response(JSON.stringify(v),{status:response.status,headers:{'content-type':'application/json'}});});
+        if(!/^\/api\/next(?:\?|$)/.test(String(input)))return request;
+        return request.then(async function(response){
+          if(!response.ok)return response;
+          var data=await response.clone().json(), row=data[id];
+          if(row&&row.view){
+            var v=row.view, start=(v.shots||[]).length;
+            v.shots=(v.shots||[]).concat([
+              ['ev','test-round/before.png','平台履歷「測試段落」改前'],
+              ['ev','test-round/after.png','平台履歷「測試段落」改後']]);
+            v.line=(v.line||[]).concat([
+              ['bad','測試段落：agent 代填待確認',{sync:true}],
+              ['idle','平台實際結果：只驗收、已撤回',{sync:true}],
+              ['idle','改前：短文 → 改後：短文',{sync:true,full:'改前：完整舊文\n改後：完整新文'}],
+              ['idle','',{sync:true,shot_indices:[start,start+1]}]]);
+          }
+          return new Response(JSON.stringify(data),{status:response.status,
+            headers:{'content-type':'application/json'}});
+        });
+      };
+      try{
+        if(!await openShip(id))return '找不到那張可投遞卡';
+        T.sync();
+        var rows=await T.until(function(){var card=T.card(id); if(!card)return null;
+          var found=[...card.querySelectorAll('.ap-st > .ap-sync-row')];
+          return found.some(function(x){return x.textContent.includes('測試段落：')})?found:null;},8000);
+        if(!rows)return '確認送出畫面沒有逐處紀錄';
+        var title=rows.findIndex(function(x){return x.textContent.includes('測試段落：')});
+        if(!rows[title+1].textContent.includes('平台實際結果：只驗收、已撤回'))bad.push('平台結果與判定混在一起');
+        var details=rows[title+2].querySelector('details.fold.ap-sync-detail');
+        if(!details||details.open)bad.push('改前改後全文沒有預設收起');
+        else{details.querySelector('summary').click();
+          if(!details.open||!details.querySelector('pre').textContent.includes('完整新文'))bad.push('全文展不開');}
+        var links=[...rows[title+3].querySelectorAll('a.ap-shot')];
+        if(links.length!==2||!links[0].textContent.includes('改前')||!links[1].textContent.includes('改後'))
+          bad.push('局部截圖沒有緊接這一處文字');
+      }finally{window.fetch=original;T.sync();}
+      return bad.join('；');
+    """,
+    'profile_visuals_case',
+))
+APPLY_CHECKS.append((
+    '確認送出畫面能打開平台履歷的改前改後截圖',
+    OPEN_SHIP + r"""
+      var id=P.ids[0], original=window.fetch, bad=[];
+      window.fetch=function(input,init){
+        var request=original.apply(this,arguments);
+        // 看板只在 /api/rev 的 rev 變了才重拿 /api/next:讓這次輪詢看到一個新 rev,注入的那份才會被拿去畫
+        if(/^\/api\/rev(?:\?|$)/.test(String(input)))return request.then(async function(response){
+          var v=await response.clone().json(); v.rev=String(v.rev)+'+check';
+          return new Response(JSON.stringify(v),{status:response.status,headers:{'content-type':'application/json'}});});
+        if(!/^\/api\/next(?:\?|$)/.test(String(input)))return request;
+        return request.then(async function(response){
+          if(!response.ok)return response;
+          var data=await response.clone().json(), row=data[id];
+          if(row&&row.view){
+            row.view.shots=(row.view.shots||[]).concat([
+              ['ev','test-round/shot-1.png','平台履歷「作品」改前'],
+              ['ev','test-round/shot-2.png','平台履歷「作品」改後']]);
+          }
+          return new Response(JSON.stringify(data),{status:response.status,
+            headers:{'content-type':'application/json'}});
+        });
+      };
+      try{
+        if(!await openShip(id))return '找不到那張可投遞卡';
+        T.sync();
+        var links=await T.until(function(){var card=T.card(id); if(!card)return null;
+          var found=[...card.querySelectorAll('.ap-st a.ap-shot')].filter(function(a){
+            return /平台履歷「作品」改[前後]/.test(a.textContent);});
+          return found.length===2?found:null;},8000);
+        if(!links)return '確認送出畫面沒有改前、改後兩張截圖連結';
+        for(var i=0;i<2;i++){
+          var url=new URL(links[i].href), file=url.searchParams.get('f');
+          if(url.pathname!=='/api/evidence'||url.searchParams.get('u')!==id||
+             file!=='test-round/shot-'+(i+1)+'.png')bad.push('截圖連結沒有指向這張卡的證據');
+        }
+      }finally{window.fetch=original; T.sync();}
+      return bad.join('；');
+    """,
+    'profile_visuals_case',
+))
+
+
 def next_step_case(board):
     """可投遞裡幾張狀態各不同的卡,看卡上、「這一頁要你處理的」、「🚀 填表進度」、📣 回報講的一不一致。"""
     from chrome_door import GONE
@@ -4531,13 +4645,15 @@ APPLY_CHECKS.append((
       if(/頁面在 agent 的 Chrome 裡/.test(c2.textContent))bad.push('#16 頁面不見了,卡上還寫「頁面在 agent 的 Chrome 裡」');
       if(!refill(2))bad.push('頁面不見了的卡(自動關著)主按鈕不是重填');
       var todo=document.querySelector('#app .todo');
-      if(!(todo&&todo.querySelector('[data-todogo="'+CSS.escape(I[3])+'"]')))bad.push('#8 第一次填就沒成(還沒有表單紀錄)的卡沒列進「這一頁要你處理的」');
+      // 只要重填的(沒填成、頁面不見)是程式的事:卡上給重填,不列進要你處理(#446)
+      if(!refill(3))bad.push('#8 第一次填就沒成(還沒有表單紀錄)的卡,主按鈕不是重填');
+      [0,2,3].forEach(function(i){if(todo&&todo.querySelector('[data-todogo="'+CSS.escape(I[i])+'"]'))bad.push('#446 只要重填的卡(#'+i+')列進了「這一頁要你處理的」');});
       var fl=document.getElementById('filllistbar');
       function row(i){var b=fl&&fl.querySelector('[data-fillgo="'+CSS.escape(I[i])+'"]'); return b&&b.closest('.fl-row');}
       [[1,'換過履歷'],[4,'答案改過要重打'],[5,'送出沒確認成功']].forEach(function(x){var r=row(x[0]);
         if(!r)bad.push('#5 🚀 沒列「'+x[1]+'」那張'); else if(/填好了/.test(r.textContent))bad.push('#5 🚀 把「'+x[1]+'」的卡寫成填好了');});
       var r6=row(6); if(!r6||!/等你確認送出/.test(r6.textContent))bad.push('#5 真的填好的那張,🚀 沒寫「等你確認送出」('+(r6?r6.textContent:'沒列')+')');
-      var r2=row(2); if(!r2||/fl-bad/.test(r2.className)||/沒填成/.test(r2.textContent)||!/不見了/.test(r2.textContent))bad.push('#17 🚀 把頁面不見了的卡算成「沒填成」('+(r2?r2.textContent:'沒列')+')');
+      var r2=row(2); if(r2)bad.push('#446 🚀 把頁面不見了(只要重填)的卡單獨列出來,應該算在還沒填('+r2.textContent+')');
       var ib=document.getElementById('inboxbar');
       if(ib&&ib.querySelector('[data-ib="bc_rm"]'))bad.push('#11 已經移除的卡,舊回報還列在「要你處理」');
       var ro=ib&&ib.querySelector('[data-ib="bc_open"]');
@@ -5075,7 +5191,10 @@ CHECKS.append((
       I.forEach(function(id,i){var c=T.card(id), v=(N[id]||{}).view, w='第 '+i+' 張';
         if(!c||!v){bad.push(w+(c?':下一步沒有這張':':畫面上沒有這張')); return;}
         var line=c.querySelector('.ap-line'); if(!line){bad.push(w+':沒畫代投那一塊'); return;} n++;
-        var st=[].slice.call(line.querySelectorAll('.ap-st > span, .ap-st > b')).map(function(x){return x.textContent;});
+        var st=[].slice.call(line.querySelectorAll('.ap-st > span, .ap-st > b')).map(function(x){
+          if(x.classList.contains('ap-sync-shots'))return '';
+          var summary=x.querySelector('.ap-sync-detail summary');
+          return (summary||x).textContent;});
         var want=v.line.map(function(x){return x[1];});
         if(st.join('|')!==want.join('|'))bad.push(w+' 那一行「'+st.join('|')+'」,下一步「'+want.join('|')+'」');
         var why=(line.querySelector('.ap-why')||{}).textContent||'';

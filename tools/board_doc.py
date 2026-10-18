@@ -90,11 +90,18 @@ class Tampered(RuntimeError):
 
 
 def _put_file(path, b):
-    """整份換上去:先寫旁邊的暫存檔再原子換名,讀的人不會讀到寫一半的。"""
-    tmp = path + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(b)
-    _os.replace(tmp, path)
+    """整份換上去:先寫旁邊的暫存檔再原子換名,讀的人不會讀到寫一半的。
+    暫存檔每次不同名:同時有兩個人寫同一個檔(同一程序裡同時派好幾隻 agent),固定的 .tmp 會被另一個搬走而找不到。"""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=_os.path.basename(path) + '.', suffix='.tmp', dir=_os.path.dirname(path) or '.')
+    try:
+        with _os.fdopen(fd, 'wb') as f:
+            f.write(b)
+        _os.replace(tmp, path)
+    except BaseException:
+        with __import__('contextlib').suppress(FileNotFoundError):
+            _os.remove(tmp)
+        raise
 
 
 def _fp_path(live):

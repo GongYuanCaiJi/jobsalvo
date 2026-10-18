@@ -19,7 +19,7 @@ reconcile —— 改完任何東西,只跑這一個。
 
 事件驅動的步驟(找缺 converge、跑準備區 cut_tailor、手機上標階段)跑完會自己呼叫這支。
 """
-import sys, os, json, hashlib, subprocess, argparse, time
+import sys, os, json, hashlib, subprocess, argparse, time, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -74,16 +74,17 @@ def _source_report(errors, live):
     import board_doc as bd
     src = '整理要寄的檔案'
     msgs = [f'有一份要寄的檔案整理不出來:{message}' for message in errors]
+    started = datetime.datetime.now().isoformat(timespec='microseconds')
     try:
         for msg in msgs:
             agent_report.report(src, msg, need='檢查這份檔(Markdown 原稿排得出來嗎、PDF 打得開嗎),改好後回到看板會自己再試。'
                                                '整理好之前,準備履歷和填表會先停著', live=live)
-        # 這一輪沒再出現的(修好了、那份檔不用了)收掉;回報不掛在哪一張卡上(job 是空的)。
+        # 這一輪沒再出現的(修好了、那份檔不用了)收掉:這一輪又報的時間是這一輪的,留著;回報不掛在哪一張卡上(job 是空的)。
         # 先看有沒有要收的:沒有就不寫看板檔(每次存檔都會跑這支)
-        gone = lambda it: it.get('from') == src and it.get('msg') not in msgs
         with open(live, encoding='utf-8') as f:
-            if any(gone(it) for it in agent_report.open_items(json.loads(bd.parse(f.read())['fb']))):
-                agent_report.resolve(None, '這份檔整理好了', live=live, only=gone)
+            if any(it.get('from') == src and str(it.get('at', '')) < started
+                   for it in agent_report.open_items(json.loads(bd.parse(f.read())['fb']))):
+                agent_report.resolve('', '這份檔整理好了', live=live, src=src, before=started)
     except Exception as e:  # noqa: BLE001 — 回報管道本身寫不進看板:至少印出來(從按鈕跑時進這一輪的紀錄),不擋建置
         print(f'  ⚠ 來源檔的問題沒寫進回報:{e}')
 

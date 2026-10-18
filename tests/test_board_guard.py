@@ -129,7 +129,7 @@ class AgentHasNoBoardLocation(unittest.TestCase):
             for runtime in ('codex', 'claude-code'):
                 for stage in ('fill', 'fix'):
                     prompt, _out = apply_run.prompt_for(stage, U, {'id': U}, fb, self.copy, door=chrome_door.of(runtime))
-                    self.assertIn('最後直接回傳一個完整交件 JSON' if runtime == 'codex' else 'form_record.py', prompt)
+                    self.assertIn('最後直接回傳一個完整交件 JSON', prompt)        # 兩家同一種交件寫法
                     self.assertNotIn(self.copy, prompt)
                     self.assertNotIn('--board', prompt)
 
@@ -305,6 +305,28 @@ class BoardPage(HttpBase):
         code, body, _h = self.req('/')
         self.assertEqual(code, 423)
         self.assertIn('繞過', body.decode('utf-8'))
+
+
+class WritesAtTheSameTime(unittest.TestCase):
+    def test_two_writers_of_one_file_do_not_trip_over_a_shared_temp_name(self):
+        # 2026-10-07 同一程序同時派好幾隻 agent:固定的 .tmp 被另一個搬走,agent 啟動失敗「所有 Agent 都不能使用」
+        import tempfile, threading
+        d = tempfile.mkdtemp()
+        path, errors = os.path.join(d, 'f'), []
+
+        def write(i):
+            try:
+                for _ in range(100):
+                    bd._put_file(path, str(i).encode())
+            except Exception as e:  # noqa: BLE001 — 收集起來,下面一起看
+                errors.append(e)
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(os.listdir(d), ['f'])
 
 
 if __name__ == '__main__':

@@ -40,6 +40,7 @@ class SharedBrowser(unittest.TestCase):
         skill = Path(self.tmp) / 'SKILL.md'          # 不靠這台電腦有沒有裝 ego-browser skill(CI 上沒有)
         skill.write_text('ego-browser')
         self.enterContext(patch.object(cd, 'EGO_SKILL', str(skill)))
+        self.ensure_window = self.enterContext(patch.object(cd, '_ensure_ego_window'))
 
     def test_agents_are_told_not_to_send_native_keystrokes(self):
         # keyboard.paste 在 Mac 送真的 ⌘V,ego 當成使用者接手(2026-10-06 Cake 實測):規則要叫它改用 insertText
@@ -56,6 +57,16 @@ class SharedBrowser(unittest.TestCase):
             with self.assertRaises(cd.NotNow):
                 door.follow_page('7:p1')                              # 別的工作區的頁:不收
 
+    def test_profile_reload_accepts_leave_dialog_and_defers_the_r2_read(self):
+        door = cd.EgoDoor()
+        door.workspace = {'id': 42, 'name': 'jobsalvo-card', 'page': 'p1'}
+        with patch.object(cd, '_ego', return_value={'url': 'https://jobs.test/profile'}) as ego:
+            door.reload_profile_page('42:p1', 'https://jobs.test/profile')
+        script = ego.call_args.args[0]
+        self.assertIn('page.acceptDialog()', script)
+        self.assertIn('page.goto(', script)
+        self.assertNotIn('PROFILE_FN', script)
+
     def test_local_pdf_is_written_from_egos_bytes_and_its_own_workspace_is_released(self):
         source, output = Path(self.tmp, 'resume.html'), Path(self.tmp, 'resume.pdf')
         source.write_text('<p>PDF fixture</p>')
@@ -67,6 +78,20 @@ class SharedBrowser(unittest.TestCase):
             cd.EgoDoor().print_pdf(str(source), str(output))
         self.assertEqual(output.read_bytes(), content)
         release.assert_called_once_with('42:p1')
+
+    def test_local_clip_uses_cdp_document_box_and_egos_png_bytes(self):
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aY3sAAAAASUVORK5CYII=')
+        output = Path(self.tmp) / 'clip.png'
+        clip = {'x': 10, 'y': 20, 'width': 80, 'height': 40}
+        door = cd.EgoDoor()
+        with patch.object(door, '_task', return_value=''), \
+                patch.object(cd, '_ego', return_value={'data': base64.b64encode(png).decode()}) as ego:
+            self.assertEqual(door.shot_clip('42:p1', str(output), clip), str(output))
+        self.assertEqual(output.read_bytes(), png)
+        script = ego.call_args.args[0]
+        self.assertIn('Page.captureScreenshot', script)
+        self.assertIn('captureBeyondViewport', script)
+        self.assertIn('"x": 10', script)
 
     def test_failed_pdf_keeps_the_previous_file_and_releases_its_own_workspace(self):
         source, output = Path(self.tmp, 'resume.html'), Path(self.tmp, 'resume.pdf')
@@ -563,6 +588,89 @@ class NativeLoginHandoff(unittest.TestCase):
         self.assertTrue(counts['returned_to_baseline'], counts)
 
 
+class MissingEgoWindow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = self.enterContext(tempfile.TemporaryDirectory())
+        self.ensure_window = self.enterContext(patch.object(cd, '_ensure_ego_window'))
+
+    def test_screenshot_timeout_reopens_a_missing_ego_window_once(self):
+        calls = iter(['CDP request timed out: Page.captureScreenshot'] * 2)
+        out = Path(self.tmp) / 'shot.png'
+
+        def fake(*_args, **_kwargs):
+            message = next(calls, None)
+            if message is None:
+                out.write_bytes(b'\x89PNG\r\n\x1a\nrest')
+                return Mock(returncode=0, stdout=json.dumps({'ok': True, 'result': str(out)}), stderr='')
+            raise cd.NotNow(message)
+
+        with patch.object(cd, '_ego', side_effect=fake):
+            door = cd.EgoDoor.__new__(cd.EgoDoor)
+            door.workspace = {'id': 1, 'page': 'p1'}
+            door._task = lambda _tab: ''
+            self.assertEqual(door.shot('1:p1', str(out)), os.path.abspath(out))
+        self.ensure_window.assert_called_once()
+
+class ProfileReadTimeout(unittest.TestCase):
+    def test_a_timed_out_profile_read_is_read_again_once(self):
+        replies = [cd.NotNow('ego 指令連不上或逾時:timed out'), {'url': 'https://example.test'}]
+
+        def fake(*_args, **_kwargs):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        door = cd.EgoDoor.__new__(cd.EgoDoor)
+        door._task = lambda _tab: ''
+        with patch.object(cd, '_ego', side_effect=fake):
+            self.assertEqual(door.read_profile_page('1:p1'), {'url': 'https://example.test'})
+        self.assertEqual(replies, [])
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EveryReadWaitsForTheSamePageToSettle(unittest.TestCase):
+    """每個讀頁、判斷「要本人登入」的入口都先跑同一段 settle:不在載入中、有 body、網址和內容連續不變。
+    以前每個入口出事各補一種等法(只等 body、自己一圈迴圈、給 agent 的一句話),別的入口照樣出事。"""
+
+    def scripts(self):
+        door = cd.EgoDoor()
+        door.workspace = dict(WORKSPACE)
+        seen = []
+        with patch.object(cd, '_ego', side_effect=lambda script, timeout=None: seen.append(script) or {
+                'pages': {'https://jobs.test/p': {'text': ''}}, 'reader': 'p2'}):
+            door.read_page('42:p1')
+            door.read_profile_page('42:p1')
+            door.read_shown_page('https://jobs.test/p')
+            door.open_for_agent('https://jobs.test/apply', '42:p1')
+            door.human_action()
+            door.read_pages(['https://jobs.test/p'])
+        return seen
+
+    def test_each_entry_settles_before_it_reads(self):
+        for script in self.scripts():
+            self.assertIn('await settle(', script)
+            self.assertLess(script.index('await settle('), max(script.find('READ_FORM'), script.rfind('evaluate(')))
+
+    def run_settle(self, signatures):
+        script = cd.SETTLE + """
+const SIGS = %s; let n = 0;
+const p = {evaluate: async () => { const s = SIGS[Math.min(n++, SIGS.length - 1)]; if (s === null) throw new Error('navigating'); return s; },
+           waitForTimeout: async () => null};
+settle(p).then(ok => console.log(JSON.stringify({ok, n})));
+""" % json.dumps(signatures)
+        out = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_a_page_replaced_after_load_is_read_once_it_stops_changing(self):
+        # 載完又換掉整份文件(LinkedIn)、授權頁先閃登入頁(Lever):中途讀不到、沒 body、網址在換,都不算穩
+        got = self.run_settle([None, '', 'https://x/login|10|50', 'https://x/allow|300|90', 'https://x/allow|300|90'])
+        self.assertEqual(got, {'ok': True, 'n': 5})
+
+    def test_a_page_that_never_settles_is_still_read_after_the_limit(self):
+        got = self.run_settle(['a', 'b'] * 40)
+        self.assertEqual(got['ok'], False)

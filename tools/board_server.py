@@ -33,6 +33,7 @@ sys.path.insert(0,HERE)
 import board_doc as bd
 import config as cf
 import card
+import jobrun
 REPO=cf.HOME
 
 LOCK=threading.Lock()
@@ -145,9 +146,8 @@ def next_steps(doc, only=None):
     設定跟自動流程同一份(autopilot.flow);停著的頁上限要數整份看板,所以先算全部再挑。"""
     import autopilot, next_step
     fb=json.loads(doc['fb'] or '{}')
-    with _BUILD_LOCK: gen,building=_build_state['gen'],_build_state['running']
     out=next_step.of(fb,doc['data'].get('jobs') or [],doc['data'].get('status'),flow=autopilot.flow(),real=is_real(),
-                     gen=gen,building=building)
+                     build=build_state())
     if only is not None:
         out={k:v for k,v in out.items() if k in only}
     for u,due in list(QUEUED.items()):    # 確認了、排在後台等著送的:看板寫「幾秒後開始送出」,不給「▶ 送出」
@@ -392,7 +392,7 @@ def _event(cur, u, ev, data, jobs, changed, status):
     # 這張之前還開著、跟送出有關的回報已經有答案了,一起收掉(#316)
     import agent_report, apply_run
     if ev=='not_sent':
-        agent_report.apply_resolve(cur,u,'你確認沒送出',only=lambda it: it.get('from')==apply_run.REPORT_FROM)
+        agent_report.apply_resolve(cur,u,'你確認沒送出',src=apply_run.REPORT_FROM)
     elif ev in ('actually_sent','sent_manual'):
         agent_report.apply_resolve(cur,u,'你確認其實送出了' if ev=='actually_sent' else '你標了已在外部送出')
 
@@ -492,7 +492,12 @@ def note_saved():
 
 
 _BUILD_LOCK=threading.Lock()
-_build_state={'running':False,'again':False,'gen':0,'done':True}   # gen:每跑完一次 reconcile +1,給頁面判斷「卡片資料該重拿了」;done:最近那一輪有沒有跑完
+# gen:每跑完一次 reconcile +1,給頁面判斷「卡片資料該重拿了」;done:最近那一輪有沒有跑完;
+# tried、built:最近一輪、最近跑完的那一輪幾點開始的(自動流程照這個判斷卡進待你決定之後驗收跑過了沒)
+_build_state={'running':False,'again':False,'gen':0,'done':True,'tried':0.0,'built':0.0}
+
+def build_state():
+    with _BUILD_LOCK: return {k:_build_state[k] for k in ('running','tried','built')}
 
 def trigger_build():
     """有卡片被標成 ready/ship 就在背景跑一次 reconcile,把那張的可投遞包生出來。
@@ -512,6 +517,8 @@ def trigger_build():
         try:
             import reconcile
             while True:
+                started=time.time()
+                with _BUILD_LOCK: _build_state['tried']=started
                 result=subprocess.run([sys.executable,os.path.join(HERE,'reconcile.py')],cwd=REPO,
                                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
                 # 只有幾張卡的要寄的檔案沒建成也算跑完:驗收結果已寫進看板,那幾張各自被擋。
@@ -521,6 +528,7 @@ def trigger_build():
                     _build_state['done']=done
                     if done:
                         _build_state['gen']+=1
+                        _build_state['built']=started
                     if not _build_state['again']:
                         _build_state['running']=False
                         if done and PILOT: PILOT.kick()  # 驗收跑完才可能推進
@@ -614,6 +622,7 @@ RUNS={
  'add':     {'script':'add_job.py',    'env':'ADD_TMP',       'status':'add_status.json',       'dir':'.add'},
  # 「⚙ 設定 → 分類」讓 agent 建議類別與標籤(suggest_cats),建議寫在 suggest.json,套用要使用者按。
  'suggest': {'script':'suggest_cats.py','env':'SUGGEST_TMP',  'status':'suggest_status.json',   'dir':'.suggest'},
+ 'sync':    {'script':'sync_profiles.py','env':'SYNC_TMP',     'status':'sync_status.json',      'dir':'.sync'},
 }
 MODES=('deep','wide','dir')
 _PROC={}
@@ -659,20 +668,24 @@ def first_run(state):
 def migrate_marks(state):
     """伺服器起來時收尾,寫回檔案(記進流水帳):伺服器的填表、送出、自動流程讀的都是檔案。
     卡停在正在填、正在送出,那一輪卻已經不在跑(伺服器重開前被停掉、當掉):照狀態表收尾(apply_run.settle)。
-    產生它的規則改了、造成它的 bug 修掉了的 agent 回報和還沒確認的答案:清掉(stale.sweep,GLOSSARY「過時」)。"""
+    產生它的規則改了、造成它的 bug 修掉了的 agent 回報和還沒確認的答案:清掉(stale.sweep,GLOSSARY「過時」)。
+    證據夾之前填的卡,可投遞夾裡的填表截圖搬進證據夾(apply_run.old_shots)。"""
     import copy, apply_run, stale
     with open(state,encoding='utf-8') as source: fb0=json.loads(bd.parse(source.read())['fb'])
     probe=copy.deepcopy(fb0)
     stuck=apply_run.settle(probe,_apply_busy())
     before=stale.boundaries()
     outdated=stale.sweep(probe,before)
-    if not stuck and not outdated: return
+    shots=apply_run.old_shots(fb0)
+    if not stuck and not outdated and not shots: return
     def mut(fb):
         apply_run.settle(fb,_apply_busy())
         stale.sweep(fb,before)
+        apply_run.adopt_old_shots(fb,kept)
     # 回不了頭:一律走 folder_history.convert,先留退回點(存一版或備份看板檔),沒有退回點就不轉
     import folder_history
-    why='、'.join(w for w,need in (('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated)) if need)+'轉換'
+    why='、'.join(w for w,need in (('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated),('舊的填表截圖',shots)) if need)+'轉換'
+    kept=apply_run.keep_old_shots(shots,state)   # 先複製進證據夾,卡上才改指過去
     done=folder_history.convert(cf.HOME,[state],why,lambda: bd.set_fb(mut, live=state, by='board_server'))
     if not done['done']:
         print(f'⚠ {why}沒有做:沒有退回點({done["reason"]})')
@@ -693,9 +706,11 @@ def sent_files():
             docs=ship.documents(j,fb)
         except Exception as e:  # noqa: BLE001 — 算不出來記成錯誤指紋:換檔前後照樣比得出有沒有變,變了卡上會標檔案換了
             docs=[{'id':'?','effective_path':'err:'+type(e).__name__}]
+        # 送出檔名也算:公司申請頁上看到的名字變了,填好的那一頁就是舊的
         out[j['id']]=[(d.get('id'),d.get('effective_path'),
-                       ship._digest(d['effective_path']) if d.get('effective_path') and os.path.isfile(d['effective_path']) else None)
-                      for d in docs]
+                       ship._digest(d['effective_path']) if d.get('effective_path') and os.path.isfile(d['effective_path']) else None,
+                       d.get('send_name') or '')
+                      for d in docs]+[('merged_name',str((cf.C.get('resume') or {}).get('merged_name') or ''))]
     return out
 
 def files_changed(before,why):
@@ -712,10 +727,8 @@ def files_changed(before,why):
 def page_gone(u):
     """👀 截不到那一頁時:那張卡的工作區或頁已經不在 ego 裡,就把它改標成「頁面不見了,要重填」
     (自動流程每分鐘也會做同一件事)。ego 一時連不上這種不確定的情況不動。
-    副本不看:ego 整台電腦只有一個,副本的卡不是它填的,拿它判斷會把副本的卡亂標。"""
+    副本不看(sweep_gone 自己認)。"""
     import chrome_door
-    if not is_real():
-        return False
     try:
         return bool(chrome_door.sweep_gone(STATE,only=u,by='board_server'))   # 在看板鎖內照現在的看板算(#308)
     except Exception:  # noqa: BLE001 — 判斷不了就當頁面還在:👀 回「接不上,等一下再按」,自動流程每分鐘會再掃一次
@@ -769,6 +782,9 @@ def run_argv(kind,args):
     if kind=='suggest':
         return [sys.executable,os.path.join(HERE,'suggest_cats.py' if is_real() else 'job_fake.py'),'--board',STATE]+(
             [] if is_real() else ['--kind','suggest'])
+    if kind=='sync':
+        return [sys.executable,os.path.join(HERE,'sync_profiles.py' if is_real() else 'job_fake.py'),'--board',STATE]+(
+            [] if is_real() else ['--kind','sync'])
     if kind=='customize':
         argv=[sys.executable,os.path.join(HERE,'customize.py' if is_real() else 'job_fake.py'),'--board',STATE]
         if not is_real(): argv+=['--kind','customize']
@@ -800,7 +816,6 @@ def run_argv(kind,args):
     return argv
 
 def run_status(kind):
-    import jobrun
     p=_PROC.get(kind)
     if p is not None and p.poll() is not None:
         _PROC[kind]=None     # 收掉結束的子行程;不收的話它變殭屍,pid 查起來永遠「還活著」
@@ -816,7 +831,6 @@ def run_status(kind):
 
 def control_run(kind,act):
     """⏸ 暫停 / ▶ 繼續 / ⏹ 停止 正在跑的那一輪(見 jobrun.control)。回 (HTTP 狀態碼, 現在的進度)。"""
-    import jobrun
     if act not in ('pause','resume','stop'): return 400,{'msg':'不知道要暫停、繼續還是停止'}
     with _RUN_LOCK:
         if act=='pause' and kind=='apply' and run_status(kind).get('stage')=='submit':
@@ -831,7 +845,7 @@ def start_run(kind,args):
     """單飛:同一種正在跑就不再開第二個。cut_tailor 一啟動會先殺掉上一個 worker,
     按兩下等於把跑到一半的 agent 砍掉重來;找缺兩輪同時跑,兩隻 agent 會撈同一批。
     回 (HTTP 狀態碼, 內容)。"""
-    import jobrun, time
+    import time
     if kind in ('prep', 'customize', 'apply'):
         problem = _source_preflight()
         if problem:
@@ -841,8 +855,10 @@ def start_run(kind,args):
     one=str(args.get('url') or '')
     if one and kind in ('prep','replies'):
         fb0=json.loads(bd.parse(read_doc())['fb'])
-        want={'prep':'prep','replies':'sent'}[kind]
-        if (fb0.get(one) or {}).get('app')!=want: return 400,{'msg':'這張不在'+('準備履歷中' if kind=='prep' else '已投出')}
+        if kind=='prep' and (fb0.get(one) or {}).get('app')!='prep': return 400,{'msg':'這張不在準備履歷中'}
+        if kind=='replies':
+            import reply_run   # 查應徵進度查哪幾張只有一份規則:已投出的,加上送出結果不明的
+            if one not in reply_run.to_check(fb0): return 400,{'msg':'這張不在已投出,也不是送出結果不明'}
     if kind in ('research', 'suggest'):
         pasted = str(args.get('resume_text') or '').strip()[:100000]
         if kind == 'research':
@@ -931,9 +947,7 @@ def start_run(kind,args):
             if not delivery_state.allowed(m,'fix_start'):
                 return 400,{'msg':'這張「'+delivery_state.label(delivery_state.state(m))+'」,不能叫 agent 在原頁改'}
             import apply_run
-            # 他在回報按了「處理好了」確認平台內容:修改就是重新核對,不用另外寫要改什麼
-            confirmed=any(it.get('job')==url and it.get('approve') and it.get('done') and not it.get('res') for it in fb.get('__inbox__') or [])
-            if not note and not confirmed and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
+            if not note and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
                 return 400,{'msg':'寫一下要 agent 改什麼'}
         args={'stage':stage,'url':url,'note':note,'limit':0 if url else limit}
     if kind in ('prep','replies'):
@@ -943,7 +957,7 @@ def start_run(kind,args):
         urls=[u for u in re.split(r'\s+',str(args.get('text') or '')) if re.match(r'https?://',u)][:30]
         if not urls and not add_job.waiting(): return 400,{'msg':'貼一個以上的職缺網址(http 開頭)'}   # 沒貼網址:接著寫上次沒寫完的
         args={'urls':urls}
-    if kind in ('apply', 'replies') and is_real():
+    if kind in ('apply', 'replies', 'sync') and is_real():
         import chrome_door
         if not chrome_door.configured():
             ego = chrome_door.settings_status()['ego']
@@ -952,10 +966,10 @@ def start_run(kind,args):
     with _RUN_LOCK:
         st=run_status(kind)
         if st.get('running'): return 409,st
-        # 代投和查應徵進度都用 agent 的瀏覽器,一次只跑一個(電腦資源)
-        other={'apply':'replies','replies':'apply'}.get(kind)
-        if other and run_status(other).get('running'):
-            return 409,{'other':True,'msg':('查應徵進度' if other=='replies' else '幫你填表')+'正在用 agent 的瀏覽器,等它跑完再按'}
+        # 用 agent 瀏覽器的工作一次只跑一個(jobrun.BROWSER_JOBS)
+        other=kind in jobrun.BROWSER_JOBS and next((k for k in jobrun.BROWSER_JOBS if k!=kind and run_status(k).get('running')),None)
+        if other:
+            return 409,{'other':True,'msg':{'replies':'查應徵進度','apply':'幫你填表','sync':'全部同步'}[other]+'正在用 agent 的瀏覽器,等它跑完再按'}
         sp=run_sp(kind); os.makedirs(sp,exist_ok=True)
         env=dict(os.environ); env[RUNS[kind]['env']]=sp
         if kind in ('research', 'suggest'): env['JOBSALVO_RESUME_TEXT']=args['resume_text']
@@ -977,8 +991,6 @@ PILOT=None
 def start_pilot():
     global PILOT
     import autopilot, agent_report
-    def build_state():
-        with _BUILD_LOCK: return {'gen':_build_state['gen'],'running':_build_state['running']}
     PILOT=autopilot.Pilot(STATE,start_run,run_status,build_state,is_real,
                           report=lambda *x,**k: agent_report.report(*x,live=STATE,**k),build=trigger_build)
     PILOT.start()
@@ -1108,15 +1120,6 @@ class H(BaseHTTPRequestHandler):
             finally:
                 with contextlib.suppress(FileNotFoundError):
                     os.remove(out)
-        elif self.path.startswith('/api/shot?'):
-            # agent 填表/送出時截的圖(可投遞夾的 .apply/ 裡)。只給這兩張,路徑由網址算,不收任何路徑參數。
-            from urllib.parse import urlparse, parse_qs
-            import apply_run
-            q=parse_qs(urlparse(self.path).query); u=(q.get('u') or [''])[0]; s=(q.get('s') or [''])[0]
-            f=os.path.join(apply_run.out_dir(u,STATE,run_sp('apply')),s+'.png') if u and s in ('fill','submit') else ''
-            if f and os.path.isfile(f):
-                with open(f,'rb') as fh: self._send(200,fh.read(),'image/png')
-            else: self._send(404,'沒有截圖','text/plain; charset=utf-8')
         elif self.path.startswith('/api/evidence?'):
             # 要他確認或處理的事附的那張截圖(程式自己截的,在那張卡的證據夾,#315)。只收「<輪>/<檔名>」、只給圖檔
             from urllib.parse import urlparse, parse_qs
@@ -1138,7 +1141,8 @@ class H(BaseHTTPRequestHandler):
                                         'prep':run_status('prep'),'research':run_status('research'),
                                         'customize':run_status('customize'),
                                         'apply':run_status('apply'),'replies':run_status('replies'),
-                                       'add':run_status('add'),'suggest':run_status('suggest')})
+                                       'add':run_status('add'),'suggest':run_status('suggest'),
+                                       'sync':run_status('sync')})
         elif self.path.startswith('/api/prompt'):
             self.do_GET_prompt()
         elif self.path in ('/api/update','/api/update?now=1'):
@@ -1151,7 +1155,7 @@ class H(BaseHTTPRequestHandler):
         elif self.path=='/api/settings':
             import settings_api as sa
             note_existed=os.path.exists(cf.PREFERENCE_NOTE)
-            d=sa.get()
+            d=sa.get(STATE)
             if not note_existed and os.path.exists(cf.PREFERENCE_NOTE):
                 note_saved()
             try:
@@ -1544,8 +1548,10 @@ class H(BaseHTTPRequestHandler):
             got={}
             rejected=write_fb(cmds,got)
             sets=[c.get('set') for c in cmds if isinstance(c,dict) and isinstance(c.get('set'),dict)]
-            # 有卡進待你決定/可投遞 → 背景生可投遞包(single-flight),使用者不用再等人建。
-            if any(x.get('app') in ('ready','ship') for x in sets):
+            # 有卡進待你決定/可投遞、或換了要寄的檔(履歷、語言、自己的檔)→ 背景生可投遞包(single-flight),使用者不用再等人建。
+            # 換檔不建的話,夾子裡一直是舊的那一份,自動重填就拿它去傳(#448);接著要跑的填表會先等這一輪建完(_source_preflight)
+            import delivery_state as ds
+            if any(x.get('app') in ('ready','ship') or any(k in x for k in ds.SWAP_FIELDS) for x in sets):
                 trigger_build()
             if PILOT and (any(isinstance(c,dict) and (c.get('ev') or 'back' in c or c.get('u')=='__auto__') for c in cmds)
                           or any(x.get('app') in ('prep','ready','ship') for x in sets)):
@@ -1602,7 +1608,8 @@ def sandbox_home():
                 return
             os.makedirs(os.path.dirname(dst),exist_ok=True); shutil.copy2(src,dst)   # 只複製內容,不連回原檔
         for f in (os.path.join(cf.HOME,cf.NAME),cf.PREFS,cf.PREFERENCE_NOTE,
-                  cf.APPLY_RULES,os.path.join(cf.HOME,'resume.md'),os.path.join(cf.HOME,'.resume-paste.md')):
+                  cf.APPLY_RULES,os.path.join(cf.HOME,'resume.md'),os.path.join(cf.HOME,'.resume-paste.md'),
+                  os.path.join(cf.HOME,'profiles.json')):
             if os.path.commonpath((home,os.path.realpath(f)))==home:
                 keep(f,os.path.relpath(os.path.realpath(f),home))
         import settings_api as sa
@@ -1656,8 +1663,6 @@ def main():
         migrate_marks(STATE)   # 舊資料寫回成現在的樣子:自動流程第一次盤點、頁面第一次載入之前
         if is_real():
             cf.upgrade_file()          # 設定檔裡現在不用的舊設定寫回拿掉
-            import profile_sync
-            profile_sync.drop_legacy_checks()   # 舊的逐字比對留下的「對不上」不是現在的判讀結果
         start_pilot()  # 所有埠先綁好，首次盤點仍在開始接受 HTTP 前完成
         RUNNING_VERSION=code_version()
         launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1'

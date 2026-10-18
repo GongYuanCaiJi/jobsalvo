@@ -1,0 +1,118 @@
+{
+  "target": {
+    "item": "作品[0]",
+    "text": "新影片",
+    "links": [
+      "https://video.example/watch?v=new"
+    ]
+  },
+  "page": {
+    "url": "http://127.0.0.1:51442/profile/normal/fixed",
+    "title": "本機作品驗收履歷",
+    "readyState": "complete",
+    "text": "本機假驗收頁 (127.0.0.1) / Local acceptance-test platform. Changes affect only disposable test data.\n本機作品驗收履歷\n作品\n作品影片連結觀看\n求職\n可到職時間\n即刻\n兩週內\n一個月內\n儲存履歷\n\n類型:fixed\n\n沒有附件\n上傳或取代同名附件上傳附件\n返回履歷清單\n即刻\n兩週內\n一個月內",
+    "emailThreadPrintView": false,
+    "emailThreads": [],
+    "emailMessageCount": 0,
+    "emailBodies": [],
+    "links": [
+      "https://video.example/watch?v=new",
+      "http://127.0.0.1:51442/profiles/normal"
+    ],
+    "media": [],
+    "anchors": [
+      {
+        "href": "https://video.example/watch?v=new",
+        "text": "觀看"
+      },
+      {
+        "href": "http://127.0.0.1:51442/profiles/normal",
+        "text": "返回履歷清單"
+      }
+    ],
+    "fields": [
+      {
+        "id": "work",
+        "label": "作品",
+        "section": "作品",
+        "role": "",
+        "type": "text",
+        "autocomplete": "",
+        "text": "",
+        "parentText": "作品",
+        "value": "新影片",
+        "aria": {
+          "aria-selected": null,
+          "aria-checked": null,
+          "aria-pressed": null,
+          "aria-expanded": null,
+          "aria-activedescendant": null,
+          "aria-valuenow": null,
+          "aria-valuetext": null,
+          "aria-controls": null,
+          "aria-labelledby": null,
+          "aria-describedby": null
+        }
+      },
+      {
+        "id": "video_url",
+        "label": "影片連結",
+        "section": "作品",
+        "role": "",
+        "type": "url",
+        "autocomplete": "",
+        "text": "",
+        "parentText": "影片連結",
+        "value": "https://video.example/watch?v=new",
+        "aria": {
+          "aria-selected": null,
+          "aria-checked": null,
+          "aria-pressed": null,
+          "aria-expanded": null,
+          "aria-activedescendant": null,
+          "aria-valuenow": null,
+          "aria-valuetext": null,
+          "aria-controls": null,
+          "aria-labelledby": null,
+          "aria-describedby": null
+        }
+      },
+      {
+        "id": "availability",
+        "label": "可到職時間\n即刻\n兩週內\n一個月內",
+        "section": "求職",
+        "role": "",
+        "type": "select-one",
+        "autocomplete": "",
+        "text": "即刻\n兩週內\n一個月內",
+        "parentText": "可到職時間\n即刻\n兩週內\n一個月內",
+        "value": "two-weeks",
+        "shown": "兩週內",
+        "aria": {
+          "aria-selected": null,
+          "aria-checked": null,
+          "aria-pressed": null,
+          "aria-expanded": null,
+          "aria-activedescendant": null,
+          "aria-valuenow": null,
+          "aria-valuetext": null,
+          "aria-controls": null,
+          "aria-labelledby": null,
+          "aria-describedby": null
+        }
+      }
+    ]
+  },
+  "report": {
+    "tab_id": "500:p1",
+    "handoff": false,
+    "quotes": [
+      "新影片",
+      "https://video.example/watch?v=new"
+    ],
+    "urls": [
+      "https://video.example/watch?v=new"
+    ],
+    "reason": ""
+  }
+}

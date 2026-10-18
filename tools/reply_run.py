@@ -86,9 +86,27 @@ def waiting(fb):
     return [u for u, m in fb.items() if ds.app_of(m) == 'sent' and (m.get('oc') or '') not in ('rej', 'wd')]
 
 
+def unsure_cards(fb):
+    """送出結果不明、還在「可以投了」的卡:agent 按了送出卻沒看到成功頁。查應徵進度替他查到底送出沒有,不交給他。"""
+    import delivery_state as ds
+    return [u for u, m in fb.items() if isinstance(m, dict) and m.get('app') == 'ship' and not m.get('rm')
+            and ds.state(m) == 'unsure']
+
+
+def to_check(fb):
+    """這一輪要查的卡:等回音的,加上送出結果不明的。"""
+    return waiting(fb) + unsure_cards(fb)
+
+
+def submit_tried_at(m):
+    """送出結果不明的卡是什麼時候按的送出(ISO)。"""
+    a = (m or {}).get('apply') or {}
+    return str((a.get('submit_fail') or {}).get('at') or a.get('at') or '')
+
+
 def since_of(fb, url):
     item = fb.get(url) or {}
-    return str((item.get('replies') or {}).get('at') or item.get('sent_at') or '')[:10]
+    return str((item.get('replies') or {}).get('at') or item.get('sent_at') or submit_tried_at(item))[:10]
 
 
 def _company(jobs, url):
@@ -189,7 +207,17 @@ def _gmail_page_problem(page, source_url):
         return 'Gmail 來源網址格式錯誤'
     if parsed.scheme != 'https' or (parsed.hostname or '').casefold() not in ('mail.google.com', 'gmail.google.com'):
         return 'Gmail 來源讀取後跳到其他網站'
+    if gmail_message_id(source_url) != gmail_message_id(final_url):
+        return 'Gmail 讀到的是另一封信,不是要讀的那封'
+    if _gmail_search_query(source_url) != _gmail_search_query(final_url):
+        return 'Gmail 讀到的是另一個搜尋,不是要搜的那個'
     return ''
+
+
+def _gmail_search_query(url):
+    """網址裡 #search/ 後面的搜尋字;Gmail 載入後會把空白改寫成 +,兩邊都解碼再比。"""
+    fragment = str(url or '').partition('#')[2]
+    return urllib.parse.unquote_plus(fragment[len('search/'):]) if fragment.startswith('search/') else None
 
 
 def gmail_message_id(value):
@@ -240,14 +268,18 @@ def _gmail_result_range(text):
     return None
 
 
+def _thread_links(page):
+    """頁面上指向一封信的連結:真的連結,加上 Gmail 搜尋結果每一列的對話代號(列不是連結,讀頁程式另外收 emailThreads)。"""
+    page = page or {}
+    hrefs = page.get('links') or [a.get('href') for a in page.get('anchors') or [] if isinstance(a, dict)]
+    m = re.match(r'https://mail\.google\.com/mail/u/\d+/', str(page.get('url') or ''))
+    base = m.group(0) if m else GMAIL
+    hrefs = list(hrefs) + [f'{base}#all/{t}' for t in page.get('emailThreads') or [] if isinstance(t, str)]
+    return [h for h in hrefs if isinstance(h, str)]
+
+
 def _gmail_search_thread_ids(page):
-    anchors = (page or {}).get('anchors') or [
-        {'href': link, 'text': ''} for link in (page or {}).get('links') or []
-    ]
-    return list(dict.fromkeys(
-        thread_id for anchor in anchors if isinstance(anchor, dict)
-        if (thread_id := gmail_message_id(anchor.get('href')))
-    ))
+    return list(dict.fromkeys(thread_id for href in _thread_links(page) if (thread_id := gmail_message_id(href))))
 
 
 def _gmail_search_ready(page):
@@ -318,107 +350,42 @@ def _gmail_search_problem(page):
     return ''
 
 
-# ---- 補查來源的核實(#289 決定 2):agent 說查過了不算數,程式核實過來源真的讀完,那幾張卡才推論沒下文 ----
-# 核實只看一份摘要(不是全文):網址、標題、載完沒、搜尋頁上的筆數那幾行和每封信的連結、列印檢視每封信都有正文。
-# 程式自己再讀一次(read_pages 的全文照 _digest 算出摘要)。
-_LINE_RE = re.compile('[0-9][0-9,]*.{0,3}[-–—].{0,3}[0-9]')
-_MAIL_LINK = 'https://mail.google.com/mail/u/'
-
-
-def _digest(page):
-    """程式自己讀到的整頁(read_pages)算成摘要。"""
-    page = page or {}
-    text = str(page.get('text') or '')
-    lines = [line.strip() for line in text.split('\n')]
-    lines = [line for line in lines if line and len(line) <= 80 and (
-        _LINE_RE.search(line) or any(m in line.casefold() for m in _GMAIL_EMPTY_MARKERS))]
-    hrefs = page.get('links') or [a.get('href') for a in page.get('anchors') or [] if isinstance(a, dict)]
-    links = list(dict.fromkeys(h for h in hrefs if isinstance(h, str) and h.startswith(_MAIL_LINK)
-                               and ('#' in h or 'th=' in h)))
-    bodies = [str(b).strip() for b in page.get('emailBodies') or []]
-    full = [b for b in bodies if b]
-    return {'url': page.get('url') or '', 'title': page.get('title') or '', 'readyState': page.get('readyState'),
-            'hasText': bool(text.strip()), 'lines': lines, 'links': links,
-            'printView': page.get('emailThreadPrintView') is True,
-            'messageCount': page.get('emailMessageCount') if isinstance(page.get('emailMessageCount'), int) else len(bodies),
-            'bodies': len(full), 'bodiesInText': all(b in text for b in full)}
-
-
+# ---- 補查來源的核實(#289 決定 2):agent 說查過了不算數,程式自己再讀一次、核實過來源真的讀完,那幾張卡才推論沒下文 ----
 def _thread_url(box, thread_id):
     return f'{box}?ui=2&view=pt&search=all&th={thread_id}'
 
 
-def _digest_problem(d, kind, platform=''):
-    """核實這一頁讀完了沒;沒問題回空字串。kind:search(Gmail 搜尋頁)、thread(一封信的列印檢視)、record(平台應徵紀錄頁)。"""
-    if not isinstance(d, dict):
-        return '程式沒有核實讀到這一頁'
-    url, title = str(d.get('url') or ''), str(d.get('title') or '').casefold()
-    if d.get('readyState') != 'complete' or not d.get('hasText'):
-        return '頁面沒載完'
-    if 'accounts.google.com' in url.casefold() or any(x in title for x in ('sign in', 'log in', '登入')):
-        return '來源要求登入'
+def _source_problem(page, url, kind, platform=''):
+    """程式自己讀到的整頁,這個來源讀完整了沒;沒問題回空字串。kind:search(Gmail 搜尋頁)、thread(一封信的列印檢視)、
+    record(平台應徵紀錄頁,platform:哪個平台)。第一次複製來源、agent 補查後程式再讀一次,都照這一支判。"""
     if kind == 'record':
         import profile_sync as ps
-        return '' if ps.same_platform_url(url, platform) else '平台應徵紀錄讀取後跳到其他網站'
-    problem = _gmail_page_problem({'url': url, 'text': 'x'}, url)
-    if problem:
-        return problem
-    if kind == 'search':
-        return _gmail_search_problem({'text': '\n'.join(str(x) for x in d.get('lines') or []),
-                                      'anchors': [{'href': h} for h in d.get('links') or []]})
-    count = d.get('messageCount')
-    if (d.get('printView') is not True or not isinstance(count, int) or isinstance(count, bool) or count < 1
-            or count != d.get('bodies') or d.get('bodiesInText') is not True):
-        return 'Gmail 對話沒有完整讀到每封信'
-    return ''
+        return _page_problem(page) or ('' if ps.same_platform_url((page or {}).get('url') or url, platform)
+                                       else '平台應徵紀錄讀取後跳到其他網站')
+    return _gmail_page_problem(page, url) or (_gmail_search_problem(page) if kind == 'search'
+                                              else _gmail_thread_problem(page))
 
 
-def _same_page(asked, got, kind):
-    """核實讀到的那一頁是不是補查清單上的這一個來源(Claude 的摘要只有它最後停在的網址)。"""
-    try:
-        a, b = urllib.parse.urlsplit(asked), urllib.parse.urlsplit(got)
-    except ValueError:
-        return False
-    if (a.hostname or '').casefold() != (b.hostname or '').casefold() or a.path.rstrip('/') != b.path.rstrip('/'):
-        return False
-    if kind == 'search':
-        def q(u):
-            return urllib.parse.unquote(u.fragment.replace('+', ' '))
-        return q(a) == q(b)
-    if kind == 'thread':
-        return urllib.parse.parse_qs(a.query).get('th') == urllib.parse.parse_qs(b.query).get('th') \
-            and urllib.parse.parse_qs(b.query).get('view') == ['pt']
-    return True
-
-
-def unverified_cards(unavailable, digests, box=None):
+def unverified_cards(unavailable, pages, box=None):
     """補查清單上程式沒核實讀完的來源,影響到的卡(這一輪不推論沒下文、查過日期不往前推)。
-    digests:核實讀到的摘要(可帶 _asked = 程式要讀的網址)。沒有網頁可核實的來源(不是 Gmail 的信箱、
+    pages:程式自己再讀到的整頁 {網址: 頁面}。沒有網頁可核實的來源(不是 Gmail 的信箱、
     公司名沒有能搜的字)永遠算沒核實:那些卡只照回音改,不推論沒下文。"""
     box = box or mailbox()[0]
-    digests = [d for d in digests or [] if isinstance(d, dict)]
-
-    def find(url, kind):
-        hit = [d for d in digests if d.get('_asked') == url] or \
-              [d for d in digests if '_asked' not in d and _same_page(url, str(d.get('url') or ''), kind)]
-        return hit[-1] if hit else None
+    pages = pages or {}
 
     def ok(item):
         ref, url = str(item.get('source_ref') or ''), str(item.get('url') or '')
         if not url:
             return False
         if ref.startswith('application_record:'):
-            return not _digest_problem(find(url, 'record'), 'record', ref.split(':', 1)[1])
+            return not _source_problem(pages.get(url), url, 'record', ref.split(':', 1)[1])
         if ref in ('email:search', 'email:search-more'):
-            if not mailbox(url)[1]:
+            if not mailbox(url)[1] or _source_problem(pages.get(url), url, 'search'):
                 return False
-            page = find(url, 'search')
-            if _digest_problem(page, 'search'):
-                return False
-            ids = _gmail_search_thread_ids({'anchors': [{'href': h} for h in page.get('links') or []]})
-            return all(not _digest_problem(find(_thread_url(box, t), 'thread'), 'thread') for t in ids)
+            threads = [_thread_url(box, t) for t in _gmail_search_thread_ids(pages[url])]
+            return all(not _source_problem(pages.get(t), t, 'thread') for t in threads)
         if ref.startswith('email:'):
-            return not _digest_problem(find(url, 'thread'), 'thread')
+            return not _source_problem(pages.get(url), url, 'thread')
         return False
 
     out = set()
@@ -429,11 +396,11 @@ def unverified_cards(unavailable, digests, box=None):
 
 
 def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, texts=None):
-    """Codex:agent 補查完,程式自己把補查清單上的網頁再讀一次(它可能剛登入好了),算成摘要給 unverified_cards。
+    """agent 補查完,程式自己把補查清單上的網頁再讀一次(它可能剛登入好了),整頁交給 unverified_cards。
     讀不到的就沒有摘要,那幾張卡照樣不推論沒下文。「超過每輪上限」那一條不重讀(本來就讀不完)。
     texts:給了就把程式讀到的全文記進去({來源代號: 全文}),安檢門拿它核對 agent 補查交回的回音。"""
     box = mailbox()[0]
-    got = []
+    got = {}
     refs = {it['url']: str(it.get('source_ref') or '') for it in unavailable or [] if it.get('url')}
 
     def read(urls, **kw):
@@ -442,7 +409,7 @@ def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, t
         except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;原因照實印進這一輪的紀錄,這批當成沒讀到
             print(f'程式核實補查來源讀取失敗:{str(e)[:120]}')
             return {}
-        got.extend(dict(_digest(pages.get(u) or {}), _asked=u) for u in urls)
+        got.update({u: pages.get(u) or {} for u in urls})
         if texts is not None:
             for u in urls:
                 text = str((pages.get(u) or {}).get('text') or '')
@@ -450,8 +417,7 @@ def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, t
                 ref = f'email:{th}' if th else refs.get(u, '')
                 if not (th or ref.startswith('application_record:')):
                     continue                              # 搜尋頁本身不是一封信
-                if text and not _digest_problem(_digest(pages.get(u) or {}),
-                                                        'thread' if th else 'record', ref.split(':', 1)[-1]):
+                if text and not _source_problem(pages.get(u), u, 'thread' if th else 'record', ref.split(':', 1)[-1]):
                     texts[ref] = text
         return pages
 
@@ -473,6 +439,14 @@ def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, t
     return got
 
 
+def _search(box_url, query, board=None, reader=None):
+    """程式自己搜一次 Gmail:回 (搜尋頁網址, 對話代號, 沒讀完整的原因)。"""
+    url = box_url + '#search/' + urllib.parse.quote(query, safe='')
+    try:
+        page = _read_pages([url], board, reader, ready=_gmail_search_ready, settle=2).get(url) or {}
+    except Exception as e:  # noqa: BLE001 — 原因照實回給呼叫端,跟著結果回報
+        return url, [], f'Gmail 搜尋頁讀取失敗:{str(e)[:120]}'
+    return url, _gmail_search_thread_ids(page), _gmail_page_problem(page, url) or _gmail_search_problem(page)
 
 
 def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS):
@@ -499,23 +473,14 @@ def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS
                              'need': '用 agent 專用 Chrome 補查相關郵件,並記錄實際郵件來源',
                              'jobs': unsearchable})
     if query:
-        search_url = box_url + '#search/' + urllib.parse.quote(query, safe='')
-        try:
-            search_page = _read_pages([search_url], board, reader,
-                                      ready=_gmail_search_ready, settle=2).get(search_url) or {}
-        except Exception as e:  # noqa: BLE001 — 原因照實記進 search_error,跟著結果回報
-            search_page = {}
-            search_error = f'Gmail 搜尋頁讀取失敗:{str(e)[:120]}'
-        else:
-            search_error = (_gmail_page_problem(search_page, search_url)
-                            or _gmail_search_problem(search_page))
+        search_url, found, search_error = _search(box_url, query, board, reader)
         if search_error:
             inaccessible.append({'source_ref': 'email:search', 'source_type': 'email', 'url': search_url,
                                  'source': 'Gmail', 'reason': search_error,
                                  'need': '用 agent 專用 Chrome 補查 Gmail,並記錄查到的郵件來源',
                                  'jobs': searchable_urls})
         else:
-            thread_ids = _gmail_search_thread_ids(search_page)
+            thread_ids = found
             if len(thread_ids) > max_mails:
                 inaccessible.append({'source_ref': 'email:search-more', 'source_type': 'email', 'url': search_url,
                                      'source': 'Gmail 搜尋結果',
@@ -523,6 +488,15 @@ def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS
                                      'need': '用 agent 專用 Chrome 補查剩餘郵件',
                                      'jobs': searchable_urls})
             thread_ids = thread_ids[:max_mails]
+    # 送出結果不明的卡:照按送出那一秒搜(Gmail 的 after: 收秒數),搜得到的對話才可能是這一次投遞的證據
+    for url in [u for u in unsure_cards(fb) if is_gmail and u in searchable_urls]:
+        t = _local_time(submit_tried_at(fb[url]))
+        if t is None:
+            continue
+        q = f'after:{int(t.timestamp())} (' + ' OR '.join(f'"{x}"' for x in _gmail_terms(_company(jobs, url))) + ')'
+        _, found, problem = _search(box_url, q, board, reader)
+        if not problem:                   # 讀不完整就沒有這張的名單,查到的信只能回報給他
+            result['gmail'].setdefault('after', {})[url] = found
 
     record_pages = ps.application_record_pages()
     relevant_platforms = {ps.profile_key(url) for url in urls}
@@ -550,16 +524,8 @@ def collect_sources(fb, jobs, urls, board=None, reader=None, max_mails=MAX_MAILS
             page_errors.update({target: error for target in targets})
     for source_url, source_type, source_id, source_ref in read_specs:
         page = page_results.get(source_url) or {}
-        problem = page_errors.get(source_url) or (
-            _gmail_page_problem(page, source_url) if source_type == 'email'
-            else _page_problem(page)
-        )
-        if not problem and source_type == 'email':
-            problem = _gmail_thread_problem(page)
-        if not problem and source_type == 'application_record':
-            final_url = page.get('url') or source_url
-            if not ps.same_platform_url(final_url, source_id):
-                problem = '平台應徵紀錄讀取後跳到其他網站'
+        problem = page_errors.get(source_url) or _source_problem(
+            page, source_url, 'thread' if source_type == 'email' else 'record', source_id)
         if problem:
             source_label = ('Gmail 郵件 ' + source_id if source_type == 'email'
                             else str(source_id) + ' 應徵紀錄')
@@ -593,7 +559,7 @@ def _source_type(value):
     source = str(value or '').casefold()
     if any(word in source for word in ('gmail', 'email', 'mail', '信箱', '郵件')):
         return 'email'
-    if any(word in source for word in ('application', '應徵紀錄', '104')):
+    if any(word in source for word in ('application', '應徵紀錄')):
         return 'application_record'
     return 'fallback'
 
@@ -660,18 +626,18 @@ def apply_findings(fb, found, day=None):
         ev_cleared = bool(evidence_confirmed and m.pop('ev', None))
         if not new and not enriched and not ev_cleared:
             continue
-        what = []
+        what = []                                     # (哪一類, 給人看的字):看板那一行照類別組,不拆字串
         maybe = [x for x in new if x.get('maybe')]
         if len(new) > len(maybe):
-            what.append(f'新回音 {len(new) - len(maybe)} 則')
+            what.append(('', f'新回音 {len(new) - len(maybe)} 則'))
         if maybe:
-            what.append(f'可能是同一封回音 {len(maybe)} 則,沒自動改')
+            what.append(('maybe', f'可能是同一封回音 {len(maybe)} 則,沒自動改'))
         if enriched:
-            what.append('補充回音證據')
+            what.append(('', '補充回音證據'))
         if needs_confirmation:
-            what.append('舊回音已補驗，結果由你確認')
+            what.append(('', '舊回音已補驗，結果由你確認'))
         if ev_cleared:
-            what.append('已找到確認信或平台應徵紀錄')
+            what.append(('', '已找到確認信或平台應徵紀錄'))
         decisive = sorted([x for x in new if x.get('kind') in KIND_TO_OC and not x.get('maybe')
                           and not x.get('unverified') and not x.get('effect_rejected')],
                           key=lambda x: x.get('date') or '')
@@ -691,10 +657,10 @@ def apply_findings(fb, found, day=None):
                 m['oc_auto'] = {'s': s, 'from': cur, 'at': day, 'by': steps[-1][1]['id']}
                 if at0:                               # 看板「不對,復原」原封放回改之前的日期,不照 from 重算
                     m['oc_auto']['from_at'] = at0
-                what.append(f'{OC_WORD[cur]} → {OC_WORD[s]}')
+                what.append(('moved', f'{OC_WORD[cur]} → {OC_WORD[s]}'))
         if any(x.get('todo') for x in new):
-            what.append('有要你做的事')
-        done[url] = ';'.join(what)
+            what.append(('todo', '有要你做的事'))
+        done[url] = what
     return done
 
 
@@ -728,11 +694,19 @@ def summary(res, jobs):
         return '沒有新回音'
     def name(url):
         return card.name(jobs.get(url) or {})[:24] or url.split('/')[2]
-    # 取有「→」的那一段:前面可能還有「補上拒絕理由」「已找到確認信」,不能固定取第幾段
-    moved = [f'{name(url)} {next(p for p in what.split(";") if "→" in p)}' for url, what in res.items() if '→' in what]
-    todo = [name(url) for url, what in res.items() if '要你做' in what]
-    maybe = [name(url) for url, what in res.items() if '可能是同一封' in what]
-    out = f'{len(res)} 張有新回音'
+
+    def of(tag):
+        return [(name(url), text) for url, what in res.items() for t, text in what if t == tag]
+    moved = [f'{n} {text}' for n, text in of('moved')]
+    todo = [n for n, _ in of('todo')]
+    maybe = [n for n, _ in of('maybe')]
+    # 送出結果不明的卡:查完改成什麼,每一張都點名(不是回音,一般那一行講不到)
+    out = '；'.join(f'{word}:' + '、'.join(n for n, text in of('unsure') if text == word)
+                   for word in UNSURE_WORDS.values() if any(text == word for _, text in of('unsure')))
+    res = {url: what for url, what in res.items() if any(t != 'unsure' for t, _ in what)}
+    if not res:
+        return out
+    out += ('；' if out else '') + f'{len(res)} 張有新回音'
     if moved:
         out += ';改了狀態:' + '、'.join(moved)
     if todo:
@@ -765,12 +739,128 @@ def apply_ghost(fb, day=None, checked=None):
     return out
 
 
-def apply_results(fb, findings, checked, day=None, unverified=()):
+# 送出結果不明:按下送出後至少等這麼久才拿「查完了都沒有」判定沒送出(確認信常常晚幾分鐘才到)
+UNSURE_WAIT = 3600
+NOT_SENT = '查過信箱和平台的應徵紀錄,沒有送出的證據(沒有確認信、回音或應徵紀錄):判定沒送出,要重填'
+UNCLEAR = '送出結果不明:查到可能是這張的信或紀錄,但程式核實不了是不是這張(原文沒讀到,或同一封對到好幾張)'
+UNREAD = '送出結果不明:信箱查過沒有確認信,但你在 {platform} 有帳號,它的應徵紀錄這一輪沒讀到,還不能確定沒送出'
+UNREAD_NEED = '點開看那個平台的應徵紀錄:有這一筆就在卡上按「其實送出了」,沒有就按「確認沒送出,可以重送」'
+# 送出結果不明的卡查完改成什麼:卡的查應徵進度結果、看板那一行都用這幾句
+UNSURE_WORDS = {'sent': '送出結果不明,查到送出的證據,改成已投出', 'not_sent': '送出結果不明,查不到送出的證據,改成要重填',
+                'not_sent_page': '送出結果不明,查不到送出的證據,頁還開著,改成停著等你(可以再確認送出)',
+                'not_sent_stale': '送出結果不明,查不到送出的證據,頁上傳的是舊檔,會自動照新的重填',
+                'unclear': '送出結果不明,查到可能的證據但核實不了,回報給你',
+                'unread': '送出結果不明,平台應徵紀錄沒讀到,還不能確定,回報給你'}
+UNCLEAR_NEED = '點開附的那一頁看是不是這張:是就在卡上按「其實送出了」,不是就按「確認沒送出,可以重送」'
+
+
+def _local_time(value):
+    """ISO 時間 → 本機時間(不帶時區),跟 datetime.now() 比得了;讀不懂回 None。"""
+    try:
+        t = datetime.datetime.fromisoformat(str(value or ''))
+    except (ValueError, TypeError):
+        return None
+    return t.astimezone().replace(tzinfo=None) if t.tzinfo else t
+
+
+def _ref(it):
+    """哪一封信(或哪一筆紀錄),同一封只有一種寫法:連結或來源代號認得出 Gmail 對話就用 email:<代號>
+    (舊回音只存了連結),否則照來源代號、原文連結。不含種類、日期:同一封被判成不同種類還是同一封。"""
+    ref = str(it.get('source_ref') or '')
+    thread = gmail_message_id(str(it.get('link') or '')) or (ref[6:] if ref.startswith('email:') else '')
+    return f'email:{thread}' if thread else ref or str(it.get('link') or '')
+
+
+def _held(m):
+    """一張卡身上已經記著的信(回音、送出證據、之前幾次投遞 tries、history 裡的)。"""
+    out = set()
+
+    def walk(x):
+        if isinstance(x, dict):
+            if x.get('source_ref') or x.get('link'):
+                out.add(_ref(x))
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk([(m.get('replies') or {}).get('items'), (m.get('apply') or {}).get('sent'), m.get('tries'), m.get('history')])
+    return out
+
+
+def apply_unsure(fb, findings, checked, jobs=None, now=None, records_read=(), accounts=(), after=None):
+    """送出結果不明的卡照這一輪查到的改(跟他在卡上按「其實送出了」「確認沒送出」走同一個事件):
+      · 程式核實過原文、只屬於這張、這次送出之後才有的確認信或回音 → 已投出,那一則記成送出證據
+        (after:{卡: 按送出那一秒之後有信的對話},collect_sources 照秒數搜的);
+      · 信箱完整查過(checked)、他有帳號的平台(accounts)應徵紀錄這一輪也讀到了(records_read)、送出後過了
+        UNSURE_WAIT,還是一則都沒有 → 沒送出(頁不在了就要重填;還開著就停著等你,可以再確認送出);
+      · 只查到核實不了的(agent 補查、程式沒讀到原文;同一封也對到別張、或之前就記在別張、上一次投遞用過):不改,回報給他,附那一則的連結;
+      · 他有帳號的平台,應徵紀錄這一輪沒讀到:查不完,不改,回報給他。
+    平台應徵紀錄找到的已經在 sync_sent 走 platform_found 改成已投出,這裡不會再看到它。
+    回 {url: 'sent'|'not_sent'|'not_sent_page'|'unclear'|'unread'}。"""
+    import delivery_state as ds
+    import profile_sync as ps
+    import ship
+    now = now or datetime.datetime.now()
+    stamp = now.isoformat(timespec='seconds')
+    after = {u: {f'email:{t}' for t in ts} for u, ts in (after or {}).items()}
+    owners = {}                                   # 哪一封在哪幾張卡上:這一輪交的
+    for u, its in (findings or {}).items():
+        for it in its or []:
+            if it.get('source_type') != 'application_record' and _ref(it):
+                owners.setdefault(_ref(it), set()).add(u)
+    held = {u: _held(x) for u, x in fb.items() if isinstance(x, dict) and not u.startswith('__')}
+    out = {}
+    for url in unsure_cards(fb):
+        m = fb[url]
+        items = (findings or {}).get(url) or []
+        tried = submit_tried_at(m)
+
+        def mine(x):
+            # 這一次送出的:按送出那一秒之後才有信的對話(after),這一輪只交到這張、之前沒記在任何一張卡或哪一次投遞上
+            ref = _ref(x)
+            return ref in after.get(url, ()) and owners.get(ref, {url}) <= {url} and not any(ref in h for h in held.values())
+        proof = [x for x in items if x.get('_source_verified') and not x.get('unverified')
+                 and x.get('source_type') == 'email' and mine(x)]
+        platform = ps.profile_key(url)
+        if proof:
+            x = min(proof, key=lambda it: it.get('date') or '')
+            # 送出的是 agent(跟他在卡上按「其實送出了」一樣);查到的那一則是證據(by: reply)
+            ds.fire(fb, url, 'actually_sent', by='agent', at=stamp, sent_at=(tried or x['date'])[:10],
+                    evidence={'by': 'reply', 'at': stamp, 'src': x.get('src'), 'source_ref': x.get('source_ref'),
+                              'date': x.get('date'), 'link': x.get('link'), 'quote': x.get('quote') or x.get('snippet')})
+            ship.record_sent(fb, url, (jobs or {}).get(url))
+            agent_report.apply_resolve(fb, url, '查應徵進度查到送出的證據,已改成已投出', src=agent_report.FROM_APPLY)
+            out[url] = 'sent'
+        elif items:
+            x = items[0]
+            agent_report.apply_report(fb, '查回音', UNCLEAR, need=UNCLEAR_NEED, job=url, url=x.get('link') or url)
+            out[url] = 'unclear'
+        elif url in checked and tried:
+            t = _local_time(tried)
+            if t is None or (now - t).total_seconds() < UNSURE_WAIT:
+                continue
+            if platform in accounts and platform not in records_read:
+                agent_report.apply_report(fb, '查回音', UNREAD.format(platform=platform), need=UNREAD_NEED, job=url)
+                out[url] = 'unread'
+                continue
+            ds.fire(fb, url, 'not_sent', at=stamp, issues=[NOT_SENT])
+            agent_report.apply_resolve(fb, url, '查應徵進度查過了,沒有送出的證據', src=agent_report.FROM_APPLY)
+            out[url] = {'gone': 'not_sent', 'parked': 'not_sent_page'}.get(ds.state(fb[url]), 'not_sent_stale')
+    return out
+
+
+def apply_results(fb, findings, checked, day=None, unverified=(), jobs=None, now=None, records_read=(), accounts=(),
+                  after=None):
     """套用本輪回音;只替來源完整查完的卡保存查過日期。
-    unverified:來源尚未核實完整的卡，不推水位、不宣告查完、不推論沒下文。"""
+    unverified:來源尚未核實完整的卡，不推水位、不宣告查完、不推論沒下文。
+    送出結果不明的卡先照證據改成已投出或要重填(apply_unsure),改成已投出的接著照一般的回音記。"""
     day = day or today()
     checked = set(checked or []) - set(unverified or ())
+    unsure = apply_unsure(fb, findings, checked, jobs, now, records_read, accounts, after)
     result = apply_findings(fb, findings, day)
+    for url, what in unsure.items():
+        result[url] = [('unsure', UNSURE_WORDS[what])] + result.get(url, [])
     for url in checked:
         item = fb.get(url)
         if ds.app_of(item) != 'sent':
@@ -797,14 +887,14 @@ PROMPT = """你是查回音的 agent。程式已經搜尋信箱並把可讀來�
 1. 回音要給卡片網址、source_ref、來源、日期、摘要、原文連結、種類、信裡那一句和待辦。source_ref 必須照抄來源全文中的值,或照抄補查清單的值;來源是信還是平台紀錄程式照 source_ref 自己認,不用寫。kind 只能是 confirm(確認收到或仍在處理)、reject(沒錄取)、interview(面試、測驗或作業邀請)、offer(錄取)。quote 逐字抄信裡(或紀錄上)決定是這一種的那一句。待辦只記對方要求本人完成且尚未完成的事。同一家有好幾張卡、一封信看不出是哪一張時,不要自己挑一張:每張可能的卡各給一則(同一個 source_ref、同一個原文連結),程式會在卡上標「可能是這封」讓本人判斷。
 2. 讀平台應徵紀錄頁時,將能確認已投遞的記為 confirm(source_ref 照抄那一頁的);每筆應徵紀錄放進 job_ids:有職缺連結就照抄連結,沒有就給平台名稱和頁面上的職缺代號(逐字照抄),程式只用平台+代號比對。
 3. 只有檢查完信箱搜尋全文和該卡可用的應徵紀錄來源,且沒有未解的存取問題,才把卡列入 checked。沒有找到回音也可列入 checked。
-4. 無法進入的來源要列 source、reason、need 和受影響卡片網址;影響範圍不明時不要把任何卡放進 checked。
+4. 無法進入的來源要列 source、reason、need、本人要去處理的那一頁網址 url 和受影響卡片網址;影響範圍不明時不要把任何卡放進 checked。
 
 輸出 JSON 檔 {out},格式如下:
 {{
   "checked": ["本輪已完成來源檢查、沒有未解存取問題的卡片網址"],
   "findings": [{{"url":"卡片網址","source_ref":"複製來源或補查來源中的識別值","source":"來源名稱","date":"YYYY-MM-DD","summary":"重點,200字內","link":"原文連結","kind":"confirm|reject|interview|offer","quote":"信裡決定是這一種的那一句,逐字抄","reason":"拒絕信明確寫出的理由原文;制式信留空","todo":"尚未完成的待辦,沒有填空字串"}}],
-  "job_ids": [{{"url":"應徵紀錄上的職缺連結,沒有就空字串","platform":"平台,例:104、linkedin","id":"頁面上的職缺代號","applied_at":"YYYY-MM-DD","title":"方便人閱讀,不參與配對"}}],
-  "inaccessible": [{{"source":"來源","reason":"進不去的原因","need":"本人需要做什麼","jobs":["受影響的卡片網址"]}}]
+  "job_ids": [{{"url":"應徵紀錄上的職缺連結,沒有就空字串","platform":"平台名稱,照頁面上的寫法","id":"頁面上的職缺代號","applied_at":"YYYY-MM-DD","title":"方便人閱讀,不參與配對"}}],
+  "inaccessible": [{{"source":"來源","reason":"進不去的原因","need":"本人需要做什麼","url":"本人要去處理的那一頁網址(例如登入頁)","jobs":["受影響的卡片網址"]}}]
 }}
 
 程式會拿日期、原文連結、quote、拒絕理由、應徵紀錄的代號跟它複製的全文比,對不上的那一則不收、那張卡這一輪不算查完。
@@ -812,11 +902,11 @@ PROMPT = """你是查回音的 agent。程式已經搜尋信箱並把可讀來�
 """
 
 
-
-
 def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inaccessible=None):
+    unsure = set(unsure_cards(fb))
     cards = '\n'.join(
         f'- {url} | {card.name(jobs.get(url) or {})} | {since_of(fb, url) or "?"} 起'
+        + (' | 送出結果不明:那天按了送出卻沒看到成功頁,找有沒有確認收到申請的信或平台應徵紀錄' if url in unsure else '')
         for url in urls
     )
     fallback = json.dumps(inaccessible or [], ensure_ascii=False, indent=2) if inaccessible else '(沒有;不要開瀏覽器)'
@@ -924,8 +1014,6 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
             need = str(row.row.get('need') or '').strip()
             if not isinstance(jobs, list):
                 raise ValueError('inaccessible.jobs 必須是陣列')
-            if not source or not reason or not need:
-                raise ValueError('無法讀取的來源必須包含來源、原因和本人待辦')
         except ValueError as e:
             dropped.append(str(e)[:300])
             unsure.update(affected or ['*'])
@@ -934,8 +1022,10 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
             checked.difference_update(affected)
         else:
             checked.clear()                            # 未知影響範圍時不對任何卡推斷沒下文
+        link = str(row.row.get('url') or '').strip()
         inaccessible.append({'source': source[:100], 'reason': reason[:240],
-                             'need': need[:240], 'jobs': affected})
+                             'need': need[:240], 'jobs': affected,
+                             'url': link[:500] if link.startswith(('https://', 'http://')) else ''})
 
     if '*' in unsure:
         checked.clear()
@@ -1049,7 +1139,7 @@ def _report_inaccessible(items, board):
         jobs = item['jobs']
         agent_report.report(
             '查回音', f'{item["source"]} 無法進入:{item["reason"]}' + (f'(影響 {len(jobs)} 張卡)' if len(jobs) > 1 else ''),
-            need=item['need'], job=jobs[0] if len(jobs) == 1 else '', live=board
+            need=item['need'], job=jobs[0] if len(jobs) == 1 else '', live=board, url=item.get('url') or ''
         )
 
 
@@ -1058,8 +1148,6 @@ def _copy_only_agent_id():
     agents = ((cf.C.get('agent') or {}).get('agents') or [])
     agent = next((item for item in agents if item.get('runtime') == 'codex'), None)
     return agent.get('id') if agent else None
-
-
 
 
 def main():
@@ -1074,7 +1162,7 @@ def main():
     st = os.path.join(SP, STATUS)
     base = {'t0': time.time(), 'pid': os.getpid()}
     jobs, fb = load(board)
-    urls = everyone = waiting(fb)
+    urls = everyone = to_check(fb)
     if a.url:
         urls = [url for url in urls if url == a.url]
     if a.limit:
@@ -1198,10 +1286,17 @@ def main():
             msgs.append(msg)
             jobs, fb = load(board)
 
+    import profile_sync as ps
+    accounts = {k for k in ps.registry() if not str(k).startswith('_')}   # 他有帳號的平台:沒讀到應徵紀錄不判沒送出
     result, ghosts, weak_evidence = {}, [], []
     def apply(fbx):
         applied, became_ghosts, updated_weak_evidence = apply_results(
-            fbx, parsed.findings, parsed.checked, unverified=unverified
+            fbx, parsed.findings, parsed.checked, unverified=unverified, jobs=jobs,
+            # 讀到了的平台應徵紀錄:程式自己讀到的,加上 agent 補查、程式再讀核實過的(卡在 checked、不在 unverified 就是核實過)
+            records_read={r.get('source_id') for r in sources.get('application_records') or []}
+            | {x.get('source_ref', '').split(':', 1)[-1] for x in program_unavailable
+               if x.get('source_type') == 'application_record'},
+            accounts=accounts, after=sources['gmail'].get('after'),
         )
         result.update(applied)
         ghosts.extend(became_ghosts)
@@ -1211,10 +1306,9 @@ def main():
     # 查了全部還在等的卡就全收;只查了幾張(「只查這一張」「跑幾張」)只收那幾張的,別張沒重查不能替它收
     why = '後來那一輪查應徵進度重查過了'
     if len(urls) == len(everyone):
-        agent_report.resolve_from('查回音', why, started, live=board)
+        agent_report.resolve(None, why, live=board, src='查回音', before=started)
     elif parsed.checked:
-        bd.set_fb(lambda f: [agent_report.apply_resolve(f, url, why, only=lambda it: str(it.get('from', '')).startswith('查回音')
-                                                        and str(it.get('at', '')) < started) for url in parsed.checked],
+        bd.set_fb(lambda f: [agent_report.apply_resolve(f, url, why, src='查回音', before=started) for url in parsed.checked],
                   live=board, by='agent_report')
     if result:
         msgs.append(summary(result, jobs))

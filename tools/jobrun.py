@@ -10,9 +10,15 @@ jobrun —— 看板上那幾顆「跑」的按鈕(跑準備區、找新職缺)�
 import os, sys, json, time, subprocess, contextlib
 
 END = ('', 'done', 'nothing', 'failed', 'incomplete', 'died', 'stopped')
+# 用 agent 的瀏覽器的工作:一次只跑一個(電腦資源)。後台擋人(board_server.start_run)、自動流程排工(autopilot)都照這一份
+BROWSER_JOBS = ('apply', 'replies', 'sync')
+
+
+_CURRENT = []   # 這個行程這一輪寫的進度檔:等 agent 時照它扣掉暫停的時間(agent_run.wait_done)
 
 
 def write(path, d):
+    _CURRENT[:] = [path]
     try:
         d = dict(d); d['at'] = time.time()
         with open(path + '.tmp', 'w', encoding='utf-8') as o:
@@ -64,6 +70,11 @@ def paused_seconds(path):
     with contextlib.suppress(OSError):   # 沒有暫停記號 = 現在沒停著,不用加
         total += max(0.0, time.time() - os.path.getmtime(path + '.paused'))   # 現在還停著
     return total
+
+
+def current_paused():
+    """這個行程這一輪(最近寫的那一份進度檔)到現在一共暫停了幾秒;還沒寫過進度就是 0。"""
+    return paused_seconds(_CURRENT[0]) if _CURRENT else 0.0
 
 
 def clear_paused(path):

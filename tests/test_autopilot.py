@@ -2,7 +2,7 @@
 
 鎖住四個會出事的地方:開啟當下已在流程裡的卡不碰(不然一開就派幾十隻 agent)、
 失敗過的不自動重跑(不然同一張永遠重跑)、驗收要等這張進來之後跑的那一輪、任何路徑都不會替他送出。"""
-import datetime, json, os, tempfile, unittest
+import datetime, json, os, tempfile, time, unittest
 from unittest import mock
 import _env  # noqa: F401
 import chrome_door
@@ -21,9 +21,12 @@ def data(*ids, **kw):
     return {'jobs': [dict({'id': i}, **kw.get(i, {})) for i in ids], 'status': kw.get('status', OKST)}
 
 
-def run(d, fb, gen=0, building=False, running=None, now=NOW, real=True, cfg=CFG, last=None, add_waiting=0, add_last=None):
-    return ap.plan(d, fb, verified_gen=gen, build_running=building, running=running or {}, now=now, cfg=cfg, real=real,
-                   replies_last=last, add_waiting=add_waiting, add_last=add_last)
+def run(d, fb, built=0, tried=None, building=False, running=None, now=NOW, real=True, cfg=CFG, last=None,
+        add_waiting=0, add_last=None):
+    """built、tried:最近跑完的那一輪、最近一輪幾點開始的(秒);tried 沒給就是跑完的那一輪。"""
+    build = {'built': built, 'tried': built if tried is None else tried, 'running': building}
+    return ap.plan(d, fb, build=build, running=running or {}, now=now, cfg=cfg, real=real, replies_last=last,
+                   add_waiting=add_waiting, add_last=add_last)
 
 
 def auto(**kw):
@@ -61,31 +64,42 @@ class PlanTest(unittest.TestCase):
 
     def test_advance_waits_for_a_build_after_the_card_arrived(self):
         fb = {'__auto__': auto(), 'a': {'app': 'ready'}}
-        p = run(data('a'), fb, gen=3)
-        self.assertEqual(p['advance'], []); self.assertEqual(p['seen'], {'a': 3})
-        fb['__auto__']['seen'] = {'a': 3}
-        self.assertEqual(run(data('a'), fb, gen=3)['advance'], [])              # 還沒有新的一輪
-        self.assertEqual(run(data('a'), fb, gen=4, building=True)['advance'], [])
-        self.assertEqual(run(data('a'), fb, gen=4)['advance'], ['a'])
+        t = NOW.timestamp()
+        p = run(data('a'), fb, built=t - 60)
+        self.assertEqual(p['advance'], []); self.assertEqual(p['seen'], {'a': t}); self.assertTrue(p['build'])
+        fb['__auto__']['seen'] = p['seen']
+        self.assertEqual(run(data('a'), fb, built=t - 60, tried=t + 1, building=True)['advance'], [])  # 還沒有新的一輪
+        self.assertFalse(run(data('a'), fb, built=t - 60, tried=t + 1, building=True)['build'])        # 已經在建了
+        self.assertEqual(run(data('a'), fb, built=t + 1)['advance'], ['a'])
 
     def test_advance_once_then_manual_back_stays(self):
         fb = {'__auto__': auto(seen={'a': 0}), 'a': {'app': 'ready'}}
-        p = run(data('a'), fb, gen=1)
+        p = run(data('a'), fb, built=1)
         self.assertEqual(p['advance'], ['a']); self.assertIn('adv:a', p['tried'])
         fb['__auto__']['tried'] = p['tried']
-        self.assertEqual(run(data('a'), fb, gen=5)['advance'], [])
+        self.assertEqual(run(data('a'), fb, built=5)['advance'], [])
 
     def test_advance_seen_during_a_running_build_waits_for_the_next_one(self):
+        # 正在跑的那一輪是看到這張之前開始的,可能沒建到它:跑完不算,接著補建一輪
         fb = {'__auto__': auto(), 'a': {'app': 'ready'}}
-        self.assertEqual(run(data('a'), fb, gen=3, building=True)['seen'], {'a': 4})
+        t = NOW.timestamp()
+        fb['__auto__']['seen'] = run(data('a'), fb, built=t - 60, tried=t - 10, building=True)['seen']
+        p = run(data('a'), fb, built=t - 10)
+        self.assertEqual(p['advance'], []); self.assertTrue(p['build'])
+
+    def test_a_build_that_did_not_finish_is_not_retried_by_the_flow(self):
+        # 看到這張之後開始的那一輪沒跑完(來源壞了):等他改了東西存檔再建,自動流程不每分鐘重跑
+        fb = {'__auto__': auto(seen={'a': NOW.timestamp()}), 'a': {'app': 'ready'}}
+        p = run(data('a'), fb, built=NOW.timestamp() - 60, tried=NOW.timestamp() + 1)
+        self.assertEqual(p['advance'], []); self.assertFalse(p['build'])
 
     def test_blocked_cards_stay(self):
         fb = {'__auto__': auto(seen={'a': 0, 'b': 0}), 'a': {'app': 'ready'},
               'b': {'app': 'ready', 'resume_id': 'general',
                     'custom_docs': {'resume:general:zh': {'status': 'review', 'name': '履歷'}}}}
         st = {'schema_version': 2, 'checked_links': True, 'issues': [{'jid': 'a', 'msg': '職缺已下架'}]}
-        self.assertEqual(run(data('a', 'b', status=st), fb, gen=1)['advance'], [])
-        self.assertEqual(run(data('a', 'b', status=None), fb, gen=1)['advance'], [])
+        self.assertEqual(run(data('a', 'b', status=st), fb, built=1)['advance'], [])
+        self.assertEqual(run(data('a', 'b', status=None), fb, built=1)['advance'], [])
 
     def test_custom_record_of_a_file_this_card_no_longer_sends_does_not_block(self):
         # 客製檔等你看的時候換了這張的履歷:舊履歷那筆紀錄留著(換回來還在),但不會寄出去,不能擋推進。
@@ -93,22 +107,22 @@ class PlanTest(unittest.TestCase):
         fb = {'__auto__': auto(seen={'b': 0}),
               'b': {'app': 'ready', 'resume_id': 'tech',
                     'custom_docs': {'resume:general:zh': {'status': 'review', 'name': '通用版'}}}}
-        self.assertEqual(run(data('b'), fb, gen=1)['advance'], ['b'])
+        self.assertEqual(run(data('b'), fb, built=1)['advance'], ['b'])
         fb['b']['custom_docs']['resume:tech:zh'] = {'status': 'working', 'name': '技術版'}
-        self.assertEqual(run(data('b'), fb, gen=1)['advance'], [])
+        self.assertEqual(run(data('b'), fb, built=1)['advance'], [])
 
     def test_blocked_company_stays_in_ready(self):
         url = 'https://jobs.lever.co/acme/example'
         fb = {'__auto__': auto(seen={url: 0}), '__block__': ['Acme, Inc.'],
               url: {'app': 'ready'}}
-        self.assertEqual(run(data(url), fb, gen=1)['advance'], [])
+        self.assertEqual(run(data(url), fb, built=1)['advance'], [])
 
     def test_unverified_link_hint_does_not_block_auto_advance(self):
         fb = {'__auto__': auto(seen={'a': 0}), 'a': {'app': 'ready'}}
         st = {'schema_version': 2, 'checked_links': True,
               'issues': [{'jid': 'a', 'stage': 'ready', 'kind': 'unverified', 'soft': True,
                           'msg': '職缺頁擷取失敗,狀態未知'}]}
-        self.assertEqual(run(data('a', status=st), fb, gen=1)['advance'], ['a'])
+        self.assertEqual(run(data('a', status=st), fb, built=1)['advance'], ['a'])
 
     def test_jobs_waiting_for_an_agent_are_retried_every_hour(self):
         # 貼網址加入碰到 agent 都不能用、存著還沒寫的:隔一小時自己再跑一次,不用他再貼(跟自動流程開沒開無關)
@@ -147,6 +161,16 @@ class PlanTest(unittest.TestCase):
         self.assertIsNone(run(data('a', 'b', 'c', 'd', 'f'), fb)['fill'])
         fb['e'] = {'app': 'ship'}
         self.assertIsNone(run(data('a', 'b', 'c', 'd', 'e', 'f'), fb, running={'apply': True})['fill'])
+
+    def test_nothing_that_needs_the_agents_browser_is_queued_while_another_job_uses_it(self):
+        # 共用 agent 瀏覽器的工作一次只跑一個;自動流程跟後台擋人的是同一份(以前自動流程那份少了「全部同步」,
+        # 同步跑著時照樣排填表,再被後台擋回來)
+        import jobrun
+        fb = {'__auto__': auto(), 'e': {'app': 'ship'}}
+        self.assertEqual(run(data('e'), fb)['fill'], 'e')
+        for job in jobrun.BROWSER_JOBS:
+            self.assertIsNone(run(data('e'), fb, running={job: True})['fill'], job)
+        self.assertIn('sync', jobrun.BROWSER_JOBS)
 
     def test_fill_stops_when_enough_filled_pages_are_waiting_for_him(self):
         # 每張填好的都開著一個分頁等他看:停滿了就先不填新的,他核准(送出)或退掉一張再接著填
@@ -320,7 +344,7 @@ class PilotStepTest(unittest.TestCase):
     def pilot(self, real=False):
         def start_run(kind, args):
             self.calls.append((kind, args)); return 200, {}
-        return ap.Pilot(self.board, start_run, lambda k: {}, lambda: {'gen': 0, 'running': False}, lambda: real)
+        return ap.Pilot(self.board, start_run, lambda k: {}, lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: real)
 
     def fb(self):
         return json.loads(_read(self.board)['fb'])
@@ -341,7 +365,7 @@ class PilotStepTest(unittest.TestCase):
         bd.set_fb(lambda f: f['__auto__'].update(replies_day=today), live=self.board, by='test')
         calls = []
         p = ap.Pilot(self.board, lambda kind, args: (calls.append(kind), (200, {}))[1], lambda k: st.get(k, {}),
-                     lambda: {'gen': 0, 'running': False}, lambda: False)
+                     lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False)
         with mock.patch.object(ap, 'flow', return_value=dict(CFG, auto_prep=False, auto_advance=False,
                                                              auto_fill=False, replies_at='00:00')):
             p.step()
@@ -360,6 +384,7 @@ class PilotStepTest(unittest.TestCase):
                   live=self.board)
         claude = {'agent': {'agents': [{'id': 'cc', 'runtime': 'claude-code', 'model': '', 'effort': 'max', 'browser': True}]}}
         with mock.patch.dict(cf.C, claude), mock.patch('chrome_door.gone_pages', return_value=[]), \
+             mock.patch.object(bd, 'LIVE', self.board), \
              mock.patch.object(ap, 'flow', return_value=dict(CFG, auto_prep=False, auto_advance=False, auto_fill=False,
                                                              replies_at='')):
             self.pilot(real=True).step()
@@ -392,7 +417,7 @@ class PilotStepTest(unittest.TestCase):
         bd.set_fb(lambda fb: fb.update({'__auto__': auto(skip=skipped, seen={url: 7}), url: {'app': 'ready'}}),
                   live=self.board)
         bd.set_data(lambda d, fb: d.__setitem__('status', OKST), live=self.board)
-        generation = {'gen': 0, 'running': False}
+        generation = {'built': 0, 'tried': 0, 'running': False}   # 伺服器剛重開:這一程還沒建過
         builds = []
         p = ap.Pilot(self.board, lambda kind, args: (200, {}), lambda kind: {},
                      lambda: generation, lambda: True, build=lambda: builds.append(1))
@@ -400,7 +425,7 @@ class PilotStepTest(unittest.TestCase):
             p.step()
             self.assertEqual(builds, [1], '重啟後須補跑這張卡的新一輪驗收')
             self.assertEqual(self.fb()[url]['app'], 'ready')
-            generation['gen'] = 1
+            generation.update(built=time.time(), tried=time.time())
             p.step()
         self.assertEqual(self.fb()[url]['app'], 'ship')
 
@@ -554,6 +579,23 @@ class PilotErrorTest(unittest.TestCase):
         self.assertEqual(len(said), 1)
         self.assertEqual(said[0][0], '自動流程')
         self.assertIn('看板讀不懂', said[0][1])
+
+
+    def test_a_clean_step_closes_earlier_crash_reports_once(self):
+        # 當掉的回報講的是已經不在的問題(多半是改版前的程式):這個行程第一次整步跑完、或出錯後又跑完,就收掉(#446)
+        from unittest.mock import patch
+        p = ap.Pilot('unused.html', None, None, None, lambda: False, report=lambda src, msg, **k: None)
+        with patch('agent_report.resolve') as closed, patch.object(p, 'step'):
+            p._safe_step()
+            p._safe_step()
+            self.assertEqual(closed.call_count, 1)          # 伺服器重開前留下的,第一次跑完就收
+            with patch.object(p, 'step', side_effect=RuntimeError('壞了')):
+                p._safe_step()
+            p._safe_step()
+            self.assertEqual(closed.call_count, 2)
+        only = closed.call_args.kwargs['only']
+        self.assertTrue(only({'msg': ap.CRASH + 'NameError: x'}))
+        self.assertFalse(only({'msg': '要讓 agent 填表,但 agent 的瀏覽器(ego)沒準備好'}))
 
 
 class PilotStopTest(unittest.TestCase):

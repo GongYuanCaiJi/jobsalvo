@@ -389,7 +389,7 @@ class Http(HttpBase):
         self.assertEqual(result, {'msg': message})
         preflight.assert_called_once_with()
 
-    def test_after_he_confirms_platform_content_fix_needs_no_note(self):
+    def test_old_handled_report_does_not_start_an_unrequested_fix(self):
         url = JOBS[1]['id']
         fb = {url: {'app': 'ship', 'apply': {'session': 's1'}}, '__inbox__': [
             {'id': 'r1', 'job': url, 'approve': [{'item': 'field:0'}], 'msg': 'x'}]}
@@ -399,10 +399,21 @@ class Http(HttpBase):
                     mock.patch('delivery_state.allowed', return_value=True), \
                     mock.patch.object(bs, 'run_status', return_value={'running': True}):
                 return bs.start_run('apply', {'stage': 'fix', 'url': url})
-        self.assertEqual(ask()[1].get('msg'), '寫一下要 agent 改什麼')          # 沒寫要改什麼、也沒確認過:擋
-        fb['__inbox__'][0]['done'] = '2026-10-06'                              # 他在回報按了「處理好了」
+        self.assertEqual(ask()[1].get('msg'), '寫一下要 agent 改什麼')
+        fb['__inbox__'][0]['done'] = '2026-10-06'
         doc['fb'] = json.dumps(fb)
-        self.assertNotEqual(ask()[1].get('msg'), '寫一下要 agent 改什麼')       # 修改就是重新核對,不用寫
+        self.assertEqual(ask()[1].get('msg'), '寫一下要 agent 改什麼')
+
+    def test_reply_check_of_one_card_accepts_an_unsure_send(self):
+        # 自動流程送出滿一小時查這一張(#389):這張還在「可以投了」,不能被「不在已投出」擋掉
+        url = JOBS[1]['id']
+        fb = {url: {'app': 'ship', 'ds': 'unsure', 'apply': {'submit_fail': {'at': '2026-01-05T08:00:00'}}},
+              JOBS[2]['id']: {'app': 'ship'}}
+        doc = {'fb': json.dumps(fb), 'data': {}}
+        with mock.patch.object(bs, 'read_doc', return_value=''), mock.patch.object(bd, 'parse', return_value=doc), \
+                mock.patch.object(bs, 'run_status', return_value={'running': True}):
+            self.assertNotEqual(bs.start_run('replies', {'url': url})[0], 400)
+            self.assertEqual(bs.start_run('replies', {'url': JOBS[2]['id']})[0], 400)
 
     def test_agent_cannot_write_his_board(self):
         before = read(self.path)
@@ -2526,6 +2537,26 @@ class ServerStartCleansUpOnDisk(OwnHome):
             bs.migrate_marks(self.path)
         self.assertEqual(read_fb(self.path)[JOBS[0]['id']]['ds'], 'stuck')
         self.assertEqual(sorted(everything() - before), [])
+
+    def test_fill_screenshots_from_before_the_evidence_folder_move_into_it(self):
+        """證據夾之前填的卡,填表截圖只在可投遞夾的 .apply/ 裡(可投遞夾會整份重建):伺服器起來時複製進那張卡的
+        證據夾,卡上改指過去;檔已經不在的只拿掉舊的位置,已經有證據夾截圖的照舊。"""
+        import evidence
+        a, b, c = JOBS[0]['id'], JOBS[1]['id'], JOBS[2]['id']
+        shot = os.path.join(self.dir, 'ship', 'A-x', '.apply', 'fill.png')
+        os.makedirs(os.path.dirname(shot))
+        with open(shot, 'wb') as f:
+            f.write(b'png')
+        make_board(self.path, {a: {'app': 'ship', 'apply': {'stage': 'fill', 'shot': os.path.relpath(shot, self.dir)}},
+                               b: {'app': 'ship', 'apply': {'stage': 'fill', 'shot': 'ship/gone/.apply/fill.png'}},
+                               c: {'app': 'ship', 'apply': {'stage': 'fill', 'shot': 'x', 'ev': 'r/shot-1.png'}}})
+        with mock.patch.object(bs, 'run_status', return_value={'running': False}):
+            bs.migrate_marks(self.path)
+        fb = read_fb(self.path)
+        with open(evidence.path(a, fb[a]['apply']['ev'], self.path), 'rb') as f:
+            self.assertEqual(f.read(), b'png')
+        self.assertEqual([(u in (a, b, c), 'shot' in fb[u]['apply']) for u in (a, b, c)], [(True, False)] * 3)
+        self.assertEqual((fb[b]['apply'].get('ev'), fb[c]['apply']['ev']), (None, 'r/shot-1.png'))
 
     def test_server_start_settles_rounds_that_are_no_longer_running(self):
         """伺服器起來時,卡停在正在填、正在送出,那一輪卻已經不在跑(Mac 重開、當掉):照狀態表收尾(修正 4、13)。"""

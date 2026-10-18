@@ -14,7 +14,6 @@ import shutil
 import sys
 import tempfile
 import time
-import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -344,7 +343,6 @@ class ProfileAcceptance:
         self.runtime_home = os.path.realpath(runtime_home)
         self.source_board = source_board
         self.source_ship = source_ship
-        self.ship_root = os.path.join(self.out, 'ship')
         self.apply_tmp = os.path.join(self.out, 'runtime')
         self.board = os.path.join(self.out, 'board-profile-accept.html')
         self.checks = []
@@ -358,7 +356,6 @@ class ProfileAcceptance:
         self.modules = None
         self.original_attachments = None
         self.original_profile_registry = None
-        self.original_profile_read = None
 
     def say(self, message):
         self.log.append(message)
@@ -377,14 +374,12 @@ class ProfileAcceptance:
             raise RuntimeError('驗收只能在程式自行建立的真實資料副本上跑')
         _sanitize_acceptance_home(self.runtime_home)
         os.makedirs(self.out, exist_ok=False)
-        os.makedirs(self.ship_root)
         os.makedirs(self.apply_tmp)
         os.makedirs(os.path.join(self.out, 'fixtures'))
         self.env_before = {
             key: os.environ.get(key)
-            for key in ('APPLY_SHIP_ROOT', 'APPLY_TMP', 'AGENT_BOARD')
+            for key in ('APPLY_TMP', 'AGENT_BOARD')
         }
-        os.environ['APPLY_SHIP_ROOT'] = self.ship_root
         os.environ['APPLY_TMP'] = self.apply_tmp
 
         import board_doc as bd
@@ -403,6 +398,7 @@ class ProfileAcceptance:
         self.original_profile_registry = ps.REG
         if os.path.realpath(cf.HOME) != self.runtime_home:
             raise RuntimeError('JOBSALVO_HOME 沒有指向驗收副本，拒絕執行')
+        self.ship_root = cf.SHIP_DIR      # 副本的設定已經把投遞夾指到副本裡(_clone_home)
         self.acceptance_resume_id = ACCEPTANCE_RESUME_ID
         self.live_board = self.source_board
         self.real_ship = self.source_ship
@@ -430,15 +426,6 @@ class ProfileAcceptance:
             SUPPORT, CUSTOM_RESUME, OLD_VERSION, SYNTHETIC_PROFILE_TEXT,
         )
         self.server = FakePlatformProfile(scenarios=scenarios).start()
-        self.original_profile_read = ps.read
-
-        def fixture_read(platform, lang, variant, *args, **kwargs):
-            read_url = kwargs.get('read_url') or (ps.where(platform, lang, variant) or {}).get('read') or ''
-            if urllib.parse.urlsplit(read_url).netloc == urllib.parse.urlsplit(self.server.url('normal')).netloc:
-                kwargs['test_allow_local'] = True
-            return self.original_profile_read(platform, lang, variant, *args, **kwargs)
-
-        ps.read = fixture_read
         self.lang = (cf.LANGS or ['en'])[0]
         cf.ATTACHMENTS = [{
             'id': 'acceptance-support', 'name': 'support.pdf', 'enabled': True,
@@ -620,18 +607,20 @@ class ProfileAcceptance:
             profile_sync.profile_key(self.jobs[case]), self.lang,
             self.acceptance_resume_id, self.server.profile_url(case, 'fixed'),
         )
-        # 這個假平台用名稱顯示選取結果;和已登記的真實平台一樣,先由程式讀到名稱才記。
+        # 這個假平台用名稱顯示選取結果；先由程式讀到名稱才記。
         fixed = self.server.scenarios[case]['profiles']['fixed']
         import evidence as browser_evidence
+        import chrome_door
         with browser_evidence.opened('profile_probe', 'read', [self.jobs[case]], self.board) as probe:
-            _entry, _page, problem = profile_sync.read(
-                profile_sync.profile_key(self.jobs[case]), self.lang, self.acceptance_resume_id,
-                board=self.board, name=fixed['name'], test_allow_local=True,
-            )
-            if _page:
-                probe.page(_page, '確認假平台固定履歷名稱')
-        if problem:
-            raise RuntimeError('假平台固定履歷名稱無法讀回:' + problem)
+            door = chrome_door.current()
+            if door is None:
+                raise RuntimeError(chrome_door.NO_BROWSER_AGENT)
+            page = door.read_profile(self.server.profile_url(case, 'fixed'), self.board)
+            probe.page(page, '確認假平台固定履歷名稱')
+            if fixed['name'] not in page.get('text', ''):
+                raise RuntimeError('假平台固定履歷名稱無法讀回')
+            profile_sync.remember_name(profile_sync.profile_key(self.jobs[case]),
+                                       self.lang, self.acceptance_resume_id, fixed['name'])
         started = time.time()
         self.say(f'\n開始 agent 情境:{case}')
         try:
@@ -707,7 +696,7 @@ class ProfileAcceptance:
             files = fixed['attachments']
             mirrored = len(files) == 1 and sha256(files[0]['content']) == sha256(SUPPORT)
             profile_url = (extra_apply.get('delivery') or {}).get('profile_url')
-            matched = bool(self.modules['ps'].attachment_check(profile_url).get('matched'))
+            matched = bool(extra_apply.get('ok'))
             self.check('平台多出舊版', '固定履歷依本機鏡像移除舊版,重新下載核對後放行',
                        bool(removed) and mirrored and matched and extra_apply.get('ok'),
                        f'{self._report_evidence(extra)}；刪除事件={len(removed)}；'
@@ -720,8 +709,7 @@ class ProfileAcceptance:
             failed_downloads = [e for e in download['events']
                                 if e.get('action') == 'DOWNLOAD' and not e.get('ok')]
             download_url = (download_apply.get('delivery') or {}).get('profile_url')
-            download_cache = self.modules['ps'].attachment_check(download_url)
-            download_matched = bool(download_cache.get('matched'))
+            download_matched = bool(download_url and download_apply.get('ok'))
             self.check('下載失敗', '程式照實回報；失敗下載未被當成一致',
                        any(r.get('msg') for r in download['reports']) and failed_downloads and not download_matched
                        and not download_apply.get('ok'),
@@ -766,11 +754,7 @@ class ProfileAcceptance:
             uploaded_hashes = [e.get('sha256') for e in uploads]
             downloaded_hashes = [e.get('sha256') for e in downloads]
             profile_url = (normal_apply.get('delivery') or {}).get('profile_url')
-            normal_cache = self.modules['ps'].attachment_check(profile_url)
-            normal_matched = bool(
-                normal_cache.get('matched')
-                and normal_cache.get('profile_kind') == 'custom'
-            )
+            normal_matched = (normal_apply.get('delivery') or {}).get('profile_kind') == 'custom'
             selected_profile_id = str(profile_url or '').rstrip('/').rsplit('/', 1)[-1]
             profile_selected = bool(selected_profile_id) and any(
                 event.get('action') == 'BEACON'
@@ -880,8 +864,6 @@ class ProfileAcceptance:
                 self.modules['cf'].ATTACHMENTS = self.original_attachments
             if self.original_profile_registry is not None:
                 self.modules['ps'].REG = self.original_profile_registry
-            if self.original_profile_read is not None:
-                self.modules['ps'].read = self.original_profile_read
         for key, value in self.env_before.items():
             if value is None:
                 os.environ.pop(key, None)

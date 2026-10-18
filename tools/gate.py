@@ -25,21 +25,22 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import evidence  # noqa: E402
 # 用的地方只 import gate:幫你填表的頁面判斷、型別從這裡拿(F401:這幾個是給別處用的)
-from gate_apply import (FILL, PROFILE_REVIEW, SUBMIT,  # noqa: E402,F401
+from gate_apply import (FILL, SUBMIT,  # noqa: E402,F401
                         page_changes, seen)
+from gate_profile_choice import PROFILE_CHOICE  # noqa: E402
 from gate_cells import (CHECK, DECIDED, JUDGED, UNUSED, WORDS, Row, RowTruth, Truth,  # noqa: E402,F401
                         Verdict, short)
 from gate_flows import (CUSTOMIZE, LINK_STATUS, POSTED_AT, PREPARE, REPLY, RESEARCH_JUDGE,  # noqa: E402
                         RESEARCH_SEARCH, SUGGEST_CATS)
 
 # 每一種交件單的檔名(* 是每一輪、每一批不一樣的那一段)。程式裡別處打開這些檔,tests/test_gate.py 的結構測試就失敗
-FILES = {'fill': 'fill.json', 'submit': 'submit.json', 'profile_review': 'profile-review.json',
+FILES = {'fill': 'fill.json', 'submit': 'submit.json', 'profile_choice': 'profile-choice.json',
          'posted_at': 'posted_age_results.json', 'link_status': 'verdicts.json',
          'suggest_cats': 'suggest.json', 'customize': 'feedback_reports.json', 'prepare': 'fill.json',
          'research_search': 'search_*.json', 'research_judge': 'judge_*.json', 'reply': 'replies.json'}
 # 整張就是一個清單的交件單(找缺交的候選、判斷):讀進來當成 {清單名: 清單}
 LIST_SHEETS = {'research_search': 'candidates', 'research_judge': 'jobs'}
-NESTED = ('posting', 'profile', 'delivery', 'fixed_profile')   # 交件單裡這幾格底下還有格子,一格一格登記
+NESTED = ('posting', 'profile', 'delivery')   # 交件單裡這幾格底下還有格子,一格一格登記
 # 一列一列的交件單(其他 7 種流程:每一列是一張卡、一個來源):{種類: {清單名: 那一列用哪一格認是誰}}。
 # 每一列各自核對:對不上的那一列不收、原因寫出是哪一列,別列照收
 ROWS = {'posted_at': {'dates': 'url', 'inaccessible': 'url'}, 'link_status': {'jobs': 'id'},
@@ -47,7 +48,7 @@ ROWS = {'posted_at': {'dates': 'url', 'inaccessible': 'url'}, 'link_status': {'j
         'research_search': {'candidates': 'url'}, 'research_judge': {'jobs': 'id'},
         'reply': {'findings': 'url', 'job_ids': 'id', 'inaccessible': 'source'}}
 
-SHEETS = {'fill': FILL, 'submit': SUBMIT, 'profile_review': PROFILE_REVIEW, 'posted_at': POSTED_AT,
+SHEETS = {'fill': FILL, 'submit': SUBMIT, 'profile_choice': PROFILE_CHOICE, 'posted_at': POSTED_AT,
           'link_status': LINK_STATUS, 'suggest_cats': SUGGEST_CATS, 'customize': CUSTOMIZE, 'prepare': PREPARE,
           'research_search': RESEARCH_SEARCH, 'research_judge': RESEARCH_JUDGE, 'reply': REPLY}
 
@@ -71,7 +72,8 @@ def _check(table, flat, whole, truth, where=''):
     problems, facts, judged, said, unregistered = [], {}, {}, {}, []
     for name, cell in table.items():
         missing = cell.required(truth) if callable(cell.required) else cell.required
-        if name not in flat and missing and missing not in problems:
+        blank = name not in flat or (isinstance(flat[name], str) and not flat[name].strip())   # 只寫空白跟沒寫一樣
+        if blank and missing and missing not in problems:
             problems.append(missing)
     for name, value in flat.items():
         cell = table.get(name)

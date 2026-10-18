@@ -93,8 +93,9 @@ def _field_html(name, q, kind):
 
 
 class FakeForm:
-    def __init__(self, port=0, upload_fields=1, upload_slots=None, requires_login=False, sso=False):
+    def __init__(self, port=0, upload_fields=1, upload_slots=None, requires_login=False, sso=False, note=''):
         self.log, self.lock = [], threading.Lock()
+        self.note = note          # 職缺寫在頁面上的要求(驗收「要寄的檔不符職缺要求」用,#449)
         self.logged_in = not requires_login
         self.upload_slots = list(upload_slots) if upload_slots is not None else [
             ('resume', 'Resume/CV')
@@ -126,7 +127,9 @@ class FakeForm:
                         '{upload_fields}', ''.join(_field_html(name, label, 'file')
                                                    for name, label in srv.upload_slots)).replace(
                         '{fields}', ''.join(_field_html(*f) for f in srv.fields))
-                    if len(srv.upload_slots) == 1:
+                    if srv.note:
+                        page = page.replace('<form id="app"', '<p id="requirement">' + srv.note + '</p><form id="app"')
+                    elif len(srv.upload_slots) == 1:
                         page = page.replace('<form id="app"',
                             '<p>Resume/CV accepts one combined PDF containing the resume and supporting documents.</p>'
                             '<form id="app"')

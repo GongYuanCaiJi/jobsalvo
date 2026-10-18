@@ -34,6 +34,7 @@ import config as cf           # noqa: E402
 
 DIR = 'evidence'
 EVENTS = 'events.jsonl'
+SYNC_PROFILES_REF = '_sync_profiles'  # 沒有卡片的全部同步，讓回報能指到這一輪的截圖。
 KEEP = 30                     # 每張卡留最近幾輪(local policy:舊的證據對查錯沒用,留著只會越堆越大)
 ROUND = re.compile(r'^\d{8}-\d{6}-\d{6}-[a-z0-9_]+-[a-z0-9_-]+$')
 FILE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$')
@@ -86,7 +87,7 @@ class Round:
         for home, d in zip(homes, self.dirs):
             try:
                 os.makedirs(d, exist_ok=True)
-                _prune(home)
+                _prune(home, board)
             except OSError as e:
                 _warn(d, e)
 
@@ -199,10 +200,20 @@ class Round:
         return self.rel(self.shots[-1]) if self.shots else None
 
 
-def _prune(home):
-    names = sorted(n for n in os.listdir(home) if ROUND.match(n))
-    for n in names[:-KEEP]:
-        shutil.rmtree(os.path.join(home, n), ignore_errors=True)
+def _prune(home, board=None):
+    """每張卡留最近 KEEP 輪;看板還指著的那幾輪(題目、卡上、回報附的截圖)不刪,不然他點開是空的(#447)。
+    讀不到看板就不刪:分不出哪幾輪還有人用。"""
+    names = sorted(n for n in os.listdir(home) if ROUND.match(n))[:-KEEP]
+    if not names:
+        return
+    import board_doc as bd
+    try:
+        text = bd.read_doc(bd.target(board))
+    except Exception as e:  # noqa: BLE001 — 看板讀不到(被改過、不在):這次不清,下一輪再清
+        return _warn('清舊的證據', e)
+    for n in names:
+        if n + '/' not in text:
+            shutil.rmtree(os.path.join(home, n), ignore_errors=True)
 
 
 @contextlib.contextmanager
@@ -235,9 +246,10 @@ def active():
 
 
 def path(url, rel, board=None):
-    """看板要開的那個檔(<輪>/<檔名>)在哪;不是這張卡證據夾裡的檔回 None。只收固定格式,不收任何路徑。"""
+    """看板要開的圖(<輪>/<檔名>)在哪；只收卡片或全部同步自己的證據夾。"""
     parts = str(rel or '').split('/')
     if len(parts) != 2 or not ROUND.match(parts[0]) or not FILE.match(parts[1]):
         return None
-    p = os.path.join(card_dir(url, board), parts[0], parts[1])
+    home = flow_dir('sync_profiles', board) if url == SYNC_PROFILES_REF else card_dir(url, board)
+    p = os.path.join(home, parts[0], parts[1])
     return p if os.path.isfile(p) else None

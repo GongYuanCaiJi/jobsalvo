@@ -16,6 +16,7 @@ from apply_fakeform import FIELDS, PAGE, THANKS, _field_html
 
 
 CASES = ('slots-full', 'extra-old', 'download-error', 'upload-error', 'normal')
+SYNC_EXPERIENCE_CHOICES = ('0-2 years', '2-4 years', '5+ years')
 LOCAL_ACCEPTANCE_BANNER = (
     '<div class="banner" data-local-acceptance="true">'
     '本機假驗收頁 (127.0.0.1) / Local acceptance-test platform. '
@@ -68,12 +69,25 @@ def acceptance_scenarios(support, custom_resume, old_version, profile_text=''):
     }
 
 
+def sync_acceptance_scenarios():
+    """只供 #403 本機同步驗收的合成履歷。"""
+    profile = {
+        'id': 'fixed', 'kind': 'fixed', 'name': '本機同步驗收履歷',
+        'sync_acceptance': True, 'attachments': [],
+        'full_name': 'Old Candidate', 'email': 'old@example.invalid',
+        'phone': '1111111111', 'location': 'Taipei', 'experience': '0-2 years',
+    }
+    return {'sync-403': {'profiles': [profile]},
+            'sync-403-preview-edit': {'profiles': [{**profile, 'separate_editor': True}]}}
+
+
 class FakePlatformProfile:
     """只綁 127.0.0.1；保留所有頁面操作與檔案雜湊供驗收查證。"""
 
     def __init__(self, port=0, scenarios=None):
         self.log = []
         self.lock = threading.Lock()
+        self.load_sequence = 0
         raw = scenarios or acceptance_scenarios(b'support', b'resume', b'old')
         self.scenarios = copy.deepcopy(raw)
         for case, state in self.scenarios.items():
@@ -199,7 +213,35 @@ class FakePlatformProfile:
                         return self._send(404, 'profile not found')
                     self._event(action='VIEW_PROFILE', case=case, profile=profile_id,
                                 profile_kind=profile.get('kind'), status=200)
+                    if profile.get('separate_editor'):
+                        return self._send(200, srv._sync_profile_preview_html(case, profile))
                     return self._send(200, srv._profile_html(case, profile))
+                if len(parts) == 3 and parts[0] == 'profile-edit':
+                    _, case, profile_id = parts
+                    profile = srv._profile(case, profile_id)
+                    if profile is None or not profile.get('separate_editor'):
+                        return self._send(404, 'profile not found')
+                    self._event(action='VIEW_PROFILE_EDIT', case=case, profile=profile_id, status=200)
+                    return self._send(200, srv._profile_html(case, profile))
+                if len(parts) == 3 and parts[0] == 'profile-content':
+                    _, case, profile_id = parts
+                    profile = srv._profile(case, profile_id)
+                    if profile is None or not profile.get('sync_acceptance'):
+                        return self._send(404, 'profile not found')
+                    self._event(action='VIEW_PROFILE_CONTENT', case=case, profile=profile_id,
+                                status=200)
+                    return self._send(200, srv._sync_profile_fields_html(case, profile))
+                if len(parts) == 3 and parts[0] == 'profile-load-gate':
+                    _, case, profile_id = parts
+                    profile = srv._profile(case, profile_id)
+                    if profile is None or not profile.get('sync_acceptance'):
+                        return self._send(404, 'profile not found')
+                    time.sleep(0.8)
+                    self._event(action='PROFILE_LOAD_COMPLETE', case=case,
+                                profile=profile_id, status=200)
+                    return self._send(200, bytes.fromhex(
+                        '47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b'
+                    ), 'image/gif')
                 if len(parts) == 4 and parts[0] == 'download':
                     _, case, profile_id, attachment_id = parts
                     profile = srv._profile(case, profile_id)
@@ -282,6 +324,30 @@ class FakePlatformProfile:
                     }
                     self._event(action='CREATE_PROFILE', case=case, profile=profile_id,
                                 name=state['profiles'][profile_id]['name'], status=201, ok=True)
+                    return self._send(303, b'', extra={'Location': srv.profile_url(case, profile_id)})
+                if len(parts) == 3 and parts[0] == 'save-profile':
+                    _, case, profile_id = parts
+                    profile = srv._profile(case, profile_id)
+                    if profile is None:
+                        return self._send(404, 'profile not found')
+                    fields, _ = self._form(body)
+                    if profile.get('sync_acceptance'):
+                        if fields.get('experience') not in SYNC_EXPERIENCE_CHOICES:
+                            return self._send(400, 'invalid experience choice')
+                        for key in ('full_name', 'email', 'phone', 'location', 'experience'):
+                            profile[key] = fields.get(key, '')
+                        self._event(action='SAVE_PROFILE', case=case, profile=profile_id,
+                                    status=200, ok=True,
+                                    **{key: profile[key] for key in (
+                                        'full_name', 'email', 'phone', 'location', 'experience')})
+                        return self._send(303, b'', extra={'Location': srv.profile_url(case, profile_id)})
+                    if fields.get('availability') not in ('immediate', 'two-weeks', 'one-month'):
+                        return self._send(400, 'invalid availability')
+                    for key in ('work', 'video_url', 'availability'):
+                        profile[key] = fields.get(key, '')
+                    self._event(action='SAVE_PROFILE', case=case, profile=profile_id, status=200, ok=True,
+                                work=profile['work'], video_url=profile['video_url'],
+                                availability=profile['availability'])
                     return self._send(303, b'', extra={'Location': srv.profile_url(case, profile_id)})
                 if len(parts) == 3 and parts[0] == 'upload':
                     _, case, profile_id = parts
@@ -430,6 +496,34 @@ class FakePlatformProfile:
         )
 
     def _profile_html(self, case, profile):
+        if profile.get('sync_acceptance'):
+            pid = profile['id']
+            with self.lock:
+                self.load_sequence += 1
+                load_token = self.load_sequence
+            return (
+                '<html><meta charset="utf-8"><title>本機同步驗收履歷</title>'
+                '<style>body{font:16px system-ui,sans-serif;max-width:760px;margin:32px auto;padding:0 20px;}'
+                '.banner,aside{padding:12px;background:#eef3f8;border-radius:8px;margin-bottom:16px;}'
+                'form section{display:grid;grid-template-columns:90px minmax(0,1fr);gap:12px;align-items:center;}'
+                'form h2{grid-column:1/-1;}input,select{width:100%;box-sizing:border-box;}'
+                'input,select,button{font:inherit;padding:8px;}button{margin-top:20px;}</style>'
+                + LOCAL_ACCEPTANCE_BANNER
+                + '<h1>本機同步驗收履歷</h1>'
+                + f'<aside data-load-token="{load_token}">今日推薦職缺批次 {load_token}</aside>'
+                + '<main id="sync-profile" data-load-state="pending">履歷資料載入中</main>'
+                + ('<footer id="sync-floating-link"><a href="https://example.invalid/local-survey">'
+                   '浮動問卷連結</a></footer>'
+                   '<script>setTimeout(()=>document.getElementById("sync-floating-link")?.remove(),45000);</script>'
+                   if case == 'sync-403' else '')
+                + '<script>setTimeout(async()=>{const root=document.getElementById("sync-profile");'
+                'try{const response=await fetch("/profile-content/' + quote(case) + '/' + quote(pid) + '");'
+                'if(!response.ok)throw new Error("profile content unavailable");'
+                'root.innerHTML=await response.text();root.dataset.loadState="ready";}'
+                'catch(error){root.textContent="履歷資料載入失敗";root.dataset.loadState="error";}},400);</script>'
+                + '<img alt="" width="1" height="1" src="/profile-load-gate/'
+                + quote(case) + '/' + quote(pid) + '"></html>'
+            )
         pid = profile['id']
         profile_text = profile.get('text')
         profile_text_html = (
@@ -437,17 +531,66 @@ class FakePlatformProfile:
             if isinstance(profile_text, str) and profile_text else ''
         )
         files = self._files_html(case, profile)
+        work = html.escape(str(profile.get('work') or '舊影片'), quote=True)
+        video_url = html.escape(str(profile.get('video_url') or 'https://video.example/watch?v=old'), quote=True)
+        availability = str(profile.get('availability') or 'two-weeks')
+        choices = [('immediate', '即刻'), ('two-weeks', '兩週內'), ('one-month', '一個月內')]
+        options = ''.join(f'<option value="{value}"{" selected" if value == availability else ""}>{label}</option>'
+                          for value, label in choices)
+        editor = (
+            f'<form method="post" action="/save-profile/{quote(case)}/{quote(pid)}">'
+            '<section><h2>作品</h2>'
+            f'<label for="work">作品<input id="work" name="work" value="{work}"></label>'
+            f'<label for="video_url">影片連結<input id="video_url" name="video_url" type="url" value="{video_url}"></label>'
+            f'<a id="profile-video-preview" href="{video_url}">觀看</a></section>'
+            '<section><h2>求職</h2><label for="availability">可到職時間'
+            f'<select id="availability" name="availability">{options}</select></label></section>'
+            '<button type="submit">儲存履歷</button></form>'
+            '<script>document.getElementById("video_url").addEventListener("input",event=>{'
+            'document.getElementById("profile-video-preview").href=event.target.value;});</script>'
+        )
         return (
             f'<html><meta charset="utf-8"><title>{html.escape(profile["name"])}</title>'
             + LOCAL_ACCEPTANCE_BANNER
             + f'<h1>{html.escape(profile["name"])}</h1>'
             + profile_text_html
+            + editor
             + f'<p>類型:{html.escape(profile["kind"])}</p><ul>{files}</ul>'
             f'<form method="post" enctype="multipart/form-data" action="/upload/{quote(case)}/{quote(pid)}">'
             '<label>上傳或取代同名附件<input type="file" name="attachment"></label>'
             '<button type="submit">上傳附件</button></form>'
             f'<a href="{self.manager_url(case)}">返回履歷清單</a></html>'
         )
+
+    def _sync_profile_preview_html(self, case, profile):
+        details = ''.join(
+            f'<dt>{html.escape(label)}</dt><dd>{html.escape(str(profile.get(key) or ""))}</dd>'
+            for key, label in (('full_name', '姓名'), ('email', 'Email'), ('phone', '電話'),
+                               ('location', '地點'), ('experience', '年資')))
+        return ('<html><meta charset="utf-8"><title>平台履歷預覽</title>'
+                + LOCAL_ACCEPTANCE_BANNER
+                + '<h1>平台履歷預覽</h1><dl>' + details + '</dl>'
+                + f'<a href="{self.edit_url(case, profile["id"])}">編輯履歷</a></html>')
+
+    def _sync_profile_fields_html(self, case, profile):
+        pid = profile['id']
+        fields = ''.join(
+            f'<label for="{key}">{label}</label>'
+            f'<input id="{key}" name="{key}" value="{html.escape(str(profile.get(key) or ""), quote=True)}">'
+            for key, label in (
+                ('full_name', '姓名'), ('email', 'Email'), ('phone', '電話'),
+                ('location', '地點'))
+        )
+        experience = str(profile.get('experience') or '')
+        choices = ''.join(
+            f'<option value="{choice}"{" selected" if choice == experience else ""}>{choice}</option>'
+            for choice in SYNC_EXPERIENCE_CHOICES
+        )
+        return (f'<form method="post" action="/save-profile/{quote(case)}/{quote(pid)}">'
+                '<section><h2>個人資料</h2>' + fields +
+                '<label for="experience">年資</label>'
+                f'<select id="experience" name="experience">{choices}</select></section>'
+                '<button type="submit">儲存履歷</button></form>')
 
     def _scenario_hash(self, case, kind=None):
         state = self.scenarios.get(case) or {}
@@ -476,6 +619,9 @@ class FakePlatformProfile:
 
     def profile_url(self, case, profile_id='fixed'):
         return f'http://127.0.0.1:{self.port}/profile/{quote(case)}/{quote(str(profile_id))}'
+
+    def edit_url(self, case, profile_id='fixed'):
+        return f'http://127.0.0.1:{self.port}/profile-edit/{quote(case)}/{quote(str(profile_id))}'
 
     def download_url(self, case, profile_id, attachment_id):
         return (f'http://127.0.0.1:{self.port}/download/{quote(case)}/'

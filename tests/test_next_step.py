@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -60,6 +61,24 @@ class ConfirmButton(unittest.TestCase):
     def test_a_filled_card_with_every_answer_ready_can_be_confirmed(self):
         self.assertIsNone(step(ready_to_confirm())['confirm'])
 
+    def test_the_resume_as_shown_on_the_employer_page_comes_first_on_the_card(self):
+        fb = ready_to_confirm()
+        fb[URL]['apply']['proof'] = {'ev': '20261014-000000-000000-apply-fill/proof-1.png',
+                                     'url': 'https://job-boards.example/apply', 'name': 'en-nocex.pdf'}
+        self.assertEqual(step(fb)['view']['shots'][0],
+                         ['proof', '20261014-000000-000000-apply-fill/proof-1.png', '公司申請頁 job-boards.example 上的履歷'])
+        fb[URL]['apply']['proof'] = {}                          # 這一輪找過、申請頁上找不到
+        fb[URL]['apply']['delivery'] = {'method': 'direct_upload'}
+        self.assertIn('找不到送出的檔名', ' '.join(line[1] for line in step(fb)['view']['line']))
+
+    def test_a_card_whose_files_changed_says_so_instead_of_filled(self):
+        import delivery_state as ds
+        fb = ready_to_confirm()
+        ds.fire(fb, URL, 'files_changed', why='送出檔名改了')
+        lines = [line[1] for line in step(fb)['view']['line']]
+        self.assertIn('📄 送出檔名改了:申請頁上是舊的,要重填', lines)
+        self.assertFalse(any('停在送出前' in x for x in lines))
+
     def test_an_answer_still_waiting_for_you_blocks_it(self):
         fb = ready_to_confirm()
         fb['__ans__'][0]['inf'] = 1                    # agent 推論的,你還沒確認
@@ -69,6 +88,53 @@ class ConfirmButton(unittest.TestCase):
         fb = ready_to_confirm()
         fb[URL].pop('ds')
         self.assertIn('還沒填', step(fb)['confirm'])
+
+    def test_profile_change_list_puts_pending_first_and_keeps_result_separate(self):
+        fb = ready_to_confirm()
+        fb[URL]['apply']['delivery'] = {'method': 'platform_profile',
+                                        'profile_url': 'https://example.test/profile'}
+        rows = [
+            {'card': URL, 'item': '技能', 'verdicts': ['照原文'], 'platform_result': '已存上平台',
+             'before_text': '舊技能', 'after_text': '新技能',
+             'before_shot': 'round/before.png', 'after_shot': 'round/after.png'},
+            {'card': URL, 'item': '自傳', 'verdicts': ['agent 代填待確認', '範圍外有內容消失'],
+             'platform_result': '只驗收、已撤回', 'before_text': '舊文' * 100,
+             'after_text': '新文' * 100, 'outside_losses': ['旁欄消失'],
+             'answer_question': '自傳題目'},
+        ]
+        registry = {'example.test': {'zh/one': {'read': 'https://example.test/profile',
+                                                'sync_visuals': rows}}}
+        with mock.patch('profile_sync.registry', return_value=registry):
+            view = step(fb)['view']
+        labels = [line[1] for line in view['line']]
+        self.assertLess(next(i for i, label in enumerate(labels) if label.startswith('自傳：')),
+                        next(i for i, label in enumerate(labels) if label.startswith('技能：')))
+        self.assertIn('平台實際結果：只驗收、已撤回', labels)
+        self.assertTrue(any(line[2].get('full') for line in view['line']
+                            if len(line) > 2 and isinstance(line[2], dict)))
+        self.assertIn('用到的常用答案：自傳題目', labels)
+        self.assertEqual([shot[1] for shot in view['shots']][-2:],
+                         ['round/before.png', 'round/after.png'])
+        shot_line = next(i for i, line in enumerate(view['line'])
+                         if len(line) > 2 and isinstance(line[2], dict) and line[2].get('shot_indices'))
+        self.assertGreater(shot_line, next(i for i, label in enumerate(labels) if label.startswith('技能：')))
+
+    def test_profile_change_list_shows_only_the_latest_round_of_each_item(self):
+        fb = ready_to_confirm()
+        fb[URL]['apply']['delivery'] = {'method': 'platform_profile',
+                                        'profile_url': 'https://example.test/profile'}
+        rows = [
+            {'card': URL, 'item': '技能', 'verdicts': ['agent 代填待確認'], 'platform_result': '沒做成',
+             'before_text': '舊技能', 'after_text': '', 'reason': '存檔後沒有這次新增的文字'},
+            {'card': URL, 'item': '技能', 'verdicts': ['照原文'], 'platform_result': '已存上平台',
+             'before_text': '舊技能', 'after_text': '新技能'},
+        ]
+        registry = {'example.test': {'zh/one': {'read': 'https://example.test/profile',
+                                                'sync_visuals': rows}}}
+        with mock.patch('profile_sync.registry', return_value=registry):
+            labels = [line[1] for line in step(fb)['view']['line']]
+        self.assertEqual([label for label in labels if label.startswith('技能：')], ['技能：照原文'])
+        self.assertNotIn('平台實際結果：沒做成', ' '.join(labels))
 
 
 FLOW = {'auto_prep': True, 'auto_advance': True, 'auto_fill': True, 'fill_max': 0, 'replies_at': ''}
@@ -90,14 +156,14 @@ def flow_board(**cards):
     return fb, [{'id': i, 'target': 'Role ' + i + ' · Co ' + i} for i in cards]
 
 
-def steps(fb, jobs, flow=FLOW, now=NOW, real=True, status=PASSED, gen=0, building=False):
+def steps(fb, jobs, flow=FLOW, now=NOW, real=True, status=PASSED):
     import next_step
-    return next_step.of(fb, jobs, status, flow=flow, now=now, real=real, gen=gen, building=building)
+    return next_step.of(fb, jobs, status, flow=flow, now=now, real=real)
 
 
-def plan(fb, jobs, flow=FLOW, now=NOW, real=True, running=None, gen=0, building=False):
+def plan(fb, jobs, flow=FLOW, now=NOW, real=True, running=None, built=0):
     import autopilot
-    return autopilot.plan({'jobs': jobs, 'status': PASSED}, copy.deepcopy(fb), verified_gen=gen, build_running=building,
+    return autopilot.plan({'jobs': jobs, 'status': PASSED}, copy.deepcopy(fb), build={'built': built, 'tried': built, 'running': False},
                           running=running or {}, now=now, cfg=flow, real=real)
 
 
@@ -274,14 +340,57 @@ class CardView(unittest.TestCase):
         self.assertEqual((v['busy'], v['stage']), (True, 'fill'))
 
     def test_a_card_sent_without_seeing_the_success_page(self):
-        self.assertEqual(shown(card_view('unsure')), {
-            'line': ['bad'], 'buttons': [('clear', False), ('actsent', False)], 'why': True, 'todo': True, 'fill': 'unsure'})
+        # 查到底送出沒有是查應徵進度的事(#389):卡上寫 agent 會去查,不算要你處理;他自己查過照樣能按
+        v = card_view('unsure')
+        self.assertEqual(shown(v), {
+            'line': ['bad', 'run'], 'buttons': [('clear', False), ('actsent', False)], 'why': True, 'todo': False, 'fill': 'unsure'})
+        self.assertIn('信箱', v['line'][1][1])
 
     def test_a_card_whose_page_is_gone_is_refilled(self):
+        # 頁面不見只要重填,是程式的事:不列進要你處理,填表進度算在還沒填(#446)
         v = card_view('gone')
         self.assertEqual(shown(v), {
-            'line': ['bad'], 'buttons': [('fill', False), ('approve', True)], 'why': False, 'todo': True, 'fill': 'gone'})
-        self.assertEqual(v['todo'], ds.GONE)
+            'line': ['bad'], 'buttons': [('fill', False), ('approve', True)], 'why': False, 'todo': False, 'fill': 'todo'})
+
+    def test_a_fact_about_the_job_outlives_later_page_events(self):
+        # 職缺關了、要本人登入:之後 Chrome 重開(頁面不見)、換檔,卡上講的還是它;自動流程不重填(#446)
+        block = {'kind': 'posting', 'text': '這個網址上的職缺已經關了或換成別的'}
+        for event in ('page_lost', 'files_changed'):
+            with self.subTest(event=event):
+                fb, jobs = flow_board(**{URL: 'stuck'})
+                fb[URL]['apply']['block'] = block
+                ds.fire(fb, URL, event, issues=[ds.GONE], why='履歷換過了')
+                self.assertEqual(fb[URL]['apply']['block'], block)
+                v = steps(fb, jobs)[URL]['view']
+                # 他的決定直接是按鈕:不投就移除、其實沒變就重填
+                self.assertEqual(shown(v), {'line': ['bad'], 'buttons': [('rm', False), ('fill', False)], 'why': False,
+                                            'todo': True, 'fill': 'bad'})
+                self.assertTrue(all(block['text'] in t for t in (v['line'][0][1], v['todo'], v['fill']['text'])))
+                self.assertIsNone(does(fb, jobs, URL))
+
+    def test_a_card_whose_files_miss_a_posting_requirement_is_handled_step_by_step(self):
+        # 要寄的檔跟職缺要求不符(#449):自動客製 → 改的時候等 → 通過自動收下 → 可投遞夾重建 → 重填;舊卡也接;
+        # 客製沒通過就停在卡上,不再自動
+        fb, jobs = flow_board(**{URL: 'stuck'})
+        fb['__auto__']['skip'] = [URL]
+        a = fb[URL]['apply']
+        a['unmet'] = [{'quote': '履歷請控制在兩頁以內', 'file': 'cv.pdf', 'act': 'adapt'}]
+        entry = {'id': 'resume:r:zh', 'kind': 'resume', 'name': '履歷', 'auto': True, 'status': 'queued',
+                 'feedbacks': [{'id': 'f1', 'auto': 'unmet', 'at': a['at'], 'text': '這家職缺要求:「履歷請控制在兩頁以內」'}]}
+        fb[URL]['custom_docs'] = {'resume:r:zh': entry}
+        with mock.patch('ship.chosen_not_built', return_value=None):
+            for status, want in (('queued', 'customize'), ('working', 'wait'), ('review', 'accept'), ('accepted', 'fill')):
+                with self.subTest(status=status):
+                    entry['status'] = status
+                    self.assertEqual(does(fb, jobs, URL), want)
+            with mock.patch('ship.chosen_not_built', return_value='夾子還是舊的'):
+                self.assertEqual(does(fb, jobs, URL), 'build')
+            entry['status'] = 'queued'
+            self.assertEqual(plan(fb, jobs)['customize'], {'url': URL, 'items': ['resume:r:zh']})   # 自動流程真的排這一輪
+            entry['status'] = 'review'
+            self.assertEqual(plan(fb, jobs)['accept'], [(URL, ['resume:r:zh'])])
+            entry['error'] = '客製版比原檔長'
+            self.assertIsNone(does(fb, jobs, URL))
 
     def test_a_card_stuck_says_why(self):
         v = card_view('stuck')
@@ -464,8 +573,8 @@ class FlowPicksExactlyTheNextStep(unittest.TestCase):
         """真的看板上,自動流程一輪一輪跑到沒事可做(每輪只派一張填表或重打,每輪之間建置和驗收跑完一輪);
         回派過的 (做什麼, 哪張)。"""
         picked, t = set(), NOW
-        for gen in range(60):
-            pl = plan(fb, jobs, flow=flow, now=t, gen=gen)
+        for _ in range(60):
+            pl = plan(fb, jobs, flow=flow, now=t, built=(t - datetime.timedelta(seconds=5)).timestamp())
             got = {('advance', i) for i in pl['advance']} | {('fix', pl['fix']), ('fill', pl['fill'])} - {('fix', None), ('fill', None)}
             if pl['prep']:
                 got |= {('prep', k.split(':', 1)[1]) for k in pl['tried'] if k.startswith('prep:')}

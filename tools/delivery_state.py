@@ -34,6 +34,7 @@ SWAP = _marked('swap')              # 能換檔(換履歷、語言、自己的�
 LEAVE = _marked('leave')            # 能離開流程(移除、退回、出錯了、👎)
 FILLED = _marked('filled')          # 算填好(頁上有他要看的東西)
 WORKING = _marked('working')        # agent 正在做
+HANDBACK = _marked('handback')      # 他在回報按了處理好了,自動流程接著重填(沒填成、卡住、頁不見、舊檔)
 AUTO_FILL = {s: x['auto_fill'] for s, x in TABLE['states'].items() if x.get('auto_fill')}   # 自動流程會自己(重)填的:卡上那一句
 SWAP_FIELDS = ('resume_id', 'lang', 'custom_file')     # 卡上換檔的那幾欄:換了就是換檔
 # 換檔會動到的狀態(表上 files_changed 那一格不只是原地不動):頁上傳的會變成舊檔,或先記下來

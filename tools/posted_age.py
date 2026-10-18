@@ -346,7 +346,7 @@ def main(argv=None):
         save_cache()
     inaccessible.extend(agent_inaccessible)
     import agent_report                  # 這一輪跑完了:上一輪「agent 沒完成」這類回報收掉(還讀不到的下一行會再報)
-    agent_report.resolve_from('刊登日期', '後來那一輪查刊登日期跑完了', started, live=board)
+    agent_report.resolve(None, '後來那一輪查刊登日期跑完了', live=board, src='刊登日期', before=started)
     _report(inaccessible, board)
     for url, why in wrong:          # 安檢門擋下的:講清楚哪一格、agent 說什麼、實際是什麼
         print(f'{url}:agent 交的刊登日期跟頁面對不上,這一張這一輪不寫(下一輪會重查):{why}')

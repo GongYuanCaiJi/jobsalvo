@@ -25,6 +25,20 @@ import jobrun               # noqa: E402
 import config as cf         # noqa: E402
 
 
+def sync(board, sp, step):
+    """看板副本只演練背景狀態；不接瀏覽器、不改平台履歷登記。"""
+    import sync_profiles
+    path = os.path.join(sp, 'sync_status.json')
+    slots = [slot for slot in sync_profiles.slots() if sync_profiles.behind(*slot, board)]
+    needed = sync_profiles.pending_count(board)
+    started = time.time()
+    sync_profiles.write_status(path, started, len(slots), needed)
+    time.sleep(step)
+    results = {(platform, lang, variant): (False, ['副本只演練畫面，未實際同步'])
+               for platform, lang, variant, _entry in slots}
+    sync_profiles.write_status(path, started, len(slots), needed, results, finished=True)
+
+
 def prep(board, sp, step, limit=0, url=''):
     import cut_tailor as ct     # 進度檔的位置跟真的 cut_tailor 同一套
     st = lambda d: ct._status(d, sp=sp)
@@ -105,17 +119,17 @@ def apply(board, sp, step, stage, url, limit=0):
                 # 沒有表單紀錄的話副本上新進可投遞的卡永遠走不到確認。
                 old = m.get('form') or {}
                 m['form'] = {'plat': old.get('plat') or '沙箱', 'f': old.get('f') or [], 'at': today}
-                ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fill', m.get('apply'), FAKE_FILL, [], 'sandbox-' + str(me), '', 'sandbox',
+                ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fill', m.get('apply'), FAKE_FILL, [], 'sandbox-' + str(me), 'sandbox',
                                                                runtime=_fake_runtime()))
                 done.append(u)
             elif stage == 'fix':
                 if (m.get('apply') or {}).get('session') and ds.allowed(m, 'fix_start'):
                     ds.fire(fb, u, 'fix_start', apply={'stage': 'fix', 'at': today, 'issues': []})
-                    ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fix', m['apply'], FAKE_FILL, [], m['apply']['session'], '', 'sandbox'))
+                    ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fix', m['apply'], FAKE_FILL, [], m['apply']['session'], 'sandbox'))
                     fr.apply_clear_refill(fb, u)
                     done.append(u)
             elif fr.approval_problem(fb, u, status) is None:
-                ev = ar.submit_evidence({'confirm_text': '(沙箱假確認頁)', 'confirm_url': ''}, '')
+                ev = ar.submit_evidence({'confirm_text': '(沙箱假確認頁)', 'confirm_url': ''})
                 ds.fire(fb, u, 'submit_start')
                 ds.fire(fb, u, 'submit_ok', by='agent', sent_at=today, evidence=ev)
                 import ship
@@ -173,7 +187,7 @@ def customize(board, sp, step, url, items):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--kind', choices=['prep', 'customize', 'research', 'apply', 'add', 'suggest'], required=True)
+    ap.add_argument('--kind', choices=['prep', 'customize', 'research', 'apply', 'add', 'suggest', 'sync'], required=True)
     ap.add_argument('--board', required=True)
     ap.add_argument('--mode', default='')
     ap.add_argument('--direction', default='')
@@ -185,7 +199,9 @@ def main():
     a = ap.parse_args()
     step = float(os.environ.get('JOB_FAKE_STEP', '1'))
     sp = os.environ.get({'prep': 'CUT_TAILOR_TMP', 'customize': 'CUSTOMIZE_TMP', 'research': 'CONVERGE_TMP', 'apply': 'APPLY_TMP',
-                         'add': 'ADD_TMP', 'suggest': 'SUGGEST_TMP'}[a.kind]) or cf.TMP
+                         'add': 'ADD_TMP', 'suggest': 'SUGGEST_TMP', 'sync': 'SYNC_TMP'}[a.kind]) or cf.TMP
+    if a.kind == 'sync':
+        return sync(a.board, sp, step)
     if a.kind == 'customize':
         return customize(a.board, sp, step, a.url[-1] if a.url else '', a.item)
     if a.kind == 'apply':

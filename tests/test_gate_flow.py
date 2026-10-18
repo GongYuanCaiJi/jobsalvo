@@ -41,7 +41,7 @@ FORM_PAGE = {'url': U + '/apply', 'title': 'Engineer - Example', 'lines': ['Engi
                         {'label': 'Nationality', 'name': 'nat', 'type': 'text', 'value': 'Taiwan'}]}
 HONEST = {'url': U, 'platform': 'Lever', 'tab_id': '7:p1', 'handoff': True, 'tab_url': U + '/apply',
           'posting': {'title': 'Engineer', 'company': 'Example', 'same_job': True},
-          'delivery': {'method': 'no_profile'}, 'uploaded': [],
+          'delivery': {'method': 'no_profile'}, 'uploaded': [], 'unmet': [],
           'fields': [{'q': 'Full name', 'value': 'Alex Chen', 'src': 'rz'},
                      {'q': 'Nationality', 'value': 'Taiwan', 'src': 'bank', 'k': 'nat'}],
           'problems': [], 'notes': [], 'submitted': False}
@@ -110,11 +110,11 @@ class CodexFlow(unittest.TestCase):
                 self.after_submit(self.page)
                 with open(os.path.join(self.out, 'submit.json'), 'w', encoding='utf-8') as f:
                     json.dump(self.submit_sheet, f, ensure_ascii=False)
-        stdout.write(self.log_lines())
+        stdout.write(self.log_lines(stage))
         stdout.flush()
         return SimpleNamespace(pid=4242)
 
-    def log_lines(self):
+    def log_lines(self, stage):
         return ''.join(json.dumps(x) + '\n' for x in ({'type': 'thread.started', 'thread_id': 'S1'},
                                                        {'type': 'turn.completed'}))
 
@@ -204,11 +204,12 @@ class CodexFlow(unittest.TestCase):
         # 門路查到綁定的工作區不見了,不拿另一張頁去比;這張要重填。
         ok, msg = self.fill()
         self.assertTrue(ok, msg)
-        with patch.object(chrome_door, 'gone_pages', return_value=[U]):
+        # 每次讀頁 ego 都核對工作區:不見了就丟「頁面不見了」,不會讀到別張卡的頁
+        with patch.object(self.door, 'read_page', side_effect=chrome_door.Unreachable(ds.GONE)) as read:
             rejected = self.confirm()
         self.assertEqual(len(rejected), 1)
         self.assertEqual(ds.state(self.card()), 'gone')
-        self.assertFalse([c for c in getattr(self.door, 'calls', []) if c[0] == 'read_page'][1:])  # 驗收讀過一次,確認時沒再讀
+        self.assertEqual(read.call_count, 1)                            # 讀那一頁就知道不見了,沒有拿別的頁去比
 
     def test_a_field_changed_after_he_confirmed_is_stopped_before_sending(self):
         self.filled_and_confirmed()
@@ -275,14 +276,15 @@ class CodexFlow(unittest.TestCase):
         ok, _msg = self.submit()
         self.assertFalse(ok)
         self.assertEqual(ds.state(self.card()), 'unsure')               # 頁換了、沒有確認頁的字:程式也判斷不了
-        self.assertTrue([it for it in self.open_reports() if '信箱' in it['need']])
-        self.assertEqual(self.press('not_sent', at=run.now()), [])       # 他查過了:確認沒送出
+        self.assertEqual(self.open_reports(), [])                        # 不叫他去信箱查:查應徵進度會去查(#389)
+        self.assertEqual(self.press('not_sent', at=run.now()), [])       # 他自己查過了,也照樣能按:確認沒送出
         self.assertEqual(self.open_reports(), [])
 
     def test_the_agents_own_report_is_filed_under_the_programs_source_and_cleared_by_a_good_refill(self):
         self.said_from = '(Engineer)核准送出'
         self.page['fields'][1]['value'] = ''                            # 第一輪 Nationality 沒填上:驗收不過
-        ok, _msg = self.fill()
+        with patch.object(run, '_self_fixable', return_value=[]):      # 這裡看回報來源,不看自動改一次
+            ok, _msg = self.fill()
         self.assertFalse(ok)
         mine = [it for it in self.open_reports() if '本人登入' in it['msg']]
         self.assertEqual([it['from'] for it in mine], [run.REPORT_FROM])  # 照程式給的來源記,不是它自己寫的
@@ -297,10 +299,11 @@ class ClaudeFlow(CodexFlow):
     """Claude 的對話紀錄格式不同,瀏覽器門路與即時核對行為相同。"""
     RUNTIME = chrome_door.CLAUDE
 
-    def log_lines(self):
+    def log_lines(self, stage):
+        # 兩家都是最後一則訊息交件:填表那一輪 claude 最後的結果就是交件單,程式存成 fill.json
         lines = [{'type': 'system', 'subtype': 'init', 'session_id': 'S1'}]
-        lines.append({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': '@@DONE@@',
-                      'session_id': 'S1'})
+        lines.append({'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': 'S1',
+                      'result': json.dumps(self.sheet, ensure_ascii=False) if stage == 'fill' else '@@DONE@@'})
         return ''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in lines)
 
 

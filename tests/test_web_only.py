@@ -309,7 +309,7 @@ class WebOnly(tb.HttpBase):
         u = 'https://jobs.example/1'
         fb = {u: {'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'at': '2026-09-29T14:00:00', 'tab_id': '7:p1',
                                                             'workspace': {'id': 7, 'name': 'w', 'page': 'p1'}}}}
-        with patch.object(bs, 'is_real', return_value=True), \
+        with patch('board_doc.is_live', return_value=True), \
              patch('board_doc.load', return_value={'fb': json.dumps(fb)}), \
              patch.object(chrome_door, 'close_if_idle'), \
              patch.object(bs.bd, 'set_fb', side_effect=lambda fn, live=None, by='': fn(fb)):

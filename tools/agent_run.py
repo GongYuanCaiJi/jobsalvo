@@ -117,9 +117,9 @@ def report_rule():
     return ('【回報】只回報非使用者本人不可的事:要他登入、要他給權限、要他本人點的驗證碼,而且你找不到別的路。'
      '抓不到就換別的方法抓;判斷得出來就自己判斷,照這一輪的規矩寫進產出;'
      '已經繞過去的不用報。要回報時:'
-     f'`python3 {cf.tool("agent_report.py")} --from {source} --job <職缺網址,沒有就不給> --need "<他要做什麼>" "<發生了什麼>"`'
+     f'`python3 {cf.tool("agent_report.py")} --from {source} --job <職缺網址,沒有就不給> --need "<他要做什麼>" --url <他要去處理的那一頁網址> "<發生了什麼>"`'
      + ('(--from 照抄,是程式給的)' if src else '') + '。'
-     '用繁體中文、白話、一句講清楚。回報完照原本的規矩繼續做能做的部分。\n\n')
+     '--url 一定要給:他點開就能直接處理的那一頁(登入頁、設定頁、停住的那一頁)。用繁體中文、白話、一句講清楚。回報完照原本的規矩繼續做能做的部分。\n\n')
 
 # 使用者在看板上撥的開關(__agentfree__):要不要放手讓 agent 自己決定派幾隻。
 # 放在這裡而不是各支 prompt 裡各接一次:這裡是派工的唯一入口,一處寫完,找缺、判斷、
@@ -489,6 +489,7 @@ def _failure_reason(runtime, returncode, output=''):
         'server is overloaded', 'at capacity', 'high demand', 'internal server error',
         'service unavailable', 'connection failed', 'connectionfailure', 'unable to connect',
         'exceeded retry limit, last status: 5', 'http 500', 'http 502', 'http 503', 'http 504',
+        'stream disconnected before completion',
     )):
         return 'service'
     return None
@@ -575,12 +576,11 @@ def _record(outfile, agent, index, started, result, prompt):
 
 def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
         browser_required=False, browser=None, resume=None, board=None, web=True,
-        agent_id=None, on_start=None, launcher=None, waiter=None, prepare=None, report_from=None,
+        agent_id=None, on_start=None, launcher=None, waiter=None, report_from=None,
         output_last_message=None):
     """依序試用符合瀏覽器需求的 agent;只在 runtime 明確不可用時換手。
     report_from:這一輪 agent 回報時的來源(程式給的,例如「代投」);agent 自己寫別的也照這個記(#316)。
-    prepare(agent):輪到這個 agent 時回給它的 prompt(代投換手到另一家時照那一家重組、重做 Chrome 檢查,#288);
-    那一家的 Chrome 沒準備好就丟 AgentStartError,照啟動失敗換下一個。
+    output_last_message:交件單存到哪裡;兩家都是最後一則訊息交件,換手到哪一家 prompt 都一樣。
     證據(#315):每一次派出去的指示、跑完的動作紀錄都記進現在開著的那一輪(evidence.opened);
     流程沒開輪就記進那個流程自己的夾,沒有一次派 agent 是沒留證據的。"""
     import evidence
@@ -588,9 +588,8 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
                                               os.path.splitext(os.path.basename(outfile or ''))[0] or 'run', (), board)
 
     def noted(agent):
-        task = prepare(agent) if prepare else prompt
-        rnd.instruction(task, agent=agent.get('id'))
-        return task
+        rnd.instruction(prompt, agent=agent.get('id'))
+        return prompt
     token = _REPORT_FROM.set(report_from) if report_from else None
     try:
         return _run(prompt, outfile, repo, timeout, browser_required=browser_required or chrome, browser=browser,
@@ -611,6 +610,7 @@ def _run(prompt, outfile, repo, timeout, *, browser_required, browser, resume, b
     if not agents:
         return AgentResult('unavailable', reason=selection_error)
 
+    retried = set()
     for index, agent in enumerate(agents, 1):
         runtime = agent.get('runtime', '')
         try:
@@ -655,12 +655,25 @@ def _run(prompt, outfile, repo, timeout, *, browser_required, browser, resume, b
                     _record(outfile, agent, index, started, result, task)
                     return result
                 _failure_line(outfile, agent, index, reason)
+                if reason == 'service' and agent.get('id') not in retried:
+                    # 服務端斷線多半一下就好:同一隻等一下再跑一次,不直接整件失敗
+                    retried.add(agent.get('id'))
+                    _record(outfile, agent, index, started, result, task)
+                    time.sleep(SERVICE_RETRY_WAIT)
+                    agents.insert(index, agent)
+                    continue
                 if reason == 'authentication':
                     _report_authentication(agent, index, board, outfile)
                 result = AgentResult('unavailable', result.returncode, result.pid,
                                      reason=reason, agent_id=agent.get('id'))
+            if result.ok and output_last_message and runtime == 'claude-code':
+                # 兩家交件同一種寫法:最後一則訊息就是交件單(codex 由 --output-last-message 存,claude 由程式從串流結果存)
+                with open(output_last_message, 'w', encoding='utf-8') as f:
+                    f.write(str((_claude_outcome(_log_text(outfile, log_offset)) or {}).get('result') or ''))
             _record(outfile, agent, index, started, result, task)
             if result.ok:
+                if output_last_message and runtime == 'codex':
+                    _keep_last_reply(output_last_message, _log_text(outfile, log_offset))
                 return result
             if result.status != 'unavailable':
                 return result
@@ -671,6 +684,30 @@ def _run(prompt, outfile, repo, timeout, *, browser_required, browser, resume, b
         return AgentResult('unavailable', result.returncode, result.pid,
                            reason='all_unavailable', agent_id=result.agent_id)
     return AgentResult('unavailable', reason='all_unavailable')
+
+SERVICE_RETRY_WAIT = 30
+
+
+def _keep_last_reply(path, log_text):
+    """codex 最後偶爾多送一則空白訊息,--output-last-message 存成空檔:改存最後一則有字的回覆。"""
+    try:
+        with open(path, encoding='utf-8') as f:
+            if f.read().strip():
+                return
+    except OSError:
+        pass
+    for line in reversed(log_text.splitlines()):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        item = event.get('item') if isinstance(event, dict) else None
+        if (event.get('type') == 'item.completed' and isinstance(item, dict)
+                and item.get('type') == 'agent_message' and str(item.get('text') or '').strip()):
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(item['text'])
+            return
+
 
 def _group_alive(pid):
     if os.name != 'posix':
@@ -713,12 +750,15 @@ def _stop_tree(proc, grace=2):
 
 def wait_done(procs, timeout=3600, paused=None):
     """等全部 agent 結束;逐一回報成功、非零結束或超時。
-    paused():這一輪到現在一共暫停了幾秒(jobrun.paused_seconds);給了的話,等的這段期間暫停的時間不算進時限(#308)。"""
+    paused():這一輪到現在一共暫停了幾秒;等的這段期間暫停的時間不算進時限(#308)。
+    沒給就照這一輪寫的進度檔算(jobrun.current_paused):每個流程都一樣,不靠各自接。"""
+    import jobrun
+    paused = paused or jobrun.current_paused
     procs = list(procs)
     pending = list(procs)
     results = {}
     deadline = time.monotonic() + max(0, timeout)
-    paused0 = paused() if paused else 0.0
+    paused0 = paused()
     while pending:
         for proc in pending[:]:
             code = proc.poll()
@@ -728,7 +768,7 @@ def wait_done(procs, timeout=3600, paused=None):
             pending.remove(proc)
         if not pending:
             break
-        remaining = deadline + ((paused() - paused0) if paused else 0.0) - time.monotonic()
+        remaining = deadline + paused() - paused0 - time.monotonic()
         if remaining <= 0:
             for proc in pending:
                 _stop_tree(proc)
