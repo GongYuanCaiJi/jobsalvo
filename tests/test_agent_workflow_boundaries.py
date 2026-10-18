@@ -41,7 +41,6 @@ class Responsibilities(unittest.TestCase):
         self.jobs, self.fb = {URL: {'id': URL}}, {URL: {'app': 'ship', 'apply': {'delivery': self.delivery}}}
         self.status = 'complete'
         self.calls = []
-        self.fingerprint = 'current'
         self.door = SimpleNamespace(agent_id='original-agent', runtime='codex',
                                     profile_reader=lambda board: lambda url: copy.deepcopy(self.pages[url]))
         for target, value in (
@@ -49,7 +48,6 @@ class Responsibilities(unittest.TestCase):
             ('apply_run.out_dir', lambda url, board: str(self.out)),
             ('profile_sync.decided', lambda *args: dict(self.decision)),
             ('profile_sync.delivery_for', lambda *args: dict(self.delivery)),
-            ('profile_sync.attachment_fingerprint', lambda *args: self.fingerprint),
             ('config.master', lambda *args: str(self.source)),
             ('agent_run.session_id', lambda log: 'same-session'),
             ('evidence.active', lambda: None),
@@ -157,38 +155,35 @@ if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文�
         self.assertEqual(Path(ps.REG).read_text(), '{broken')
 
     def test_text_date_meaning_is_judged_but_calendar_and_source_are_checked(self):
-        text = '刊登日期：2026年九月七日'
-        sheet = {'dates': [{'url': URL, 'posted_at': '2026-09-07', 'source': text}]}
-        truth = gate.Truth(given={URL: text}, fetched_on={URL: '2026-10-02'})
-        verdict = gate.inspect('posted_at', sheet, truth)
+        from numbered import Numbered
+        numbered = Numbered()
+        numbered.add('刊登日期：2026年九月七日', 'date', URL)
+        sheet = {'material_id': numbered.material_id, 'dates': [{'url': URL, 'posted_at': '2026-09-07', 'source': [1]}]}
+        truth = lambda: gate.Truth(handed={URL}, fetched_on={URL: '2026-10-02'})
+        verdict = gate.inspect('posted_at', sheet, truth(), numbered)
         self.assertFalse(verdict.problems)
         self.assertEqual(verdict.rows['dates'][0].judged['posted_at'], '2026-09-07')
-        for field, value in [('posted_at', '2026-02-31'), ('source', '不在原文的日期')]:
+        self.assertEqual(verdict.rows['dates'][0].facts['source'], '刊登日期：2026年九月七日')
+        for field, value in [('posted_at', '2026-02-31'), ('source', '不在原文的日期'), ('source', [2])]:
             broken = copy.deepcopy(sheet)
             broken['dates'][0][field] = value
-            self.assertTrue(gate.inspect('posted_at', broken, truth).problems)
+            self.assertTrue(gate.inspect('posted_at', broken, truth(), numbered).problems)
 
-    def test_summary_unit_conversion_needs_real_jd_quote(self):
+    def test_summary_dates_or_salary_need_a_jd_paragraph_number(self):
+        # 單位換算、跳著摘都交給 agent;程式只要它引這一張 JD 原文那幾段的編號(編號本身由安檢門的 pick 核)
         import gate_flows
-        text = '年薪 NT$100K 至 NT$120K'
-        truth = SimpleNamespace(given=text)
-        self.assertIsNone(gate_flows._card_summary({'salary': '年薪 100,000–120,000 元', 'quote': text}, {}, truth))
-        self.assertTrue(gate_flows._card_summary({'salary': '年薪 100,000–120,000 元', 'quote': '原文不存在'}, {}, truth))
-
-    def test_summary_quote_may_skip_with_ellipsis_but_each_part_must_exist(self):
-        import gate_flows
-        truth = SimpleNamespace(given='職稱: AI 工程師\n曝光日期: 2026/10/08\n地點: 台北市\n薪資: 待遇面議')
-        said = {'posted': '2026/10/08', 'salary': '待遇面議'}
-        self.assertIsNone(gate_flows._card_summary(dict(said, quote='曝光日期: 2026/10/08 … 薪資: 待遇面議'), {}, truth))
-        self.assertTrue(gate_flows._card_summary(dict(said, quote='曝光日期: 2026/10/08 … 薪資: 月薪五萬'), {}, truth))
-        self.assertTrue(gate_flows._card_summary(dict(said, quote=' … '), {}, truth))
-        self.assertIsNone(gate_flows._card_summary(dict(said, quote='曝光日期: 2026/10/08\n薪資: 待遇面議'), {}, truth))
+        truth = SimpleNamespace(key='J1', read={('J1', 'jd')})
+        said = {'salary': '年薪 100,000–120,000 元'}
+        self.assertIsNone(gate_flows._card_summary(dict(said, quote=[2]), {}, truth))
+        self.assertTrue(gate_flows._card_summary(dict(said, quote=[]), {}, truth))
+        self.assertIs(gate_flows._card_summary(dict(said, quote=[]), {}, SimpleNamespace(key='J1', read=set())),
+                      gate_flows.UNUSED)
 
     def test_placeholder_words_in_a_summary_are_not_dates_or_salary(self):
         # agent 沒照指示留空、寫了「查無」「未公開」這類字:跟沒寫一樣,不要它附原文引用;判斷收職稱、存摘要用同一支
         import gate_flows
         import research
-        truth = SimpleNamespace(given='Platform engineer, remote')
+        truth = SimpleNamespace(key='J1', read={('J1', 'jd')})
         for word in ('無', '未公開', '查無', '未提供', '-', 'N/A', '未明載(JD 沒寫)'):
             with self.subTest(word=word):
                 self.assertIsNone(gate_flows._card_summary({'deadline': word, 'salary': word, 'posted': word}, {}, truth))

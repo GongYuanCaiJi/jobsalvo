@@ -96,6 +96,8 @@ def _agent_link_batch(pages, board, run_agent=None):
         return {}
     import agent_run as ar
     import evidence
+    from numbered import Numbered
+    numbered = Numbered()      # 每一頁原文邊印邊編號,同一個物件交給安檢門
     with evidence.opened('link_status', 'judge', list(pages), board):
         with tempfile.TemporaryDirectory(prefix='jobsalvo-link-gate-') as directory:
             output = os.path.join(directory, 'verdicts.json')
@@ -103,15 +105,17 @@ def _agent_link_batch(pages, board, run_agent=None):
             lines = []
             for i, (url, result) in enumerate(pages.items(), 1):
                 lines.append(f'=== J{i} ===\nURL: {url}\n來源路徑: {result.via}\n'
-                             f'職缺頁原文:\n--- 開始 ---\n{result.text}\n--- 結束 ---')
+                             f'職缺頁原文:\n--- 開始 ---\n{numbered.add(result.text or "", "text", f"J{i}")}\n--- 結束 ---')
             prompt = (
                 '只依照下方程式提供的頁面原文,判斷網址所指的這一個職缺是否已經關閉或移除。'
                 '不可開瀏覽器、不可請求網址。只看整體語意;頁面提及「expired」「已關閉」等字眼, '
                 '若描述的是憑證、帳號或其他內容,不代表職缺已關。證據不足就填 uncertain。'
-                '判 closed 一定要在 quote 逐字抄頁面上講職缺關了的那一句,程式會拿它跟原文比,原文裡找不到的不收。\n\n'
+                '判 closed 一定要在 quote 寫那一頁講職缺關了的那幾段的編號(原文每段前面的數字),'
+                '程式照編號取原文,不是這一頁的編號不收。\n\n'
                 + '\n\n'.join(lines) + '\n\n'
                 + f'把 JSON 寫到 {output}:{{"jobs":[{{"id":"J1","status":"live|closed|uncertain",'
-                  '"quote":"頁面原文逐字抄的那一句(closed 必填)","reason":"一句話說明,或不確定的原因"}]}}。每個 id 恰好出現一次。')
+                  '"quote":[那幾段的編號,整數(closed 必填)],"reason":"一句話說明,或不確定的原因"}],'
+                  f'"material_id":"{numbered.material_id}"}}。每個 id 恰好出現一次;material_id 照抄(這一份材料的交付代號)。')
             try:
                 if run_agent is None:
                     outcome = ar.run(prompt, log, cf.HOME, browser_required=False, web=False, board=board)
@@ -128,8 +132,7 @@ def _agent_link_batch(pages, board, run_agent=None):
             if payload is None:   # 沒交或寫壞了:照實標成不確定
                 return {url: ('uncertain', 'agent 沒有交可讀的判斷') for url in pages}
         ids = {f'J{i}': url for i, url in enumerate(pages, 1)}
-        verdict = gate.inspect('link_status', payload,
-                               gate.Truth(given={jid: pages[url].text or '' for jid, url in ids.items()}))
+        verdict = gate.inspect('link_status', payload, gate.Truth(handed=set(ids)), numbered)
         if not isinstance(payload.get('jobs'), list):
             return {url: ('uncertain', 'agent 回覆格式無效') for url in pages}
         rows = {r.key: r for r in verdict.rows.get('jobs', []) if r.key in ids}

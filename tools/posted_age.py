@@ -81,11 +81,15 @@ def date_lines(text, limit=1500):
 
 
 def prompt_for(jobs, urls, out, fetched=None):
-    """fetched:{網址: 程式抓那一頁的日期};「3 天前」照這一天算(程式知道,寫進指示,不讓 agent 猜今天幾號)。"""
+    """fetched:{網址: 程式抓那一頁的日期};「3 天前」照這一天算(程式知道,寫進指示,不讓 agent 猜今天幾號)。
+    回 (指示, 編號材料):每個網址日期那幾行邊印邊編號,同一個物件交給 parse_result 核對。"""
+    from numbered import Numbered
+    numbered = Numbered()
     today = datetime.date.today().isoformat()
     cards = '\n\n'.join(
         f'- {url} | {jobs.get(url, {}).get("target") or "職缺"} | 程式在 {(fetched or {}).get(url) or today} 抓的這一頁\n'
-        f'頁面上跟日期有關的幾行(程式從原文挑出來的):\n--- 開始 ---\n{date_lines(urls[url].text)}\n--- 結束 ---'
+        f'頁面上跟日期有關的幾行(程式從原文挑出來的):\n--- 開始 ---\n{numbered.add(date_lines(urls[url].text), "date", url)}'
+        '\n--- 結束 ---'
         for url in urls)
     return (
         '請只依照程式提供的頁面文字,補上頁面清楚標示的刊登日期;不可開啟來源網址或使用瀏覽器。'
@@ -93,27 +97,26 @@ def prompt_for(jobs, urls, out, fetched=None):
         '頁面寫「3 天前」這種的,照那一頁抓的日期往回算。\n\n'
         f'職缺與頁面文字:\n{cards}\n\n'
         f'把結果寫入 {out},格式如下:\n'
-        '{"dates":[{"url":"原網址","posted_at":"YYYY-MM-DD",'
-        '"source":"頁面上的日期說明,包含欄位名稱與日期文字,照原文逐字抄"}],'
+        f'{{"material_id":"{numbered.material_id}","dates":[{{"url":"原網址","posted_at":"YYYY-MM-DD",'
+        '"source":[這個網址那幾行裡寫著刊登日期的那幾行的編號,整數]}],'
         '"inaccessible":[{"url":"原網址","reason":"無法讀取的原因",'
         '"need":"本人要做的事;不需要本人處理就寫空字串"}]}\n'
-        '日期意思由你判讀；程式驗日曆格式與 source 是否來自這個網址的原文。'
+        'material_id 照抄(這一份材料的交付代號)。日期意思由你判讀；程式驗日曆格式與 source 是不是這個網址的那幾行。'
         '每個網址只能出現在 dates 或 inaccessible 其中一處。dates 只列能確認日期的網址;其他網址都要在 inaccessible 說明原因。只寫這份 JSON 檔,不要改看板,最後一行印 @@DONE@@。\n'
-    )
+    ), numbered
 
 
-def parse_result(data, urls, fetched=None):
+def parse_result(data, urls, fetched=None, numbered=None):
     """交件單經安檢門(gate.inspect):每一列跟程式交給它的那幾行比。整份的形狀不對整份不收(丟 ValueError);
     一列對不上只那一張不收,原因照實回報。回 (日期, 確認不了的, 對不上的 [(網址, 原因)])。
-    urls:{網址: 程式交給它的頁面(PageResult)};fetched:{網址: 程式抓那一頁的日期}。"""
+    urls:{網址: 程式交給它的頁面(PageResult)};fetched:{網址: 程式抓那一頁的日期};
+    numbered:prompt_for 印進指示的那一份編號材料(source 的編號照它核)。"""
     import gate
     if not isinstance(data, dict) or not isinstance(data.get('dates'), list):
         raise ValueError('缺少 dates 清單')
     if not isinstance(data.get('inaccessible', []), list):
         raise ValueError('inaccessible 必須是清單')
-    truth = gate.Truth(given={url: date_lines(page.text) for url, page in urls.items()},
-                       fetched_on=fetched)
-    verdict = gate.inspect('posted_at', data, truth)
+    verdict = gate.inspect('posted_at', data, gate.Truth(handed=set(urls), fetched_on=fetched), numbered)
     rows = [r for rows in verdict.rows.values() for r in rows]
     if len(rows) < len(data['dates']) + len(data.get('inaccessible', [])):
         raise ValueError(next((p for p in verdict.problems if '不是物件' in p), '交件單裡有一列不是物件'))
@@ -303,7 +306,7 @@ def main(argv=None):
         os.makedirs(os.path.dirname(RESULT), exist_ok=True)
         if os.path.exists(RESULT):
             os.remove(RESULT)
-        prompt = prompt_for(jobs, agent_pages, RESULT, fetched_on)
+        prompt, numbered = prompt_for(jobs, agent_pages, RESULT, fetched_on)
         with evidence.opened('posted_age', 'dates', list(agent_pages), board) as rnd:   # 證據記進每一張卡(#315)
             outcome = ar.run(prompt, LOG, cf.HOME, browser_required=False, web=False, board=board)
             rnd.handoff(RESULT)
@@ -321,7 +324,7 @@ def main(argv=None):
             if sheet is None:
                 raise ValueError(missing)
             with evidence.activated(rnd):     # 安檢門的比對結果記進同一輪
-                dates, agent_inaccessible, wrong = parse_result(sheet, agent_pages, fetched_on)
+                dates, agent_inaccessible, wrong = parse_result(sheet, agent_pages, fetched_on, numbered)
         except Exception as e:  # noqa: BLE001 — agent 交的檔什麼樣子都有可能;原因照實寫進看板的回報
             msg = f'刊登日期 agent 交件無法使用:{str(e)[:200]}'
             import agent_report

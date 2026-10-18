@@ -101,7 +101,7 @@ class Fill(unittest.TestCase):
              patch.object(fr, 'board_status', return_value=OKST), \
              patch.object(run, 'load', side_effect=lambda b: (jobs, fb)), \
              patch.object(run, 'out_dir', return_value=self.out), \
-             patch.object(run, 'prompt_for', return_value=('指示:照答案庫填 Nationality', self.out)), \
+             patch.object(run, 'prompt_for', return_value=('指示:照答案庫填 Nationality', self.out, None)), \
              patch('profile_sync.check_attachments', return_value=[]), \
              patch.object(ar, 'launch', side_effect=agent.launch), \
              patch.object(ar, 'wait_done', side_effect=agent.wait), \
@@ -426,18 +426,16 @@ class OtherFlows(unittest.TestCase):
         rows = [['https://ex.test/job/1', 'A'], ['https://ex.test/job/2', 'B']]
         sp = os.path.join(self.home, 'sp')
         os.makedirs(sp)
-        for name, data in (('cut_tailor_rows.json', rows),):
-            with open(os.path.join(sp, name), 'w', encoding='utf-8') as f:
+        out = os.path.join(self.home, 'prepare')      # 這一輪的夾:收尾只從這裡讀輪次檔
+        os.makedirs(out)
+        for name, data in (('rows.json', rows), ('t0', 0), ('choices.json', {}), ('cached.json', [])):
+            with open(os.path.join(out, name), 'w', encoding='utf-8') as f:
                 json.dump(data, f)
-        with open(os.path.join(sp, 'cut_tailor_t0'), 'w') as f:
-            f.write('0')
-        with open(os.path.join(sp, 'cut_tailor_prompt.txt'), 'w', encoding='utf-8') as f:
+        with open(os.path.join(out, 'prompt.txt'), 'w', encoding='utf-8') as f:
             f.write('準備這兩張')
-        out = os.path.join(self.home, 'prepare')
         own = os.path.join(out, cut_tailor.card.card_id_from_url(rows[0][0]), 'fill.json')
         a, b = agent_writes(lambda of: {own: {'keep': True}})
-        with a, b, patch.multiple(cut_tailor, SP=sp, ROWSF=os.path.join(sp, 'cut_tailor_rows.json'),
-                                  CHOICESF=os.path.join(sp, 'c.json'), CACHEDF=os.path.join(sp, 'd.json'),
+        with a, b, patch.multiple(cut_tailor, SP=sp,
                                   STATUSF=os.path.join(sp, 's.json'), PIDF=os.path.join(sp, 'p'),
                                   WORKER_PIDF=os.path.join(sp, 'w')), \
              patch.object(ar, 'wait_done', return_value=[SimpleNamespace(status='failed', returncode=1, pid=4242)]), \

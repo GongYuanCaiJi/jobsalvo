@@ -3,15 +3,41 @@
 """查回音(reply_run)的規則:照證據改狀態、30 天沒回音記沒下文、他自己決定的不動、看不懂的不改只標出來。"""
 import contextlib
 from types import SimpleNamespace
-import os, sys, unittest
+import json, os, re, sys, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import reply_run as rr     # noqa: E402
+from numbered import Numbered  # noqa: E402
+from test_board import Q    # noqa: E402
 
 U = 'https://jobs.lever.co/x/1'
 DAY = '2026-10-30'
+
+
+def copied(*records):
+    """程式複製、編號交給 agent 的來源:(種類, 來源代號, 全文)。"""
+    numbered = Numbered()
+    for kind, ref, text in records:
+        numbered.add(text, kind, ref)
+    return numbered
+
+
+def reply_sheet(prompt, sheet):
+    """假 agent 照程式複製的來源檔交件:Q('那段字') 換成來源檔裡印成「n. 那段字」的編號,抄指示上的交付代號。"""
+    with open(re.search(r'複製到 (\S+?);', prompt)[1], encoding='utf-8') as f:
+        data = json.load(f)
+    lines = '\n'.join(r.get('text') or '' for r in data['gmail']['threads'] + data['application_records'])
+
+    def walk(value):
+        if isinstance(value, Q):
+            return int(re.search(rf'^(\d+)\. {re.escape(value)}$', lines, re.M)[1])
+        if isinstance(value, dict):
+            return {k: walk(v) for k, v in value.items()}
+        return [walk(v) for v in value] if isinstance(value, list) else value
+    said = re.search(r'"material_id": ?"(\w+)"', prompt)
+    return dict(walk(sheet), **({'material_id': said[1]} if said else {}))
 
 
 def board(**m):
@@ -40,8 +66,12 @@ class Findings(unittest.TestCase):
                  'link': 'https://mail.example/template', 'kind': 'reject', 'quote': '制式拒絕通知', 'reason': ''},
             ],
         }
+        numbered = copied(('mail', 'email:reason1', reason + '\n' + DAY), ('mail', 'email:tmpl1', '制式拒絕通知\n' + DAY))
+        data = dict(data, material_id=numbered.material_id)
+        data['findings'][0].update(quote=[1], reason=[1, 2])
+        data['findings'][1].update(quote=[4], reason=[])
         parsed = rr.parse_result(data, [U, other], source_types={'email:reason1': 'email', 'email:tmpl1': 'email'},
-                                 texts={'email:reason1': reason + '\n' + DAY, 'email:tmpl1': '制式拒絕通知\n' + DAY})
+                                 numbered=numbered)
         fb = {U: {'app': 'sent'}, other: {'app': 'sent'}}
         rr.apply_findings(fb, parsed.findings, DAY)
         self.assertEqual(fb[U]['replies']['items'][0]['reason'], reason)
@@ -317,21 +347,35 @@ class AgentResults(unittest.TestCase):
             'findings': [{'url': U, 'source': 'email', 'date': '2026-09-12',
                           'summary': '邀請面試', 'link': 'https://mail.example/thread/1',
                           'kind': 'interview', 'todo': '回覆可面談時段'}],
-            'job_ids': [{'id': 'AbC123', 'applied_at': '2026-09-11', 'title': 'ignored'}],
+            'job_ids': [{'platform': '104', 'at': [1], 'applied_at': '2026-09-11', 'title': 'ignored'}],
             'inaccessible': [{'source': '104', 'reason': '需要登入', 'need': '登入後重跑',
                               'jobs': [other]}],
         }
         raw['findings'][0]['source_ref'] = 'email:thread-001'
-        parsed = rr.parse_result(raw, [U, other], source_types={'email:thread-001': 'email'},
-                                 texts={'application_record:104': '應徵紀錄 AbC123 資料工程師 2026-09-11 已應徵'})
+        numbered = copied(('record', 'application_record:104', '應徵紀錄 AbC123 資料工程師 2026-09-11 已應徵'))
+        parsed = rr.parse_result(dict(raw, material_id=numbered.material_id), [U, other],
+                                 source_types={'email:thread-001': 'email'}, numbered=numbered)
         self.assertEqual(parsed.findings[U][0]['link'], 'https://mail.example/thread/1')
         self.assertEqual(parsed.findings[U][0]['kind'], 'interview')
         self.assertEqual(parsed.findings[U][0]['todo'], '回覆可面談時段')
         self.assertEqual(parsed.findings[U][0]['source_type'], 'email')
         self.assertEqual(parsed.findings[U][0]['source_ref'], 'email:thread-001')
         self.assertEqual(parsed.checked, {U})
-        self.assertEqual(parsed.job_ids, [{'id': 'AbC123', 'title': 'ignored', 'applied_at': '2026-09-11'}])
+        self.assertEqual(parsed.job_ids, [{'platform': '104', 'line': '應徵紀錄 AbC123 資料工程師 2026-09-11 已應徵',
+                                           'applied_at': '2026-09-11', 'title': 'ignored'}])
         self.assertEqual(parsed.inaccessible[0]['jobs'], [other])
+
+    def test_the_card_shows_the_cited_program_text(self):
+        """卡上的標題、信裡那一句是程式複製的那一封信的字(照 agent 引的編號取),不是 agent 寫的編號。"""
+        numbered = copied(('mail', 'email:iv0001', MAIL['text']))
+        raw = {'material_id': numbered.material_id, 'checked': [U],
+               'findings': [dict(MainRun.IV, subject={'text': f'Acme 人資 {DAY}', 'cite': [1]}, quote=[2])]}
+        parsed = rr.parse_result(raw, [U], source_types={'email:iv0001': 'email'}, numbered=numbered)
+        fb = board()
+        rr.apply_findings(fb, parsed.findings, DAY)
+        item = fb[U]['replies']['items'][0]
+        self.assertEqual((item['subject'], item['quote']), (f'Acme 人資 {DAY}', '您好,邀請您參加第一輪面試。'))
+        self.assertNotIn('unverified', item)
 
     def test_unknown_inaccessible_scope_prevents_ghost_inference(self):
         raw = {'checked': [U], 'findings': [], 'job_ids': [],
@@ -366,8 +410,9 @@ class AgentResults(unittest.TestCase):
              'source': 'Gmail', 'date': DAY, 'summary': 'Application received',
              'link': 'https://mail.google.com/thread/1', 'kind': 'confirm'},
         ]}
-        parsed = rr.parse_result(raw, [U, other, third], source_types={'email:thread-001': 'email'},
-                                 texts={'email:thread-001': 'Application received\n' + DAY})
+        numbered = copied(('mail', 'email:thread-001', 'Application received\n' + DAY))
+        parsed = rr.parse_result(dict(raw, material_id=numbered.material_id), [U, other, third],
+                                 source_types={'email:thread-001': 'email'}, numbered=numbered)
         self.assertEqual(parsed.findings[U][0]['source_type'], 'email')
         self.assertTrue(parsed.findings[U][0]['_source_verified'])
         self.assertNotIn(other, parsed.findings)
@@ -408,10 +453,11 @@ class AgentResults(unittest.TestCase):
         """agent 補查、程式沒讀到全文的來源:核對不了原文,那一則標 unverified(卡上照實講「程式沒讀到原文」)。"""
         fallback_sources = [{'source_ref': 'email:search', 'source_type': 'email', 'source': 'Gmail',
                              'reason': '讀不到', 'need': '補查', 'jobs': [U]}]
-        raw = {'checked': [U], 'findings': [{
+        numbered = Numbered()
+        raw = {'material_id': numbered.material_id, 'checked': [U], 'findings': [{
             'url': U, 'source_ref': 'email:search', 'source': 'Gmail', 'date': DAY, 'summary': '面試邀請',
-            'link': 'https://mail.google.com/mail/u/0/#all/thread-001', 'kind': 'interview', 'quote': '邀請面試'}]}
-        parsed = rr.parse_result(raw, [U], source_types=rr._source_type_index({}, fallback_sources), texts={})
+            'link': 'https://mail.google.com/mail/u/0/#all/thread-001', 'kind': 'interview', 'quote': []}]}
+        parsed = rr.parse_result(raw, [U], source_types=rr._source_type_index({}, fallback_sources), numbered=numbered)
         self.assertTrue(parsed.findings[U][0]['unverified'])
         fb = board()
         rr.apply_findings(fb, parsed.findings, DAY)
@@ -449,16 +495,17 @@ class AgentResults(unittest.TestCase):
                     'link': 'https://mail.example/iv', 'kind': 'interview'},
                    {'url': other, 'source': 'Gmail', 'date': '10/03', 'summary': '拒絕', 'source_ref': 'email:rej1',
                     'link': 'https://mail.example/rej', 'kind': 'reject'}],
-               'job_ids': [{'platform': '104', 'id': 'good1', 'applied_at': '2026-10-01'},
-                           {'platform': '104', 'id': 'bad1', 'applied_at': '10/03'}],
+               'job_ids': [{'platform': '104', 'at': [1], 'applied_at': '2026-10-01'},
+                           {'platform': '104', 'at': [2], 'applied_at': '10/03'}],
                'inaccessible': [{'source': '104', 'reason': '要登入', 'jobs': [third]}]}   # 缺 need
-        parsed = rr.parse_result(raw, [U, other, third], source_types={'email:iv1': 'email', 'email:rej1': 'email'},
-                                 texts={'application_record:104': 'good1 2026-10-01 bad1 2026-10-03'})
+        numbered = copied(('record', 'application_record:104', 'good1 2026-10-01\nbad1 2026-10-03'))
+        parsed = rr.parse_result(dict(raw, material_id=numbered.material_id), [U, other, third],
+                                 source_types={'email:iv1': 'email', 'email:rej1': 'email'}, numbered=numbered)
         self.assertEqual(parsed.findings[U][0]['kind'], 'interview')
         self.assertNotIn(other, parsed.checked)
         self.assertNotIn(third, parsed.checked)
         self.assertIn(U, parsed.checked)
-        self.assertEqual([x['id'] for x in parsed.job_ids], ['good1'])
+        self.assertEqual([x['line'] for x in parsed.job_ids], ['good1 2026-10-01'])
         self.assertEqual(len(parsed.dropped), 3)
 
     def test_a_finding_that_is_not_an_object_leaves_no_card_counted_as_checked(self):
@@ -493,7 +540,7 @@ MAIL = {'source_ref': 'email:iv0001', 'source_type': 'email', 'source_id': 'iv00
 class MainRun(unittest.TestCase):
     """reply_run.main 整輪跑一次:不開 Chrome、不派 agent、不寫真的看板,agent 交件用假的。"""
     IV = {'url': U, 'source': 'Gmail', 'date': DAY, 'summary': '面試邀請', 'source_ref': 'email:iv0001',
-          'link': 'https://mail.example/iv', 'kind': 'interview', 'quote': '邀請您參加第一輪面試'}
+          'link': 'https://mail.example/iv', 'kind': 'interview', 'quote': [Q('您好,邀請您參加第一輪面試。')]}
 
 
     def run_main(self, delivery=None, *, chrome_up=(True, ''), close_error=None, fb=None, unavailable=(),
@@ -513,7 +560,7 @@ class MainRun(unittest.TestCase):
                 f.write(''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in log_lines))
             if delivery is not None:
                 with open(os.path.join(d, 'replies.json'), 'w', encoding='utf-8') as f:
-                    json.dump(delivery, f)
+                    json.dump(reply_sheet(prompt, delivery), f)
             return rr.ar.AgentResult(*result)
 
         def fake_set_fb(fn, live=None, by=''):
@@ -572,7 +619,7 @@ class MainRun(unittest.TestCase):
                              ['page', 'instruction', 'agent_log', 'handoff', 'check'])   # 安檢門的比對結果(#317)
 
     def test_a_reply_whose_quote_is_not_in_the_mail_does_not_move_the_card(self):
-        """安檢門(#317):agent 說是拒絕信,抄的那一句程式複製的信裡沒有:不改狀態、那張這一輪不算查完、照實寫進紀錄。"""
+        """安檢門(#317):agent 說是拒絕信,抄了一句字而不是引程式複製的那一封信的編號:不改狀態、那張這一輪不算查完。"""
         lie = dict(self.IV, kind='reject', quote='很遺憾通知您')
         code, fb = self.run_main({'checked': [U], 'findings': [lie]})
         self.assertEqual(code, 0)
@@ -586,7 +633,7 @@ class MainRun(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(fb[U]['oc'], 'iv')
         (item,) = fb[U]['replies']['items']
-        self.assertEqual(item['quote'], '邀請您參加第一輪面試')
+        self.assertEqual(item['quote'], '您好,邀請您參加第一輪面試。')
         self.assertNotIn('unverified', item)
         self.assertEqual(fb[U]['oc_auto']['by'], item['id'])
 
@@ -681,6 +728,16 @@ class VerifiedFallback(unittest.TestCase):
         self.assertNotEqual(fb[U].get('oc'), 'ghost')
         self.assertNotIn('at', fb[U]['replies'])  # 未核實不能縮小下一輪搜尋範圍
         self.assertIn('沒核實', self.statuses[-1]['msg'])
+
+    def test_a_finding_from_a_source_the_program_did_not_hand_stays_unverified_after_reread(self):
+        """agent 補查到的信,程式事後重讀讀得到,也只是拿來判那張卡查完沒:那一封沒編號交給 agent,
+        回音照樣是未核實(不自動改卡),等下一輪程式自己複製到、agent 引了才算。"""
+        found = {'url': U, 'source_ref': 'email:search', 'source': 'Gmail', 'date': DAY, 'summary': '收到申請',
+                 'link': 'https://mail.google.com/mail/u/0/#all/abc123def', 'kind': 'confirm', 'quote': []}
+        code, fb = self.run_main({'checked': [U], 'findings': [found]}, fb=self.fb(), unavailable=[self.GMAIL],
+                                 reread=gmail_pages())
+        self.assertEqual(code, 0)
+        self.assertTrue(fb[U]['replies']['items'][0].get('unverified'))
 
     def test_one_mail_missing_from_the_programs_reread_is_not_enough(self):
         pages = gmail_pages(threads=('abc123def', 'zzz999yyy'))
@@ -1035,6 +1092,56 @@ class Mailbox(unittest.TestCase):
         for link in ('https://outlook.office.com.attacker.example/mail/inbox/id/AAQk', 'https://outlook.office.com/mail/'):
             with self.subTest(link=link):
                 self.assertFalse(parse(link)['_source_verified'])
+
+
+class RecordLines(unittest.TestCase):
+    """平台應徵紀錄(#465):agent 引應徵紀錄頁上那一筆所在的段;程式在看板上找平台一樣、代號在那幾段字裡是完整一個詞的卡,
+    剛好一張才標已投遞(從 parse_result 走到 sync_sent.sync,看看板上的卡)。"""
+    A = 'https://www.104.com.tw/job/abc12'
+    B = 'https://www.104.com.tw/job/abc123'
+    C = 'https://www.104.com.tw/job/xyz77'
+    L = 'https://www.linkedin.com/jobs/view/4012345678/'
+
+    def sync(self, lines, rows, cards):
+        import tempfile, sync_sent
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='record-lines-'))
+        path = os.path.join(d, 'board.html')
+        _env.make_board(path, {u: {'app': 'ship'} for u in cards}, jobs=[{'id': u, 'target': u[-8:]} for u in cards])
+        numbered = copied(('record', 'application_record:104', '應徵紀錄\n' + '\n'.join(lines)))
+        raw = {'material_id': numbered.material_id, 'checked': [],
+               'job_ids': [{'platform': platform, 'at': at, 'applied_at': '2026-10-01', 'title': '看的人用'}
+                           for platform, at in rows]}
+        sync_sent.sync(path, rr.parse_result(raw, [], numbered=numbered).job_ids)
+        return {u: _env.read_fb(path)[u]['app'] for u in cards}
+
+    def test_a_record_line_marks_the_one_card_whose_id_is_in_it(self):
+        apps = self.sync(['資料工程師 abc12 2026/10/01 已應徵'], [('104', [2])], [self.A, self.B])
+        self.assertEqual(apps, {self.A: 'sent', self.B: 'ship'})      # abc123 不是 abc12 那一個詞
+
+    def test_a_line_matching_two_cards_marks_neither(self):
+        apps = self.sync(['abc12 abc123 2026/10/01', 'xyz77 2026/10/01'], [('104', [2]), ('104', [3])],
+                         [self.A, self.B, self.C])
+        self.assertEqual(apps, {self.A: 'ship', self.B: 'ship', self.C: 'sent'})
+
+    def test_a_line_from_another_platform_is_refused(self):
+        apps = self.sync(['Senior Designer 4012345678', 'xyz77 2026/10/01'], [('linkedin', [2]), ('104', [2]), ('104', [3])],
+                         [self.L, self.C])
+        self.assertEqual(apps, {self.L: 'ship', self.C: 'sent'})
+
+    def test_a_record_marks_the_card_on_its_own_platform_not_a_card_elsewhere_with_the_same_id(self):
+        import datetime, sync_sent
+        uid = '0f0e0d0c-1111-2222-3333-444455556666'
+        us, eu = f'https://jobs.lever.co/acme/{uid}', f'https://jobs.eu.lever.co/acme/{uid}'
+        to_mark, _, _ = sync_sent.plan([{'platform': 'jobs.lever.co', 'line': f'Engineer {uid} applied'}], {},
+                                       [{'id': us}, {'id': eu}], datetime.date(2026, 10, 18))
+        self.assertEqual([job['id'] for job, _ in to_mark], [us])
+
+    def test_an_id_inside_a_longer_token_is_not_that_id(self):
+        import datetime, sync_sent
+        to_mark, _, _ = sync_sent.plan([{'platform': '104', 'line': 'wrong_abc123 2026/10/01'},
+                                        {'platform': '104', 'line': '職缺xyz77已應徵'}], {},
+                                       [{'id': self.B}, {'id': self.C}], datetime.date(2026, 10, 18))
+        self.assertEqual([job['id'] for job, _ in to_mark], [self.C])     # 緊貼中文的代號還是完整一個詞
 
 
 if __name__ == '__main__':

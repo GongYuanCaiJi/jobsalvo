@@ -23,6 +23,16 @@ def output_path(source_path):
     return os.path.join(cf.HOME, '.rendered', os.path.splitext(relative)[0] + '.pdf')
 
 
+def is_markdown(path):
+    return bool(path) and path.lower().endswith(('.md', '.markdown'))
+
+
+def sent_file(path):
+    """設定的這份原稿,卡片實際寄出的是哪個檔:Markdown 寄它排好的 PDF(可能還沒排出來),其他就是它自己。
+    不排版、不碰磁碟;要位元組的人自己確認檔在不在。"""
+    return output_path(path) if is_markdown(path) else path
+
+
 def render(source_path, destination, style_path=None, lang=''):
     """Write a PDF atomically; without style_path, leave browser defaults in charge."""
     source_path = os.path.abspath(os.path.expanduser(source_path))

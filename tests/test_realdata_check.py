@@ -51,6 +51,7 @@ class TemporaryCopy(unittest.TestCase):
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools'))
         import config as cf
+        import markdown_pdf
         import source_sync
         with tempfile.TemporaryDirectory(prefix='realdata-home-') as home:
             previous_home = os.environ.get('JOBSALVO_HOME')
@@ -72,7 +73,7 @@ class TemporaryCopy(unittest.TestCase):
                     source_sync.page_key(entry): 1,
                 }
                 manifest[source_sync.preview_attempt_key(entry)] = source_sync.entry_fingerprint(entry)
-                output = source_sync.effective_path(entry)
+                output = markdown_pdf.sent_file(entry['path'])
                 os.makedirs(os.path.dirname(output), exist_ok=True)
                 with open(output, 'wb') as target:
                     target.write(b'%PDF-synthetic')

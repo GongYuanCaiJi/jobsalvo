@@ -128,7 +128,7 @@ class AgentHasNoBoardLocation(unittest.TestCase):
                 mock.patch.object(apply_run.fr, 'shared_text', return_value=''):
             for runtime in ('codex', 'claude-code'):
                 for stage in ('fill', 'fix'):
-                    prompt, _out = apply_run.prompt_for(stage, U, {'id': U}, fb, self.copy, door=chrome_door.of(runtime))
+                    prompt, _out, _n = apply_run.prompt_for(stage, U, {'id': U}, fb, self.copy, door=chrome_door.of(runtime))
                     self.assertIn('最後直接回傳一個完整交件 JSON', prompt)        # 兩家同一種交件寫法
                     self.assertNotIn(self.copy, prompt)
                     self.assertNotIn('--board', prompt)

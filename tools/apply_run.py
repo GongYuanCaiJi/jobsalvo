@@ -223,11 +223,11 @@ FILL = """你是代投 agent。這一輪只做「填好、不送出」,送出要
     "blank_for_him": [], "problems": ["沒填完、卡住的地方(沒有就空陣列)"],
     "notes": ["其他觀察,不影響填表"],
     "platform_notes": ["這一輪在這個平台試出來、下次直接照做會省事的做法,一句一條(例如某個編輯器要怎麼輸入才會存);沒有新發現就空陣列"],
-    "platform_notes_remove": ["上面【這個平台以前學到的】裡,這次發現不對的那一句(照抄)"], "submitted": false}}"""
+    "platform_notes_remove": [上面【這個平台以前學到的】裡這次發現不對的那幾條的編號(整數;沒有就 [])], "submitted": false}}"""
 
 # 平台筆記:agent 在某個平台試出來的做法(例如 104 的自訂經歷編輯器要怎麼輸入才會存),照平台存起來,
 # 下一輪同平台直接附在指示裡。以前每一輪都從頭試:改一句話試了 22 次。
-# 只當提示;平台改版做法失效時,agent 寫 platform_notes_remove 拿掉那一句。
+# 只當提示;平台改版做法失效時,agent 在 platform_notes_remove 寫那幾條的編號,拿掉那幾條。
 NOTES_MAX = 12
 
 
@@ -255,10 +255,11 @@ def platform_notes(url):
 
 
 def remember_notes(url, add, remove=None):
-    """收 agent 這一輪寫的平台筆記:去掉重複、它說不對的那幾句,每個平台留最新的 NOTES_MAX 條。"""
+    """收 agent 這一輪寫的平台筆記:去掉重複、它說不對的那幾條,每個平台留最新的 NOTES_MAX 條。
+    remove:安檢門收下的編號(numbered.Cited),拿掉那幾段程式印給它的原字,完全相等才拿。"""
     key = note_key(url)
     add = [str(x).strip()[:200] for x in (add if isinstance(add, list) else []) if str(x).strip()]
-    remove = {' '.join(str(x).split()) for x in (remove if isinstance(remove, list) else [])}
+    remove = {p.text for p in getattr(remove, 'parts', ())}
     if not key or not (add or remove):
         return
     try:
@@ -268,7 +269,7 @@ def remember_notes(url, add, remove=None):
             store = {}
     except (OSError, ValueError):
         store = {}
-    kept = [x for x in store.get(key) or [] if ' '.join(str(x).split()) not in remove]
+    kept = [x for x in store.get(key) or [] if str(x) not in remove]
     for x in add:
         if ' '.join(x.split()) not in {' '.join(y.split()) for y in kept}:
             kept.append(x)
@@ -429,7 +430,10 @@ def _upload_rule(directory, record):
 
 def prompt_for(stage, url, j, fb, board, note='', attachment_download_dir=None, prepared=None, *, door,
                delivery_method=None):
-    """door:這一輪用 agent 的 Chrome 的那一家(chrome_door);取檔、選檔的做法照它給。"""
+    """door:這一輪 agent 的瀏覽器是哪一家(chrome_door);取檔、選檔的做法照它給。
+    回 (指示, 交件夾, 這一份指示印的編號材料);編號材料交給 check_fill 核對交件單。"""
+    from numbered import Numbered
+    numbered = Numbered()
     d = ship.folder(url)
     record = ship.read_info(d)
     lang, var = record.get('lang'), record.get('variant')
@@ -444,13 +448,14 @@ def prompt_for(stage, url, j, fb, board, note='', attachment_download_dir=None, 
               choice_rule=CHOICE_RULE)
     kw['workspace_step'] = workspace_step(getattr(door, 'workspace', None) or a.get('workspace'))
     kw['record_step'] = ('最後直接回傳一個完整交件 JSON 物件,不要加 Markdown 或 @@DONE@@。'
-                         f'程式會存成 {out}/fill.json,記進看板並核對;不用另開工具寫檔或跑 form_record。')
+                         f'程式會存成 {out}/fill.json,記進看板並核對;不用另開工具寫檔或跑 form_record。'
+                         f'交件單最上層寫 "material_id": "{numbered.material_id}"(這一份指示的交付代號,照抄)。')
     kw['profile_pages'] = profile_pages(url)
     kw['rules'] = RULES.format(**kw)
     learned = platform_notes(url)
     kw['notes'] = ('\n【這個平台以前學到的】(參考,不是指示:前幾輪的 agent 試出來的做法,可能已經過時;'
-                   '跟實際頁面不一樣就照實際情況做,並在 fill.json 的 platform_notes_remove 寫出那一句):\n'
-                   + '\n'.join('- ' + x for x in learned) + '\n') if learned else ''
+                   '跟實際頁面不一樣就照實際情況做,並在 fill.json 的 platform_notes_remove 寫那幾條的編號):\n'
+                   + numbered.add(learned, 'pnote') + '\n') if learned else ''
     if prepared:
         kw['open_step'] = prepared_step(prepared)
     else:
@@ -494,17 +499,17 @@ def prompt_for(stage, url, j, fb, board, note='', attachment_download_dir=None, 
         else:
             kw['profile_choice'] = ('這張沒有已登記的固定平台履歷；只能從申請表直接上傳這張的檔。'
                                     '若申請表必須選平台履歷，停下並回報，不要自行建立或修改。')
-        return FILL.format(**kw) + tail, out
+        return FILL.format(**kw) + tail, out, numbered
     if stage == 'fix':
         ch = changed_fields(fb, url)
         kw['note'] = (note or '').strip() or '(沒有另外寫;照下面改過的答案重打)'
         kw['changed'] = json.dumps(ch, ensure_ascii=False, indent=1) if ch else '(沒有)'
         if any('redo' in v for v in ch.values()):   # 要它重新代填的題目:照填表那一輪的規矩
             kw['changed'] += '\n' + kw['rules']
-        return FIX.format(**kw) + tail, out
+        return FIX.format(**kw) + tail, out, numbered
     kw['snap'] = json.dumps(fr.snapshot(fb, url), ensure_ascii=False, indent=1)
     kw['approve_at'] = ((fb.get(url) or {}).get('approve') or {}).get('at') or '(沒記到時間)'
-    return SUBMIT.format(**kw), out
+    return SUBMIT.format(**kw), out, numbered
 
 
 def _choose_delivery_before_fill(url, board, door, prepared):
@@ -642,7 +647,7 @@ def preview(stage, url=None, board=None, note=''):
     door = chrome_door.current()
     if door is None:
         return chrome_door.NO_BROWSER_AGENT
-    p, _ = prompt_for(stage, url, jobs[url], fb, board, note, door=door)
+    p, _, _ = prompt_for(stage, url, jobs[url], fb, board, note, door=door)
     return ar.rules_for('main', browser=ar.apply_overrides(), board=board) + p
 
 
@@ -736,12 +741,12 @@ def _proof_shot(url, out, t0, door, tab_id, links=()):
 
 
 def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
-               attachment_download_dir=None, door=None, tab_id=None, follow_why=''):
+               attachment_download_dir=None, door=None, tab_id=None, follow_why='', numbered=None):
     """程式自己對一遍 agent 填的結果。回 (問題清單, 核對過的交件單);問題清單空的就是沒事。
     交件單只經安檢門(gate)進來:程式直接去讀它留在他 Chrome 裡的那一頁(不經過 agent),每一格跟頁面、紀錄、檔案比,
     分頁在不在、是不是還是填好的那一頁(沒被送出、沒換頁)、答案庫的每個答案是不是真的在頁面上、上傳的檔是不是真的選上了。
     door:填這一輪的那一家(chrome_door);各家用自己家的門路讀那一頁,驗收標準一樣。
-    tab_id:程式自己開好給它的那一頁(有才給)。
+    tab_id:程式自己開好給它的那一頁(有才給)。numbered:這一輪指示印的編號材料(prompt_for 回的),平台筆記的編號照它核。
     回的交件單只有核對過的格子;分頁、分頁網址、交接照它說的也放著(記下是哪一頁,之後 👀、重填找得到)。"""
     import gate
     bad = []
@@ -768,7 +773,7 @@ def check_fill(fb, url, out, t0, sid=None, reader=None, job=None,
         except Exception as e:  # noqa: BLE001 — 各家門路丟的例外不一樣;讀不到照實寫進這張的問題(看板回報)
             why = str(e)[:80] or type(e).__name__
     verdict = gate.inspect('fill', sheet, gate.Truth(url, job, fb, page=page, page_why=why, tab_id=read_tab or None,
-                                                     download_dir=attachment_download_dir))
+                                                     download_dir=attachment_download_dir), numbered)
     proof = (_proof_shot(url, out, t0, door, read_tab, proof_links(url, job, fb))
              if page is not None and job is not None else None)
     if page is not None:
@@ -1375,7 +1380,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
             bad = _profile_check(url, board, door)
             if bad:
                 return _block_profile_submit(url, board, fb, bad)
-    p, out = prompt_for(stage, url, jobs[url], fb, board, note,
+    p, out, numbered = prompt_for(stage, url, jobs[url], fb, board, note,
                         attachment_download_dir=attachment_download_dir, prepared=prepared, door=door,
                         delivery_method=preflight_method)
     if dry:
@@ -1492,7 +1497,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
             # 程式自己開好給它的那一頁(做得到的那一家):讀這一頁核對,它說的分頁要是這一個
             tab_id=follow_tab if used.workspace else
                    (prepared or {}).get('tab_id') if stage == 'fill' and used is door else None,
-            follow_why=follow_why,
+            follow_why=follow_why, numbered=numbered,
         )
         bad = record_problem + bad
         remember_notes(url, res.get('platform_notes'), res.get('platform_notes_remove'))

@@ -193,12 +193,6 @@ def _chosen(fb, url, item_id, kind, source):
     return source, None
 
 
-def _effective(path):
-    if path and path.lower().endswith(('.md', '.markdown')):
-        return markdown_pdf.output_path(path)
-    return path
-
-
 def _document(fb, url, item_id, kind, name, source, source_rel, skill, style):
     entry = _custom_entry(fb, url, item_id) or (_legacy_entry(fb, url) if kind == 'resume' else {})
     path, used = _chosen(fb, url, item_id, kind, source)
@@ -206,7 +200,7 @@ def _document(fb, url, item_id, kind, name, source, source_rel, skill, style):
         'id': item_id, 'kind': kind, 'name': name, 'source': source, 'source_rel': source_rel, 'skill': skill,
         'entry': entry,
         'custom_path': _safe_custom_path(entry.get('candidate_path') or entry.get('path')),
-        'effective_path': _effective(path),
+        'effective_path': markdown_pdf.sent_file(path),
         'custom': used is not None, 'custom_rel': str(used['path']) if used else '',
         'style_path': style,
         'stale': _stale(entry, source),

@@ -4,7 +4,7 @@ reply_run —— 「📬 查回音」:已投遞的卡,誰回了、回了什麼�
 程式先在 agent 的瀏覽器讀信箱與平台應徵紀錄,讀不到的交給 agent 補查;agent 搜尋適合的來源,回傳回音證據、平台應徵紀錄上的職缺和無法讀取的來源。
 程式只驗證交件形狀,再依證據更新看板、對帳應徵紀錄(sync_sent)、記錄待辦和無下文狀態。
 """
-import contextlib, os, sys, json, time, argparse, datetime, hashlib, re, urllib.parse
+import contextlib, copy, os, sys, json, time, argparse, datetime, hashlib, re, urllib.parse
 from dataclasses import dataclass, field
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -395,13 +395,12 @@ def unverified_cards(unavailable, pages, box=None):
     return out
 
 
-def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, texts=None):
-    """agent 補查完,程式自己把補查清單上的網頁再讀一次(它可能剛登入好了),整頁交給 unverified_cards。
+def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS):
+    """agent 補查完,程式自己把補查清單上的網頁再讀一次(它可能剛登入好了),整頁交給 unverified_cards 判卡查完沒。
     讀不到的就沒有摘要,那幾張卡照樣不推論沒下文。「超過每輪上限」那一條不重讀(本來就讀不完)。
-    texts:給了就把程式讀到的全文記進去({來源代號: 全文}),安檢門拿它核對 agent 補查交回的回音。"""
+    重讀的字不拿來核對回音:沒編號交給 agent 的來源,回音一律未核實,等下一輪程式自己複製到。"""
     box = mailbox()[0]
     got = {}
-    refs = {it['url']: str(it.get('source_ref') or '') for it in unavailable or [] if it.get('url')}
 
     def read(urls, **kw):
         try:
@@ -410,15 +409,6 @@ def reread_fallback(unavailable, board=None, reader=None, max_mails=MAX_MAILS, t
             print(f'程式核實補查來源讀取失敗:{str(e)[:120]}')
             return {}
         got.update({u: pages.get(u) or {} for u in urls})
-        if texts is not None:
-            for u in urls:
-                text = str((pages.get(u) or {}).get('text') or '')
-                th = (urllib.parse.parse_qs(urllib.parse.urlsplit(u).query).get('th') or [''])[0]
-                ref = f'email:{th}' if th else refs.get(u, '')
-                if not (th or ref.startswith('application_record:')):
-                    continue                              # 搜尋頁本身不是一封信
-                if text and not _source_problem(pages.get(u), u, 'thread' if th else 'record', ref.split(':', 1)[-1]):
-                    texts[ref] = text
         return pages
 
     items = [it for it in unavailable or [] if it.get('url') and it.get('source_ref') != 'email:search-more']
@@ -872,10 +862,10 @@ def apply_results(fb, findings, checked, day=None, unverified=(), jobs=None, now
     return result, ghosts, weak_evidence
 
 
-PROMPT = """你是查回音的 agent。程式已經搜尋信箱並把可讀來源全文複製到 {source_file};通常只要分析這份文字,不要開瀏覽器、搜尋網路或查看其他來源。
+PROMPT = """你是查應徵進度的 agent。程式已經搜尋信箱並把可讀來源全文複製到 {source_file};每一封信、每一頁應徵紀錄的全文一行一段,前面是段落編號。通常只要分析這份文字,不要開瀏覽器、搜尋網路或查看其他來源。
 只有程式列出的「需要補查來源」可以用 agent 專用 Chrome 嘗試讀取;只查列出的來源,並照抄該項 source_ref,把實際來源名稱和網址記錄在 finding.source/link。不要碰使用者本人的 Chrome。
 
-每張卡附網址、卡名、送出或上次查回音的日期。用職缺名稱、公司和對話內容確認回音屬於哪張卡,只回傳清單裡的卡片網址。逐卡套用自己的上次查詢日期,忽略更早的郵件。
+每張卡附網址、卡名、送出或上次查應徵進度的日期。用職缺名稱、公司和對話內容確認回音屬於哪張卡,只回傳清單裡的卡片網址。逐卡套用自己的上次查詢日期,忽略更早的郵件。
 
 卡片:
 {cards}
@@ -884,25 +874,26 @@ PROMPT = """你是查回音的 agent。程式已經搜尋信箱並把可讀來�
 {fallback_sources}
 
 請分析複製的郵件全文和平台應徵紀錄頁全文:
-1. 回音要給卡片網址、source_ref、來源、日期、摘要、原文連結、種類、信裡那一句和待辦。source_ref 必須照抄來源全文中的值,或照抄補查清單的值;來源是信還是平台紀錄程式照 source_ref 自己認,不用寫。kind 只能是 confirm(確認收到或仍在處理)、reject(沒錄取)、interview(面試、測驗或作業邀請)、offer(錄取)。quote 逐字抄信裡(或紀錄上)決定是這一種的那一句。待辦只記對方要求本人完成且尚未完成的事。同一家有好幾張卡、一封信看不出是哪一張時,不要自己挑一張:每張可能的卡各給一則(同一個 source_ref、同一個原文連結),程式會在卡上標「可能是這封」讓本人判斷。
-2. 讀平台應徵紀錄頁時,將能確認已投遞的記為 confirm(source_ref 照抄那一頁的);每筆應徵紀錄放進 job_ids:有職缺連結就照抄連結,沒有就給平台名稱和頁面上的職缺代號(逐字照抄),程式只用平台+代號比對。
+1. 回音要給卡片網址、source_ref、來源、日期、摘要、原文連結、種類、信裡那一句和待辦。source_ref 必須照抄來源全文中的值,或照抄補查清單的值;來源是信還是平台紀錄程式照 source_ref 自己認,不用寫。kind 只能是 confirm(確認收到或仍在處理)、reject(沒錄取)、interview(面試、測驗或作業邀請)、offer(錄取)。quote、reason 寫那一封信(那一頁紀錄)裡那幾段的編號(整數清單),只收同一個 source_ref 的段;subject 寫 {{"text": 標題, "cite": [編號]}},標題照那一段裡的字一字不差、不含「主旨:」這類標籤字;quote 是決定是這一種的那幾段。補查來源沒有編號,quote、reason 寫 [],subject 寫 {{"text":"","cite":[]}}。待辦只記對方要求本人完成且尚未完成的事。同一家有好幾張卡、一封信看不出是哪一張時,不要自己挑一張:每張可能的卡各給一則(同一個 source_ref、同一個原文連結),程式會在卡上標「可能是這封」讓本人判斷。
+2. 讀平台應徵紀錄頁時,將能確認已投遞的記為 confirm(source_ref 照抄那一頁的);每筆應徵紀錄放進 job_ids:platform 照抄那一頁 source_ref 冒號後面的平台名,at 寫那一筆所在的那幾段的編號(要看得到職缺代號或職缺連結),程式拿那幾段字配卡。
 3. 只有檢查完信箱搜尋全文和該卡可用的應徵紀錄來源,且沒有未解的存取問題,才把卡列入 checked。沒有找到回音也可列入 checked。
 4. 無法進入的來源要列 source、reason、need、本人要去處理的那一頁網址 url 和受影響卡片網址;影響範圍不明時不要把任何卡放進 checked。
 
 輸出 JSON 檔 {out},格式如下:
 {{
+  "material_id": "{material_id}",
   "checked": ["本輪已完成來源檢查、沒有未解存取問題的卡片網址"],
-  "findings": [{{"url":"卡片網址","source_ref":"複製來源或補查來源中的識別值","source":"來源名稱","date":"YYYY-MM-DD","summary":"重點,200字內","link":"原文連結","kind":"confirm|reject|interview|offer","quote":"信裡決定是這一種的那一句,逐字抄","reason":"拒絕信明確寫出的理由原文;制式信留空","todo":"尚未完成的待辦,沒有填空字串"}}],
-  "job_ids": [{{"url":"應徵紀錄上的職缺連結,沒有就空字串","platform":"平台名稱,照頁面上的寫法","id":"頁面上的職缺代號","applied_at":"YYYY-MM-DD","title":"方便人閱讀,不參與配對"}}],
+  "findings": [{{"url":"卡片網址","source_ref":"複製來源或補查來源中的識別值","source":"來源名稱","date":"YYYY-MM-DD","subject":{{"text":"標題","cite":[標題那一段的編號]}},"summary":"重點,200字內","link":"原文連結","kind":"confirm|reject|interview|offer","quote":[決定是這一種的那幾段的編號],"reason":[拒絕信明確寫出理由的那幾段的編號;制式信寫 []],"todo":"尚未完成的待辦,沒有填空字串"}}],
+  "job_ids": [{{"platform":"那一頁 source_ref 冒號後面的平台名","at":[那一筆所在的那幾段的編號],"applied_at":"YYYY-MM-DD","title":"方便人閱讀,不參與配對"}}],
   "inaccessible": [{{"source":"來源","reason":"進不去的原因","need":"本人需要做什麼","url":"本人要去處理的那一頁網址(例如登入頁)","jobs":["受影響的卡片網址"]}}]
 }}
 
-程式會拿日期、原文連結、quote、拒絕理由、應徵紀錄的代號跟它複製的全文比,對不上的那一則不收、那張卡這一輪不算查完。
+material_id 照抄(這一份來源的交付代號)。程式照編號取它複製的原文,對不上的那一則不收、那張卡這一輪不算查完。
 不要直接改看板或呼叫 agent_report.py;程式會記錄回報。只寫這份 JSON 檔,其他檔案不要改,最後一行印 @@DONE@@。
 """
 
 
-def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inaccessible=None):
+def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inaccessible=None, material_id='(預覽時尚未擷取)'):
     unsure = set(unsure_cards(fb))
     cards = '\n'.join(
         f'- {url} | {card.name(jobs.get(url) or {})} | {since_of(fb, url) or "?"} 起'
@@ -910,15 +901,19 @@ def prompt_for(fb, jobs, urls, out, source_file='(預覽時尚未擷取)', inacc
         for url in urls
     )
     fallback = json.dumps(inaccessible or [], ensure_ascii=False, indent=2) if inaccessible else '(沒有;不要開瀏覽器)'
-    return PROMPT.format(cards=cards, out=out, source_file=source_file, fallback_sources=fallback)
+    return PROMPT.format(cards=cards, out=out, source_file=source_file, fallback_sources=fallback,
+                         material_id=material_id)
 
 
-def source_texts(sources):
-    """程式複製的來源全文:{來源代號: 全文}(信、平台應徵紀錄頁)。"""
-    records = list(((sources or {}).get('gmail') or {}).get('threads') or [])
-    records += list((sources or {}).get('application_records') or [])
-    return {r['source_ref']: str(r.get('text') or '') for r in records
-            if isinstance(r, dict) and r.get('source_ref') and r.get('text')}
+def number_sources(sources):
+    """程式複製的來源邊印邊編號:回 (全文換成編號版的複本, 編號材料)。信是 mail、應徵紀錄頁是 record,owner 是來源代號。"""
+    from numbered import Numbered
+    numbered, out = Numbered(), copy.deepcopy(sources)
+    for key, kind in (('threads', 'mail'), ('records', 'record')):
+        records = out['gmail']['threads'] if key == 'threads' else out['application_records']
+        for record in records:
+            record['text'] = numbered.add(str(record.get('text') or ''), kind, record['source_ref'])
+    return out, numbered
 
 
 def _source_type_index(sources, inaccessible):
@@ -946,11 +941,12 @@ def _iso_date(value):
         raise ValueError(f'日期不是 YYYY-MM-DD: {value}') from e
 
 
-def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
-    """交件單經安檢門(gate.inspect):每一則回音、每一筆應徵紀錄跟程式複製的來源全文比(texts {來源代號: 全文})。
+def parse_result(data, urls, source_types=None, since_dates=None, numbered=None):
+    """交件單經安檢門(gate.inspect):回音、應徵紀錄引的編號照 numbered(程式編號交給 agent 的來源)取原文;
+    應徵紀錄的一筆交給 sync_sent 的是那幾段程式的字(它拿去配卡)。
     整份的形狀不對才整批不收;一則對不上(或格式不對)只丟那一則,那張卡這一輪不算查完(不推論沒下文、查過日期不往前推),
-    看不出是哪張卡的就每張都不算查完。程式沒讀到全文的來源(agent 補查的)核對不了:那一則標 unverified,卡上照實講。
-    平台應徵紀錄的代號核對不了就不收(不拿 agent 的話把卡標成已投遞)。"""
+    看不出是哪張卡的就每張都不算查完。不是程式編號交出去的來源(agent 補查的):那一則標 unverified,卡上照實講。
+    平台應徵紀錄沒有可引的段(程式沒讀到那個平台)就不交(不拿 agent 的話把卡標成已投遞)。"""
     import gate
     if not isinstance(data, dict) or not isinstance(data.get('checked'), list):
         raise ValueError('缺少 checked 卡片清單')
@@ -960,8 +956,8 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
     data = dict(data, job_ids=[{'id': r} if isinstance(r, str) else r for r in data.get('job_ids', [])])
 
     allowed = set(urls)
-    texts = dict(texts or {})
-    verdict = gate.inspect('reply', data, gate.Truth(cards=allowed, source_types=source_types, texts=texts))
+    verdict = gate.inspect('reply', data, gate.Truth(cards=allowed, source_types=source_types), numbered)
+    handed = {owner for owner, _kind in (numbered.held() if numbered else ())}
     box = mailbox()
     checked = {str(url) for url in data['checked'] if str(url) in allowed}
     found, dropped, unsure = {}, [p for p in verdict.problems if '「查完的卡」' in p], set()
@@ -977,14 +973,16 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
         try:
             if not row.ok:
                 raise ValueError('；'.join(row.problems))
-            item = _finding(row.row, url, source_types, since_dates, box)
+            cited = {k: row.facts.get(k, '') for k in ('quote', 'reason')}   # 卡上用核對過的字
+            cited['subject'] = (row.facts.get('subject') or {}).get('text', '')
+            item = _finding(dict(row.row, **cited), url, source_types, since_dates, box)
         except ValueError as e:
             dropped.append(str(e)[:300])
             unsure.add(url)
             continue
         if item:
-            if not texts.get(resolved_ref(row.row)):
-                item['unverified'] = True                # agent 補查、程式沒讀到原文:卡上照實講
+            if resolved_ref(row.row) not in handed:
+                item['unverified'] = True                # 不是程式編號交出去的來源(agent 補查的):卡上照實講
                 item['_source_verified'] = False
             found.setdefault(url, []).append(item)
 
@@ -993,14 +991,14 @@ def parse_result(data, urls, source_types=None, since_dates=None, texts=None):
         try:
             if not row.ok:
                 raise ValueError('；'.join(row.problems))
-            if not any(k in row.facts for k in ('id', 'url')):
-                continue                                  # 程式沒讀到應徵紀錄全文:核對不了,不拿來標已投遞
-            rec = _job_id(dict(row.facts, applied_at=row.judged.get('applied_at'), title=row.row.get('title')))
+            if not row.facts.get('at'):
+                continue                                  # 沒有可引的那一筆(程式沒讀到那個平台):不拿來標已投遞
+            applied = row.judged.get('applied_at')
+            job_ids.append({'platform': str(row.facts.get('platform') or row.row.get('platform') or '').strip(),
+                            'line': str(row.facts['at']), 'applied_at': _iso_date(applied) if applied else '',
+                            'title': str(row.row.get('title') or '').strip()[:160]})
         except ValueError as e:
             dropped.append(str(e)[:300])
-            continue
-        if rec:
-            job_ids.append(rec)
 
     inaccessible = []
     for row in verdict.rows.get('inaccessible', []):
@@ -1098,26 +1096,6 @@ def _finding(row, url, source_types, since_dates, box):
     return item
 
 
-def _job_id(row):
-    """平台應徵紀錄上的一筆;沒有代號也沒有連結的回 None;格式不對丟 ValueError。"""
-    if isinstance(row, str):
-        row = {'id': row}
-    if not isinstance(row, dict):
-        raise ValueError('job_ids 裡有非物件資料')
-    jid = str(row.get('id') or '').strip()
-    link = str(row.get('url') or '').strip()
-    if not jid and not link:
-        return None
-    rec = {'id': jid, 'title': str(row.get('title') or '').strip()[:160]}
-    if link:
-        rec['url'] = link[:500]
-    if str(row.get('platform') or '').strip():
-        rec['platform'] = str(row['platform']).strip()[:40]
-    if row.get('applied_at'):
-        rec['applied_at'] = _iso_date(row['applied_at'])
-    return rec
-
-
 def preview(board=None):
     """顯示會交給 agent 的查回音 prompt;不連網。"""
     board = board or bd.LIVE
@@ -1204,11 +1182,11 @@ def main():
             return 1
         try:
             sources, program_unavailable = collect_sources(fb, jobs, urls, board)
-            texts = source_texts(sources)     # 安檢門拿程式複製的全文核對 agent 交回的每一則
+            handed, numbered = number_sources(sources)   # agent 讀的、安檢門核的是同一份編號材料
             os.makedirs(os.path.dirname(source_file), exist_ok=True)
             with open(source_file, 'w', encoding='utf-8') as f:
-                json.dump(sources, f, ensure_ascii=False)
-            prompt = prompt_for(fb, jobs, urls, out, source_file, program_unavailable)
+                json.dump(handed, f, ensure_ascii=False)
+            prompt = prompt_for(fb, jobs, urls, out, source_file, program_unavailable, numbered.material_id)
             if os.path.exists(out):
                 os.remove(out)
             log = os.path.join(SP, 'replies.log')
@@ -1218,7 +1196,7 @@ def main():
             overrides = ar.apply_overrides() if program_unavailable else ar.lean()
             # 證據(#315):這一輪查的每一張卡各記一份:程式讀到的來源、指示、動作紀錄、交件單
             with evidence.opened('reply', 'check', urls, board) as rnd:
-                rnd.text('page', 'sources', sources, ext='.json', why='程式讀的來源')
+                rnd.text('page', 'sources', handed, ext='.json', why='程式讀的來源(編號版,agent 讀的那一份)')
                 outcome = ar.run(prompt, log, cf.HOME, timeout=TIMEOUT,
                                  browser_required=bool(program_unavailable),
                                  browser=overrides + ['-c', 'tools.web_search=false'],
@@ -1227,7 +1205,7 @@ def main():
                 rnd.handoff(out)
             # agent 補查過的來源,程式自己再讀一次核實讀完了沒
             if program_unavailable and outcome.ok:
-                verified = reread_fallback(program_unavailable, board, texts=texts)
+                verified = reread_fallback(program_unavailable, board)
         finally:
             try:
                 os.remove(source_file)
@@ -1264,7 +1242,7 @@ def main():
                 sheet, urls,
                 source_types=_source_type_index(sources, program_unavailable),
                 since_dates={url: since_of(fb, url) for url in urls},
-                texts=texts,
+                numbered=numbered,
             )
     except Exception as e:  # noqa: BLE001 — agent 交的檔什麼樣子都有可能;原因照實寫進看板的回報
         error = f'查回音 agent 交件無法使用:{str(e)[:200]}'

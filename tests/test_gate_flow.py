@@ -85,7 +85,7 @@ class CodexFlow(unittest.TestCase):
     def patches(self):
         return [fc.installed(self.door),
                 patch.object(run, 'out_dir', return_value=self.out),
-                patch.object(run, 'prompt_for', side_effect=lambda stage, *a, **k: (f'指示:{stage}', self.out)),
+                patch.object(run, 'prompt_for', side_effect=lambda stage, *a, **k: (f'指示:{stage}', self.out, None)),
                 patch.object(ar.subprocess, 'Popen', side_effect=self.agent),
                 patch.object(ar, 'wait_done', side_effect=lambda procs, timeout=None, paused=None: [
                     SimpleNamespace(status='completed', returncode=0, pid=4242)]),

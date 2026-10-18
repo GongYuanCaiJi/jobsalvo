@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 gate_flows —— 其他 7 種會叫 agent 的流程(刊登日期、職缺關了沒、分類建議、客製版、準備履歷、找缺、查應徵進度)
-交件單每一格登記的核對方式。這幾種沒開 agent 的 Chrome,真相是程式交給 agent 的原文和程式自己知道的事(Truth)。
+交件單每一格登記的核對方式。這幾種沒開 agent 的瀏覽器,真相是程式交給 agent 的編號材料(程式自己印、自己編號的段落,agent 只回號碼,字由程式用同一份編號解回)和程式自己知道的事(Truth)。
 入口在 gate。
 """
 import datetime
@@ -16,22 +16,12 @@ import prefs                   # noqa: E402
 import profile_sync as ps      # noqa: E402
 import reply_run               # noqa: E402
 import research                # noqa: E402
-import sync_sent               # noqa: E402
-from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, norm, quoted, words  # noqa: E402
+from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell  # noqa: E402
+from numbered import ROW, Accept  # noqa: E402
 
 def _given_key(said, row, truth):
     """這一列是誰(網址、代號):要是這一輪程式交給它的其中一個。"""
     return None if truth.key in truth.handed else '這一輪沒有交給它這一個'
-
-
-def _in_given(said, row, truth):
-    """agent 說是原文的字:程式交給它的那一列原文裡要逐字看得到(gate_cells.words:標點、空白、全形半形、大小寫不算)。
-    「查無」這類佔位字跟沒寫一樣(research.blank)。程式沒有原文可以比(沒抓到頁面):核對不了,這一格不用。"""
-    if research.blank(said):
-        return None
-    if not truth.given:
-        return UNUSED
-    return None if words(said) and words(said) in words(truth.given) else '程式給它的原文裡沒有這段字'
 
 
 def _posted_date(said, row, truth):
@@ -43,16 +33,16 @@ def _posted_date(said, row, truth):
             raise ValueError
     except ValueError:
         return '要寫成 YYYY-MM-DD'
-    if not str(row.get('source') or '').strip():
-        return '要附原文中的日期說明'
-    return _in_given(row['source'], row, truth)
+    if not row.get('source'):
+        return '要附原文中日期那一行的編號'
+    return None
 
 
 POSTED_AT = {
     'dates.url': Cell(CHECK, '職缺網址', '這一輪交給它的其中一個網址', _given_key),
     'dates.posted_at': Cell(JUDGED, '刊登日期', 'Agent 依指定原文與抓頁日理解日期；程式驗 ISO 格式與引用',
                             _posted_date),
-    'dates.source': Cell(CHECK, '日期欄位的名稱', '程式給它的那幾行裡逐字看得到', _in_given),
+    'dates.source': Cell(CHECK, '日期那一行', '程式給它這個網址的那幾行的編號', cite=Accept(owner=ROW)),
     'inaccessible.url': Cell(CHECK, '職缺網址', '這一輪交給它的其中一個網址', _given_key),
     'inaccessible.reason': Cell(WORDS, '確認不了的原因', '只給人看'),
     'inaccessible.need': Cell(WORDS, '要他做的事', '照原文放進回報給他看,標明是 agent 說的;程式不拿它判斷什麼'),
@@ -62,8 +52,8 @@ def _link_status(said, row, truth):
     """職缺還在不在是 agent 判斷(程式核對不了);只核對寫法,判關了要附頁面上逐字的那一句(那一句另外核對)。"""
     if said not in ('live', 'closed', 'uncertain'):
         return '只能是 live、closed、uncertain'
-    if said == 'closed' and not str(row.get('quote') or '').strip():
-        return [f'交件單「職缺還在不在」({truth.key}):agent 說 closed,卻沒有抄頁面上講職缺關了的那一句,不收']
+    if said == 'closed' and not row.get('quote'):
+        return [f'交件單「職缺還在不在」({truth.key}):agent 說 closed,卻沒有引頁面上講職缺關了的那一段,不收']
     return None
 
 
@@ -71,7 +61,7 @@ LINK_STATUS = {
     'jobs.id': Cell(CHECK, '職缺代號', '這一輪交給它的其中一個(J1、J2…)', _given_key),
     'jobs.status': Cell(JUDGED, '職缺還在不在', '程式核對不了:卡上標明 agent 判斷、附它抄的原文;他按「不對,職缺還在」就不擋',
                         _link_status),
-    'jobs.quote': Cell(CHECK, '頁面原文', '程式交給它的那一頁原文裡逐字看得到', _in_given),
+    'jobs.quote': Cell(CHECK, '頁面原文', '程式交給它的那一頁原文的編號', cite=Accept(owner=ROW)),
     'jobs.reason': Cell(WORDS, '說明', '只給人看'),
 }
 
@@ -122,18 +112,9 @@ CUSTOMIZE = {
     'reports.occurrences': Cell(DECIDED, '提到幾次', '程式照它列的回饋數(agent 不用寫;寫了要一樣)', _occurrences),
 }
 
-def _card_text(truth):
-    """程式交給 agent 的這張卡的原文(JD);沒給過是 None。"""
-    return truth.given.get(truth.url)
-
-
-def _in_jd(said, sheet, truth):
-    if not str(said or '').strip():
-        return None
-    text = _card_text(truth)
-    if not text:
-        return UNUSED                  # 程式沒給它原文:核對不了,這一格不用
-    return None if words(said) and words(said) in words(text) else '程式給它的 JD 原文裡沒有這段字'
+def CARD(row, truth):
+    """準備履歷一張卡一張交件單:只收這張卡的 JD 原文。"""
+    return {truth.url}
 
 
 def _resume_pick(said, sheet, truth):
@@ -167,10 +148,10 @@ def _skip_reason(said, sheet, truth):
     if not sheet.get('skip'):
         return UNUSED
     said = str(said or '').strip()
-    if said.startswith('抓不到 JD') and _card_text(truth):
-        return f'程式有給它 JD 原文({len(_card_text(truth))} 字)'
-    if said.startswith('職缺已關') and not str(sheet.get('quote') or '').strip():
-        return ['交件單「跳過的原因」:agent 說職缺已關,卻沒有抄頁面上講職缺關了的那一句(quote),不收']
+    if said.startswith('抓不到 JD') and (truth.url, 'jd') in truth.read:
+        return '程式有給它 JD 原文'
+    if said.startswith('職缺已關') and not sheet.get('quote'):
+        return ['交件單「跳過的原因」:agent 說職缺已關,卻沒有引頁面上講職缺關了的那一段(quote),不收']
     return None
 
 
@@ -181,10 +162,11 @@ PREPARE = {
     'lang': Cell(JUDGED, '語言', 'JD 是哪種語言是 agent 判斷;只核對是設定裡的語言', _jd_lang),
     'why': Cell(WORDS, '挑選理由', '卡上照原文給人看'),
     'content_problem': Cell(JUDGED, '履歷內容問題', '卡上標明是 agent 判斷,只是提示(不擋、不放行)'),
-    'real_title': Cell(CHECK, '頁面上的名字', '程式給它的 JD 原文裡逐字看得到(才拿來改卡片名字)', _in_jd),
+    'real_title': Cell(CHECK, '頁面上的名字', '寫出名字、附這張卡 JD 原文那幾段的編號;名字要一字不差在那幾段裡(才拿來改卡片名字)',
+                       items=('text', 'cite'), cite={'cite': Accept(owner=CARD, value='text')}),
     'skip': Cell(JUDGED, '跳過', '跳過是 agent 判斷:原因照原文寫在卡上;判職缺已關的卡標出錯了,他按放回原處就復原', _skip),
     'reason': Cell(CHECK, '跳過的原因', '說抓不到 JD,程式要真的沒給它原文;說職缺已關,要附頁面上那一句', _skip_reason),
-    'quote': Cell(CHECK, '頁面原文', '程式給它的 JD 原文裡逐字看得到', _in_jd),
+    'quote': Cell(CHECK, '頁面原文', '程式給它這張卡的 JD 原文的編號', cite=Accept(owner=CARD)),
 }
 
 def _job_page(said, row, truth):
@@ -199,51 +181,54 @@ def _cited(said, row, truth):
     return f'程式沒附給它 {"、".join(stray[:3])} 這幾張舊卡' if stray else None
 
 
+# 每一種根據(只有這四種)收哪幾種材料(照指示給每種根據的材料);原話在偏好筆記裡、也印在舊卡表態那幾行。推估不含程式提醒
+BASIS_KINDS = {'JD 原文': frozenset({'jd'}), '使用者原話': frozenset({'note', 'old'}),
+               '偏好筆記': frozenset({'note', 'old'}), '推估': frozenset({'jd', 'note', 'old'})}
+
+
+def BY_BASIS(item):
+    """理由的引用收哪幾種材料:照那一則理由自己的根據。"""
+    return BASIS_KINDS.get(str(item.get('basis') or '').strip(), frozenset())
+
+
 def _reasons(said, row, truth):
-    """每段理由的引用:要在程式這一張給它的材料(JD 原文、他的原話、偏好筆記)裡逐字找得到。"""
-    _rows, bad = research.checked_reasons(said, truth.sources or {})
-    return '引用在程式給它的材料裡找不到(或少了根據類型)' if bad else None
+    """每段理由要有內容、引用(段落編號,另外核對)和根據類型。"""
+    rows = said if isinstance(said, list) else []
+    ok = rows and all(isinstance(r, dict) and str(r.get('text') or '').strip() and 'citation' in r
+                      and str(r.get('basis') or '').strip() in BASIS_KINDS for r in rows)
+    return None if ok else f'每一則要有理由、引用(段落編號)和根據類型({"/".join(BASIS_KINDS)})'
 
 
 def _risk(said, row, truth):
-    """詐騙、幽靈缺是 agent 判斷;它引的那句要在 JD 原文或程式提醒裡。"""
+    """詐騙、幽靈缺是 agent 判斷;說是的話要引 JD 原文或程式提醒那一段(編號另外核對)。"""
     said = said if isinstance(said, dict) else {}
     if str(said.get('kind') or '') not in ('scam', 'ghost', ''):
         return '風險只能是 scam、ghost 或空字串'
-    why = str(said.get('why') or '').strip()
-    if not said.get('kind') or not why:
-        return None
-    seen = [truth.given or '', *(truth.flags or ())]
-    return None if quoted(why, seen) else '它引的那句 JD 原文和程式提醒裡都沒有'
+    if said.get('kind') and not said.get('cite'):
+        return '說是詐騙或幽靈缺,卻沒有引 JD 原文或程式提醒那一段的編號(cite)'
+    return None
 
 
 def _card_summary(said, row, truth):
-    """摘要、日期與金額是 Agent 判斷；程式核對它附的 JD 原文。"""
+    """摘要、日期與金額是 Agent 判斷;有日期或薪資時要引這一張 JD 原文那幾段(編號另外核對)。"""
     if not isinstance(said, dict):
         return '摘要要是物件'
     has_details = not all(research.blank(said.get(k)) for k in ('deadline', 'posted', 'salary'))
     if not has_details:
         return None
-    if not truth.given:
+    if (truth.key, 'jd') not in truth.read:
         return UNUSED
-    quote = str(said.get('quote') or '').strip()
-    return None if quoted(quote, [truth.given]) else '日期／薪資摘要要附指定 JD 的逐字引用 quote'
+    return None if said.get('quote') else '日期／薪資摘要要附這一張 JD 原文那幾段的編號 quote'
 
 
 def _terms(said, row, truth):
-    """這輪條件(薪資、經驗、地點)的值是 agent 讀的;每個有值的項目,它抄的那句要在程式給的 JD 原文裡逐字找得到。"""
+    """這輪條件(薪資、經驗、地點)的值是 agent 讀的;有值的項目要引這一張 JD 原文那幾段(編號另外核對)。"""
     import find_terms
     if not isinstance(said, dict):
         return '條件要是物件'
-    bad = []
-    for _key, (value, quote, _what) in find_terms.FIELDS.items():
-        v = said.get(value)
-        if v in (None, '', '看不出'):
-            continue
-        q = str(said.get(quote) or '').strip()
-        if not q or not quoted(q, [truth.given or '']):
-            bad.append(value)
-    return f'{"、".join(bad)} 有值卻沒附 JD 原文裡逐字找得到的那句' if bad else None
+    bad = [value for value, quote, _what in find_terms.FIELDS.values()
+           if said.get(value) not in (None, '', '看不出') and not said.get(quote)]
+    return f'{"、".join(bad)} 有值卻沒引 JD 原文那幾段的編號' if bad else None
 
 
 RESEARCH_SEARCH = {
@@ -253,37 +238,40 @@ RESEARCH_SEARCH = {
     'candidates.why': Cell(WORDS, '為什麼可能對味', '只給判斷的人參考'),
     'candidates.via': Cell(WORDS, '怎麼找到的', '只記在卡上的來源'),
     'candidates.angle': Cell(JUDGED, '找缺角度', '角度名稱是 agent 判斷:只拿來統計、記在卡上的來源'),
-    'candidates.jd_excerpt': Cell(CHECK, 'JD 摘錄', '程式抓回來的職缺頁原文裡逐字看得到才給判斷的人當原文;'
-                                  '抓不到頁面就核對不了、不用', _in_given),
 }
 
 RESEARCH_JUDGE = {
     'jobs.id': Cell(CHECK, '職缺代號', '這一批交給它的其中一個(J1、J2…)', _given_key),
     'jobs.missing': Cell(JUDGED, '頁面上看不到這個職缺', '是 agent 判斷:這張不加卡,它看到的是什麼照原文告訴他'),
-    'jobs.title': Cell(CHECK, '頁面上的職稱', '程式給它的 JD 原文裡逐字看得到(才拿來當卡片名字)', _in_given),
-    'jobs.company': Cell(CHECK, '頁面上的公司', '程式給它的 JD 原文裡逐字看得到', _in_given),
+    'jobs.title': Cell(CHECK, '頁面上的職稱', '寫出職稱、附這一張 JD 原文那幾段的編號;職稱要一字不差在那幾段裡(才拿來當卡片名字)',
+                       items=('text', 'cite'), cite={'cite': Accept(frozenset({'jd'}), ROW, value='text')}),
+    'jobs.company': Cell(CHECK, '頁面上的公司', '寫出公司、附這一張 JD 原文那幾段的編號;公司要一字不差在那幾段裡',
+                         items=('text', 'cite'), cite={'cite': Accept(frozenset({'jd'}), ROW, value='text')}),
     'jobs.keep': Cell(JUDGED, '要不要送到他眼前', '送不送是 agent 判斷:卡上標明、附理由,他可以移除'),
     'jobs.fit': Cell(JUDGED, '合不合適', '1-5 是 agent 判斷:只拿來排序,卡上標明'),
     'jobs.why': Cell(WORDS, '一句結論', '卡上照原文給人看'),
     'jobs.cite': Cell(CHECK, '引用的舊卡', '程式這一批附給它的那幾張之一', _cited),
-    'jobs.reasons': Cell(CHECK, '理由的引用', '在程式這一張給它的材料裡逐字找得到(research.checked_reasons)', _reasons,
-                         items=('text', 'citation', 'basis')),
-    'jobs.risk': Cell(JUDGED, '詐騙或幽靈缺', '是不是詐騙、幽靈缺是 agent 判斷;它引的那句要在 JD 原文或程式提醒裡', _risk,
-                      items=('kind', 'why')),
+    'jobs.reasons': Cell(CHECK, '理由的引用', '照那一則的根據,程式給它的材料的編號(偏好筆記、舊卡整批共用,JD 只算這一張)',
+                         _reasons, items=('text', 'citation', 'basis'), cite={'citation': Accept(BY_BASIS, ROW)}),
+    'jobs.risk': Cell(JUDGED, '詐騙或幽靈缺', '是不是詐騙、幽靈缺是 agent 判斷;它引這一張 JD 原文或程式提醒那一段的編號', _risk,
+                      items=('kind', 'why', 'cite'), cite={'cite': Accept(frozenset({'jd', 'flag'}), ROW)}),
     'jobs.resume': Cell(JUDGED, '挑的履歷', _PICK, _resume_pick),
     'jobs.variant': Cell(JUDGED, '挑的履歷(舊寫法)', _PICK, _resume_pick),
     'jobs.lang': Cell(JUDGED, '語言', 'JD 是哪種語言是 agent 判斷;只核對是設定裡的語言', _jd_lang),
     'jobs.pick_why': Cell(WORDS, '挑選理由', '卡上照原文給人看'),
     'jobs.cat': Cell(JUDGED, '類別', '分在哪一類是 agent 判斷:他可以改'),
-    'jobs.terms': Cell(CHECK, '這輪條件讀到的值', '薪資、經驗、地點是 agent 讀的,程式照使用者的條件比;值要附 JD 原文逐字引用',
-                       _terms, items=('salary_month', 'salary_quote', 'exp_years', 'exp_quote', 'location', 'location_quote')),
-    'jobs.card': Cell(JUDGED, '卡片摘要', 'Agent 讀 JD 寫的摘要；日期與薪資解釋須附原文引用',
-                      _card_summary, items=('fit', 'co', 'loc', 'deadline', 'salary', 'bar', 'posted', 'ammo', 'quote')),
+    'jobs.terms': Cell(CHECK, '這輪條件讀到的值', '薪資、經驗、地點是 agent 讀的,程式照使用者的條件比;有值的要引這一張 JD 原文那幾段的編號',
+                       _terms, items=('salary_month', 'salary_quote', 'exp_years', 'exp_quote', 'location', 'location_quote'),
+                       cite={'salary_quote': Accept(frozenset({'jd'}), ROW), 'exp_quote': Accept(frozenset({'jd'}), ROW),
+                             'location_quote': Accept(frozenset({'jd'}), ROW)}),
+    'jobs.card': Cell(JUDGED, '卡片摘要', 'Agent 讀 JD 寫的摘要;日期與薪資要引這一張 JD 原文那幾段的編號',
+                      _card_summary, items=('fit', 'co', 'loc', 'deadline', 'salary', 'bar', 'posted', 'ammo', 'quote'),
+                      cite={'quote': Accept(frozenset({'jd'}), ROW)}),
 }
 
-# 查應徵進度:程式複製的信和平台應徵紀錄全文(Truth.texts {來源代號: 全文})、這一輪的卡(Truth.cards)、
-# 來源代號是哪一種(Truth.source_types,程式自己建的索引)。程式沒讀到全文的來源(agent 補查的)核對不了:
-# 要看原文的格子不用,那一則在卡上標明「agent 補查、程式沒讀到原文」
+# 查應徵進度:程式複製、編號交給 agent 的信和平台應徵紀錄(owner 是來源代號;格子只看 Truth.read 知道哪個來源有材料)、
+# 這一輪的卡(Truth.cards)、來源代號是哪一種(Truth.source_types)。
+# 不是程式編號交出去的來源(agent 補查的)核對不了:要看原文的格子不用,那一則在卡上標明未核實
 
 def _in_cards(said, row, truth):
     urls = said if isinstance(said, list) else [said]
@@ -296,8 +284,15 @@ def _reply_ref(row, truth):
     return reply_run.resolved_ref(row)
 
 
-def _source_text(row, truth):
-    return truth.texts.get(_reply_ref(row, truth))
+def SOURCE(row, truth):
+    """回音只收它對到的那一個來源的段。"""
+    return {_reply_ref(row, truth)}
+
+
+def _handed(row, truth):
+    """這一則對到的來源是程式編號交給 agent 的(有材料)。"""
+    ref = _reply_ref(row, truth)
+    return (ref, 'mail') in truth.read or (ref, 'record') in truth.read
 
 
 def _source_ref(said, row, truth):
@@ -309,24 +304,13 @@ def _source_type(said, row, truth):
     return None if not said or not want or said == want else f'{want}(程式照 source_ref 認的)'
 
 
-def _in_source(said, row, truth):
-    """原文:程式複製的那一封信、那一頁紀錄的全文裡逐字看得到;程式沒讀到全文的核對不了、不用。"""
-    if not str(said or '').strip():
-        return None
-    text = _source_text(row, truth)
-    if not text:
-        return UNUSED
-    return None if words(said) and words(said) in words(text) else '程式複製的那一封(那一頁)原文裡沒有這段字'
-
-
 def _reply_date(said, row, truth):
     try:
         if datetime.date.fromisoformat(str(said)[:10]).isoformat() != str(said).strip()[:10]:
             raise ValueError
     except ValueError:
         return '要寫成 YYYY-MM-DD'
-    text = _source_text(row, truth)
-    if not text:
+    if not _handed(row, truth):
         return UNUSED
     return None                                      # 日期含義交 Agent；source_ref 與引用由其他格核對
 
@@ -345,54 +329,37 @@ def _reply_link(said, row, truth):
 
 
 def _reply_kind(said, row, truth):
-    """信算哪一種是 agent 判斷(程式核對不了):只核對寫法;拒絕、面試、錄取要抄信裡那一句(程式讀得到全文時)。"""
+    """信算哪一種是 agent 判斷(程式核對不了):只核對寫法;拒絕、面試、錄取要引信裡那一段(程式編號交出去的來源)。"""
     if said not in ('confirm', 'reject', 'interview', 'offer'):
         return '只能是 confirm、reject、interview、offer'
-    if said != 'confirm' and _source_text(row, truth) and not str(row.get('quote') or '').strip():
-        return [f'交件單「信算哪一種」({truth.key}):agent 說 {said},卻沒有抄信裡決定是這一種的那一句(quote),不收']
+    if said != 'confirm' and _handed(row, truth) and not row.get('quote'):
+        return [f'交件單「信算哪一種」({truth.key}):agent 說 {said},卻沒有引信裡決定是這一種的那一段的編號(quote),不收']
     return None
 
 
-def _records_text(truth):
-    return '\n'.join(text for ref, text in truth.texts.items()
-                     if str(ref).startswith('application_record:') and text)
+def _records_read(truth):
+    """程式編號交給 agent 的平台應徵紀錄頁是哪幾個平台(來源代號 application_record:<平台>)。"""
+    return {str(owner).split(':', 1)[1] for owner, kind in truth.read
+            if kind == 'record' and str(owner).startswith('application_record:')}
 
 
-def _record_id(said, row, truth):
-    """平台應徵紀錄上的職缺代號:程式複製的應徵紀錄頁全文裡看得到;沒讀到全文核對不了、不用(不拿來標已投遞)。"""
-    if not str(said or '').strip():
-        return None
-    text = _records_text(truth)
-    if not text:
-        return UNUSED
-    return None if norm(said) in norm(text) else '程式複製的平台應徵紀錄裡沒有這個代號'
-
-
-def _record_url(said, row, truth):
-    if not str(said or '').strip():
-        return None
-    text = _records_text(truth)
-    if not text:
-        return UNUSED
-    jid = sync_sent.job_id(str(said))
-    if jid and norm(jid) in norm(text):
-        return None
-    return '程式複製的平台應徵紀錄裡沒有這個職缺' if jid else '認不出是哪個平台的職缺網址'
+def RECORD(row, truth):
+    """應徵紀錄的一筆只收這一列寫的那個平台的應徵紀錄頁。"""
+    want = str(row.get('platform') or '').strip().casefold()
+    return {f'application_record:{p}' for p in _records_read(truth) if p.casefold() == want}
 
 
 def _record_platform(said, row, truth):
-    have = {str(ref).split(':', 1)[1] for ref, text in truth.texts.items()
-            if str(ref).startswith('application_record:') and text}
+    have = _records_read(truth)
     if not have:
         return UNUSED
     return None if str(said or '').strip().casefold() in {h.casefold() for h in have} else f'程式讀了 {"、".join(sorted(have))} 的應徵紀錄'
 
 
 def _record_date(said, row, truth):
-    text = _records_text(truth)
     if not str(said or '').strip():
         return None
-    if not text:
+    if not _records_read(truth):
         return UNUSED
     try:
         datetime.date.fromisoformat(str(said)[:10])
@@ -409,16 +376,17 @@ REPLY = {
     'findings.source_type': Cell(DECIDED, '來源種類', '程式照來源代號自己認(agent 不用寫;寫了要一樣)', _source_type),
     'findings.source': Cell(WORDS, '來源名稱', '只給人看'),
     'findings.date': Cell(JUDGED, '日期', 'Agent 理解指定原文的日期；程式驗日曆格式與來源', _reply_date),
-    'findings.subject': Cell(CHECK, '標題', '程式複製的原文裡逐字看得到', _in_source),
+    'findings.subject': Cell(CHECK, '標題', '寫出標題、附程式複製編號交給它的那一個來源那幾段的編號;標題要一字不差在那幾段裡',
+                             items=('text', 'cite'), cite={'cite': Accept(owner=SOURCE, value='text')}),
     'findings.summary': Cell(WORDS, '摘要', '卡上照原文給人看'),
     'findings.link': Cell(CHECK, '原文連結', '信要是 source_ref 那一封;平台紀錄要在那個平台的網站上', _reply_link),
     'findings.kind': Cell(JUDGED, '信算哪一種', '確認、拒絕、面試、錄取是 agent 判斷:照舊自動改狀態,卡上標明、附它抄的那一句,'
                           '按「不對,復原」改回去', _reply_kind),
-    'findings.quote': Cell(CHECK, '信裡那一句', '程式複製的原文裡逐字看得到', _in_source),
-    'findings.reason': Cell(CHECK, '拒絕理由', '程式複製的原文裡逐字看得到', _in_source),
+    'findings.quote': Cell(CHECK, '信裡那一句', '程式複製、編號交給它的那一個來源的編號', cite=Accept(owner=SOURCE)),
+    'findings.reason': Cell(CHECK, '拒絕理由', '程式複製、編號交給它的那一個來源的編號', cite=Accept(owner=SOURCE)),
     'findings.todo': Cell(JUDGED, '要他做的事', '是 agent 判斷:卡上寫「要你做」,他按「做好了」就收掉'),
-    'job_ids.id': Cell(CHECK, '職缺代號', '程式複製的平台應徵紀錄裡看得到(才拿來標已投遞)', _record_id),
-    'job_ids.url': Cell(CHECK, '職缺連結', '連結裡的職缺代號在程式複製的平台應徵紀錄裡看得到', _record_url),
+    'job_ids.at': Cell(CHECK, '應徵紀錄上那一筆', '程式複製、編號交給它的那個平台應徵紀錄頁的編號(程式拿那幾段字配卡)',
+                       cite=Accept(frozenset({'record'}), RECORD)),
     'job_ids.platform': Cell(CHECK, '平台', '程式讀了應徵紀錄的平台之一', _record_platform),
     'job_ids.applied_at': Cell(JUDGED, '應徵日期', 'Agent 理解平台原文的日期；程式驗日曆格式與紀錄身分', _record_date),
     'job_ids.title': Cell(WORDS, '職稱', '只給人看,不拿來配對'),

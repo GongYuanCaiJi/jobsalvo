@@ -125,14 +125,15 @@ class EvidenceReplay(unittest.TestCase):
         door = RecordedDoor(pages)
         steps = []
 
-        def agent(_prompt, log, _home, _board, **kwargs):
+        def agent(prompt, log, _home, _board, **kwargs):
             step = Path(kwargs['output_last_message']).stem
             steps.append(step)
             with open(log, 'w', encoding='utf-8') as out:
                 out.write(json.dumps({'type': 'thread.started', 'thread_id': 'same-agent'}) + '\n')
+            shown = re.search(r'"material_id"\s*:\s*"([0-9a-f]+)"', prompt)
             with open(kwargs['output_last_message'], 'w', encoding='utf-8') as out:
                 json.dump({'tab_id': '1:p1', 'ids': list(ids) if step.startswith('edit-') else [],
-                           'handoff': False, 'reason': ''}, out)
+                           'material_id': shown.group(1) if shown else None, 'handoff': False, 'reason': ''}, out)
             return SimpleNamespace(ok=True, message=lambda: '')
 
         with fake_door.installed(door), mock.patch.object(sp.apply_run, '_run_agent', side_effect=agent):

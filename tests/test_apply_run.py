@@ -68,7 +68,7 @@ def confirm(fb):
 def loaded(jobs, fb, d):
     """run_one 讀到的看板是 (jobs, fb)、指示寫在 d、寫回看板直接改 fb。"""
     with patch.object(run, 'load', return_value=(jobs, fb)), \
-         patch.object(run, 'prompt_for', return_value=('prompt', d)), \
+         patch.object(run, 'prompt_for', return_value=('prompt', d, None)), \
          patch.object(run.fr, 'record_fill', return_value=[]), \
          patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)):
         yield
@@ -243,7 +243,7 @@ class Checks(unittest.TestCase):
                     'tab_id': '42:p1', 'page': {'url': U, 'fields': [], 'lines': []}}
         for runtime in ('codex', 'claude-code'):
             with self.subTest(runtime=runtime):
-                prompt, _ = run.prompt_for('fill', U, {'id': U}, board(), '/tmp/board.html',
+                prompt, _, _n = run.prompt_for('fill', U, {'id': U}, board(), '/tmp/board.html',
                                            prepared=prepared, door=chrome_door.of(runtime))
                 self.assertIn('同一工作區內可另開必要分頁', prompt)
                 self.assertIn('履歷同步、附件管理與登入授權', prompt)
@@ -253,7 +253,7 @@ class Checks(unittest.TestCase):
 
     def test_fill_prompt_lists_registered_profile_pages_for_links_missing_from_the_master(self):
         with patch.object(run, 'profile_pages', return_value='- linkedin en/one:https://www.linkedin.com/in/someone/'):
-            prompt, _ = run.prompt_for('fill', U, {'id': U}, board(), '/tmp/board.html', door=chrome_door.of('codex'))
+            prompt, _, _n = run.prompt_for('fill', U, {'id': U}, board(), '/tmp/board.html', door=chrome_door.of('codex'))
         self.assertIn('https://www.linkedin.com/in/someone/', prompt)
         self.assertIn('母稿沒寫的個人連結用程式登記的', prompt)
         self.assertIn('"qz"', prompt)                       # 題目不是他讀的語言時,交件附中文題目
@@ -272,7 +272,7 @@ class Checks(unittest.TestCase):
         for runtime in ('codex', 'claude-code'):
             for stage in ('fill', 'fix'):
                 with self.subTest(runtime=runtime, stage=stage):
-                    prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
+                    prompt, _, _n = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
                                                door=chrome_door.of(runtime))
                     # 登入規則只有一份,在每個開瀏覽器的 agent 派工時都會帶的那段(agent_run 啟動時接上;同步平台履歷的 agent 也拿這段)
                     login = chrome_door.of(runtime).apply_rule()
@@ -289,7 +289,7 @@ class Checks(unittest.TestCase):
         with open(rules, 'w', encoding='utf-8') as output:
             output.write('需要登入、遇到驗證碼、頁面要密碼:停下。')
         with patch.object(run.cf, 'APPLY_RULES', rules):
-            prompt, _ = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
+            prompt, _, _n = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
                                        door=chrome_door.current())
         self.assertIn('需要登入、遇到驗證碼、頁面要密碼:停下', prompt)               # 他的舊做法照樣附上
         self.assertIn('這一段優先於填表做法與平台筆記', chrome_door.current().apply_rule())
@@ -301,7 +301,7 @@ class Checks(unittest.TestCase):
             output.write('需要登入、遇到驗證碼、頁面要密碼:停下。')
         for stage in ('fill', 'fix'):
             with self.subTest(stage=stage), patch.object(run.cf, 'APPLY_RULES', rules):
-                p, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html', door=chrome_door.current())
+                p, _, _n = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html', door=chrome_door.current())
                 fed = ar.prompt_stdin('main', p, browser=ar.apply_overrides(), board='/tmp/board.html', chrome=True)
                 self.assertIn('需要登入、遇到驗證碼、頁面要密碼:停下', fed)
                 for words in ('這一段優先於填表做法與平台筆記', 'Continue with Google', '已登入的帳號完成'):
@@ -314,7 +314,7 @@ class Checks(unittest.TestCase):
         with patch.object(run.cf, 'APPLY_RULES', rules):
             for stage in ('fill', 'fix'):
                 with self.subTest(stage=stage):
-                    prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
+                    prompt, _, _n = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
                                                door=chrome_door.current())
                     self.assertIn('表單有 Apply with LinkedIn 就先用;帶入的現職保留。', prompt)
                     self.assertNotIn('不為可選資料開外部授權頁', prompt)
@@ -365,7 +365,7 @@ class Checks(unittest.TestCase):
         with open(os.path.join(folder, 'ship.json'), 'w') as output:
             json.dump({'files': ['resume.pdf', 'support.pdf'], 'merged': 'merged.pdf'}, output)
         with patch.object(run.cf, 'SHIP_DIR', self.d):
-            prompt, _out = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
+            prompt, _out, _n = run.prompt_for('fix', U, {'id': U}, board(), '/tmp/board.html',
                                          note='本人已完成登入,接著填', door=chrome_door.current())
         for name in ('resume.pdf', 'support.pdf', 'merged.pdf'):
             self.assertIn(os.path.join(folder, name), prompt)
@@ -377,7 +377,7 @@ class Checks(unittest.TestCase):
         for runtime in ('codex', 'claude-code'):
             for stage in ('fill', 'fix'):
                 with self.subTest(runtime=runtime, stage=stage):
-                    prompt, _ = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
+                    prompt, _, _n = run.prompt_for(stage, U, {'id': U}, board(), '/tmp/board.html',
                                                door=chrome_door.of(runtime))
                     self.assertIn('檔案欄已選妥', prompt)
                     self.assertIn('非同步上傳', prompt)
@@ -1092,7 +1092,7 @@ class Dispatch(unittest.TestCase):
         self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='apply-handoff-'))
         with fc.installed(codex, claude), \
              patch.object(run, 'load', return_value=(jobs, fb)), \
-             patch.object(run, 'prompt_for', return_value=('FILL', self.d)) as built, \
+             patch.object(run, 'prompt_for', return_value=('FILL', self.d, None)) as built, \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(ar, 'session_id', return_value='S9'), \
              patch.object(run, 'shoot'), \
@@ -1114,10 +1114,12 @@ class Dispatch(unittest.TestCase):
         fb = board(); jobs = {U: {'id': U, 'target': 'X'}}
         real = run.load
         run.load = lambda b: (jobs, fb)
+        # 每一次交付有自己的交付代號(numbered.material_id);預覽跟派出去的除了代號一字不差
+        self.enterContext(patch('numbered.secrets.token_hex', return_value='abc123'))
         try:
             shown = run.preview('fill', U, '/tmp/board.html')
             door = chrome_door.current()
-            p, _ = run.prompt_for('fill', U, jobs[U], fb, '/tmp/board.html', door=door)
+            p, _, _n = run.prompt_for('fill', U, jobs[U], fb, '/tmp/board.html', door=door)
         finally:
             run.load = real
         # 同一份看板底下比才有意義:那句「自己決定派幾隻」是看板上的開關決定的
@@ -1197,7 +1199,7 @@ class SubmitOutcomes(unittest.TestCase):
         run.bd.set_fb = edit_during_send
         try:
             with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-                 patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+                 patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
                  patch.object(run, 'shoot'), \
                  patch.object(run, 'check_submit', return_value=(True, {'confirm_text': 'Application submitted'})), \
                  patch.object(run.ar, 'launch', return_value=SimpleNamespace(pid=123)), \
@@ -1229,7 +1231,7 @@ class SubmitOutcomes(unittest.TestCase):
             ran['yes'] = True
             return SimpleNamespace(pid=123)
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_submit', return_value=(True, {'confirm_text': 'Application submitted'})), \
              patch.object(run.ar, 'launch', side_effect=launch), \
@@ -1248,7 +1250,7 @@ class SubmitOutcomes(unittest.TestCase):
         # 送出那一輪接到的不是填這張的那段對話:照樣擋重送(它可能在哪一頁按了送出),但卡上要講真正的原因,
         # 不是沿用「送出途中停掉了」
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
              patch.object(run.ar, 'launch', return_value=SimpleNamespace(pid=123)), \
              patch.object(run.ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 123)]), \
              patch.object(run.ar, 'session_id', return_value='S-OTHER'), \
@@ -1265,7 +1267,7 @@ class SubmitOutcomes(unittest.TestCase):
     def test_a_crash_after_sending_started_leaves_the_send_result_unknown_with_the_real_reason(self):
         # 送出開始後程式自己出錯:可能已經按了送出,卡要停在送出結果不明,原因是這次的錯,不是之後收尾寫的「送出途中停掉了」
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
              patch.object(run, '_run_agent', side_effect=RuntimeError('送出執行器斷線')), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.agent_report, 'report'), \
@@ -1282,7 +1284,7 @@ class SubmitOutcomes(unittest.TestCase):
         with open(os.path.join(self.d, 'submit.json'), 'w', encoding='utf-8') as f:
             json.dump({'submitted': True, 'confirm_text': 'partial'}, f)
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
              patch.object(run, 'check_submit') as check, \
              patch.object(run.ar, 'launch', return_value=SimpleNamespace(pid=123)), \
              patch.object(run.ar, 'wait_done', return_value=[ar.AgentResult('failed', 7, 123)]), \
@@ -1305,7 +1307,7 @@ class SubmitOutcomes(unittest.TestCase):
             self.fb['__ans__'][0]['v'] = 'Edited after approval'
             mut(self.fb)
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
              patch.object(run.ar, 'launch', side_effect=lambda *a, **k: launched.append(1) or SimpleNamespace(pid=1)), \
              patch.object(run.agent_report, 'report'), \
              patch.object(run.ship, 'folder', return_value=self.d), \
@@ -1333,7 +1335,7 @@ class SubmitOutcomes(unittest.TestCase):
 
     def test_missing_confirmation_evidence_keeps_the_tab_and_marks_submit_failed(self):
         with patch.object(run, 'load', return_value=(self.jobs, self.fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.d)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.d, None)), \
              patch.object(run, 'shoot'), \
              patch.object(run, 'check_submit', return_value=(False, {'problems': ['no confirmation'], 'clicked': True})), \
              patch.object(run.ar, 'launch', return_value=SimpleNamespace(pid=123)), \
@@ -1530,7 +1532,7 @@ class SelfFix(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='apply-selffix-') as d, fc.installed(fc.FakeDoor()), \
              loaded({U: {'id': U, 'target': 'Example · Engineer'}}, fb, d), \
              patch.object(run, 'prompt_for', side_effect=lambda stage, url, job, fb_, board_, note='', **k:
-                          rounds.append((stage, note)) or ('prompt', d)), \
+                          rounds.append((stage, note)) or ('prompt', d, None)), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S1'), patch.object(run, 'shoot'), \
              patch.object(run, 'check_fill', side_effect=lambda fb_, url, *a, **k: (apply_tab.page_problems(page, fb_, url), res)), \
@@ -1609,7 +1611,7 @@ class RetypedMarksOnly(unittest.TestCase):
             return [], res
         with tempfile.TemporaryDirectory(prefix='apply-retype-') as directory, \
              patch.object(run, 'load', side_effect=lambda _b: (jobs, copy.deepcopy(fb))), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', directory, None)), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
@@ -1630,7 +1632,7 @@ class RetypedMarksOnly(unittest.TestCase):
         res = {'tab_id': '7', 'handoff': True, 'delivery': {'method': 'direct_upload'}}
         with tempfile.TemporaryDirectory(prefix='apply-retype-') as directory, \
              patch.object(run, 'load', side_effect=lambda _b: ({U: {'id': U, 'target': 'X'}}, copy.deepcopy(fb))), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', directory, None)), \
              patch.object(run, '_run_agent', return_value=SimpleNamespace(ok=True, status='completed', agent_id='primary')), \
              patch.object(ar, 'session_id', return_value='S1'), \
              patch.object(run, 'shoot'), \
@@ -1723,7 +1725,7 @@ class AgentThatNeverStarted(unittest.TestCase):
              fc.installed(fc.FakeDoor('codex', page=copy.deepcopy(FORM_PAGE)),
                           fc.FakeDoor('claude-code', agent_id='cc', page=copy.deepcopy(FORM_PAGE)), agents=agents), \
              patch.object(run, 'load', return_value=({U: {'id': U, 'target': 'X'}}, fb)), \
-             patch.object(run, 'prompt_for', return_value=('prompt', directory)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', directory, None)), \
              patch.object(run, '_run_agent', side_effect=agent), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.bd, 'set_fb', side_effect=lambda mut, live=None, by='': mut(fb)), \

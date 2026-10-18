@@ -18,6 +18,7 @@ import board_doc as bd  # noqa: E402
 import card  # noqa: E402
 import config as cf  # noqa: E402
 import reconcile  # noqa: E402
+import markdown_pdf  # noqa: E402
 import ship  # noqa: E402
 import source_sync  # noqa: E402
 import pdf_tools  # noqa: E402
@@ -561,7 +562,7 @@ class PackageReconcile(unittest.TestCase):
                 v1 = hashlib.sha256(f.read()).hexdigest()
             self.assertIn('Original v1', settings_api.pdf_text(output))
             self.assertEqual(self._run(), 0)
-            rendered = source_sync.effective_path(next(source_sync.files()))
+            rendered = markdown_pdf.sent_file(next(source_sync.files())['path'])
             mtime = os.stat(rendered).st_mtime_ns
             self.assertEqual(self._run(), 0)
             self.assertEqual(os.stat(rendered).st_mtime_ns, mtime)

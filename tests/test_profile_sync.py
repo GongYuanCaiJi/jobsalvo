@@ -8,6 +8,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402
 import config as cf  # noqa: E402
+import fake_door as fc  # noqa: E402
+import markdown_pdf  # noqa: E402
 import profile_sync as ps  # noqa: E402
 
 
@@ -79,3 +81,38 @@ class SyncBaseline(unittest.TestCase):
             out.write(b'cover v2')
         self.assertEqual(ps.status()[0]['state'], 'master-changed')
         self.assertNotIn('_attachment_checks', ps.registry())
+
+    def _markdown_cover(self):
+        """附件原稿是 Markdown,reconcile 已經把它排成 .rendered 裡的 PDF。回 (原稿, 排好的 PDF)。"""
+        md = os.path.join(self.home, 'resume', 'cover.md')
+        with open(md, 'w', encoding='utf-8') as out:
+            out.write('# 求職信\n')
+        pdf = markdown_pdf.output_path(md)
+        os.makedirs(os.path.dirname(pdf), exist_ok=True)
+        with open(pdf, 'wb') as out:
+            out.write(b'%PDF-1 rendered')
+        cf.ATTACHMENTS[:] = [{'id': 'cover', 'name': '求職信', 'files': {'zh': 'resume/cover.md'}, 'enabled': True}]
+        self.addCleanup(cf.ATTACHMENTS.clear)
+        return md, pdf
+
+    def test_markdown_attachment_is_compared_as_the_pdf_the_card_sends(self):
+        # #469:卡片寄的是排好的 PDF,平台上存的也是它;拿 .md 原稿去比,平台履歷永遠「內容不同」
+        _md, pdf = self._markdown_cover()
+        self.assertEqual(ps.slot_attachments('zh', 'one'), [('求職信', pdf)])
+        platform = fc.FakeDoor(attachments=[{'name': 'cover.pdf', 'bytes': b'%PDF-1 rendered'}])
+        self.assertEqual(ps.downloaded_problems(platform.download_attachments, 'https://platform.example/resume/one',
+                                                os.path.join(self.home, 'downloads'), ps.slot_attachments('zh', 'one')),
+                         [])
+
+    def test_markdown_attachment_fingerprint_follows_the_rendered_pdf_bytes(self):
+        # 比的是排好的 PDF,落後與否也看它:PDF 重排了就落後;原稿改了但還沒重排,平台上該有的檔還沒變
+        md, pdf = self._markdown_cover()
+        ps.remember_sync('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
+        self.assertEqual(ps.status()[0]['state'], 'ok')
+        with open(pdf, 'wb') as out:
+            out.write(b'%PDF-1 rendered again')
+        self.assertEqual(ps.status()[0]['state'], 'master-changed')
+        ps.remember_sync('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
+        with open(md, 'w', encoding='utf-8') as out:
+            out.write('# 求職信(改過,還沒重排)\n')
+        self.assertEqual(ps.status()[0]['state'], 'ok')

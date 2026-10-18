@@ -9,14 +9,16 @@ add_job —— 看板上「➕ 貼網址加入」:使用者自己找到的職缺
 agent 都不能用(額度用完、限流)時不加空卡:抓好的職缺存成待寫(跟找缺的待判同一套),下一次跑先寫它們;
 自動流程每隔一小時自己再跑一次(autopilot),不用他再貼一次。
 
-外面已經判好的(別的 agent 讀過 JD、照找缺判斷的交件單格式寫好,每列多一個 url):用 --judged 交進來,
-不再派 agent 讀第二次;程式照樣抓頁、照樣過安檢門,引用對不上的那張照加、摘要不用、原因照實回報。
-格式就是看板「🔎 找新職缺」判斷那一段的 📝 prompt(research.preview('judge'))。
+外面的 agent 要自己判(不派 agent 讀第二次):分兩步。--hand 抓頁、組好每一批的判斷指示(段落編號、交付代號),
+整份判斷輸入存進一輪的夾,印出每一批的指示;外面的 agent 照那一份判。--judged --round 只讀那一輪存下的材料
+(不抓頁、不重讀偏好筆記與相似舊卡),照樣過安檢門:引用對不上的那張照加、摘要不用、原因照實回報。
 
 用法:python3 tools/add_job.py --url <網址> [--url <網址> …] [--board B]
-      python3 tools/add_job.py --judged 判好的.json [--board B]     # [{url, title, company, keep, fit, why, cat, card, reasons…}]
+      python3 tools/add_job.py --hand <網址> [<網址> …] [--board B]          # 印出每一批的指示和那一輪的夾
+      python3 tools/add_job.py --judged 判好的.json --round <那一輪的夾> [--board B]
+          # [{"material_id": 那一批的交付代號, "jobs": [{url, title, company, keep, fit, why, cat, card, reasons…}]}]
 """
-import os, re, sys, time, argparse, json
+import os, sys, time, argparse, json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -48,34 +50,18 @@ def _report(msg, need, board, job=''):
     except Exception as e:  # noqa: BLE001 — 回報寫不進看板:印進這一輪的紀錄
         print(f'⚠ 這則回報寫不進看板({str(e)[:120]}):{msg} → {need}')
 
-def run(urls, board, browser_required=True, run_agent=None, answers=None):
-    import research as rs, prefs, page_fetch
-    st = lambda d: jobrun.write(os.path.join(SP, STATUS), d)
-    t0 = time.time()
-    fb, jobs = prefs.load(board)
-    have = {j['id'] for j in jobs}
-    held = [c for c in rs.pending_take(pending_path()) if c['url'] not in have]   # 上一次 agent 不能用、還沒寫的先寫
-    urls = [u.strip() for u in urls if u.strip().startswith('http')]
-    new = [u for u in dict.fromkeys(urls) if u not in have and u not in {c['url'] for c in held}]
-    if not new and not held:
-        # 已移除的卡也算板上有(去重用全部卡);只說「都有了」他在看板上找不到,要講它在哪、怎麼放回來
-        gone = sum(1 for u in dict.fromkeys(urls) if (fb.get(u) or {}).get('rm'))
-        msg = '這幾個網址板上都已經有了' + (
-            f'(其中 {gone} 張在「🗑 已移除」,要的話到那一頁按「↩︎ 放回看板」)' if gone else '')
-        st({'phase': 'nothing', 'msg': msg if urls else '沒有網址'})
-        return 0
-
-    st({'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(new) + len(held), 'step': '檢查網址'})
-    cands, gone = list(held), []
-    for url, fetched in zip(new, page_fetch.fetch_many(new)):
+def _fetch(urls):
+    """抓頁、清洗成候選;直連 404/410 的回在 gone。"""
+    import page_fetch
+    cands, gone = [], []
+    for url, fetched in zip(urls, page_fetch.fetch_many(urls)):
         if fetched.status == 'closed':
             gone.append(url)
             continue
         cands.append({
             'url': url,
             'title': fetched.title or '職缺頁待確認',
-            # 104 等平台的程式抓頁會給「公司: …」那一行:卡片名字至少帶得到公司,摘要被安檢擋下時也一樣
-            'company': next(iter(re.findall(r'^公司:\s*(.+)$', fetched.text or '', re.M)), '').strip(),
+            'company': '',      # 公司是 agent 讀頁判斷、引段落編號(安檢門核過才寫上卡)
             'via': '手動加入',
             'jd': fetched.jd,
             'page_status': fetched.status,
@@ -87,6 +73,51 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
             'page_errors': list(fetched.errors),
             'flag': [] if fetched.readable else ['程式無法取得職缺頁文字;保留待確認,不可猜測內容'],
         })
+    return cands, gone
+
+
+def hand(urls, board):
+    """--hand:抓頁、組好每一批的判斷指示,整份判斷輸入(候選、指示、舊卡代號、編號材料、勾選的履歷)存進一輪的夾
+    (handed.json),--judged --round 只讀它。回 (那一輪的夾, 每一批的指示, 下架沒加的網址)。
+    下架的也存進 handed.json:--judged 收尾時跟 --url 一樣列在「沒加」裡。"""
+    import research as rs, prefs
+    fb, jobs = prefs.load(board)
+    cands, gone = _fetch([u for u in dict.fromkeys(urls) if u.startswith('http')])
+    rd = rs.new_round('-add')
+    resumes = prefs.checked_resumes()
+    batches = rs.prepare(cands, prefs.cards(fb, jobs), rd, mode='add', resumes=resumes)
+    with open(os.path.join(rd, 'handed.json'), 'w', encoding='utf-8') as f:
+        json.dump({'resumes': resumes, 'batches': [b.dump() for b in batches], 'gone': gone}, f, ensure_ascii=False)
+    return rd, [b.prompt for b in batches], gone
+
+
+def run(urls, board, browser_required=True, run_agent=None, answers=None, round_dir=None):
+    """round_dir:--judged 交進來的那一輪(answers 是外面照那一輪的指示判好的):只讀那一輪存下的判斷輸入。"""
+    import research as rs, prefs
+    st = lambda d: jobrun.write(os.path.join(SP, STATUS), d)
+    t0 = time.time()
+    fb, jobs = prefs.load(board)
+    prepared = resumes = None
+    if round_dir:
+        with open(os.path.join(round_dir, 'handed.json'), encoding='utf-8') as f:
+            handed = json.load(f)
+        prepared, resumes = [rs.Batch.load(b) for b in handed['batches']], handed['resumes']
+        cands, gone = [c for b in prepared for c in b.cands], handed.get('gone', [])
+    else:
+        have = {j['id'] for j in jobs}
+        held = [c for c in rs.pending_take(pending_path()) if c['url'] not in have]   # 上一次 agent 不能用、還沒寫的先寫
+        urls = [u.strip() for u in urls if u.strip().startswith('http')]
+        new = [u for u in dict.fromkeys(urls) if u not in have and u not in {c['url'] for c in held}]
+        if not new and not held:
+            # 已移除的卡也算板上有(去重用全部卡);只說「都有了」他在看板上找不到,要講它在哪、怎麼放回來
+            gone = sum(1 for u in dict.fromkeys(urls) if (fb.get(u) or {}).get('rm'))
+            msg = '這幾個網址板上都已經有了' + (
+                f'(其中 {gone} 張在「🗑 已移除」,要的話到那一頁按「↩︎ 放回看板」)' if gone else '')
+            st({'phase': 'nothing', 'msg': msg if urls else '沒有網址'})
+            return 0
+        st({'phase': 'fold', 'pid': os.getpid(), 't0': t0, 'n': len(new) + len(held), 'step': '檢查網址'})
+        fetched, gone = _fetch(new)
+        cands = held + fetched
 
     res = {}
     agent_error = ''
@@ -95,12 +126,12 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
         import agent_run as ar
         if run_agent is None:
             run_agent = web_agent(board)
-        rd = os.path.join(rs.DIR, 'rounds', time.strftime('%Y%m%d-%H%M%S') + '-add')
-        os.makedirs(rd, exist_ok=True)
+        rd = round_dir or rs.new_round('-add')
         try:
             # 他撥了「愛派幾隻就派幾隻」:跟找缺一樣,判斷那幾批同時跑
-            res = rs.judge(cands, prefs.cards(fb, jobs), rd, False, run_agent, mode='add', board=board,
-                           par=bool(fb.get('__agentfree__')), answers=answers)
+            res = rs.judge(cands, [] if prepared else prefs.cards(fb, jobs), rd, False, run_agent, mode='add',
+                           board=board, par=bool(fb.get('__agentfree__')), answers=answers, prepared=prepared,
+                           resumes=resumes)
         except ar.AgentRunError as e:
             if all(r.status == 'unavailable' for r in e.results):
                 # agent 都不能用(額度用完、限流、要重新登入):等得到,不加空卡,存成待寫,之後接著寫
@@ -143,15 +174,29 @@ def run(urls, board, browser_required=True, run_agent=None, answers=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--url', action='append', default=[])
-    ap.add_argument('--judged', help='外面已經判好的交件單(JSON 清單,每列帶 url)')
+    ap.add_argument('--hand', nargs='+', metavar='URL', help='抓頁、組好判斷指示並存下,印出每一批的指示給外面的 agent')
+    ap.add_argument('--judged', help='外面照 --hand 的指示判好的交件單:[{material_id, jobs: [每列帶 url]}]')
+    ap.add_argument('--round', help='--hand 印出來的那一輪的夾(--judged 要配它)')
     ap.add_argument('--board', default=cf.LIVE)
     a = ap.parse_args()
+    if a.hand:
+        rd, prompts, gone = hand(a.hand, a.board)
+        for i, p in enumerate(prompts):
+            print(f'===== 第 {i + 1} 批的指示 =====\n{p}')
+        for url in gone:
+            print(f'沒加(職缺已下架):{url}')
+        if prompts:
+            print(f'判好之後:python3 tools/add_job.py --judged <判好的.json> --round {rd}')
+        return
     answers = None
     if a.judged:
+        if not a.round:
+            ap.error('--judged 要配 --round(先跑 --hand,照它印的指示判)')
         with open(a.judged, encoding='utf-8') as f:
-            answers = {r['url']: {k: v for k, v in r.items() if k != 'url'} for r in json.load(f) if r.get('url')}
+            answers = {r['url']: dict({k: v for k, v in r.items() if k != 'url'}, material_id=group.get('material_id'))
+                       for group in json.load(f) for r in group.get('jobs') or [] if r.get('url')}
     try:
-        print('新增', run(a.url + list(answers or ()), a.board, answers=answers), '張')
+        print('新增', run(a.url, a.board, answers=answers, round_dir=a.round if a.judged else None), '張')
     except Exception as e:
         jobrun.write(os.path.join(SP, STATUS), {'phase': 'failed', 'msg': f'沒加成:{e}', 'finished_at': time.time()})
         raise

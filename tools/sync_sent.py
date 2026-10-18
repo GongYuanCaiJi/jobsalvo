@@ -1,6 +1,7 @@
 """
-平台應徵紀錄對帳:agent 在各平台的應徵紀錄頁看到的職缺(平台+代號,或職缺連結)和日期,
-程式只用「平台+職缺代號」配卡。代號怎麼從職缺網址讀出來,每個平台一條規則(POSTING_ID)。
+平台應徵紀錄對帳:平台應徵紀錄上的職缺和日期,程式只用「平台+職缺代號」配卡。代號怎麼從職缺網址讀出來,每個平台一條規則(POSTING_ID)。
+查應徵進度交來的是應徵紀錄頁上那一筆所在的那幾段程式的字(line):看板上平台一樣、代號在那幾段字裡是完整一個詞的卡,
+剛好一張才配(兩邊的平台名都由 profile_sync.profile_key 算)。手動 --records 照舊收平台+代號或職缺連結。
 
 手動對帳:
   uv run python tools/sync_sent.py --records <agent 回傳的 JSON 檔> [--apply]
@@ -54,6 +55,26 @@ def applied_date(value, today):
     return datetime.date(year, mo, day).isoformat()
 
 
+def _lines(records, jobs):
+    """{'platform', 'line'} 的紀錄配卡:回 (配到的 [(卡, 紀錄)], 其他照舊的紀錄)。零張或兩張以上不配(丟掉那一筆,不影響別筆)。
+    配到的帶著那張卡本身往下走:代號一樣、網域不一樣的卡(jobs.lever.co 跟 jobs.eu.lever.co)不會被認成它。
+    完整一個詞:前後不是英文字母、數字、底線(wrong_abc123 不是 abc123);緊貼中文照算(職缺abc123已應徵)。"""
+    import profile_sync as ps
+    found, rest = [], []
+    for row in records:
+        if not (isinstance(row, dict) and 'line' in row):
+            rest.append(row)
+            continue
+        want = str(row.get('platform') or '').strip().casefold()
+        hits = [j for j in jobs if ps.profile_key(j['id']).casefold() == want and (key := posting_key(j['id']))
+                and re.search(rf'(?<!\w){re.escape(key[1])}(?!\w)', str(row['line']), re.I | re.A)]
+        if len(hits) == 1:
+            platform, jid = posting_key(hits[0]['id'])
+            found.append((hits[0], {'platform': platform, 'id': jid, 'applied_at': row.get('applied_at') or '',
+                                    'title': str(row.get('title') or '')}))
+    return found, rest
+
+
 def _records(records):
     out = []
     for row in records:
@@ -79,13 +100,13 @@ def record_key(record, today):
 
 def plan(records, fb, jobs, today):
     """只用職缺代號配卡;日期僅用來避免把舊一輪的記錄誤當成再次投遞。"""
-    records = _records(records)
+    found, rest = _lines(records, jobs)
     by_id = {posting_key(j['id']): j for j in jobs if posting_key(j['id'])}
-    record_ids = {(r['platform'], r['id']) for r in records}
-    record_platforms = {r['platform'] for r in records}
+    pairs = found + [(by_id.get((r['platform'], r['id'])), r) for r in _records(rest)]
+    record_ids = {(r['platform'], r['id']) for _, r in pairs}
+    record_platforms = {r['platform'] for _, r in pairs}
     to_mark, unknown = [], []
-    for record in records:
-        job = by_id.get((record['platform'], record['id']))
+    for job, record in pairs:
         if not job:
             unknown.append(record)
             continue
@@ -134,7 +155,6 @@ def mark(board, to_mark, today):
 def sync(board, records):
     """將 agent 回傳的職缺代號對到卡片並更新投遞狀態。"""
     today = datetime.date.today()
-    records = _records(records)
     if not records:
         return ''
     with open(board, encoding='utf-8') as f:

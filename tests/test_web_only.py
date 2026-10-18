@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """使用者只碰網頁就能做完的事:設定頁讀寫、上傳、卡片自己的檔、貼網址加入、分類建議、看紀錄、104 對帳。"""
-import os, sys, json, time, shutil, unittest, urllib.request, contextlib
+import os, re, sys, json, time, shutil, unittest, urllib.request, contextlib
 from unittest.mock import Mock, patch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
@@ -677,28 +677,53 @@ class AddJobReal(unittest.TestCase):
                 self.assertIs(seen['par'], bool(on))
 
     def test_jobs_judged_outside_skip_the_agent_but_still_pass_the_gate(self):
-        """別的 agent 已經讀過 JD、照交件單格式判好的:不再派 agent 讀第二次;程式照樣抓頁、照樣過安檢門,
-        引用在頁面原文裡找不到的那張照加(他要的),摘要不用、原因照實回報。"""
-        import tempfile, add_job, research, page_fetch
+        """別的 agent 照 --hand 印出來的指示判(編號、交付代號是那一份的):--judged --round 不再派 agent、不抓頁、
+        不重讀偏好筆記與相似舊卡,照那一輪存下的材料過安檢門。照編號判的那張摘要收下、引的是快照裡的字;
+        引別張 JD 的那張、抄錯交付代號的那一組照加(他要的),摘要不用。"""
+        import tempfile, add_job, research, page_fetch, prefs
         d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         make_board(p, {})
-        jd = 'Acme is hiring a Platform Engineer to build secure systems. Remote, Asia time zones.'
-        page = lambda url: page_fetch.PageResult(url, 'ok', text=jd, title='Platform Engineer', via='direct', http_status=200)
-        good = {'title': 'Platform Engineer', 'company': 'Acme', 'keep': True, 'fit': 4, 'why': '遠端、亞洲時區',
-                'cat': research.CATS[0], 'card': {'fit': '他做過平台', 'co': 'Acme', 'loc': 'Remote'},
-                'reasons': [{'text': '可遠端', 'citation': 'Remote, Asia time zones', 'basis': 'JD 原文'}]}
-        bad = dict(good, reasons=[{'text': '要求 10 年', 'citation': '10 years of experience', 'basis': 'JD 原文'}])
-        answers = {'https://ex.test/good': good, 'https://ex.test/bad': bad}
+        urls = {k: f'https://ex.test/{k}' for k in ('good', 'other', 'stale')}
+        text = {u: f'Acme builds secure systems ({k}).\nRemote, Asia time zones.' for k, u in urls.items()}
+        page = lambda url: page_fetch.PageResult(url, 'ok', text=text[url], title='Platform Engineer', via='direct',
+                                                 http_status=200)
+        note = '# 偏好筆記\n他喜歡平台工程'
+
+        def row(url, reasons):
+            return {'url': url, 'title': {'text': 'Platform Engineer', 'cite': [tb.Q('Platform Engineer')]}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 4,
+                    'why': '遠端、亞洲時區', 'cat': research.CATS[0],
+                    'card': {'fit': '他做過平台', 'co': 'Acme', 'loc': 'Remote'}, 'reasons': reasons}
+        good = [{'text': '可遠端', 'citation': [tb.Q('Remote, Asia time zones.')], 'basis': 'JD 原文'},
+                {'text': '他喜歡', 'citation': [tb.Q('他喜歡平台工程')], 'basis': '偏好筆記'}]
         with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
-                patch.object(page_fetch, 'fetch', side_effect=page):
-            n = add_job.run(list(answers), p, run_agent=lambda *a, **k: self.fail('判好的不該再派 agent'),
-                            answers=answers)
-        self.assertEqual(n, 2)
+                patch.object(research, 'BATCH', 2), patch.object(page_fetch, 'fetch', side_effect=page), \
+                patch.object(prefs, 'ensure_note', return_value=note):
+            rd, prompts, _ = add_job.hand(list(urls.values()), p)
+        self.assertEqual(len(prompts), 2)                                   # 一批兩張:good、other 一批,stale 一批
+        steal = prompts[0].split('=== J1 ===', 1)[1]
+        stolen = int(re.search(r'^(\d+)\. Remote, Asia time zones\.$', steal, re.M)[1])   # J1(good)的 JD
+        groups = [tb.judge_sheet(prompts[0], [row(urls['good'], good),
+                                              row(urls['other'], [{'text': '可遠端', 'citation': [stolen],
+                                                                   'basis': 'JD 原文'}])]),
+                  tb.judge_sheet(prompts[1], [row(urls['stale'], good)], material_id='ffffff')]
+        judged = os.path.join(d, 'judged.json')
+        with open(judged, 'w', encoding='utf-8') as f:
+            json.dump(groups, f, ensure_ascii=False)
+        boom = Mock(side_effect=AssertionError('--judged 只讀那一輪存下的材料'))
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch_many', boom), patch.object(page_fetch, 'fetch', boom), \
+                patch.object(prefs, 'ensure_note', boom), patch.object(prefs, 'neighbors', boom), \
+                patch.object(sys, 'argv', ['add_job.py', '--judged', judged, '--round', rd, '--board', p]):
+            add_job.main()
         data = read_board(p)
         cards = {j['id']: j for j in data['data']['jobs']}
-        self.assertEqual(cards['https://ex.test/good']['sum']['fit'], '他做過平台')
-        self.assertNotEqual(cards['https://ex.test/bad']['sum']['fit'], '他做過平台')   # 引用對不上:摘要不用
-        self.assertIn('摘要沒寫成', cards['https://ex.test/bad']['src']['why'])    # 寫在卡上,不發回報(他處理不了)
+        self.assertEqual(set(cards) & set(urls.values()), set(urls.values()))     # 三張都加(他自己貼的)
+        self.assertEqual(cards[urls['good']]['sum']['fit'], '他做過平台')
+        self.assertEqual([r['citation'] for r in cards[urls['good']]['src']['reasons']],
+                         ['Remote, Asia time zones.', '他喜歡平台工程'])          # 快照裡的 JD 與筆記
+        for bad in ('other', 'stale'):
+            self.assertNotEqual(cards[urls[bad]]['sum']['fit'], '他做過平台')      # 引用不收:摘要不用
+            self.assertIn('摘要沒寫成', cards[urls[bad]]['src']['why'])         # 寫在卡上,不發回報(他處理不了)
         self.assertEqual(json.loads(data['fb']).get('__inbox__') or [], [])
 
     def test_no_agent_available_keeps_the_jobs_waiting_instead_of_empty_cards(self):
@@ -784,13 +809,14 @@ class AddJobReal(unittest.TestCase):
         d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
         make_board(p, {})
         page = lambda url: page_fetch.PageResult(url, 'ok', text='首页 职位 活动 学习 登录 注册', title='DeJob', via='direct')
-        miss = {'missing': '網站首頁,沒有職缺內容', 'title': '', 'company': '', 'keep': False, 'fit': 1, 'why': '',
-                'cat': research.CATS[0], 'card': {}, 'reasons': [{'text': '看不到', 'citation': '筆記裡沒有相關的',
-                                                                   'basis': '推估'}]}
+        miss = {'missing': '網站首頁,沒有職缺內容', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': False, 'fit': 1, 'why': '',
+                'cat': research.CATS[0], 'card': {}, 'reasons': [{'text': '看不到', 'citation': [], 'basis': '推估'}]}
         urls = ['https://ex.test/home-1', 'https://ex.test/home-2']
         with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
                 patch.object(page_fetch, 'fetch', side_effect=page):
-            self.assertEqual(add_job.run(urls, p, answers={u: miss for u in urls}), 0)
+            rd, prompts, _ = add_job.hand(urls, p)
+            answers = {u: dict(miss, material_id=tb.material(prompts[0])) for u in urls}
+            self.assertEqual(add_job.run([], p, answers=answers, round_dir=rd), 0)
         data = read_board(p)
         self.assertFalse({j['id'] for j in data['data']['jobs']} & set(urls))
         self.assertEqual(json.loads(data['fb']).get('__inbox__') or [], [])
@@ -798,6 +824,93 @@ class AddJobReal(unittest.TestCase):
             st = json.load(f)
         self.assertEqual([x['url'] for x in st['unadded']], urls)
         self.assertTrue(all('網站首頁' in x['why'] for x in st['unadded']))
+
+    def test_judged_rows_of_one_batch_that_copied_different_delivery_ids_say_so(self):
+        """外面判好交進來的,同一批的列抄了不同的交付代號:整批的引用不收,原因要講是這一批抄的代號不一樣、各是哪個,
+        不是說成交件單沒寫代號。"""
+        import tempfile, add_job, research, page_fetch
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        page = lambda url: page_fetch.PageResult(url, 'ok', text='About the job\nWork on policy.', title='Policy Intern',
+                                                 via='direct')
+        miss = {'missing': '', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': False, 'fit': 1, 'why': '', 'cat': research.CATS[0],
+                'card': {}, 'reasons': [{'text': '看不到', 'citation': [], 'basis': '推估'}]}
+        urls = ['https://ex.test/mixed-1', 'https://ex.test/mixed-2']
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', side_effect=page):
+            rd, prompts, _ = add_job.hand(urls, p)
+            with open(os.path.join(rd, 'handed.json'), encoding='utf-8') as f:
+                handed = json.load(f)
+            prepared = [research.Batch.load(b) for b in handed['batches']]
+            right = tb.material(prompts[0])
+            answers = {urls[0]: dict(miss, material_id=right), urls[1]: dict(miss, material_id='0ther0')}
+            res = research.judge([c for b in prepared for c in b.cands], [], rd, False, None, mode='add', board=p,
+                                 answers=answers, prepared=prepared, resumes=handed['resumes'])
+        for u in urls:
+            said = '；'.join(res[u]['wrong'])
+            self.assertIn('不同的交付代號', said)
+            self.assertIn(right, said)
+            self.assertIn('0ther0', said)
+
+    def test_two_hand_overs_in_the_same_second_each_keep_their_own_round(self):
+        """同一秒交兩次 --hand:各自一個夾;第一次印出的 --round 讀到的還是第一次的材料,不被第二次蓋掉。"""
+        import tempfile, add_job, research, page_fetch
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        page = lambda url: page_fetch.PageResult(url, 'ok', text=f'Engineer at {url}', title='Engineer', via='direct')
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', side_effect=page), \
+                patch.object(time, 'strftime', return_value='20261018-120000'):
+            first, _, _ = add_job.hand(['https://ex.test/first'], p)
+            add_job.hand(['https://ex.test/second'], p)
+        with open(os.path.join(first, 'handed.json'), encoding='utf-8') as f:
+            handed = json.load(f)
+        self.assertEqual([c['url'] for b in handed['batches'] for c in b['cands']], ['https://ex.test/first'])
+
+    def test_a_hand_over_names_the_urls_left_out_because_the_job_is_gone(self):
+        """--hand 裡下架(404/410)的網址:印出哪幾個沒加、為什麼;判好交回來那一輪的結果也列著,跟 --url 一樣。"""
+        import io, tempfile, add_job, research, page_fetch
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        gone, live = 'https://ex.test/gone', 'https://ex.test/live'
+        page = lambda url: page_fetch.PageResult(url, 'closed' if url == gone else 'ok', text='Engineer at Acme',
+                                                 title='Engineer', via='direct', http_status=404 if url == gone else 200)
+        miss = {'missing': '網站首頁,沒有職缺內容', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': False, 'fit': 1, 'why': '',
+                'cat': research.CATS[0], 'card': {}, 'reasons': [{'text': '看不到', 'citation': [], 'basis': '推估'}]}
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', side_effect=page):
+            with patch.object(sys, 'argv', ['add_job.py', '--hand', gone, live, '--board', p]), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                add_job.main()
+            printed = out.getvalue()
+            rd = re.search(r'--round (\S+)', printed)[1]
+            add_job.run([], p, answers={live: dict(miss, material_id=tb.material(printed))}, round_dir=rd)
+        self.assertTrue(any(gone in line and '職缺已下架' in line for line in printed.splitlines()), printed[-300:])
+        with open(os.path.join(d, add_job.STATUS), encoding='utf-8') as f:
+            self.assertEqual({x['url']: x['why'] for x in json.load(f)['unadded']}.get(gone), '職缺已下架')
+
+    def test_a_round_handed_before_gone_urls_were_saved_still_judges(self):
+        """8fbe2c1 之前 --hand 存的 handed.json 只有 resumes 和 batches、沒有 gone:判好交回來要能收尾,沒有 gone 就是沒有網址下架。
+        虛擬碼:handed.json 拿掉 gone → run(round_dir) 照常跑完,沒加的清單只有 agent 退回的那一張。"""
+        import tempfile, add_job, research, page_fetch
+        d = self.enterContext(tempfile.TemporaryDirectory()); p = os.path.join(d, 'board.html')
+        make_board(p, {})
+        live = 'https://ex.test/old-round'
+        page = lambda url: page_fetch.PageResult(url, 'ok', text='Engineer at Acme', title='Engineer', via='direct')
+        miss = {'missing': '網站首頁,沒有職缺內容', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': False, 'fit': 1, 'why': '',
+                'cat': research.CATS[0], 'card': {}, 'reasons': [{'text': '看不到', 'citation': [], 'basis': '推估'}]}
+        with patch.object(add_job, 'SP', d), patch.object(research, 'DIR', os.path.join(d, 'r')), \
+                patch.object(page_fetch, 'fetch', side_effect=page):
+            rd, prompts, _ = add_job.hand([live], p)
+            path = os.path.join(rd, 'handed.json')
+            with open(path, encoding='utf-8') as f:
+                handed = json.load(f)
+            del handed['gone']
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(handed, f, ensure_ascii=False)
+            add_job.run([], p, answers={live: dict(miss, material_id=tb.material(prompts[0]))}, round_dir=rd)
+        with open(os.path.join(d, add_job.STATUS), encoding='utf-8') as f:
+            self.assertEqual([x['url'] for x in json.load(f)['unadded']], [live])
 
 
 class Translate(unittest.TestCase):
@@ -810,7 +923,7 @@ class Translate(unittest.TestCase):
                   'ds': 'parked', 'apply': {'session': 'S', 'tab_id': '1'}}}
         self.assertEqual(run.eligible({u: JOBS[0]}, fb, 'fix'), [u])
         import chrome_door
-        p, _ = run.prompt_for('fix', u, JOBS[0], fb, '/tmp/b.html', door=chrome_door.of('codex'))
+        p, _, _n = run.prompt_for('fix', u, JOBS[0], fb, '/tmp/b.html', door=chrome_door.of('codex'))
         self.assertIn('新的中文', p)
         self.assertIn('fr.translate', p)
 
@@ -869,27 +982,36 @@ class Sync104(unittest.TestCase):
                                 fb, jobs, datetime.date(2026, 10, 1))
         self.assertEqual([j['id'] for j, _ in suspect], [h1])   # LinkedIn 這輪沒讀到,不懷疑
 
-    def test_agent_result_keeps_link_and_platform(self):
+    def test_agent_result_hands_the_platform_and_its_record_line(self):
+        """交給對帳的是平台和那一筆所在的那幾段程式的字(#465):每一筆只收它寫的那個平台的應徵紀錄頁。"""
         import reply_run as rr
+        from numbered import Numbered
         url = 'https://jobs.lever.co/x/1'
-        # 代號要在程式複製的平台應徵紀錄裡看得到才收(#317)
-        records = {'application_record:linkedin': 'Applied 4012345678 Senior Designer',
-                   'application_record:lever': 'acme 0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d'}
-        got = rr.parse_result({'checked': [], 'job_ids': [
-            {'url': 'https://jobs.lever.co/acme/0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d', 'title': 'B'},
-            {'platform': 'linkedin', 'id': '4012345678'}]}, [url], texts=records).job_ids
-        self.assertEqual(got[0]['url'], 'https://jobs.lever.co/acme/0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d')
-        self.assertEqual((got[1]['platform'], got[1]['id']), ('linkedin', '4012345678'))
+        numbered = Numbered()
+        numbered.add('Applied 4012345678 Senior Designer', 'record', 'application_record:linkedin')
+        numbered.add('acme 0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d', 'record', 'application_record:lever')
+        got = rr.parse_result({'material_id': numbered.material_id, 'checked': [], 'job_ids': [
+            {'platform': 'lever', 'at': [2], 'title': 'B'}, {'platform': 'linkedin', 'at': [1]}]},
+            [url], numbered=numbered).job_ids
+        self.assertEqual([(g['platform'], g['line']) for g in got],
+                         [('lever', 'acme 0b5a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d'),
+                          ('linkedin', 'Applied 4012345678 Senior Designer')])
 
     def test_an_id_the_program_did_not_see_on_the_records_page_marks_nothing(self):
-        """安檢門(#317):平台應徵紀錄的代號,程式複製的紀錄頁裡看不到(或程式根本沒讀到紀錄頁)就不拿來標已投遞。"""
+        """安檢門(#317):引的段不在程式複製的紀錄頁上(或程式根本沒讀到紀錄頁)就不拿來標已投遞。"""
         import reply_run as rr
+        from numbered import Numbered
         url = 'https://jobs.lever.co/x/1'
-        raw = {'checked': [], 'job_ids': [{'platform': '104', 'id': 'zz9zz'}]}
-        seen = rr.parse_result(raw, [url], texts={'application_record:104': 'aaaa1 已應徵'})
+        numbered = Numbered()
+        numbered.add('aaaa1 已應徵', 'record', 'application_record:104')
+        raw = {'material_id': numbered.material_id, 'checked': [], 'job_ids': [{'platform': '104', 'at': [5]}]}
+        seen = rr.parse_result(raw, [url], numbered=numbered)
         self.assertEqual(seen.job_ids, [])
-        self.assertTrue(any('zz9zz' in d for d in seen.dropped))
-        self.assertEqual(rr.parse_result(raw, [url]).job_ids, [])
+        self.assertTrue(any('段落編號無效' in d and '5' in d for d in seen.dropped))
+        mail_only = Numbered()                                  # 這一輪程式沒讀到紀錄頁:只有信
+        mail_only.add('aaaa1 已應徵', 'mail', 'email:thr001')
+        raw = dict(raw, material_id=mail_only.material_id, job_ids=[{'platform': '104', 'at': [1]}])
+        self.assertEqual(rr.parse_result(raw, [url], numbered=mail_only).job_ids, [])
 
     def test_agent_checks_104_application_history_on_every_run(self):
         import reply_run as rr

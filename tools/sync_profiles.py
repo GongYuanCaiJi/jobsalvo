@@ -29,6 +29,7 @@ import evidence               # noqa: E402
 import form_record as fr      # noqa: E402
 import gate_cells             # noqa: E402
 from gate_cells import Problem  # noqa: E402
+from numbered import Miscited, Numbered, pick  # noqa: E402
 import profile_sync as ps     # noqa: E402
 
 REPORT_FROM = '平台履歷同步'
@@ -72,10 +73,9 @@ def _reading_parts(page):
 
 
 def _selected_parts(parts, ids):
-    if (not isinstance(ids, list) or any(type(number) is not int or number < 1 or number > len(parts)
-                                         for number in ids) or len(set(ids)) != len(ids)):
-        raise ValueError('agent 交回的段落編號無效')
-    return [parts[number - 1] for number in ids]
+    numbered = Numbered()
+    numbered.add(parts, 'line')
+    return [part.text for part in pick(numbered, ids).parts]
 
 
 CHECK_MARKS = {'已勾選': '☑', '已選取': '☑', '未勾選': '☐', '未選取': '☐'}
@@ -632,6 +632,11 @@ def _sync_slot(platform, lang, variant, entry, board, *, card_url='', source_fil
     attachments = ps._attachments_fp(lang, variant) if source_file is None else None
     expected = ps.slot_attachments(lang, variant) if source_file is None else []
     attachments_due = source_file is None and (verify_only or baseline.get('attachments') != attachments)
+    missing = [Problem(f'附件「{name}」要寄的檔不在本機:Markdown 原稿要先排成 PDF(跑 reconcile),'
+                       '其他檔要放回設定裡的位置', 'setup')
+               for name, path in expected if attachments_due and not os.path.isfile(path)]
+    if missing:
+        return _failure(platform, lang, variant, entry, board, missing, card_url)
     if not changes and not attachments_due:
         if same_entry and not verify_only and baseline.get('master') != master_fp:
             ps.remember_sync(platform, lang, variant, source, current_answers, master_fp, attachments=attachments)
@@ -868,8 +873,8 @@ def _sync_slot(platform, lang, variant, entry, board, *, card_url='', source_fil
                 before = read(f'before-{index}', item=change['item'])
                 known_drift = Counter()   # 範圍外的變動，照次數記：同字也在範圍內時不連那一份一起忽略
                 r0_tab = tab_id
-                parts = _reading_parts(before)
-                numbered = '\n'.join(f'{number}. {part}' for number, part in enumerate(parts, 1))
+                numbered = Numbered()
+                listing = numbered.add(_reading_parts(before), 'line')
                 before_document = capture_document(before, index)
                 active_step = '輸入這一處'
                 edited = ask(f'edit-{index}',
@@ -877,11 +882,13 @@ def _sync_slot(platform, lang, variant, entry, board, *, card_url='', source_fil
                              '（例如字數計數）。原文相同（字和標點符號都一樣；換行、拆成不同欄位不算差別）就保持頁面不動；'
                              '平台上多了原稿沒有的符號（例如 ` 或 **）就改掉。沒有原文才選空陣列。'
                              '同一個欄位裡還有別段內容時，只改這一處，其他段落原樣保留。'
-                             f'需要修改時放入原稿並停在未存檔狀態。原稿：{target}\nR0 段落：\n{numbered}')
+                             f'需要修改時放入原稿並停在未存檔狀態。原稿：{target}\nR0 段落：\n{listing}\n'
+                             f'交回時多寫 "material_id":"{numbered.material_id}"(這一份 R0 段落的代號)。')
                 ids = edited.get('ids')
                 try:
-                    selected = _selected_parts(parts, ids)
-                except ValueError:
+                    numbered.check_id(edited.get('material_id'))
+                    selected = [part.text for part in pick(numbered, ids).parts]
+                except Miscited:
                     # 編號不在 R0 上：agent 多半在別頁找到了輸入處。不在 R0 那一頁就同樣到那一頁重讀 R0、重做一次
                     here = door.read_profile_page(tab_id) or {}
                     moved = (not _same_page_url(here.get('url'), before.get('url'))

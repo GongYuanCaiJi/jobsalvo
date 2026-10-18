@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config as cf
+import markdown_pdf
 REG = cf.path('profiles.json')
 PLATFORMS = {
     '104': ('104.com.tw',),
@@ -138,9 +139,10 @@ def _master_fp(lang, variant):
 
 
 def slot_attachments(lang, variant):
-    """固定平台履歷上該有的附件(本機是真相,平台是鏡像):這份履歷、這個語言設定要附的每一份。回 [(名稱, 路徑)]。"""
+    """固定平台履歷上該有的附件(本機是真相,平台是鏡像):這份履歷、這個語言設定要附的每一份。
+    回 [(名稱, 卡片實際會寄的檔)]:Markdown 原稿換成它排好的 PDF。同步的比對、叫 agent 上傳、指紋都吃這一份。"""
     ids = set(variant.split('+'))
-    return [(str(a.get('name') or os.path.basename(a['files'][lang])), cf.path(a['files'][lang]))
+    return [(str(a.get('name') or os.path.basename(a['files'][lang])), markdown_pdf.sent_file(cf.path(a['files'][lang])))
             for a in cf.ATTACHMENTS
             if a.get('enabled', True) and (a.get('files') or {}).get(lang)
             and (not a.get('resume_ids') or ids & set(a['resume_ids']))]
@@ -602,7 +604,7 @@ def attachment_sources(job, fb, delivery=None):
     profile_kind = (delivery or {}).get('profile_kind')
     if profile_kind == 'fixed' and (delivery or {}).get('original_only'):
         sources = [
-            dict(item, effective_path=item.get('source') or item['effective_path'])
+            dict(item, effective_path=markdown_pdf.sent_file(item['source']))
             for item in sources
         ]
     elif profile_kind == 'custom':
@@ -611,34 +613,6 @@ def attachment_sources(job, fb, delivery=None):
             if item.get('kind') == 'resume' and item.get('effective_path')
         )
     return sources
-
-
-def attachment_fingerprint(job, fb, delivery=None):
-    """清單選擇與這份平台履歷要用的檔案內容指紋,用來決定是否需要重新下載。"""
-    import ship
-    resume_id, lang = ship.resolve(job, fb)
-    choices = []
-    for item in cf.ATTACHMENTS:
-        files = {}
-        for file_lang, relative in sorted((item.get('files') or {}).items()):
-            path = cf.path(relative) if relative else None
-            files[file_lang] = {'path': relative, 'sha256': _sha_file(path)}
-        choices.append({
-            'id': str(item.get('id') or ''),
-            'enabled': item.get('enabled', True),
-            'resume_ids': list(item.get('resume_ids') or []),
-            'files': files,
-        })
-    effective = [{
-        'id': item.get('id'), 'name': item.get('name'),
-        'path': os.path.relpath(item['effective_path'], cf.HOME)
-                if item.get('effective_path') else None,
-        'sha256': _sha_file(item.get('effective_path')),
-    } for item in attachment_sources(job, fb, delivery)]
-    content = json.dumps({
-        'resume_id': resume_id, 'lang': lang, 'choices': choices, 'effective': effective,
-    }, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
-    return hashlib.sha256(content).hexdigest()
 
 
 def _same_bytes(left, right):

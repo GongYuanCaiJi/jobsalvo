@@ -18,6 +18,7 @@ gate —— 安檢門(GLOSSARY「安檢門」「交件單」):agent 交回來的
   agent 判斷 程式核對不了的判斷(一封信算拒絕還是面試):不進 facts,用的地方標明「agent 判斷」、附原文、可以復原
 沒登記的格子不進 facts,程式用不到(tests/test_gate.py 另有測試:指示裡叫 agent 寫的每一格都要登記)。
 """
+import copy
 import json
 import os
 import sys
@@ -32,6 +33,7 @@ from gate_cells import (CHECK, DECIDED, JUDGED, UNUSED, WORDS, Row, RowTruth, Tr
                         Verdict, short)
 from gate_flows import (CUSTOMIZE, LINK_STATUS, POSTED_AT, PREPARE, REPLY, RESEARCH_JUDGE,  # noqa: E402
                         RESEARCH_SEARCH, SUGGEST_CATS)
+from numbered import Accept, Miscited, pick  # noqa: E402
 
 # 每一種交件單的檔名(* 是每一輪、每一批不一樣的那一段)。程式裡別處打開這些檔,tests/test_gate.py 的結構測試就失敗
 FILES = {'fill': 'fill.json', 'submit': 'submit.json', 'profile_choice': 'profile-choice.json',
@@ -46,7 +48,7 @@ NESTED = ('posting', 'profile', 'delivery')   # 交件單裡這幾格底下還�
 ROWS = {'posted_at': {'dates': 'url', 'inaccessible': 'url'}, 'link_status': {'jobs': 'id'},
         'suggest_cats': {'categories': 'name', 'tags': 'name'}, 'customize': {'reports': 'issue'},
         'research_search': {'candidates': 'url'}, 'research_judge': {'jobs': 'id'},
-        'reply': {'findings': 'url', 'job_ids': 'id', 'inaccessible': 'source'}}
+        'reply': {'findings': 'url', 'job_ids': 'platform', 'inaccessible': 'source'}}
 
 SHEETS = {'fill': FILL, 'submit': SUBMIT, 'profile_choice': PROFILE_CHOICE, 'posted_at': POSTED_AT,
           'link_status': LINK_STATUS, 'suggest_cats': SUGGEST_CATS, 'customize': CUSTOMIZE, 'prepare': PREPARE,
@@ -67,8 +69,27 @@ def cells(sheet):
     return out
 
 
-def _check(table, flat, whole, truth, where=''):
-    """一張(或一列)交件單照登記的方式核對:回 (facts, judged, said, problems, unregistered)。"""
+def _resolve(cite, value, whole, truth, numbered):
+    """有 cite 的格:編號換成程式的字(Cited)。{鍵: Accept} 的格每一筆各自換那個鍵,種類照那一筆判。"""
+    if isinstance(cite, Accept):
+        return pick(numbered, value, cite, row=whole, truth=truth)
+    out = copy.deepcopy(value)
+    items = out if isinstance(out, list) else [out]
+    if not all(isinstance(item, dict) for item in items):
+        raise Miscited(f'要寫物件(或物件的清單),{"、".join(cite)} 寫段落編號,agent 寫的是 {short(value)}')
+    for item in items:
+        for key, accept in cite.items():
+            if key in item or (accept.value and accept.value in item):   # 寫了值沒指段落也要核
+                item[key] = pick(numbered, item.get(key), accept, row=whole, truth=truth, item=item)
+                if accept.value:      # 要當值用的格:agent 寫的值換成核對過的那一截程式的字
+                    item[accept.value] = item[key]
+    return out
+
+
+def _check(table, flat, whole, truth, where='', numbered=None, stale=None):
+    """一張(或一列)交件單照登記的方式核對:回 (facts, judged, said, problems, unregistered)。
+    有 cite 的格:程式沒交材料(numbered 是 None)是程式的錯,停下;交付代號對不上(stale)或編號不收就一條問題,
+    不進 facts/judged、不跑 fn。fn 拿 agent 寫的編號;收下的是程式的字,放進 how 決定的那一格。"""
     problems, facts, judged, said, unregistered = [], {}, {}, {}, []
     for name, cell in table.items():
         missing = cell.required(truth) if callable(cell.required) else cell.required
@@ -80,6 +101,20 @@ def _check(table, flat, whole, truth, where=''):
         if cell is None:
             unregistered.append(name)
             continue
+        kept = value
+        if cell.cite is not None:
+            if numbered is None:
+                raise RuntimeError(f'交件單「{cell.name}」{where}要核對段落編號,呼叫安檢門的地方卻沒交這一次的編號材料:'
+                                   '是程式的錯,不是 agent 的')
+            if stale:
+                if stale not in problems:
+                    problems.append(stale)
+                continue
+            try:
+                kept = _resolve(cell.cite, value, whole, truth, numbered)
+            except Miscited as e:
+                problems.append(f'交件單「{cell.name}」{where}:{e}')
+                continue
         got = cell.fn(value, whole, truth) if cell.fn else None
         if got is UNUSED:
             continue
@@ -91,13 +126,13 @@ def _check(table, flat, whole, truth, where=''):
         head, _, sub = name.partition('.')
         for box in (keep if not got or cell.how == WORDS else (said,)):
             if sub:
-                box.setdefault(head, {})[sub] = value
+                box.setdefault(head, {})[sub] = value if box is said else kept
             else:
-                box[name] = value
+                box[name] = value if box is said else kept
     return facts, judged, said, problems, unregistered
 
 
-def _rows(kind, head, value, truth):
+def _rows(kind, head, value, truth, numbered=None, stale=None):
     """一列一列的清單:每一列各自核對。回 ([Row], 整張的問題, 沒登記的格子)。"""
     table = {name.partition('.')[2]: cell for name, cell in SHEETS[kind].items() if name.startswith(head + '.')}
     if not isinstance(value, list):
@@ -109,26 +144,38 @@ def _rows(kind, head, value, truth):
             problems.append(f'交件單「{head}」裡有一列不是物件:{short(row)}')
             continue
         key = str(row.get(by) or '')
-        facts, judged, _said, bad, unregistered = _check(table, row, row, RowTruth(truth, key), f'({short(key, 80)})')
+        facts, judged, _said, bad, unregistered = _check(table, row, row, RowTruth(truth, key), f'({short(key, 80)})',
+                                                         numbered, stale)
         rows.append(Row(key, row, facts, judged, bad))
         problems += [p for p in bad if p not in problems]
         loose += [f'{head}.{n}' for n in unregistered if f'{head}.{n}' not in loose]
     return rows, problems, loose
 
 
-def inspect(kind, sheet, truth):
+def inspect(kind, sheet, truth, numbered=None):
     """安檢門:交件單的每一格照登記的方式核對。回 Verdict(facts 只有登記過、核對過的格子,judged 是 agent 判斷,
-    problems 每一條一句;一列一列的清單每一列各自的結果在 rows)。"""
+    problems 每一條一句;一列一列的清單每一列各自的結果在 rows)。
+    numbered:這一張對應的那一次交付(程式印進指示的編號材料),只傳到 pick,不放進 truth;
+    交件單最上層的 material_id 在這裡跟它核一次,對不上這一張的每一個 cite 格都不收。"""
     table = SHEETS[kind]
     if not isinstance(sheet, dict):
         return Verdict({}, ['交件單不是一個物件'], [])
+    said_id = sheet.get('material_id')
+    sheet = {k: v for k, v in sheet.items() if k != 'material_id'}
+    truth.read = numbered.held() if numbered is not None else frozenset()
+    stale = None
+    if numbered is not None:
+        try:
+            numbered.check_id(said_id)
+        except Miscited as e:
+            stale = str(e)
     lists = ROWS.get(kind) or {}
     flat = {k: v for k, v in cells(sheet).items() if k not in lists}
     top = {n: c for n, c in table.items() if n.partition('.')[0] not in lists}
-    facts, judged, said, problems, unregistered = _check(top, flat, sheet, truth)
+    facts, judged, said, problems, unregistered = _check(top, flat, sheet, truth, '', numbered, stale)
     rows = {}
     for head in lists:
-        rows[head], bad, loose = _rows(kind, head, sheet.get(head, []), truth)
+        rows[head], bad, loose = _rows(kind, head, sheet.get(head, []), truth, numbered, stale)
         problems += [p for p in bad if p not in problems]
         unregistered += loose
     verdict = Verdict(facts, problems, unregistered, said, judged, rows)

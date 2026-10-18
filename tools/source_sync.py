@@ -81,12 +81,6 @@ def entry_fingerprint(entry):
     return digest.hexdigest()
 
 
-def effective_path(entry):
-    if entry['path'].lower().endswith(('.md', '.markdown')):
-        return markdown_pdf.output_path(entry['path'])
-    return entry['path']
-
-
 def read_manifest(path=None):
     if path is None:
         path = os.path.join(cf.HOME, '.reconcile-manifest.json')
@@ -106,8 +100,8 @@ def stale(path=None, manifest=None, board=None):
         current = entry_fingerprint(entry)
         if manifest.get(input_key(entry)) != current:
             return True
-        output = effective_path(entry)
-        if entry['path'].lower().endswith(('.md', '.markdown')) and not os.path.isfile(output):
+        output = markdown_pdf.sent_file(entry['path'])
+        if markdown_pdf.is_markdown(entry['path']) and not os.path.isfile(output):
             return True
         if output.lower().endswith('.pdf') and os.path.isfile(output):
             cached = manifest.get(preview_key(entry))
@@ -116,7 +110,7 @@ def stale(path=None, manifest=None, board=None):
                 return True
             if not cached and manifest.get(preview_attempt_key(entry)) != current:
                 return True
-        if entry['path'].lower().endswith(('.md', '.markdown')) and manifest.get(page_key(entry)) is None:
+        if markdown_pdf.is_markdown(entry['path']) and manifest.get(page_key(entry)) is None:
                 return True
     return any(k.startswith('file:') and k.count(':') == 3 and k not in keys
                for k in manifest)
@@ -151,7 +145,7 @@ def prune_rendered(board):
     """排出來的 PDF 只留現在用得到的:原稿換了位置、不用了,舊的立刻丟(都能重排出來),空資料夾一併收掉。"""
     root = os.path.join(cf.HOME, '.rendered')
     norm = lambda path: unicodedata.normalize('NFC', path)
-    keep = {norm(effective_path(entry)) for entry in files(board)}
+    keep = {norm(markdown_pdf.sent_file(entry['path'])) for entry in files(board)}
     for folder, _dirs, names in os.walk(root, topdown=False):
         if '.markdown-pdf-' in folder:   # 正在排版的暫存夾
             continue
@@ -179,8 +173,8 @@ def refresh(manifest, check_only=False, board=None, diagnostics=None):
         key = input_key(entry)
         preview = preview_key(entry)
         current = entry_fingerprint(entry)
-        output = effective_path(entry)
-        is_markdown = entry['path'].lower().endswith(('.md', '.markdown'))
+        output = markdown_pdf.sent_file(entry['path'])
+        is_markdown = markdown_pdf.is_markdown(entry['path'])
         cached = manifest.get(preview)
         cached_path = pdf_preview.cache_path(cached) if cached else None
         needs_preview = (output.lower().endswith('.pdf') and os.path.isfile(output)

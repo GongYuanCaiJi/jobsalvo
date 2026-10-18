@@ -2,6 +2,7 @@
 import glob
 import json
 import os
+import re
 import shutil
 import sys
 import unittest
@@ -89,17 +90,22 @@ class ParagraphIds(unittest.TestCase):
 
     def run_flow(self, source, before, after, ids, *, restored=None, verify_only=True,
                  old_source='# 作品\n- 舊影片\n', read_pages=None, on_step=None,
-                 baseline_answers=(), handoff_step=None, edit_tab='1:p1', shown=None, translation=None):
+                 baseline_answers=(), handoff_step=None, edit_tab='1:p1', shown=None, translation=None,
+                 material=None):
+        """material(step, 每一步指示印的交付代號) → 這一步交回的代號;沒給就抄這一步自己指示上的。"""
         with open(os.path.join(self.home, 'resume', 'one.md'), 'w', encoding='utf-8') as out:
             out.write(source)
         ps.remember_sync('example.test', 'zh', 'one', old_source, list(baseline_answers), 'old-fingerprint')
         door = Pages(read_pages if read_pages is not None else [before, after, restored],
                      [restored] if restored else [], shown=shown)
-        prompts = []
+        prompts, printed = [], {}
 
         def agent(prompt, log, _home, _board, **kwargs):
             step = os.path.basename(kwargs['output_last_message']).removesuffix('.json')
             prompts.append((step, prompt))
+            shown = re.search(r'"material_id"\s*:\s*"([0-9a-f]+)"', prompt)
+            if shown:
+                printed[step] = shown.group(1)
             if on_step:
                 on_step(step)
             with open(log, 'w', encoding='utf-8') as out:
@@ -110,9 +116,12 @@ class ParagraphIds(unittest.TestCase):
                 return SimpleNamespace(ok=True, message=lambda: '')
             with open(kwargs['output_last_message'], 'w', encoding='utf-8') as out:
                 selected = (ids.get(int(step.split('-')[1]), []) if isinstance(ids, dict) else ids) if step.startswith(('edit-', 'select-')) else []
-                json.dump({'tab_id': edit_tab if step.startswith('edit-') else '1:p1', 'ids': selected,
-                           'handoff': step == handoff_step,
-                           'reason': '需要本人驗證' if step == handoff_step else ''}, out)
+                reply = {'tab_id': edit_tab if step.startswith('edit-') else '1:p1', 'ids': selected,
+                         'handoff': step == handoff_step, 'reason': '需要本人驗證' if step == handoff_step else ''}
+                said = material(step, printed) if material else printed.get(step)
+                if said is not None:
+                    reply['material_id'] = said
+                json.dump(reply, out)
             return SimpleNamespace(ok=True, message=lambda: '')
 
         with fake_door.installed(door), mock.patch.object(sp.apply_run, '_run_agent', side_effect=agent):
@@ -616,6 +625,33 @@ class ParagraphIds(unittest.TestCase):
         self.assertFalse(result[0])
         self.assertIn('段落編號無效', str(result[1]))
         self.assertEqual([step for step, _ in prompts], ['open-0', 'edit-0'])
+
+    def test_invalid_id_names_the_id_and_the_range(self):
+        before = page('作品', '舊影片')
+        result, _, _ = self.run_flow('# 作品\n- 新影片\n', before, page('作品', '新影片'), [99])
+        self.assertFalse(result[0])
+        self.assertIn('99', str(result[1]))
+        self.assertIn('1-2', str(result[1]))
+
+    def test_numbers_written_for_another_spots_r0_are_refused(self):
+        """兩處的 R0 都有 2 號、字不同:第二處交回的代號是第一處的、或沒寫,2 號就不能解成第二處的字(#465 R3)。"""
+        source, old = '# 作品\n- 新影片\n# 日期\n- 新日期\n', '# 作品\n- 舊影片\n# 日期\n- 舊日期\n'
+        r0a, r1a = page('作品', '舊影片', '日期', '舊日期'), page('作品', '新影片', '日期', '舊日期')
+        r0b = page('日期', '舊日期', '作品', '新影片', document='doc-2')
+        r1b = page('日期', '新日期', '作品', '新影片', document='doc-2')
+        reads = [r0a, r1a, r1a, r0b, r1b, r1b]
+        result, _, _ = self.run_flow(source, r0a, r1a, {0: [2], 1: [2]}, old_source=old, verify_only=False,
+                                     read_pages=list(reads))
+        self.assertEqual(result, (True, []))
+        for name, stale in (('第一處的代號', lambda seen: seen['edit-0']), ('沒寫代號', lambda seen: None)):
+            with self.subTest(name):
+                result, _, prompts = self.run_flow(
+                    source, r0a, r1a, {0: [2], 1: [2]}, old_source=old, verify_only=False, read_pages=list(reads),
+                    material=lambda step, seen, stale=stale: stale(seen) if step == 'edit-1' else seen.get(step))
+                self.assertFalse(result[0])
+                self.assertEqual([step for step, _ in prompts][-2:], ['open-1', 'edit-1'])
+                printed = re.search(r'"material_id"\s*:\s*"([0-9a-f]+)"', dict(prompts)['edit-1']).group(1)
+                self.assertIn(printed, str(result[1]))
 
     def test_selected_paragraphs_can_span_separate_contact_fields(self):
         before = page('個人名片', '小明', 'sample@example.test', '0912345678')

@@ -3356,17 +3356,20 @@ def confirmed_submission_evidence_case(board):
         job = next((item for item in jobs if (feedback.get(item['id']) or {}).get('ev')), None)
     if not job:
         raise ValueError('找不到只有送出頁證據的測試卡')
+    from numbered import Numbered
     url = job['id']
     source_ref = 'email:board-check'
+    numbered = Numbered()                 # 程式編號交出去的那一封合成確認信:引了它的回音才算核實
+    numbered.add('2026-09-21 確認已收到此次應徵', 'mail', source_ref)
     finding = {
         'url': url, 'source_ref': source_ref, 'source_type': 'email',
         'source': 'Gmail 合成確認信', 'date': '2026-09-21',
         'summary': '合成確認信', 'link': 'https://mail.google.com/mail/u/0/#all/board-check',
-        'kind': 'confirm', 'quote': '確認已收到此次應徵',
+        'kind': 'confirm', 'quote': [1],
     }
     result = rr.parse_result(
-        {'checked': [url], 'findings': [finding]}, [url], source_types={source_ref: 'email'},
-        texts={source_ref: '2026-09-21 確認已收到此次應徵'},
+        {'material_id': numbered.material_id, 'checked': [url], 'findings': [finding]}, [url],
+        source_types={source_ref: 'email'}, numbered=numbered,
     )
     bd.set_fb(lambda fb: rr.apply_findings(fb, result.findings), live=board, by='board_check')
     return {'id': url, 'source_ref': source_ref}

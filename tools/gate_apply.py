@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apply_tab               # noqa: E402
 import profile_sync as ps      # noqa: E402
 from gate_cells import CHECK, DECIDED, JUDGED, UNUSED, WORDS, Cell, Problem, norm, same_url, short  # noqa: E402
+from numbered import Accept  # noqa: E402
 
 def _card_url(said, sheet, truth):
     """同一張職缺:路徑相同,卡片網址原有的參數都在(職缺編號可能就在參數裡);agent 多帶的參數(例如 ?apply=form)不算換了職缺。"""
@@ -305,7 +306,8 @@ FILL = {
     'problems': Cell(WORDS, '卡住的地方', 'agent 說卡住就停(不拿它放行任何事)', _problems),
     'notes': Cell(WORDS, '其他觀察', '只給人看'),
     'platform_notes': Cell(WORDS, '平台做法', '存起來,下一輪標成「參考」附在指示裡'),
-    'platform_notes_remove': Cell(WORDS, '不對的平台做法', '從參考裡拿掉那一句'),
+    'platform_notes_remove': Cell(CHECK, '不對的平台做法', '上面那幾條平台筆記的編號(從參考裡拿掉那幾條)',
+                                  cite=Accept(frozenset({'pnote'}))),
     'fixed': Cell(WORDS, '改了哪幾格', '只給人看(修改那一輪)'),
     'submitted': Cell(JUDGED, '已送出', '填表不准送出；有宣稱就核實或禁止重送，不以表單外觀推論', _not_sent_in_fill),
     'clicked': Cell(WORDS, '有沒有按下送出', '有操作宣稱就核實或禁止重送'),

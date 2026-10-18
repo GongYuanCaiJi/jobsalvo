@@ -162,13 +162,14 @@ def _traceback_details(lines):
 
 def source_sync_failure_kinds(entries, manifest):
     """Classify stale generated state without exposing copied filenames or exception text."""
+    import markdown_pdf
     import pdf_preview
     import source_sync
     kinds = set()
     for entry in entries:
         current = source_sync.entry_fingerprint(entry)
-        output = source_sync.effective_path(entry)
-        markdown = entry['path'].lower().endswith(('.md', '.markdown'))
+        output = markdown_pdf.sent_file(entry['path'])
+        markdown = markdown_pdf.is_markdown(entry['path'])
         if markdown and manifest.get(source_sync.input_key(entry)) != current:
             kinds.add('Markdown PDF 未更新')
         elif markdown and manifest.get(source_sync.page_key(entry)) is None:

@@ -13,6 +13,9 @@ import chrome_door            # noqa: E402
 import fake_door as fc      # noqa: E402
 import config as cf           # noqa: E402
 import form_record as fr      # noqa: E402
+import markdown_pdf           # noqa: E402
+import ship                   # noqa: E402
+from numbered import Numbered, pick  # noqa: E402
 
 
 URL = 'https://new-platform.example/jobs/1'
@@ -162,7 +165,7 @@ class ProfileAttachments(unittest.TestCase):
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.fr, 'shared_text', return_value=''):
-            prompt, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+            prompt, _out, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                           attachment_download_dir=self.downloads, door=CODEX)
         self.assertIn('只選它,不改它的文字和附件', prompt)         # 固定平台履歷填表前已同步,這一輪不碰
         self.assertNotIn('field_mapping', prompt)                 # 欄位對照整套拿掉了
@@ -178,9 +181,9 @@ class ProfileAttachments(unittest.TestCase):
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.fr, 'shared_text', return_value=''):
-            prompt, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+            prompt, _out, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                           attachment_download_dir=self.downloads, prepared=prepared, door=CODEX)
-            plain, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+            plain, _out, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                          attachment_download_dir=self.downloads, door=CODEX)
         self.assertIn('taskSpace(42)', prompt)
         self.assertIn('First Name [text]', prompt)
@@ -198,13 +201,44 @@ class ProfileAttachments(unittest.TestCase):
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.fr, 'shared_text', return_value=''):
-            prompt, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+            prompt, _out, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                           attachment_download_dir=self.downloads, door=CODEX)
         self.assertIn('【這個平台以前學到的】', prompt)
         self.assertIn('推薦信從下拉選單選', prompt)
         self.assertNotIn('filechooser 上傳欄要用', prompt)
-        run.remember_notes(URL, [], ['推薦信從下拉選單選'])
+        numbered = Numbered()
+        numbered.add(run.platform_notes(URL), 'pnote')
+        run.remember_notes(URL, [], pick(numbered, [2]))
         self.assertEqual(run.platform_notes(URL), ['自訂經歷的編輯器要先全選再輸入才會存'])
+
+    def test_note_removal_takes_the_numbered_note_exactly(self):
+        # 兩條只差空白的筆記:引 1 號只拿掉 1 號(以前照抄的字壓掉空白再比,兩條一起不見)
+        notes = ['推薦信從下拉 選單選', '推薦信從下拉選單選']
+
+        def seed():
+            with open(run._notes_path(), 'w', encoding='utf-8') as f:
+                json.dump({run.note_key(URL): notes}, f, ensure_ascii=False)
+        seed()
+        numbered = Numbered()
+        numbered.add(run.platform_notes(URL), 'pnote')
+        run.remember_notes(URL, [], pick(numbered, [1]))
+        self.assertEqual(run.platform_notes(URL), ['推薦信從下拉選單選'])
+
+        seed()
+        with patch.object(run.ship, 'folder', return_value=''), \
+             patch.object(run.ship, 'read_info', return_value={}), \
+             patch.object(run.fr, 'shared_text', return_value=''):
+            prompt, _out, numbered = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+                                                    attachment_download_dir=self.downloads, door=CODEX)
+        self.assertIn('1. 推薦信從下拉 選單選\n2. 推薦信從下拉選單選', prompt)
+        self.assertIn(f'"material_id": "{numbered.material_id}"', prompt)
+        with open(os.path.join(self.out, 'fill.json'), 'w', encoding='utf-8') as f:
+            json.dump({'fields': [], 'submitted': False, 'tab_id': '7', 'tab_url': URL + '/apply', 'handoff': True,
+                       'material_id': numbered.material_id, 'platform_notes_remove': [1]}, f)
+        _problems, result = run.check_fill(self.fb, URL, self.out, time.time() - 1, job=self.job,
+                                           attachment_download_dir=self.downloads, door=CODEX, numbered=numbered)
+        run.remember_notes(URL, result.get('platform_notes'), result.get('platform_notes_remove'))
+        self.assertEqual(run.platform_notes(URL), ['推薦信從下拉選單選'])
 
     def test_fill_prompt_carries_answer_text_and_record_format(self):
         # agent 以前每一輪都去翻 board.html 找推薦信原文(只給了 k)、去讀 form_record.py 學記法:都直接寫在 prompt 裡
@@ -213,7 +247,7 @@ class ProfileAttachments(unittest.TestCase):
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.fr, 'shared_text', return_value=''):
-            prompt, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+            prompt, _out, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                           attachment_download_dir=self.downloads, door=CODEX)
         self.assertIn('我擅長把系統拆開、一次只動一個變數。', prompt)
         self.assertNotIn('寫法看 tools/form_record.py', prompt)
@@ -228,8 +262,8 @@ class ProfileAttachments(unittest.TestCase):
                                               'profile_url': 'https://profiles.example/1'}}
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}):
-            fill, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
-            fix, _ = run.prompt_for('fix', URL, self.job, self.fb, self.out, note='只改作品連結', door=CODEX)
+            fill, _, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            fix, _, _n = run.prompt_for('fix', URL, self.job, self.fb, self.out, note='只改作品連結', door=CODEX)
             self.assertIn('這一輪填申請表，附件照下方指示處理', fill)
             self.assertIn('不要為了文字打開或修改固定版', fill)
             self.assertNotIn('逐段核對目前原始履歷', fill)
@@ -242,7 +276,7 @@ class ProfileAttachments(unittest.TestCase):
                 self.assertIn('上傳失敗,就停下寫進 problems', prompt)
                 self.assertNotIn('才可 markHandoff', prompt)
             self._accept(('resume:general:zh', 'custom/resume.pdf', b'accepted custom resume'))
-            custom, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            custom, _, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
             self.assertIn('固定版只讀、不覆寫', custom)
             self.assertIn('只讀不改', custom)
 
@@ -255,16 +289,16 @@ class ProfileAttachments(unittest.TestCase):
             for text in ('母稿原文\n姓名與完整經歷', '本輪新版本\n更新後的完整經歷'):
                 with open(master, 'w', encoding='utf-8') as f:
                     f.write(text)
-                prompt, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+                prompt, _, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
                 self.assertIn(text, prompt)
                 self.assertIn(master, prompt)
                 self.assertNotIn('程式未能讀取母稿', prompt)
             with open(master, 'wb') as f:
                 f.write(b'\xff')
-            prompt, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            prompt, _, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
             self.assertIn('程式未能讀取母稿', prompt)
             os.unlink(master)
-            prompt, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            prompt, _, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
             self.assertIn('程式未能讀取母稿', prompt)
 
     def test_instructions_come_from_the_card_now_not_from_the_old_form(self):
@@ -289,7 +323,7 @@ class ProfileAttachments(unittest.TestCase):
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={'lang': 'en', 'variant': 'general'}), \
              patch.object(run.fr, 'shared_text', return_value=''):
-            prompt, _out = run.prompt_for('fill', url, job, self.fb, self.out,
+            prompt, _out, _n = run.prompt_for('fill', url, job, self.fb, self.out,
                                           attachment_download_dir=self.downloads, door=CODEX)
         self.assertIn('https://pda.104.com.tw/profile/preview?vno=1', prompt)
         self.assertIn('固定版', prompt)
@@ -314,10 +348,10 @@ class ProfileAttachments(unittest.TestCase):
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}), \
              patch.object(run.fr, 'shared_text', return_value=''):
-            fill, _out = run.prompt_for('fill', URL, self.job, self.fb, self.out,
+            fill, _out, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out,
                                         attachment_download_dir=self.downloads, door=CODEX)
             self.fb[URL]['form']['f'][0]['refill'] = 1                  # 頁面還在的卡:在那一頁上改
-            fix, _out = run.prompt_for('fix', URL, self.job, self.fb, self.out,
+            fix, _out, _n = run.prompt_for('fix', URL, self.job, self.fb, self.out,
                                        attachment_download_dir=self.downloads, door=CODEX)
         for prompt in (fill, fix):
             self.assertIn(q, prompt)
@@ -556,7 +590,7 @@ class ProfileAttachments(unittest.TestCase):
              patch.object(run, 'load', return_value=({URL: self.job}, self.fb)), \
              patch('sync_profiles.sync_slot', return_value=(True, [])), \
              patch('sync_profiles.behind', return_value=False), \
-             patch.object(run, 'prompt_for', return_value=('prompt', self.out)), \
+             patch.object(run, 'prompt_for', return_value=('prompt', self.out, None)), \
              patch.object(run.ar, 'run', return_value=SimpleNamespace(ok=True, agent_id='test-agent')), \
              patch.object(run.ar, 'session_id', return_value='apply-session'), \
              patch.object(run.fr, 'record_fill'), \
@@ -699,6 +733,58 @@ class ProfileAttachments(unittest.TestCase):
         self.assertIn('其他的刪掉', prompts[0])
         self.assertIn(self.expected, prompts[0])
         self.assertEqual(self._state(platform), 'ok')
+
+    def _markdown_cover(self, rendered=True):
+        """中文求職信改用 Markdown 原稿;rendered:reconcile 已經把它排成 .rendered 裡的 PDF。回排好的 PDF 該在的路徑。"""
+        self.settings['resume']['attachments'][0]['files']['zh'] = 'resume/cover.md'
+        self._save_settings()
+        pdf = markdown_pdf.output_path(self._put_home('resume/cover.md', '# 求職信\n'.encode('utf-8')))
+        if rendered:
+            self._write(os.path.dirname(pdf), os.path.basename(pdf), b'%PDF-1 rendered cover')
+        return pdf
+
+    def test_the_card_the_fixed_profile_sync_and_the_overwrite_check_expect_the_same_attachment_file(self):
+        # #469:卡片寄的、固定平台履歷同步比的、客製那輪核對「固定版沒被改」比的,是同一個檔;三處各自挑附件,分岔就紅
+        for source in ('pdf', 'markdown'):
+            with self.subTest(source=source):
+                if source == 'markdown':
+                    self._markdown_cover()
+                sent = [item['effective_path'] for item in ship.documents(self.job, self.fb)
+                        if item['kind'] == 'attachment']
+                slot = [path for _name, path in self.ps.slot_attachments('zh', 'general')]
+                fixed = [item['effective_path'] for item in self.ps.attachment_sources(
+                    self.job, self.fb, {'profile_kind': 'fixed', 'original_only': True})]
+                self.assertEqual(len(sent), 1)
+                self.assertEqual([slot, fixed], [sent, sent])
+
+    def test_an_unrendered_markdown_attachment_stops_the_sync_before_asking_the_agent(self):
+        # 原稿是 Markdown、還沒排成 PDF:平台上該放的檔還不存在,不能叫 agent 去傳(更不能把 .md 本身傳上去)
+        platform = self._synced_slot(attachments='求職信:old')
+        self._markdown_cover(rendered=False)
+        door = fc.FakeDoor(attachments=[{'name': '求職信', 'bytes': b'cover bytes'}])
+        prompts = []
+        ok, problems = self._sync(door, platform, prompts)
+        self.assertFalse(ok)
+        self.assertEqual(prompts, [])
+        self.assertNotIn('download_attachments', [call[0] for call in door.calls])
+        self.assertTrue(any('要寄的檔不在本機' in problem for problem in problems), problems)
+
+    def test_an_unrendered_markdown_attachment_stops_the_sync_before_the_text_step_too(self):
+        # 同一輪也有文字要改:附件反正會失敗,不能先叫 agent 改文字、留下半套的平台履歷
+        platform = self._synced_slot(attachments='求職信:old')
+        self._markdown_cover(rendered=False)
+        self._put_home('resume/base.md', '## 經歷\n\n- 做過資料管線與看板\n'.encode('utf-8'))
+        door = fc.FakeDoor(attachments=[{'name': '求職信', 'bytes': b'cover bytes'}])
+        parts = ['經歷', '做過資料管線']
+        door.read_profile_page = lambda _tab: {'url': URL, 'documentKey': 'doc', 'readyState': 'complete',
+                                               'readingParts': parts, 'reading': ' '.join(parts),
+                                               'text': ' '.join(parts), 'fields': [], 'links': []}
+        prompts = []
+        ok, problems = self._sync(door, platform, prompts)
+        self.assertFalse(ok)
+        self.assertEqual(prompts, [])
+        self.assertEqual(door.calls, [])
+        self.assertTrue(any('要寄的檔不在本機' in problem for problem in problems), problems)
 
     def test_direct_upload_instructions_put_merged_into_one_file_field_without_hesitating(self):
         # a654ed2 那條順帶守的直接上傳指示:放不下就交 merged、整套不混搭;「不能只因 accept=pdf」讓 agent 停下(Greenhouse 實測)
@@ -957,7 +1043,7 @@ class ProfileAttachments(unittest.TestCase):
 
         with patch.object(run.ship, 'folder', return_value=''), \
              patch.object(run.ship, 'read_info', return_value={}):
-            profile, _ = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
+            profile, _, _n = run.prompt_for('fill', URL, self.job, self.fb, self.out, door=CODEX)
         attachments = ps.attachment_step(
             self.job, self.fb, URL, self.downloads, CODEX,
         )

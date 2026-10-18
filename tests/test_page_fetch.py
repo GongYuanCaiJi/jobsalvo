@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -621,12 +622,13 @@ class PostedAgeCache(unittest.TestCase):
                                      via='reader')
 
         def run_agent(prompt, _log, _home, **kwargs):
-            self.assertIn(page.text, prompt)
+            self.assertIn('1. ' + page.text, prompt)
             self.assertFalse(kwargs['browser_required'])
             self.assertFalse(kwargs['web'])
             with open(posted_age.RESULT, 'w', encoding='utf-8') as f:
-                json.dump({'dates': [{'url': self.url, 'posted_at': '2026-09-07',
-                                      'source': 'Posted on'}], 'inaccessible': []}, f)
+                json.dump({'material_id': re.search(r'"material_id":"(\w+)"', prompt)[1],
+                           'dates': [{'url': self.url, 'posted_at': '2026-09-07', 'source': [1]}],
+                           'inaccessible': []}, f)
             return SimpleNamespace(ok=True, message=lambda: 'completed')
 
         with self._patch_paths(posted_age), patch.object(cf, 'HOME', self.directory), \
@@ -637,7 +639,7 @@ class PostedAgeCache(unittest.TestCase):
         with open(self.board, encoding='utf-8') as f:
             job = board_doc.parse(f.read())['data']['jobs'][0]
         self.assertEqual(job['posted_at'], '2026-09-07')
-        self.assertEqual(job['posted_src'], 'Posted on')
+        self.assertEqual(job['posted_src'], page.text[:80])
 
 
     def test_an_invalid_calendar_date_is_not_written_and_is_logged(self):
@@ -649,7 +651,8 @@ class PostedAgeCache(unittest.TestCase):
 
         def run_agent(prompt, _log, _home, **kwargs):
             with open(posted_age.RESULT, 'w', encoding='utf-8') as f:
-                json.dump({'dates': [{'url': self.url, 'posted_at': '2026-02-31', 'source': 'Posted on'}],
+                json.dump({'material_id': re.search(r'"material_id":"(\w+)"', prompt)[1],
+                           'dates': [{'url': self.url, 'posted_at': '2026-02-31', 'source': [1]}],
                            'inaccessible': []}, f)
             return SimpleNamespace(ok=True, message=lambda: 'completed')
 

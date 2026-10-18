@@ -24,6 +24,7 @@ import config as cf
 import card
 import delivery_state as ds
 import prefs
+from numbered import Numbered
 
 jid = card.card_id_from_url
 # 暫存狀態放哪:預設設定的 tmp。看板的副本(沙箱、測試)各自指一個地方,才不會蓋到真的那一份的進度。
@@ -33,12 +34,8 @@ OUT=cf.PREPARE_DIR
 PIDF=os.path.join(SP,'cut_tailor.pid')
 WORKER_PIDF=os.path.join(SP,'cut_tailor_worker.pid')
 RECONCILE=os.path.join(HERE,'reconcile.py')
-ROWSF=os.path.join(SP,'cut_tailor_rows.json')
-CHOICESF=os.path.join(SP,'cut_tailor_choices.json')
-CACHEDF=os.path.join(SP,'cut_tailor_cached.json')
-GIVENF=os.path.join(SP,'cut_tailor_given.json')   # 程式交給 agent 的 JD 原文(收尾時安檢門拿它核對交件單)
 STATUSF=os.path.join(SP,'cut_tailor_status.json')
-RUNS=os.path.join(SP,'cut_tailor_runs')
+RUNS=os.path.join(SP,'cut_tailor_runs')   # 一輪一個夾:收尾只從那一輪的夾讀(開始時間、列、選擇、沿用、指示、編號、可選履歷)
 
 
 NAMES=('cut_tailor.py','job_fake.py')   # 看板副本上跑的是 job_fake(見那支)
@@ -129,12 +126,12 @@ def check_written(rows,t0,out_dir=None):
     return bad
 
 
-def row_line(u, t, verdict=None, note=''):
-    """一個職缺在 prompt 裡的幾行,包含擷取狀態與收到的原文。"""
+def row_line(u, t, numbered, verdict=None, note=''):
+    """一個職缺在 prompt 裡的幾行,包含擷取狀態與收到的原文(JD 原文邊印邊編號,屬於這張卡)。"""
     v, fetched = verdict or ('', None)
     if fetched is not None and getattr(fetched, 'readable', False):
         check = f'可讀;路徑 {fetched.via}; HTTP {fetched.http_status or "未知"}'
-        body = f'\n    JD 原文開始:\n{fetched.text}\n    JD 原文結束'
+        body = f'\n    JD 原文開始:\n{numbered.add(fetched.text, "jd", u)}\n    JD 原文結束'
     elif v == 'unknown':
         check = (f'無法擷取;嘗試路徑 {getattr(fetched, "via", "") or "無"}; '
                  f'HTTP {getattr(fetched, "http_status", 0) or "無回應"}; '
@@ -200,9 +197,10 @@ def _promote_cached(rows, board):
 
 
 def prompt(rows, verdicts=None, notes=None, out_dir=None, resumes=None):
-    """判斷履歷與語言;agent 只能使用程式附上的職缺頁文字。"""
+    """判斷履歷與語言;agent 只能使用程式附上的職缺頁文字。回 (指示, 這一輪印的編號材料)。"""
     out_dir = out_dir or OUT
-    jobs = [row_line(u, t, (verdicts or {}).get(u), (notes or {}).get(u, ''))
+    numbered = Numbered()
+    jobs = [row_line(u, t, numbered, (verdicts or {}).get(u), (notes or {}).get(u, ''))
             for u, t in rows]
     available = list(cf.RESUMES.values()) if resumes is None else list(resumes)
     available = [item for item in available if item.get('enabled', True)]
@@ -226,21 +224,22 @@ def prompt(rows, verdicts=None, notes=None, out_dir=None, resumes=None):
       '請讀取提供的頁面文字,由你判斷職缺是否真的已關。若頁面文字未取得,不得猜測或標記已關;'
       '在 fill.json 留下 skip 與「抓不到 JD:」開頭的理由。\n'
       '每一個都先判斷:網址那一頁跟「看板上的名字」是不是同一個職缺(名字可能是舊的、寫法不同、中英不同)。\n'
-      '  · 同一個缺、只是看板上的名字不對或過時:照做,並在 fill.json 多寫 "real_title": "頁面上的職稱,逐字抄"。\n'
+      '  · 同一個缺、只是看板上的名字不對或過時:照做,並在 fill.json 多寫 "real_title": {"text": "職稱,照那一段裡的字一字不差、不含標籤字", "cite": [寫著職稱那一段的編號]}。\n'
       '  · 網址指到的是別的職缺,或職缺已經關了:把 {"skip": true, "reason": "…"} 寫進那個 jid 的 fill.json,\n'
       '    reason 開頭寫「網址指到的是別的職缺:」或「職缺已關:」,講清楚你看到什麼。\n'
-      '    寫「職缺已關:」的,另外寫 "quote": "JD 原文裡講職缺關了的那一句,逐字抄";程式會把卡標下架、移出準備區。\n'
-      '程式會拿 real_title、quote 跟上面的 JD 原文比、拿挑的履歷跟勾選的比,對不上的那一張不推進。\n'
+      '    寫「職缺已關:」的,另外寫 "quote": [這張卡 JD 原文裡講職缺關了的那幾段的編號];程式會把卡標下架、移出準備區。\n'
+      '編號是 JD 原文每段前面的數字;程式照編號取這張卡的 JD 原文(別張卡的編號不收)、拿挑的履歷跟勾選的比,對不上的那一張不推進。\n'
       '真的讀不到 JD,也寫 skip,reason 開頭寫「抓不到 JD:」。其他跳過的卡會留在使用者的準備區,\n'
       '原因原封不動顯示在卡上,所以理由要寫他看得懂的一句話。\n\n'
       '只有在使用者回饋指出履歷內容本身需要修改、重挑版本與語言解決不了時,content_problem 才填 true;這表示要開客製。沒有這種回饋填 false。\n\n'
       '不要去找、也不要讀任何既有的 fill.json 或舊產出。每個職缺都從 JD 重新判一次。\n'
       '每個職缺都要處理並寫出 fill.json;真的對不上/已關/讀不到就寫 skip+理由。\n\n'
       f'每個職缺寫一個檔 {out_dir}/<JID>/fill.json:\n'
+      f'  "material_id": "{numbered.material_id}"   照抄(這一輪材料的交付代號,每個 fill.json 都寫)\n'
       + selection_fields +
       '  content_problem      true/false;有履歷內容問題且重挑無法解決時填 true,其他填 false\n'
-      '  real_title            (只有看板上的名字不對時才寫)\n\n'
-      '寫一個存一個。全部做完 stdout 只印 @@ROUND_DONE@@。\n')
+      '  real_title            {"text": 職稱, "cite": [編號]}(只有看板上的名字不對時才寫)\n\n'
+      '寫一個存一個。全部做完 stdout 只印 @@ROUND_DONE@@。\n'), numbered
 
 
 def preview(live=None, model='main'):
@@ -250,7 +249,7 @@ def preview(live=None, model='main'):
     d = bd.load(live)
     fb = json.loads(d['fb']); jobs = d['data'].get('jobs', [])
     rows = [(j['id'], j.get('target') or '') for j in jobs if ds.place_of(fb, j) == 'prep']
-    return ar.rules_for(model, board=live) + prompt(rows, notes=notes_of(fb))
+    return ar.rules_for(model, board=live) + prompt(rows, notes=notes_of(fb))[0]
 
 
 def _status(d, sp=None):
@@ -262,10 +261,10 @@ def progress(sp=None):
     """現在跑到哪。看板伺服器每次輪詢都問這裡,不自己猜。"""
     sp=sp or SP
     st=jobrun.read(os.path.join(sp,'cut_tailor_status.json'),NAMES)
-    if st.get('phase')=='agent' and 'done' not in st:
+    if st.get('phase')=='agent' and 'done' not in st and st.get('out_dir'):   # 這一輪的列在它自己的夾;沒有夾就不顯示幾張
         try:
-            with open(os.path.join(sp,'cut_tailor_rows.json'),encoding='utf-8') as f: rows=json.load(f)
-            st['done']=len(rows)-len(check_written([tuple(r) for r in rows],float(st.get('t0') or 0),st.get('out_dir')))
+            with open(os.path.join(st['out_dir'],'rows.json'),encoding='utf-8') as f: rows=json.load(f)
+            st['done']=len(rows)-len(check_written([tuple(r) for r in rows],float(st.get('t0') or 0),st['out_dir']))
         except (OSError,ValueError,TypeError): pass   # 進度數字算不出來就不顯示幾張,狀態照舊
     return st
 
@@ -276,47 +275,46 @@ def _stop(msg):
     sys.exit(msg)
 
 
-def _fills(rows, out_dir=None, given=None):
+def _round_file(out_dir, name):
+    """這一輪的夾裡交付時存下的檔(main 每一輪都寫)。沒有或讀不懂是程式的錯:這一輪停下,不改用當下設定、不跳過核對。"""
+    path = os.path.join(out_dir or OUT, name)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f'這一輪的夾裡 {name} 讀不到({path}):{e}') from e
+
+
+def _round_resumes(out_dir):
+    """這一輪交付時的可選履歷:收尾、核對、落到看板都照它,不照當下設定。"""
+    return prefs.checked_resumes(_round_file(out_dir, 'resumes.json'))
+
+
+def _fills(rows, out_dir=None):
     """每張的 fill.json(交件單)經安檢門:回 {網址: (收下的格子, 對不上的問題)}。
     收下的 = 核對過的 + agent 判斷的(挑哪份履歷、跳過);沒寫出來的不在結果裡,check_written 照實報。
-    given:程式交給 agent 的 JD 原文(given_of);沒給就讀這一輪存下來的那一份。"""
+    引的編號照這一輪夾裡的 handed.json(印進指示的那一份,連交付代號)核。"""
     out_dir=out_dir or OUT; out={}
-    if given is None:
-        try:
-            with open(GIVENF,encoding='utf-8') as fh: given=json.load(fh)
-        except (OSError,ValueError): given={}   # 舊的一輪沒存:能核對的照核對,要看原文的那幾格不用
-    resumes=prefs.checked_resumes()
+    numbered=Numbered.load(_round_file(out_dir,'handed.json'))
+    resumes=_round_resumes(out_dir)
     for u,t in rows:
         sheet,_missing=gate.read(os.path.join(out_dir,card.card_id_from_url(u)),'prepare')
         if sheet is None: continue
-        g=given.get(u) or {}
-        v=gate.inspect('prepare',sheet,gate.Truth(u,given={u:g['text']} if 'text' in g else {},
-                                                   resumes=resumes))
+        v=gate.inspect('prepare',sheet,gate.Truth(u,resumes=resumes),numbered)
         out[u]=(dict(v.facts,**v.judged),v.problems)
     return out
 
 
-def given_of(rows, verdicts):
-    """程式交給 agent 的東西:{網址: {'text': JD 原文(讀不到是空字串)}}。"""
-    out={}
-    for u,_t in rows:
-        _v,fetched=(verdicts or {}).get(u) or ('',None)
-        text=fetched.text if fetched is not None and getattr(fetched,'readable',False) else ''
-        out[u]={'text':text or ''}
-    return out
-
-
-def _apply_stages(rows, board, out_dir=None, selection_signature=None, feedback_signatures=None, given=None,
-                  checked=None):
-    """把這一輪的履歷判斷落到看板,只接受已勾選且有該語言檔的履歷。
+def _apply_stages(rows, board, out_dir=None, selection_signature=None, feedback_signatures=None, checked=None):
+    """把這一輪的履歷判斷落到看板,只接受這一輪交付時勾選、有該語言檔的履歷。
     交件單經安檢門(_fills):對不上的那一張不推進、不標關閉,卡上寫出哪一格、agent 說什麼、實際是什麼。"""
-    checked = checked if checked is not None else _fills(rows, out_dir, given)
+    checked = checked if checked is not None else _fills(rows, out_dir)
     fills = {u: f for u, (f, _bad) in checked.items()}
     wrong = {u: bad for u, (_f, bad) in checked.items() if bad}
     for u, _ in rows:
         if u not in fills:
             fills[u] = {'skip': True, 'reason': '這一輪沒判到'}
-    active = {rid: item for rid, item in cf.RESUMES.items() if item.get('enabled', True)}
+    active = {item.get('id'): item for item in _round_resumes(out_dir)}
     selection_signature = selection_signature or prefs.resume_selection_signature(active.values())
     feedback_signatures = feedback_signatures or {}
 
@@ -409,12 +407,12 @@ def _apply_stages(rows, board, out_dir=None, selection_signature=None, feedback_
     return moved
 
 
-def apply_real_titles(rows, board, out_dir=None, given=None, checked=None):
-    """agent 判斷「同一個缺、只是看板上的名字不對」時寫的 real_title,改進卡片名字(安檢門核對過:JD 原文裡逐字看得到)。
+def apply_real_titles(rows, board, out_dir=None, checked=None):
+    """agent 判斷「同一個缺、只是看板上的名字不對」時引的 real_title,改進卡片名字(安檢門照編號換成這張卡的 JD 原文)。
     只換名字那一段,後面的「（[Lever](網址)）」原樣留著;可投遞夾照名字取名,跟著改。回改了幾張。"""
-    checked=checked if checked is not None else _fills(rows,out_dir,given)
-    fix={u:str(f.get('real_title') or '').strip() for u,(f,bad) in checked.items()
-         if str(f.get('real_title') or '').strip() and not f.get('skip') and not bad}
+    checked=checked if checked is not None else _fills(rows,out_dir)
+    name=lambda f: str((f.get('real_title') or {}).get('text') or '').strip() if isinstance(f.get('real_title'),dict) else ''
+    fix={u:name(f) for u,(f,bad) in checked.items() if name(f) and not f.get('skip') and not bad}
     moved=[]
     def mut(data, fb):
         for j in data['jobs']:
@@ -429,11 +427,11 @@ def apply_real_titles(rows, board, out_dir=None, given=None, checked=None):
     return len(moved)
 
 
-def _report(msg, need, board):
-    """要他知道的事寫進看板最上面的「📣 agent 回報」(見 agent_report)。"""
+def _report(msg, need, board, info=False):
+    """要他知道的事寫進看板最上面的「📣 agent 回報」(見 agent_report)。info:程式自己的錯,不列進「要你處理」。"""
     try:
         import agent_report
-        agent_report.report('跑準備區', msg, need=need, live=board)
+        agent_report.report('跑準備區', msg, need=need, live=board, info=info)
     except Exception as e:  # noqa: BLE001 — 回報寫不進看板:至少印進這一輪的紀錄(看板上「看紀錄」看得到)
         print(f'⚠ 這則回報寫不進看板({str(e)[:120]}):{msg} → {need}')
 
@@ -441,15 +439,14 @@ def _report(msg, need, board):
 def run_finish(board, out_dir=None):
     """收尾 supervisor(脫離 session,由 main 派出來)。等 agent worker 跑完 → 驗每個 jid
     真的重寫過 → 判斷落到看板 → 跑 reconcile 建可投遞夾 → 寫狀態檔。按一下就做到底,不用人接手。"""
-    import time
-    t0=float(open(os.path.join(SP,'cut_tailor_t0')).read())
-    rows=[tuple(x) for x in json.load(open(ROWSF,encoding='utf-8'))]
-    try: choice_state=json.load(open(CHOICESF,encoding='utf-8'))
-    except (OSError,ValueError): choice_state={}   # 這一輪沒有要換的選擇
-    try: cached_urls=json.load(open(CACHEDF,encoding='utf-8'))
-    except (OSError,ValueError): cached_urls=[]   # 這一輪沒有沿用的
-    out_dir=out_dir or OUT
-    p=open(f'{SP}/cut_tailor_prompt.txt',encoding='utf-8').read()
+    import datetime, time
+    started=datetime.datetime.now().isoformat(timespec='microseconds')
+    out_dir=out_dir or OUT   # 這一輪的夾:收尾只讀它(第二輪開始了也不會讀到第二輪的)
+    t0=float(_round_file(out_dir,'t0'))
+    rows=[tuple(x) for x in _round_file(out_dir,'rows.json')]
+    choice_state=_round_file(out_dir,'choices.json')
+    cached_urls=_round_file(out_dir,'cached.json')
+    with open(os.path.join(out_dir,'prompt.txt'),encoding='utf-8') as fh: p=fh.read()
     of=f'{SP}/cut_tailor.out'
     me=os.getpid()
     # graceful:看板按停止時先收工,只停 agent,這裡把已經寫好的 fill.json 照常推進(見 jobrun.control)
@@ -506,6 +503,13 @@ def run_finish(board, out_dir=None):
         _status({'phase':phase,'t0':t0,'n':len(rows),
                  'missing':[k for k,_ in bad],'worker_outcome':result.status,'worker_rc':result.returncode,
                  'reconcile_rc':rc.returncode,'finished_at':time.time(),'msg':msg,**moved})
+        try:   # 這一輪收完了:之前收尾出錯留下的程式錯誤收掉(這一輪自己報的、要他處理的留著)
+            import agent_report
+            agent_report.resolve(None, '後來那一輪跑準備區收完了', live=board, src='跑準備區', before=started,
+                                 only=lambda it: it.get('info'))
+        except Exception as e:  # noqa: BLE001 — 收不掉照樣收尾完;舊回報還開著,原因記成程式的錯
+            _report(f'之前留下的程式錯誤回報收不掉({str(e)[:120]}),看板上那幾則還開著',
+                    '看完那幾則舊回報自己按已處理', board, info=True)
         print('@@CUT_TAILOR_FINISHED@@')
         return result
     finally:
@@ -543,7 +547,7 @@ def main():
             if progress().get('phase')!='failed':
                 import time
                 _status({'phase':'failed','msg':f'收尾出錯:{e}','finished_at':time.time()})
-                _report(f'跑準備區沒跑完:{e}', '可以再按一次;一直失敗就在「正在準備」按「看紀錄」', a.board)
+                _report(f'跑準備區沒跑完,是程式出錯(不用你處理):{e}', '', a.board, info=True)
             raise
         return 1 if progress().get('phase') in ('failed','incomplete') else 0
     _status({'phase':'start','pid':os.getpid()})
@@ -593,11 +597,6 @@ def main():
             if prefs.valid_resume_pick(rid, lang, resumes):
                 cached.append((u, t))
     feedback_signatures = {u: prefs.feedback_signature(notes.get(u, '')) for u, _ in reselect}
-    with open(CHOICESF, 'w', encoding='utf-8') as f:
-        json.dump({'selection_signature': signature,
-                   'feedback_signatures': feedback_signatures}, f, ensure_ascii=False)
-    with open(CACHEDF, 'w', encoding='utf-8') as f:
-        json.dump([u for u, _ in cached], f, ensure_ascii=False)
     if not reselect:
         import time
         started = time.time()
@@ -621,15 +620,22 @@ def main():
     os.makedirs(OUT,exist_ok=True)
     run_out_dir=os.path.join(RUNS,uuid.uuid4().hex)
     os.makedirs(run_out_dir,exist_ok=True)
-    given=given_of(rows,verdicts)
-    with open(GIVENF,'w',encoding='utf-8') as fh: json.dump(given,fh,ensure_ascii=False)   # 收尾時安檢門拿它核對
-    p=prompt(rows,verdicts,notes,out_dir=run_out_dir,resumes=resumes); open(f'{SP}/cut_tailor_prompt.txt','w',encoding='utf-8').write(p)
-    json.dump([[u,t] for u,t in rows],open(ROWSF,'w',encoding='utf-8'),ensure_ascii=False)
+
+    def keep(name, value):   # 收尾(另一個程序)只從這一輪的夾讀
+        with open(os.path.join(run_out_dir,name),'w',encoding='utf-8') as fh:
+            fh.write(value if isinstance(value,str) else json.dumps(value,ensure_ascii=False))
+    p,numbered=prompt(rows,verdicts,notes,out_dir=run_out_dir,resumes=resumes)
+    keep('prompt.txt',p)
+    keep('handed.json',numbered.dump())
+    keep('resumes.json',resumes)
+    keep('rows.json',[[u,t] for u,t in rows])
+    keep('choices.json',{'selection_signature':signature,'feedback_signatures':feedback_signatures})
+    keep('cached.json',[u for u,_ in cached])
     print(f'準備履歷 {len(rows)} 個職缺 · 1 個 agent')
     for u,t in rows: print('  -',t[:40],card.card_id_from_url(u))
     of=f'{SP}/cut_tailor.out'; open(of,'w').close()   # 清掉上一輪輸出
     t0=__import__('time').time()
-    open(os.path.join(SP,'cut_tailor_t0'),'w').write(str(t0))
+    keep('t0',t0)
     # 派一支脫離 session 的收尾 supervisor:它啟動 agent → 等跑完 → 驗過 → 自己跑 reconcile,
     # 把履歷/看板/可投遞包全部建好。以前這後半是人手動接的,現在按一下全自動。
     sup=subprocess.Popen([sys.executable,os.path.abspath(__file__),'--finish','--board',a.board,

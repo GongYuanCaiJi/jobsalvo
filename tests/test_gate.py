@@ -7,6 +7,7 @@
 指示裡叫 agent 寫、卻沒登記核對方式的格子,測試就失敗。"""
 import ast
 import copy
+import dataclasses
 import json
 import os
 import re
@@ -19,6 +20,9 @@ sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import gate                   # noqa: E402
 import profile_sync as ps     # noqa: E402
+from gate_cells import Cell   # noqa: E402
+from numbered import ROW, Accept, Cited, Numbered  # noqa: E402
+from unittest import mock     # noqa: E402
 
 TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 URL = 'https://www.104.com.tw/job/abc'
@@ -94,25 +98,36 @@ SUBMIT_LIES = {
 
 # ---- 其他 7 種流程(#317):真相是程式交給 agent 的原文;一列一列的交件單,謊話填在第一列 ----
 A, B = 'https://ex.test/job/a', 'https://ex.test/job/b'
+
+
+def numbered_of(*blocks, mark=''):
+    """程式印進指示的編號材料:(種類, 哪一列, 原文) 一行一段;mark 加在每段前面(test_cell_functions_never_see_handed_text)。"""
+    numbered = Numbered()
+    for kind, owner, text in blocks:
+        numbered.add([mark + line for line in text.splitlines()], kind, owner)
+    return numbered
+
+
 FLOWS = {
-    # 刊登日期:程式從頁面挑出跟日期有關的那幾行交給它
+    # 刊登日期:程式從頁面挑出跟日期有關的那幾行,編號交給它;它引那幾行的編號
     'posted_at': dict(
-        honest={'dates': [{'url': A, 'posted_at': '2026-09-07', 'source': 'Posted on'}],
+        honest={'dates': [{'url': A, 'posted_at': '2026-09-07', 'source': [1]}],
                 'inaccessible': [{'url': B, 'reason': '原文沒有刊登日期', 'need': ''}]},
-        truth=lambda: gate.Truth(given={A: 'Posted on September 7, 2026\nUpdated 3 days ago', B: 'Apply by Oct 1'},
-                                 fetched_on={A: '2026-09-20', B: '2026-09-20'}),
+        numbered=lambda mark='': numbered_of(('date', A, 'Posted on September 7, 2026\nUpdated 3 days ago'),
+                                             ('date', B, 'Apply by Oct 1'), mark=mark),
+        truth=lambda: gate.Truth(handed={A, B}, fetched_on={A: '2026-09-20', B: '2026-09-20'}),
         lies={'dates.url': ('https://ex.test/job/other', ['職缺網址', 'job/other', '這一輪沒有交給它']),
               'dates.posted_at': ('2026-02-31', ['刊登日期', '2026-02-31', 'YYYY-MM-DD']),
-              'dates.source': ('First published', ['日期欄位的名稱', 'First published', '原文裡沒有']),
               'inaccessible.url': ('https://ex.test/job/other', ['職缺網址', 'job/other', '這一輪沒有交給它'])},
         judged={'dates.posted_at': '2026-09-07'}),
-    # 職缺關了沒:程式抓好的頁面原文交給它判斷;關了沒是 agent 判斷,它抄的那一句要在原文裡
+    # 職缺關了沒:程式抓好的頁面原文編號交給它判斷;關了沒是 agent 判斷,它引那一頁講關了的那一段的編號
     'link_status': dict(
-        honest={'jobs': [{'id': 'J1', 'status': 'closed', 'quote': 'This position has been filled', 'reason': '徵到人了'},
+        honest={'jobs': [{'id': 'J1', 'status': 'closed', 'quote': [2], 'reason': '徵到人了'},
                          {'id': 'J2', 'status': 'live', 'reason': ''}]},
-        truth=lambda: gate.Truth(given={'J1': 'Data Engineer. This position has been filled.', 'J2': 'Apply now'}),
+        numbered=lambda mark='': numbered_of(('text', 'J1', 'Data Engineer.\nThis position has been filled.'),
+                                             ('text', 'J2', 'Apply now'), mark=mark),
+        truth=lambda: gate.Truth(handed={'J1', 'J2'}),
         lies={'jobs.id': ('J9', ['職缺代號', 'J9', '這一輪沒有交給它']),
-              'jobs.quote': ('Applications closed', ['頁面原文', 'Applications closed', '原文裡沒有']),
               'jobs.status': ('gone', ['職缺還在不在', 'gone', 'live、closed、uncertain'])},
         judged={'jobs.status': 'closed'}),
     # 分類建議:整份都是建議(他看過才套用);比對規則要是寫得出來的正規表示式
@@ -134,100 +149,104 @@ FLOWS = {
         lies={'reports.feedback_ids': (['f1', 'f9'], ['歸進來的回饋', 'f9', '這一輪沒給它']),
               'reports.occurrences': (5, ['提到幾次', '5', '2(程式照它列的回饋數的)'])},
         judged={'reports.issue': '成果不夠明確'}),
-    # 準備履歷:程式抓好的 JD 原文交給它挑履歷;JD 是哪種語言是 agent 判斷(程式不猜),只核對寫法
+    # 準備履歷:程式抓好的 JD 原文(一輪好幾張卡,一起編號)交給它挑履歷;JD 是哪種語言是 agent 判斷(程式不猜),只核對寫法
     'prepare': dict(
         honest={'resume': 'general', 'lang': 'zh', 'why': 'JD 要資料管線', 'content_problem': False,
-                'real_title': '資深資料工程師'},
-        variants={'closed': {'skip': True, 'reason': '職缺已關:頁面寫已額滿', 'quote': '本職缺已額滿'},
+                'real_title': {'text': '資深資料工程師', 'cite': [1]}},
+        variants={'closed': {'skip': True, 'reason': '職缺已關:頁面寫已額滿', 'quote': [3]},
                   'old': {'variant': 'general', 'lang': 'zh', 'why': '舊的寫法'}},
-        truth=lambda: gate.Truth(A, given={A: '資深資料工程師 好公司 負責資料管線。本職缺已額滿。'},
-                                 resumes=[{'id': 'general', 'files': {'zh': 'r/zh.pdf', 'en': 'r/en.pdf'}}]),
-        lies={'real_title': ('廚師', ['頁面上的名字', '廚師', 'JD 原文裡沒有']),
-              'resume': ('secret', ['挑的履歷', 'secret', '不是勾選']),
+        numbered=lambda mark='': numbered_of(('jd', A, '資深資料工程師\n好公司 負責資料管線。\n本職缺已額滿。'),
+                                             ('jd', B, '後端工程師'), mark=mark),
+        truth=lambda: gate.Truth(A, resumes=[{'id': 'general', 'files': {'zh': 'r/zh.pdf', 'en': 'r/en.pdf'}}]),
+        lies={'resume': ('secret', ['挑的履歷', 'secret', '不是勾選']),
               'variant': ('secret', ['挑的履歷(舊寫法)', 'secret', '不是勾選']),
               'lang': ('klingon', ['語言', 'klingon', '只能是']),
               'reason': ('抓不到 JD:讀不到', ['跳過的原因', '抓不到 JD', '程式有給它 JD 原文'], 'closed'),
-              'quote': ('徵才中', ['頁面原文', '徵才中', 'JD 原文裡沒有'], 'closed'),
               'skip': (True, ['跳過', '沒寫原因'])},
         judged={'resume': 'general', 'lang': 'zh', 'content_problem': False, 'variant': ('general', 'old'),
                 'skip': (True, 'closed')}),
-    # 找缺:agent 自己上網找的候選;程式之後抓回每一頁,摘錄要在頁面原文裡
+    # 找缺:agent 自己上網找的候選;程式之後抓回每一頁
     'research_search': dict(
         honest={'candidates': [{'url': A, 'title': '資料工程師', 'company': '好公司', 'why': '做資料管線',
-                                'via': '搜尋', 'angle': '資料管線', 'jd_excerpt': '負責資料管線'}]},
-        truth=lambda: gate.Truth(given={A: '資料工程師 好公司 負責資料管線與排程。'}),
+                                'via': '搜尋', 'angle': '資料管線'}]},
+        truth=lambda: gate.Truth(),
         lies={'candidates.url': ('https://ex.test/jobs/search?keyword=data', ['職缺網址', 'keyword=data',
-                                                                              '不是單一職缺頁']),
-              'candidates.jd_excerpt': ('負責帶領百人團隊', ['JD 摘錄', '負責帶領百人團隊', '原文裡沒有'])},
+                                                                              '不是單一職缺頁'])},
         judged={'candidates.angle': '資料管線'}),
-    # 找缺的判斷:程式抓回的 JD 原文、附的舊卡和他的原話交給它判斷
+    # 找缺的判斷:程式抓回的 JD 原文、程式提醒(各張自己的)和偏好筆記、相似舊卡(整批共用)編號交給它判斷
     'research_judge': dict(
-        honest={'jobs': [{'id': 'J1', 'title': '資料工程師', 'company': '好公司', 'keep': True, 'fit': 4,
+        honest={'jobs': [{'id': 'J1', 'title': {'text': '資料工程師', 'cite': [2]}, 'company': {'text': '好公司', 'cite': [3]},
+                          'keep': True, 'fit': 4,
                           'cite': ['c1'], 'why': '他喜歡資料管線',
-                          'risk': {'kind': '', 'why': ''},
-                          'reasons': [{'text': '他說喜歡管線', 'citation': '很喜歡資料管線', 'basis': '使用者原話'}],
+                          'risk': {'kind': '', 'why': '', 'cite': []},
+                          'reasons': [{'text': '他說喜歡管線', 'citation': [1], 'basis': '使用者原話'},
+                                      {'text': '要做管線', 'citation': [3], 'basis': 'JD 原文'}],
                           'resume': 'general', 'lang': 'zh', 'pick_why': '中文 JD', 'cat': '工程',
-                          'terms': {'salary_month': 50000, 'salary_quote': '月薪 50,000 起', 'exp_years': None,
-                                    'exp_quote': '', 'location': '看不出', 'location_quote': ''},
+                          'terms': {'salary_month': 50000, 'salary_quote': [4], 'exp_years': None,
+                                    'exp_quote': [], 'location': '看不出', 'location_quote': []},
                           'card': {'fit': '管線經驗對上', 'co': '做電商', 'loc': '台北', 'deadline': '2026-10-31',
                                    'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投',
-                                   'quote': '月薪 50,000 起。應徵截止 2026/10/31。'}}]},
-        variants={'ghost': {'jobs': [{'id': 'J1', 'keep': False, 'risk': {'kind': 'ghost', 'why': '刊登已經 200 天'}}]},
+                                   'quote': [4, 5]}}]},
+        variants={'ghost': {'jobs': [{'id': 'J1', 'keep': False,
+                                      'risk': {'kind': 'ghost', 'why': '刊登已經 200 天', 'cite': [6]}}]},
                   'old': {'jobs': [{'id': 'J1', 'variant': 'general', 'lang': 'zh', 'pick_why': '舊的寫法'}]},
-                  'missing': {'jobs': [{'id': 'J1', 'missing': '網站首頁,沒有職缺內容', 'keep': False}]}},
-        truth=lambda: gate.Truth(
-            given={'J1': '資料工程師 好公司 負責資料管線。月薪 50,000 起。應徵截止 2026/10/31。'},
-            cites={'J1': {'c1', 'c2'}},
-            sources={'J1': {'JD 原文': ['資料工程師 好公司 負責資料管線'], '使用者原話': ['很喜歡資料管線'], '偏好筆記': ['']}},
-            flags={'J1': ['刊登已經 200 天(超過 90 天):可能是幽靈職缺']},
-            resumes=[{'id': 'general', 'files': {'zh': 'r/zh.pdf'}}]),
+                  'missing': {'jobs': [{'id': 'J1', 'missing': '網站首頁,沒有職缺內容', 'keep': False}]},
+                  'terms': {'jobs': [{'id': 'J1', 'terms': {'exp_years': 0, 'exp_quote': [3],
+                                                            'location': '符合', 'location_quote': [3]}}]}},
+        numbered=lambda mark='': numbered_of(
+            ('note', None, '很喜歡資料管線'),
+            ('jd', 'J1', '資料工程師\n好公司 負責資料管線。\n月薪 50,000 起。\n應徵截止 2026/10/31。'),
+            ('flag', 'J1', '刊登已經 200 天(超過 90 天):可能是幽靈職缺'), ('jd', 'J2', '後端工程師'),
+            ('old', None, '- 資料平台工程師｜當時表態:喜歡'), mark=mark),
+        truth=lambda: gate.Truth(handed={'J1', 'J2'}, cites={'J1': {'c1', 'c2'}},
+                                 resumes=[{'id': 'general', 'files': {'zh': 'r/zh.pdf'}}]),
         lies={'jobs.id': ('J7', ['職缺代號', 'J7', '這一輪沒有交給它']),
-              'jobs.title': ('廚師', ['頁面上的職稱', '廚師', '原文裡沒有']),
-              'jobs.company': ('別家', ['頁面上的公司', '別家', '原文裡沒有']),
               'jobs.cite': (['c9'], ['引用的舊卡', 'c9', '程式沒附給它']),
-              'jobs.reasons': ([{'text': '他說過', 'citation': '他最愛管理職', 'basis': '使用者原話'}],
-                               ['理由的引用', '他最愛管理職', '找不到']),
+              'jobs.reasons': ([{'text': '他說過', 'citation': [], 'basis': '亂寫'}], ['理由的引用', '亂寫', '根據類型']),
               'jobs.resume': ('secret', ['挑的履歷', 'secret', '不是勾選']),
               'jobs.variant': ('secret', ['挑的履歷(舊寫法)', 'secret', '不是勾選']),
               'jobs.lang': ('klingon', ['語言', 'klingon', '只能是']),
-              'jobs.risk': ({'kind': 'scam', 'why': '要先匯保證金'}, ['詐騙或幽靈缺', '保證金', '都沒有']),
-              'jobs.card': ({'deadline': '2026-12-01', 'salary': '月薪 90,000', 'quote': '原文沒有這一句'},
-                            ['卡片摘要', '指定 JD', 'quote']),
-              'jobs.terms': ({'salary_month': 90000, 'salary_quote': '月薪 90,000'},
-                             ['這輪條件讀到的值', 'salary_month', '逐字'])},
+              'jobs.risk': ({'kind': 'scam', 'why': '要先匯保證金', 'cite': []}, ['詐騙或幽靈缺', '保證金', '沒有引']),
+              'jobs.card': ({'deadline': '2026-12-01', 'salary': '月薪 90,000', 'quote': []},
+                            ['卡片摘要', '月薪 90,000', 'quote']),
+              'jobs.terms': ({'salary_month': 90000, 'salary_quote': []},
+                             ['這輪條件讀到的值', 'salary_month', '編號'])},
         judged={'jobs.missing': ('網站首頁,沒有職缺內容', 'missing'), 'jobs.keep': True, 'jobs.fit': 4, 'jobs.cat': '工程', 'jobs.resume': 'general', 'jobs.lang': 'zh',
-                'jobs.variant': ('general', 'old'), 'jobs.risk': ({'kind': 'ghost', 'why': '刊登已經 200 天'}, 'ghost'),
+                'jobs.variant': ('general', 'old'),
+                'jobs.risk': ({'kind': 'ghost', 'why': '刊登已經 200 天',
+                               'cite': '刊登已經 200 天(超過 90 天):可能是幽靈職缺'}, 'ghost'),
                 'jobs.card': {'fit': '管線經驗對上', 'co': '做電商', 'loc': '台北', 'deadline': '2026-10-31',
                               'salary': '月薪 50,000 起', 'bar': '三年', 'posted': '無', 'ammo': '直投',
-                              'quote': '月薪 50,000 起。應徵截止 2026/10/31。'}}),
+                              'quote': '月薪 50,000 起。\n應徵截止 2026/10/31。'}}),
     # 查應徵進度:程式複製的信和平台應徵紀錄全文交給它;信算哪一種、要他做的事是 agent 判斷
     'reply': dict(
         honest={'checked': [A],
                 'findings': [{'url': A, 'source_ref': 'email:thr001', 'source': 'Gmail', 'date': '2026-09-03',
-                              'subject': '面試邀請', 'summary': '邀請面試', 'kind': 'interview',
-                              'link': 'https://mail.google.com/mail/u/0/#all/thr001', 'quote': '邀請您參加面試',
-                              'reason': '', 'todo': '回覆可面談時段'}],
-                'job_ids': [{'id': 'abc123', 'url': 'https://www.104.com.tw/job/abc123', 'platform': '104',
-                             'applied_at': '2026-09-01', 'title': '資料工程師'}],
+                              'subject': {'text': '面試邀請', 'cite': [1]}, 'summary': '邀請面試', 'kind': 'interview',
+                              'link': 'https://mail.google.com/mail/u/0/#all/thr001', 'quote': [3],
+                              'reason': [], 'todo': '回覆可面談時段'}],
+                'job_ids': [{'platform': '104', 'at': [5], 'applied_at': '2026-09-01', 'title': '資料工程師'}],
                 'inaccessible': [{'source': 'LinkedIn', 'reason': '要登入', 'need': '登入後重查', 'jobs': [B]}]},
+        variants={'reject': {'checked': [A], 'findings': [
+            {'url': A, 'source_ref': 'email:thr001', 'source': 'Gmail', 'date': '2026-09-03',
+             'subject': {'text': '面試邀請', 'cite': [1]},
+             'summary': '沒錄取', 'kind': 'reject', 'link': 'https://mail.google.com/mail/u/0/#all/thr001',
+             'quote': [2], 'reason': [3], 'todo': ''}]}},
+        numbered=lambda mark='': numbered_of(
+            ('mail', 'email:thr001', '面試邀請\n2026年9月3日 好公司人資\n您好,邀請您參加面試,請回覆可面談時段。'),
+            ('record', 'application_record:104', '應徵紀錄\n資料工程師 abc123 2026/09/01 已讀'),
+            ('record', 'application_record:linkedin', 'Applied 4012345678 Senior Designer'), mark=mark),
         truth=lambda: gate.Truth(
-            cards={A, B}, source_types={'email:thr001': 'email', 'application_record:104': 'application_record'},
-            texts={'email:thr001': '面試邀請\n2026年9月3日 好公司人資\n您好,邀請您參加面試,請回覆可面談時段。',
-                   'application_record:104': '應徵紀錄\n資料工程師 abc123 2026/09/01 已讀'}),
+            cards={A, B}, source_types={'email:thr001': 'email', 'application_record:104': 'application_record'}),
         lies={'checked': (['https://ex.test/job/zzz'], ['查完的卡', 'job/zzz', '不是這一輪查的卡']),
               'findings.url': ('https://ex.test/job/zzz', ['卡片網址', 'job/zzz', '不是這一輪查的卡']),
               'findings.source_ref': ('email:madeup', ['來源代號', 'email:madeup', '程式沒給它這個來源']),
               'findings.source_type': ('application_record', ['來源種類', 'application_record', 'email(程式照']),
               'findings.date': ('2026-02-31', ['日期', '2026-02-31', 'YYYY-MM-DD']),
-              'findings.subject': ('錄取通知', ['標題', '錄取通知', '原文裡沒有']),
               'findings.link': ('https://mail.google.com/mail/u/0/#all/other99', ['原文連結', 'other99',
                                                                                  'email:thr001 那一封']),
-              'findings.quote': ('恭喜您錄取', ['信裡那一句', '恭喜您錄取', '原文裡沒有']),
-              'findings.reason': ('經驗不足', ['拒絕理由', '經驗不足', '原文裡沒有']),
               'findings.kind': ('hired', ['信算哪一種', 'hired', 'confirm、reject']),
-              'job_ids.id': ('zzz999', ['職缺代號', 'zzz999', '應徵紀錄裡沒有這個代號']),
-              'job_ids.url': ('https://www.104.com.tw/job/zzz999', ['職缺連結', 'zzz999', '應徵紀錄裡沒有這個職缺']),
-              'job_ids.platform': ('linkedin', ['平台', 'linkedin', '程式讀了 104']),
+              'job_ids.platform': ('yourator', ['平台', 'yourator', '程式讀了 104']),
               'job_ids.applied_at': ('2026-02-31', ['應徵日期', '2026-02-31', 'YYYY-MM-DD']),
               'inaccessible.jobs': (['https://ex.test/job/zzz'], ['影響到的卡', 'job/zzz', '不是這一輪查的卡'])},
         judged={'findings.kind': 'interview', 'findings.todo': '回覆可面談時段',
@@ -265,11 +284,16 @@ class LyingAgent(unittest.TestCase):
         # 下載回來逐位元組比檔的那一段(job 給了才做)在 test_apply_profile_attachments 測
         return gate.Truth(URL, None, self.fb, page=copy.deepcopy(page), tab_id='7', decision=dict(DECISION))
 
+    def inspect(self, kind, sheet, page=PAGE):
+        """照填表流程交件:指示印的平台筆記(編號材料)跟著交給安檢門,交件單抄回它的交付代號。"""
+        numbered = fill_notes()
+        return gate.inspect(kind, dict(sheet, material_id=numbered.material_id), self.truth(page), numbered)
+
     def test_an_honest_handoff_sheet_is_accepted(self):
-        verdict = gate.inspect('fill', copy.deepcopy(HONEST), self.truth())
+        verdict = self.inspect('fill', copy.deepcopy(HONEST))
         self.assertEqual(verdict.problems, [])
         self.assertEqual(verdict.facts['delivery'], {'method': 'platform_profile'})
-        verdict = gate.inspect('fill', copy.deepcopy(DIRECT), self.truth(DIRECT_PAGE))
+        verdict = self.inspect('fill', copy.deepcopy(DIRECT), DIRECT_PAGE)
         self.assertEqual(verdict.problems, [])
         self.assertEqual(verdict.facts['uploaded'], ['cv.pdf'])
 
@@ -285,38 +309,38 @@ class LyingAgent(unittest.TestCase):
         lies = {'fill': LIES, 'submit': SUBMIT_LIES, 'profile_choice': {}}
         lies.update({kind: flow['lies'] for kind, flow in FLOWS.items()})
         for kind, table in gate.SHEETS.items():
-            checked = {n for n, c in table.items() if c.how in (gate.CHECK, gate.DECIDED)}
+            checked = {n for n, c in table.items() if c.how in (gate.CHECK, gate.DECIDED) and c.cite is None}
             missing = checked - set(lies[kind]) - set(ELSEWHERE) - set(DROPPED if kind == 'fill' else ()) - {n.split(':')[1] for n in ELSEWHERE
                                                                       if n.startswith(kind + ':')}
             self.assertEqual(missing, set(), f'{kind} 這幾格沒有說謊的測試')
 
     def test_submit_lies_are_stopped(self):
         for kind, honest, lies, page in (('submit', SUBMIT_HONEST, SUBMIT_LIES, THANKS),):
-            self.assertEqual(gate.inspect(kind, copy.deepcopy(honest), self.truth(page)).problems, [], kind)
+            self.assertEqual(self.inspect(kind, copy.deepcopy(honest), page).problems, [], kind)
             for name, (lie, words) in lies.items():
                 with self.subTest(kind=kind, cell=name):
                     sheet = copy.deepcopy(honest)
                     _set(sheet, name, lie)
-                    said = '\n'.join(gate.inspect(kind, sheet, self.truth(page)).problems)
+                    said = '\n'.join(self.inspect(kind, sheet, page).problems)
                     for w in words:
                         self.assertIn(w, said)
 
     def test_submit_quote_can_span_visible_lines_but_must_match_the_page(self):
         page = dict(THANKS, lines=['應徵成功', '感謝您的申請，我們會與您聯絡。'])
         sheet = dict(SUBMIT_HONEST, confirm_text='應徵成功\n\n感謝您的申請，我們會與您聯絡。')
-        self.assertEqual(gate.inspect('submit', sheet, self.truth(page)).problems, [])
+        self.assertEqual(self.inspect('submit', sheet, page).problems, [])
         sheet['confirm_text'] = '應徵成功\n\n已安排面試。'
         self.assertTrue(any('頁面上沒有這句話' in problem
-                            for problem in gate.inspect('submit', sheet, self.truth(page)).problems))
+                            for problem in self.inspect('submit', sheet, page).problems))
 
     def test_every_checked_cell_is_lied_about_once_and_each_lie_is_stopped(self):
-        checked = {n for n, c in gate.FILL.items() if c.how in (gate.CHECK, gate.DECIDED)}
+        checked = {n for n, c in gate.FILL.items() if c.how in (gate.CHECK, gate.DECIDED) and c.cite is None}
         self.assertEqual(checked - set(LIES) - set(ELSEWHERE) - set(DROPPED), set(), '這幾格沒有說謊的測試')
         for name, lie in DROPPED.items():
             with self.subTest(cell=name):
                 sheet = copy.deepcopy(HONEST)
                 _set(sheet, name, lie)
-                verdict = gate.inspect('fill', sheet, self.truth(PAGE))
+                verdict = self.inspect('fill', sheet, PAGE)
                 self.assertTrue(verdict.ok, verdict.problems)
                 self.assertNotIn(lie, json.dumps(verdict.facts))
         for name, (lie, words, *kind) in LIES.items():
@@ -324,7 +348,7 @@ class LyingAgent(unittest.TestCase):
                 direct = kind == ['direct']
                 sheet = copy.deepcopy(DIRECT if direct else HONEST)
                 _set(sheet, name, lie)
-                verdict = gate.inspect('fill', sheet, self.truth(DIRECT_PAGE if direct else PAGE))
+                verdict = self.inspect('fill', sheet, DIRECT_PAGE if direct else PAGE)
                 self.assertFalse(verdict.ok, f'{name} 說謊沒被擋下')
                 said = '\n'.join(verdict.problems)
                 for w in words:
@@ -333,16 +357,24 @@ class LyingAgent(unittest.TestCase):
     def test_marking_the_fixed_resume_as_custom_is_stopped_with_the_reason(self):
         sheet = copy.deepcopy(HONEST)
         sheet['delivery'] = {'method': 'platform_profile', 'profile_kind': 'custom', 'profile_url': MINE}
-        verdict = gate.inspect('fill', sheet, self.truth())
+        verdict = self.inspect('fill', sheet)
         self.assertIn('交件單「固定版還是客製版」:agent 說 custom,實際是 fixed(程式照這張卡決定的)', verdict.problems)
 
     def test_cells_nobody_registered_never_reach_the_program(self):
         sheet = dict(copy.deepcopy(HONEST), chrome={'pid': 1}, secret_decision='submit it')
-        verdict = gate.inspect('fill', sheet, self.truth())
+        verdict = self.inspect('fill', sheet)
         self.assertEqual(verdict.problems, [])
         self.assertNotIn('chrome', verdict.facts)
         self.assertNotIn('secret_decision', verdict.facts)
         self.assertEqual(sorted(verdict.unregistered), ['chrome', 'secret_decision'])
+
+
+def inspect_flow(kind, flow, sheet):
+    """照流程交件:有編號材料的流程,交件單抄回那一份的交付代號,同一個物件交給安檢門。"""
+    numbered = flow['numbered']() if 'numbered' in flow else None
+    if numbered is not None:
+        sheet = dict(sheet, material_id=numbered.material_id)
+    return gate.inspect(kind, sheet, flow['truth'](), numbered)
 
 
 class OtherFlowsLie(unittest.TestCase):
@@ -352,7 +384,7 @@ class OtherFlowsLie(unittest.TestCase):
         for kind, flow in FLOWS.items():
             for name, sheet in dict(flow.get('variants') or {}, honest=flow['honest']).items():
                 with self.subTest(kind=kind, sheet=name):
-                    verdict = gate.inspect(kind, copy.deepcopy(sheet), flow['truth']())
+                    verdict = inspect_flow(kind, flow, copy.deepcopy(sheet))
                     self.assertEqual(verdict.problems, [])
 
     def test_every_lie_in_every_flow_is_stopped_with_the_reason(self):
@@ -361,7 +393,7 @@ class OtherFlowsLie(unittest.TestCase):
                 with self.subTest(kind=kind, cell=name):
                     sheet = copy.deepcopy(flow['variants'][variant[0]] if variant else flow['honest'])
                     _set(sheet, name, lie)
-                    verdict = gate.inspect(kind, sheet, flow['truth']())
+                    verdict = inspect_flow(kind, flow, sheet)
                     self.assertFalse(verdict.ok, f'{kind} 的 {name} 說謊沒被擋下')
                     said = '\n'.join(verdict.problems)
                     for w in words:
@@ -373,7 +405,8 @@ class OtherFlowsLie(unittest.TestCase):
 
     def test_judgments_are_marked_and_never_become_facts(self):
         """程式核對不了的判斷(職缺關了沒、信算拒絕還是面試…):放在 judged,不在 facts,程式不能拿它當事實用。"""
-        flows = dict(FLOWS, fill={'honest': HONEST, 'truth': lambda: gate.Truth(URL, page=PAGE, decision=DECISION),
+        flows = dict(FLOWS, fill={'honest': HONEST, 'numbered': fill_notes,
+                                'truth': lambda: gate.Truth(URL, page=PAGE, decision=DECISION),
                                 'judged': {'posting.same_job': True, 'submitted': False}},
                      submit={'honest': SUBMIT_HONEST, 'truth': lambda: gate.Truth(URL, page=THANKS),
                              'judged': {'submitted': True}})
@@ -386,7 +419,7 @@ class OtherFlowsLie(unittest.TestCase):
             for name, value in cells.items():
                 value, *variant = value if isinstance(value, tuple) else (value,)
                 sheet = flows[kind]['variants'][variant[0]] if variant else flows[kind]['honest']
-                verdict = gate.inspect(kind, copy.deepcopy(sheet), flows[kind]['truth']())
+                verdict = inspect_flow(kind, flows[kind], copy.deepcopy(sheet))
                 with self.subTest(kind=kind, cell=name):
                     head, _, sub = name.partition('.')
                     if head in (gate.ROWS.get(kind) or {}):
@@ -406,8 +439,363 @@ class OtherFlowsLie(unittest.TestCase):
 
     def test_a_date_written_as_days_ago_counts_from_the_day_the_page_was_fetched(self):
         flow = FLOWS['posted_at']
-        sheet = {'dates': [{'url': A, 'posted_at': '2026-09-17', 'source': 'Updated'}]}
-        self.assertEqual(gate.inspect('posted_at', sheet, flow['truth']()).problems, [])
+        sheet = {'dates': [{'url': A, 'posted_at': '2026-09-17', 'source': [2]}]}
+        verdict = inspect_flow('posted_at', flow, sheet)
+        self.assertEqual(verdict.problems, [])
+        self.assertEqual(verdict.rows['dates'][0].facts['source'], 'Updated 3 days ago')
+
+
+# ---- 段落編號(#465):有 cite 的格只收程式這一次交付的編號 ----
+# 預期契約:(單, 格, items 裡的鍵或 None),每一格「應該只收編號」的格;跟 gate.SHEETS 推出來的兩邊互比。
+CITING = {('fill', 'platform_notes_remove', None), ('posted_at', 'dates.source', None),
+          ('link_status', 'jobs.quote', None), ('prepare', 'real_title', 'cite'), ('prepare', 'quote', None),
+          ('research_judge', 'jobs.title', 'cite'), ('research_judge', 'jobs.company', 'cite'),
+          ('research_judge', 'jobs.reasons', 'citation'), ('research_judge', 'jobs.risk', 'cite'),
+          ('research_judge', 'jobs.card', 'quote'), ('research_judge', 'jobs.terms', 'salary_quote'),
+          ('research_judge', 'jobs.terms', 'exp_quote'), ('research_judge', 'jobs.terms', 'location_quote'),
+          ('reply', 'findings.subject', 'cite'),
+          ('reply', 'findings.quote', None), ('reply', 'findings.reason', None), ('reply', 'job_ids.at', None)}
+MARK = '⟪程式交出去的字⟫'
+
+
+def registered_cites(sheets):
+    """從 SHEETS 推:每一個有 cite 的格(Accept → 鍵是 None;{鍵: Accept} → 每個鍵一列)。"""
+    out = set()
+    for kind, table in sheets.items():
+        for name, cell in table.items():
+            if isinstance(cell.cite, Accept):
+                out.add((kind, name, None))
+            elif cell.cite:
+                out |= {(kind, name, key) for key in cell.cite}
+    return out
+
+
+def contract_gaps(sheets, contract):
+    got = registered_cites(sheets)
+    return [f'{x} 登記了 cite,契約沒寫' for x in sorted(got - contract, key=str)] + \
+           [f'{x} 契約寫了,SHEETS 沒登記 cite' for x in sorted(contract - got, key=str)]
+
+
+def fill_notes(mark=''):
+    """填表指示印的平台筆記(prompt_for 的 numbered)。"""
+    numbered = Numbered()
+    numbered.add([mark + '自訂經歷的編輯器要先全選再輸入才會存', mark + '推薦信從下拉選單選'], 'pnote')
+    return numbered
+
+
+def cite_fixtures():
+    """有 numbered 的流程:照實交件單(含 variants)、編號材料(mark 加在每段前面)、真相(吃那一份材料)。"""
+    flows = dict(FLOWS, fill={'honest': dict(HONEST, platform_notes_remove=[2]), 'numbered': fill_notes,
+                              'truth': lambda: gate.Truth(URL, page=copy.deepcopy(PAGE), tab_id='7',
+                                                          decision=dict(DECISION))})
+    return {kind: {'sheets': [flow['honest'], *(flow.get('variants') or {}).values()],
+                   'numbered': flow['numbered'], 'truth': lambda numbered, flow=flow: flow['truth']()}
+            for kind, flow in flows.items() if 'numbered' in flow}
+
+
+def _cited_spots(kind, sheet, name, cell):
+    """交件單裡這一格每一個寫了非空編號的地方:(路徑, 列的序號或 None, 那一筆或 None, 鍵或 None)。"""
+    head, _, sub = name.partition('.')
+    if head in (gate.ROWS.get(kind) or {}):
+        cells = [([head, i, sub], i, r.get(sub)) for i, r in enumerate(sheet.get(head) or []) if sub in r]
+    else:
+        cells = [([name], None, sheet.get(name))] if name in sheet else []
+    for path, row, value in cells:
+        if isinstance(cell.cite, Accept):
+            if value:
+                yield path, row, None, None
+            continue
+        items = list(enumerate(value)) if isinstance(value, list) else [(None, value)]
+        for at, item in items:
+            for key in cell.cite:
+                if isinstance(item, dict) and item.get(key):
+                    yield path + ([] if at is None else [at]) + [key], row, item, key
+
+
+def _get(sheet, path):
+    for step in path:
+        sheet = sheet[step]
+    return sheet
+
+
+def _taken(kind, verdict, name, row):
+    """這一格有沒有被收下(進 facts 或 judged)。row 是那一列的序號,None 是整張的一格。"""
+    head, _, sub = name.partition('.')
+    if row is None:
+        return name in verdict.facts or name in verdict.judged
+    got = verdict.rows.get(head, [])[row]
+    return sub in got.facts or sub in got.judged
+
+
+def cite_lies(sheets, fixtures):
+    """每一張單、每一個有 cite 的格(與鍵)自動產生這幾種說謊:抄原字、超出範圍、別一列的號碼(owner 有限定時)、
+    為別次交付寫的號碼;{鍵: Accept} 的格再加整格或清單裡的一筆寫成字串。回擋不下的(空清單是全擋下)。"""
+    failures = []
+    for kind, table in sheets.items():
+        cites = {n: c for n, c in table.items() if c.cite is not None}
+        if cites and kind not in fixtures:
+            failures.append(f'{kind} 有 cite 格,卻沒有 fixture')
+            continue
+        for name, cell in cites.items():
+            for key in ([None] if isinstance(cell.cite, Accept) else list(cell.cite)):
+                failures += _lie_about(kind, name, cell, key, fixtures[kind])
+    return failures
+
+
+def _lie_about(kind, name, cell, key, fx):
+    accept = cell.cite if key is None else cell.cite[key]
+    label = f'{kind} 的「{cell.name}」' + (f'.{key}' if key else '')
+    numbered = fx['numbered']()
+    check = lambda sheet: gate.inspect(kind, sheet, fx['truth'](numbered), numbered)
+    spots = [(dict(copy.deepcopy(sheet), material_id=numbered.material_id), spot)
+             for sheet in fx['sheets'] for spot in _cited_spots(kind, sheet, name, cell) if spot[3] == key]
+    if not spots:
+        return [f'{label}沒有照實引用的範例']
+    owns = lambda found: any(numbered.parts[n - 1].owner is not None for n in _get(found[0], found[1][0]))
+    sheet, (path, row, item, _key) = next((found for found in spots if owns(found)), spots[0])
+    verdict = check(copy.deepcopy(sheet))
+    if not _taken(kind, verdict, name, row):
+        return [f'{label}的照實範例沒有收下:{verdict.problems}']
+    ids = _get(sheet, path)
+    cited = [numbered.parts[n - 1] for n in ids]
+    other = Numbered([dataclasses.replace(p, text='別次交付:' + p.text) for p in numbered.parts])
+    lies = {'抄原字': ('\n'.join(p.text for p in cited), None), '超出範圍': ([len(numbered.parts) + 1], None),
+            '別次交付': (ids, other.material_id)}
+    at = {}
+    if key is not None:     # {鍵: Accept} 的格:整格、清單裡的那一筆寫成字串,沒有鍵可換
+        in_list = isinstance(_get(sheet, path[:-2]), list)
+        at['錯形狀'] = path[:-2] if in_list else path[:-1]
+        lies['錯形狀'] = ('任意 agent 字', None)
+        if in_list:
+            at['一筆錯形狀'] = path[:-1]
+            lies['一筆錯形狀'] = ('任意 agent 字', None)
+    if accept.value:        # 要當值用的格:值不在指的段落裡、指了段落卻沒寫值,都不收
+        at['值不在段落'] = at['值空了'] = path[:-1] + [accept.value]
+        lies['值不在段落'] = ('程式材料裡沒有的字', None)
+        lies['值空了'] = ('', None)
+    failures = []
+    if accept.owner is not None:
+        kinds = accept.kinds(item or {}) if callable(accept.kinds) else accept.kinds
+        owned = {p.owner for p in cited} - {None}
+        elsewhere = [p.n for p in numbered.parts
+                     if p.owner is not None and p.owner not in owned and (kinds is None or p.kind in kinds)]
+        if not owned:
+            failures.append(f'{label}的照實範例只引了整批共用的段,看不出這一列是誰')
+        elif not elsewhere:
+            failures.append(f'{label}的 fixture 裡沒有別一列的段')
+        else:
+            lies['別一列'] = ([elsewhere[0]], None)
+    for lie, (value, material) in lies.items():
+        bad = copy.deepcopy(sheet)
+        if material:
+            bad['material_id'] = material
+        where = at.get(lie, path)
+        _get(bad, where[:-1])[where[-1]] = value
+        verdict = check(bad)
+        said = '\n'.join(verdict.problems)
+        if _taken(kind, verdict, name, row):
+            failures.append(f'{label}收了「{lie}」的號碼')
+        elif lie == '別次交付' and not (numbered.material_id in said and material in said):
+            failures.append(f'{label}擋下別次交付,但問題沒寫出兩個代號:{said}')
+        elif lie != '別次交付' and cell.name not in said:
+            failures.append(f'{label}擋下「{lie}」,但問題沒寫出格名:{said}')
+    return failures
+
+
+def _reaches(value, mark, seen):
+    if id(value) in seen:
+        return False
+    seen.add(id(value))
+    if isinstance(value, str):
+        return mark in value
+    if isinstance(value, dict):
+        return any(_reaches(k, mark, seen) or _reaches(v, mark, seen) for k, v in value.items())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_reaches(v, mark, seen) for v in value)
+    if hasattr(value, '__dict__') and not callable(value):
+        return any(_reaches(v, mark, seen) for v in vars(value).values())
+    return False
+
+
+def leaks(sheets, fixtures):
+    """每一份 fixture 的段落字前面加記號,包住每一格的 fn 記下它收到的東西(值、整張、真相與 RowTruth.sheet);
+    找到記號就是格子函式拿得到程式交出去的字。回拿得到的格。"""
+    failures = []
+    for kind, fx in fixtures.items():
+        if kind not in sheets:
+            continue
+        numbered = fx['numbered'](MARK)
+        seen = []
+
+        def wrap(name, cell):
+            def fn(said, whole, truth, inner=cell.fn):
+                seen.append((name, (said, whole, truth)))
+                return inner(said, whole, truth)
+            out = copy.copy(cell)
+            out.fn = fn
+            return out
+        with mock.patch.dict(sheets[kind], {n: wrap(n, c) for n, c in sheets[kind].items() if c.fn}):
+            for sheet in fx['sheets']:
+                gate.inspect(kind, dict(copy.deepcopy(sheet), material_id=numbered.material_id),
+                             fx['truth'](numbered), numbered)
+        for name in sorted({n for n, args in seen if _reaches(args, MARK, set())}):
+            failures.append(f'{kind} 的「{sheets[kind][name].name}」格子函式拿得到程式交出去的字')
+    return failures
+
+
+FAKE_BASIS = {'JD 原文': frozenset({'jd'}), '偏好筆記': frozenset({'note'})}
+
+
+def fake_numbered(mark=''):
+    numbered = Numbered()
+    numbered.add(mark + '他喜歡資料管線', 'note')
+    numbered.add([mark + '資料工程師', mark + '月薪 5 萬'], 'jd', owner='J1')
+    numbered.add(mark + '後端工程師', 'jd', owner='J2')
+    numbered.add(mark + '刊登超過 90 天', 'flag', owner='J3')
+    return numbered
+
+
+def fake_sheet(seen=None, title=Accept(frozenset({'jd'}), ROW)):
+    """一張假單:職稱引 JD、理由照自己的 basis 引、卡片摘要(agent 判斷)引 JD;沒有 JD 的列摘要用不到。"""
+    def raw(said, row, truth):
+        if seen is not None:
+            seen.append(said)
+    return {
+        'items.id': Cell(gate.CHECK, '代號', '這一輪交給它的', lambda s, r, t: None if t.key in t.handed else '沒交給它'),
+        'items.title': Cell(gate.CHECK, '頁面上的職稱', 'JD 的編號', raw, cite=title),
+        'items.reasons': Cell(gate.CHECK, '理由的引用', '照根據收', items=('text', 'citation', 'basis'),
+                              cite={'citation': Accept(lambda item: FAKE_BASIS.get(item.get('basis'), frozenset()), ROW)}),
+        'items.card': Cell(gate.JUDGED, '卡片摘要', 'JD 的編號',
+                           lambda s, r, t: None if (t.key, 'jd') in t.read else gate.UNUSED,
+                           items=('fit', 'quote'), cite={'quote': Accept(frozenset({'jd'}), ROW)}),
+        'items.note': Cell(gate.WORDS, '它的話', '只給人看'),
+    }
+
+
+FAKE_HONEST = {'items': [
+    {'id': 'J1', 'title': [2], 'note': '看起來不錯', 'card': {'fit': '對', 'quote': [3]},
+     'reasons': [{'text': '對味', 'citation': [1], 'basis': '偏好筆記'},
+                 {'text': '要管線', 'citation': [2], 'basis': 'JD 原文'}]},
+    {'id': 'J3', 'card': {'fit': '不知道', 'quote': []}}]}
+FAKE_CONTRACT = {('fake', 'items.title', None), ('fake', 'items.reasons', 'citation'), ('fake', 'items.card', 'quote')}
+
+
+def fake_fixture(truth=lambda numbered: gate.Truth(handed={'J1', 'J2', 'J3'})):
+    return {'fake': {'sheets': [FAKE_HONEST], 'numbered': fake_numbered, 'truth': truth}}
+
+
+class CitedCells(unittest.TestCase):
+    """有 cite 的格:交件單寫段落編號,安檢門用 pick 解回程式的字;格子函式只看到編號。"""
+
+    def inspect(self, sheet, table=None, numbered=None, material=None):
+        numbered = numbered or fake_numbered()
+        sheet = copy.deepcopy(sheet)
+        if material is not False:
+            sheet['material_id'] = material or numbered.material_id
+        with mock.patch.dict(gate.SHEETS, fake=table or fake_sheet()), mock.patch.dict(gate.ROWS, fake={'items': 'id'}):
+            return gate.inspect('fake', sheet, gate.Truth(handed={'J1', 'J2', 'J3'}), numbered)
+
+    def test_cite_cell_puts_program_text_in_facts_and_raw_ids_in_fn(self):
+        seen = []
+        verdict = self.inspect(FAKE_HONEST, fake_sheet(seen))
+        self.assertEqual(verdict.problems, [])
+        title = verdict.rows['items'][0].facts['title']
+        self.assertEqual(title, '資料工程師')
+        self.assertIsInstance(title, Cited)
+        self.assertEqual(seen, [[2]])
+        self.assertNotIn('material_id', verdict.unregistered)
+
+    def test_a_cited_cell_without_the_programs_material_is_a_program_error(self):
+        """有引用格,程式卻沒交編號材料:是程式的錯,停下;不是悄悄不核、把 agent 的判斷照收。"""
+        sheet = {'jobs': [{'id': 'J1', 'status': 'closed', 'quote': [1], 'reason': '徵到人了'}]}
+        with self.assertRaisesRegex(RuntimeError, '頁面原文.*程式的錯'):
+            gate.inspect('link_status', sheet, gate.Truth(handed={'J1'}))
+
+    def test_judged_cite_keeps_the_object_in_judged_and_swaps_only_the_key(self):
+        sheet = copy.deepcopy(FAKE_HONEST)
+        row = self.inspect(sheet).rows['items'][0]
+        self.assertEqual(row.judged['card'], {'fit': '對', 'quote': '月薪 5 萬'})
+        self.assertIsInstance(row.judged['card']['quote'], Cited)
+        self.assertNotIn('card', row.facts)
+        self.assertEqual(sheet, FAKE_HONEST)
+
+    def test_list_cite_kinds_come_from_each_item(self):
+        row = self.inspect(FAKE_HONEST).rows['items'][0]
+        self.assertEqual([r['citation'] for r in row.facts['reasons']], ['他喜歡資料管線', '資料工程師'])
+        sheet = copy.deepcopy(FAKE_HONEST)
+        sheet['items'][0]['reasons'][0]['citation'] = [2]      # 根據寫偏好筆記,引的卻是 JD
+        verdict = self.inspect(sheet)
+        self.assertNotIn('reasons', verdict.rows['items'][0].facts)
+        self.assertTrue(any('理由的引用' in p and '資料工程師' in p for p in verdict.problems), verdict.problems)
+
+    def test_a_keyed_cite_cell_of_the_wrong_shape_is_refused_not_kept_raw(self):
+        for cell, value in (('reasons', '任意 agent 字'), ('reasons', ['任意 agent 字']), ('card', '任意 agent 字')):
+            with self.subTest(cell=cell, value=value):
+                sheet = copy.deepcopy(FAKE_HONEST)
+                sheet['items'][0][cell] = value
+                verdict = self.inspect(sheet)
+                row = verdict.rows['items'][0]
+                self.assertFalse(row.ok)
+                self.assertNotIn(cell, row.facts)
+                self.assertNotIn(cell, row.judged)
+                name = fake_sheet()[f'items.{cell}'].name
+                self.assertTrue(any(name in p for p in verdict.problems), verdict.problems)
+
+    def test_a_sheet_with_another_deliverys_id_is_refused(self):
+        numbered, other = fake_numbered(), fake_numbered('別次:')
+        for material in (other.material_id, False):
+            with self.subTest(material=material):
+                verdict = self.inspect(FAKE_HONEST, numbered=numbered, material=material)
+                row = verdict.rows['items'][0]
+                self.assertFalse(row.ok)
+                for cell in ('title', 'reasons'):
+                    self.assertNotIn(cell, row.facts)
+                self.assertNotIn('card', row.judged)
+                self.assertEqual(row.facts['note'], '看起來不錯')
+                said = '\n'.join(verdict.problems)
+                self.assertIn(numbered.material_id, said)
+                if material:
+                    self.assertIn(material, said)
+
+    def test_has_a_jd_means_owner_and_kind(self):
+        rows = self.inspect(FAKE_HONEST).rows['items']
+        self.assertIn('card', rows[0].judged)
+        self.assertNotIn('card', rows[1].judged)       # J3 只有程式提醒,沒有 JD
+
+    def test_cite_must_name_items(self):
+        for kw in ({'cite': {'quote': Accept()}}, {'items': ('quote',), 'cite': Accept()},
+                   {'items': ('quote',), 'cite': {'why': Accept()}}, {'cite': 'quote'}):
+            with self.subTest(kw=kw), self.assertRaises(TypeError):
+                Cell(gate.CHECK, '格', '說明', **kw)
+        Cell(gate.CHECK, '格', '說明', cite=Accept())
+        Cell(gate.JUDGED, '格', '說明', items=('quote', 'fit'), cite={'quote': Accept()})
+
+    def test_enumerated_guards_bite_on_a_fake_sheet(self):
+        sheets = {'fake': fake_sheet()}
+        with mock.patch.dict(gate.ROWS, fake={'items': 'id'}), mock.patch.dict(gate.SHEETS, sheets):
+            self.assertEqual(cite_lies(sheets, fake_fixture()), [])
+            self.assertEqual(leaks(sheets, fake_fixture()), [])
+            self.assertEqual(contract_gaps(sheets, FAKE_CONTRACT), [])
+            loose = {'fake': fake_sheet(title=Accept(frozenset({'jd'}), lambda row, t: {'J1', 'J2', None}))}
+            with mock.patch.dict(gate.SHEETS, loose):
+                self.assertEqual(cite_lies(loose, fake_fixture()), ['fake 的「頁面上的職稱」收了「別一列」的號碼'])
+            with self.assertRaises(TypeError):           # 真相不收材料:格子函式拿不到程式交出去的字
+                gate.Truth(given={'J1': '原文'})
+            given = fake_fixture(lambda n: gate.Truth(handed={'J1', 'J2', 'J3'},
+                                                      feedback={'J1': '\n'.join(p.text for p in n.parts)}))
+            self.assertIn('fake 的「頁面上的職稱」格子函式拿得到程式交出去的字', leaks(sheets, given))
+            self.assertEqual(contract_gaps(sheets, FAKE_CONTRACT - {('fake', 'items.card', 'quote')}),
+                             ["('fake', 'items.card', 'quote') 登記了 cite,契約沒寫"])
+            self.assertEqual(cite_lies(sheets, {}), ['fake 有 cite 格,卻沒有 fixture'])
+
+    def test_citing_cells_match_the_expected_contract(self):
+        self.assertEqual(contract_gaps(gate.SHEETS, CITING), [])
+
+    def test_every_citing_cell_refuses_copied_text_other_rows_made_up_numbers_and_another_deliverys_ids(self):
+        self.assertEqual(cite_lies(gate.SHEETS, cite_fixtures()), [])
+
+    def test_cell_functions_never_see_handed_text(self):
+        self.assertEqual(leaks(gate.SHEETS, cite_fixtures()), [])
 
 
 class ReadSaysWhatWentWrong(unittest.TestCase):
@@ -467,6 +855,26 @@ class NoBypass(unittest.TestCase):
         """每一種交件單的檔名(* 那一段每一輪不一樣):寫在程式裡可能是字串、f 字串或拼起來的。"""
         parts = [re.escape(name).replace(r'\*', r"[^'\"]*") for name in gate.FILES.values()]
         return re.compile('(' + '|'.join(parts) + ')')
+
+    def test_every_inspect_of_a_sheet_with_cited_cells_passes_the_material(self):
+        """有引用格的交件單,呼叫安檢門的地方都交這一次的編號材料(第四個參數或 numbered=);種類要寫成字串才看得出是哪一種。"""
+        citing = {kind for kind, table in gate.SHEETS.items() if any(c.cite is not None for c in table.values())}
+        seen, missing = set(), []
+        for name in sorted(os.listdir(TOOLS)):
+            if not name.endswith('.py') or name == 'gate.py':
+                continue
+            with open(os.path.join(TOOLS, name), encoding='utf-8') as f:
+                tree = ast.parse(f.read())
+            for c in ast.walk(tree):
+                if not (isinstance(c, ast.Call) and ast.unparse(c.func) == 'gate.inspect'):
+                    continue
+                kind = c.args[0].value if c.args and isinstance(c.args[0], ast.Constant) else None
+                seen.add(kind)
+                if kind is None or (kind in citing and len(c.args) < 4
+                                    and not any(k.arg == 'numbered' for k in c.keywords)):
+                    missing.append(f'{name}:{c.lineno} {ast.unparse(c)[:100]}')
+        self.assertEqual(missing, [], '這幾處呼叫安檢門沒交編號材料')
+        self.assertEqual(citing - seen, set(), '有引用格的交件單,程式裡找不到呼叫安檢門的地方')
 
     def test_only_the_gate_opens_a_handoff_sheet(self):
         """打開檔案的地方(open、json.load…),參數裡直接寫交件單檔名、或用了指到交件單的變數,都算自己打開交件單。
@@ -543,6 +951,7 @@ class NoBypass(unittest.TestCase):
             table = gate.SHEETS[kind]
             known = set(table) | {n.split('.')[0] for n in table} | {i for c in table.values() for i in c.items}
             known |= {n.split('.')[1] for n in table if '.' in n}
+            known |= {'material_id'} if any(c.cite is not None for c in table.values()) else set()
             for text in prompts:
                 asked = set(re.findall(r'"([a-z_]+)"\s*:', text))
                 asked |= {m for m in re.findall(r'\b(?:delivery|profile|posting)\.([a-z_]+)', text)}
@@ -563,13 +972,13 @@ class NoBypass(unittest.TestCase):
             raise RuntimeError('只要指示')
         board_status._agent_link_batch({A: page}, None, agent)
         return {'posted_at': [posted_age.prompt_for({A: {'target': '資料工程師'}}, {A: page}, '/tmp/x.json',
-                                                   {A: '2026-09-20'})],
+                                                   {A: '2026-09-20'})[0]],
                 'link_status': seen,
                 'suggest_cats': [__import__('suggest_cats').prompt('/tmp/x.json', {}, [])],
                 'customize': [__import__('customize').build_prompt(A, '資料工程師', [], [], '/tmp/r.json', 'JD')],
                 'prepare': [__import__('cut_tailor').prompt(
                     [(A, '資料工程師')], {A: ('ok', page)}, out_dir='/tmp/prep',
-                    resumes=[{'id': 'general', 'name': '通用', 'files': {'zh': 'r/zh.pdf', 'en': 'r/en.pdf'}}])],
+                    resumes=[{'id': 'general', 'name': '通用', 'files': {'zh': 'r/zh.pdf', 'en': 'r/en.pdf'}}])[0]],
                 'research_search': [__import__('research').search_prompt('wide', '', [], {}, '', '/tmp/s.json',
                                                                           '/tmp/s.md')],
                 'research_judge': [__import__('research').judge_prompt(
@@ -582,6 +991,7 @@ class NoBypass(unittest.TestCase):
             table = gate.SHEETS[kind]
             known = set(table) | {n.split('.')[0] for n in table} | {n.split('.')[1] for n in table if '.' in n}
             known |= {i for c in table.values() for i in c.items}
+            known |= {'material_id'} if any(c.cite is not None for c in table.values()) else set()
             decided = {n.split('.')[-1] for n, c in table.items() if c.how == gate.DECIDED}
             for text in prompts:
                 with self.subTest(kind=kind):

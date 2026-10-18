@@ -2,7 +2,7 @@
 """找缺條件:使用者在找缺面板填的數字(空著 = 不限),這一輪的硬規則。
 
   上架天數、應徵人數 → 程式讀得到(page_fetch 抓頁時的上架日、應徵人數),判斷前就過濾,不花 agent
-  薪資、經驗、地點   → 判斷的 agent 從職缺頁原文抄那句話、讀出值(安檢門核對原文),程式比
+  薪資、經驗、地點   → 判斷的 agent 讀出值、引職缺頁原文那幾段的編號(安檢門照編號取原文),程式比
 頁面查不到的那一項:預設留著、卡上標出來;使用者勾了「查不到就排除」(strict)才丟。
 """
 import re
@@ -17,7 +17,7 @@ TERMS = {
 }
 NUMBERS = ('posted_days', 'applicants_max', 'salary_min', 'exp_max')
 JUDGED = ('salary_min', 'exp_max', 'location')     # 要 agent 從職缺頁原文讀的那幾項
-# 判斷交件單 terms 裡每一項:值的欄位、原文引用的欄位、要它寫什麼
+# 判斷交件單 terms 裡每一項:值的欄位、引原文段落編號的欄位、要它寫什麼
 FIELDS = {
     'salary_min': ('salary_month', 'salary_quote', '新台幣月薪下限的數字(年薪除以 12、外幣照當天匯率換算);原文沒寫留 null'),
     'exp_max': ('exp_years', 'exp_quote', '要求的最少年資數字(不拘寫 0);原文沒寫留 null'),
@@ -68,7 +68,7 @@ def judge_fields(keys):
     parts = []
     for k in keys:
         value, quote, what = FIELDS[k]
-        parts.append(f'"{value}":{what},"{quote}":"職缺頁原文裡寫這一項的那句,逐字抄;沒寫留空字串"')
+        parts.append(f'"{value}":{what},"{quote}":[這一張 JD 原文寫這一項的那幾段的編號,沒寫留 []]')
     return '"terms":{' + ','.join(parts) + '},'
 
 
@@ -127,7 +127,7 @@ def check_page(c, terms, today=None):
 
 
 def check_judged(said, terms):
-    """agent 讀出來的那幾項(薪資、經驗、地點),原文引用已由安檢門核對過。回 (不符的項目, 查不到的項目)。"""
+    """agent 讀出來的那幾項(薪資、經驗、地點),引的段落編號已由安檢門核對過。回 (不符的項目, 查不到的項目)。"""
     said = said if isinstance(said, dict) else {}
     misses, unknown = [], []
 
