@@ -17,7 +17,7 @@ permissions:
 jobs:
   tests:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.private && 'x99' || 'ubuntu-latest' }}
     timeout-minutes: 40
     permissions:
       contents: read
