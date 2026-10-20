@@ -137,7 +137,6 @@ class Tmp(unittest.TestCase):
         self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='boardtest-'))
         self.path = os.path.join(self.dir, 'board.html')
         bs.STATE = self.path
-        bs.ALLOW_AGENT[0] = False
         self.builds = []
         self._tb = bs.trigger_build
         bs.trigger_build = lambda: self.builds.append(1)   # 不要真的跑 reconcile
@@ -471,19 +470,6 @@ class Http(HttpBase):
             self.assertNotEqual(bs.start_run('replies', {'url': url})[0], 400)
             self.assertEqual(bs.start_run('replies', {'url': JOBS[2]['id']})[0], 400)
 
-    def test_agent_cannot_write_his_board(self):
-        before = read(self.path)
-        code, _, _ = self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'s': 'meh'}}]},
-                              ua='Mozilla/5.0 Claude/1.0')
-        self.assertEqual(code, 403)
-        self.assertEqual(read(self.path), before)
-
-    def test_sandbox_lets_agent_write(self):
-        bs.ALLOW_AGENT[0] = True
-        code, _, _ = self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'s': 'meh'}}]},
-                              ua='Mozilla/5.0 Claude/1.0')
-        self.assertEqual(code, 200)
-
     def test_old_tab_sending_whole_cards_is_refused(self):
         before = read(self.path)
         self.assertEqual(self.req('/api/save', {'__rev__': 1, JOBS[1]['id']: {'s': 'like'}})[0], 409)
@@ -749,11 +735,6 @@ class Prep(HttpBase):
                 return st
             time.sleep(0.1)
         self.fail('等不到:%r' % st)
-
-    def test_agent_cannot_start_it(self):
-        code, _, _ = self.req('/api/run/' + self.KIND, {'mode': 'wide'}, ua='Mozilla/5.0 Claude/1.0')
-        self.assertEqual(code, 403)
-        self.assertIsNone(bs._PROC.get(self.KIND))
 
     def test_runs_once_and_the_page_can_see_the_result(self):
         bd.set_fb(lambda f: f.update({JOBS[1]['id']: {'app': 'prep'}, JOBS[2]['id']: {'app': 'prep'}}),

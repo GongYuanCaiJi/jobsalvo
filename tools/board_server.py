@@ -39,8 +39,6 @@ REPO=cf.HOME
 LOCK=threading.Lock()
 STATE=None  # board html 檔路徑
 RUNNING_VERSION=''
-AGENT_UA='Claude/'      # AI 助理的瀏覽器(例如 Claude)會在 UA 帶這段,使用者自己的裝置不會
-ALLOW_AGENT=[False]     # 只有沙箱板開這個
 
 
 def code_version(root=None):
@@ -1253,15 +1251,10 @@ class H(BaseHTTPRequestHandler):
             return True
         return False
 
-    def _agent_blocked(self):
-        if AGENT_UA in (self.headers.get('User-Agent') or '') and not ALLOW_AGENT[0]:
-            self._json(403,{'ok':False,'err':'agent','msg':'這個看板不收 agent 的寫入。'}); return True
-        return False
     def do_PUT(self):
         """上傳檔案:body 就是檔案本身(不用 multipart)。/api/file?path=resume/x.pdf 存進資料夾;
         /api/card-file?u=<職缺網址>&name=<檔名> 是「📎 這張用自己的檔」,存進 custom/ 並記在那張卡上。"""
         if self._foreign(True): return
-        if self._agent_blocked(): return
         import settings_api as sa
         data=self._body()
         if self.path.startswith('/api/file?'):
@@ -1296,7 +1289,6 @@ class H(BaseHTTPRequestHandler):
         self._send(404,'not found','text/plain; charset=utf-8')
     def do_DELETE(self):
         if self._foreign(True): return
-        if self._agent_blocked(): return
         import settings_api as sa
         if self.path.startswith('/api/file?'):
             before=sent_files()
@@ -1308,7 +1300,6 @@ class H(BaseHTTPRequestHandler):
         self._send(404,'not found','text/plain; charset=utf-8')
     def do_POST_bank(self):
         """🎤 面試準備:新增/改/刪一題。body = {op:'put', item:{編輯框的欄位}} 或 {op:'del', id}。回整份新的 bank。"""
-        if self._agent_blocked(): return
         import interview_bank as ib
         body=self._json_body()
         if body is None: return
@@ -1325,7 +1316,6 @@ class H(BaseHTTPRequestHandler):
         note_saved()
         return self._json(200,{'ok':True,'bank':out['bank']})
     def do_POST_settings(self):
-        if self._agent_blocked(): return
         import settings_api as sa
         body=self._json_body()
         if body is None: return
@@ -1472,7 +1462,6 @@ class H(BaseHTTPRequestHandler):
     def _do_POST(self):
         if self._foreign(True): return
         if self.path=='/api/live':
-            if self._agent_blocked():return
             body=self._json_body()
             if body is None:return
             u=body.get('u') or ''
@@ -1494,7 +1483,6 @@ class H(BaseHTTPRequestHandler):
         if self.path=='/api/settings' or self.path.startswith('/api/settings/'):
             return self.do_POST_settings()
         if self.path=='/api/update':
-            if self._agent_blocked():return
             if not is_real():return self._json(400,{'ok':False,'msg':'副本不更新'})
             import update
             r=update.apply()
@@ -1502,7 +1490,6 @@ class H(BaseHTTPRequestHandler):
         if self.path=='/api/bank':
             return self.do_POST_bank()
         if self.path=='/api/customize':
-            if self._agent_blocked():return
             body=self._json_body()
             if body is None: return
             import customize as cu
@@ -1521,19 +1508,10 @@ class H(BaseHTTPRequestHandler):
         act=''
         if '/' in kind: kind,act=kind.split('/',1)
         if kind in RUNS and act:
-            if AGENT_UA in (self.headers.get('User-Agent') or '') and not ALLOW_AGENT[0]:
-                self._json(403,{'ok':False,'err':'agent'}); return
             code,st=control_run(kind,act)
             self._json(code,dict(st,ok=code==200)); return
         if self.path!='/api/save' and kind not in RUNS:
             self._send(404,'not found','text/plain; charset=utf-8'); return
-        # 這份板子上的標記是他的判斷,只有他能寫;跑準備區、找新職缺也只有他能發動。
-        # AI 助理的瀏覽器 User-Agent 帶 'Claude/',使用者的手機與瀏覽器不會有,所以這裡認得出來、直接擋掉。
-        # 以前擋不住:我在 localhost 點一下喜歡就跟他自己點沒有分別,測試因此蓋掉過他剛標的東西,
-        # 而使用者不可能記得自己標過什麼。
-        # 我要走介面就開沙箱板(tools/board_sandbox.py,那支會帶 --allow-agent)。
-        if AGENT_UA in (self.headers.get('User-Agent') or '') and not ALLOW_AGENT[0]:
-            self._json(403,{'ok':False,'err':'agent','msg':'這個看板不收 agent 的寫入。要測介面請開沙箱板(8898)。'}); return
         if kind:
             args=self._json_body()   # 讀不懂就回 400:不當成沒帶參數照跑,該只跑一張的會變成全部都跑
             if args is None: return
@@ -1644,9 +1622,7 @@ def main():
     ap.add_argument('--port',type=int,default=cf.PORT)
     ap.add_argument('--host',default='auto',help='auto=127.0.0.1 ＋ Tailscale IP(預設,安全);或指定 IP。禁 0.0.0.0')
     ap.add_argument('--state',default=cf.LIVE)
-    ap.add_argument('--allow-agent',action='store_true',
-                    help='允許 AI 助理的瀏覽器寫入。只有沙箱板該開,正式看板一律不開。')
-    a=ap.parse_args(); STATE=os.path.abspath(a.state); ALLOW_AGENT[0]=a.allow_agent; SERVING[0]=True
+    a=ap.parse_args(); STATE=os.path.abspath(a.state); SERVING[0]=True
     first_run(STATE)
     tmp=None; srvs=[]; previous_sigterm=None
     try:

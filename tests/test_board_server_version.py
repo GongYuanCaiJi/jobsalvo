@@ -17,7 +17,7 @@ class BoardServerVersion(unittest.TestCase):
             state = os.path.join(root, 'fake-board.html')
             with open(state, 'w', encoding='utf-8') as output:
                 output.write('fake board')
-            old_state, old_allow = board_server.STATE, board_server.ALLOW_AGENT[0]
+            old_state = board_server.STATE
             try:
                 with mock.patch.object(sys, 'argv', ['board_server.py', '--state', state, '--port', '8898']), \
                         mock.patch.object(board_server, 'is_real', return_value=True), \
@@ -29,7 +29,6 @@ class BoardServerVersion(unittest.TestCase):
                 pilot.assert_not_called()
             finally:
                 board_server.STATE = old_state
-                board_server.ALLOW_AGENT[0] = old_allow
 
     def test_code_version_changes_with_server_or_browser_code(self):
         with tempfile.TemporaryDirectory(prefix='board-version-') as root:

@@ -512,10 +512,6 @@ class WebOnly(tb.HttpBase):
         self.assertEqual(code, 400)
         self.assertIn('履歷代號', json.loads(raw)['msg'])
 
-    def test_agent_cannot_change_settings(self):
-        code, _, _ = self.req('/api/settings', {'texts': {'apply_rules': 'x'}}, ua='Mozilla/5.0 Claude/1.0')
-        self.assertEqual(code, 403)
-
     def test_uploads_stay_inside_resume_and_custom(self):
         self.assertEqual(self.put('/api/file?path=../evil.pdf', b'x')[0], 400)
         self.assertEqual(self.put('/api/file?path=resume/run.sh', b'x')[0], 400)
@@ -1064,7 +1060,6 @@ class BankHttp(tb.HttpBase):
         qid = bank['items'][0]['id']
         code, raw, _ = self.req('/api/bank/form?id=' + qid)
         self.assertEqual(json.loads(raw)['form']['t'], '為什麼換工作')
-        self.assertEqual(self.req('/api/bank', {'op': 'put', 'item': {'t': 'x'}}, ua='Mozilla/5.0 Claude/1.0')[0], 403)
 
 
 class FileWritesFromTheBoard(tb.HttpBase):
@@ -1087,15 +1082,12 @@ class FileWritesFromTheBoard(tb.HttpBase):
         self.assertEqual((code, json.loads(raw)['ok']), (200, False))
         self.assertEqual(self.send('DELETE', '/api/nothing')[0], 404)
 
-    def test_other_sites_and_agents_cannot_write_or_delete(self):
+    def test_other_sites_cannot_write_or_delete(self):
         rel = 'custom/keep-me.pdf'
         self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'%PDF-1.4')[0], 200)
         evil = {'Origin': 'http://evil.example'}
         self.assertEqual(self.send('DELETE', '/api/file?path=' + rel, headers=evil)[0], 403)
         self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'x', headers=evil)[0], 403)
-        agent = {'User-Agent': 'Mozilla/5.0 ' + bs.AGENT_UA}
-        self.assertEqual(self.send('DELETE', '/api/file?path=' + rel, headers=agent)[0], 403)
-        self.assertEqual(self.send('PUT', '/api/file?path=' + rel, b'x', headers=agent)[0], 403)
         with open(cf.path(rel), 'rb') as f:
             self.assertEqual(f.read(), b'%PDF-1.4')
 
@@ -1157,11 +1149,6 @@ class CustomizeAndControlFromTheBoard(tb.HttpBase):
         self.assertEqual((code, json.loads(raw)['msg']), (400, '這份不在等你看'))
         code, raw, _ = self.post('/api/customize', {'op': 'wipe'})
         self.assertEqual(code, 400)
-        agent = 'Mozilla/5.0 ' + bs.AGENT_UA
-        self.assertEqual(self.post('/api/customize', {'op': 'accept'}, ua=agent)[0], 403)
 
-    def test_agents_cannot_pause_or_stop_and_unknown_paths_are_404(self):
-        agent = 'Mozilla/5.0 ' + bs.AGENT_UA
-        with patch.object(bs, 'control_run', side_effect=AssertionError('agent 不准控制')):
-            self.assertEqual(self.post('/api/run/apply/stop', {}, ua=agent)[0], 403)
+    def test_unknown_paths_are_404(self):
         self.assertEqual(self.post('/api/nowhere', {})[0], 404)

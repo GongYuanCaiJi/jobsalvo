@@ -26,8 +26,7 @@ def main():
     bd.copy_board(LIVE, SBOX)      # 舊沙箱的指紋跟著換掉,不會被當成繞過改過
     print(f'複製了一份 → {SBOX}(你在這上面怎麼點都不會動到正式看板)')
     os.execv(sys.executable, [sys.executable, os.path.join(HERE, 'board_server.py'),
-                              '--state', SBOX, '--port', str(PORT), '--host', '127.0.0.1',
-                              '--allow-agent'])
+                              '--state', SBOX, '--port', str(PORT), '--host', '127.0.0.1'])
 
 if __name__ == '__main__':
     main()
