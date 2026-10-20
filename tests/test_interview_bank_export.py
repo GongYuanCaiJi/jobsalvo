@@ -86,6 +86,16 @@ class StageTest(unittest.TestCase):
             it = ib.apply(bank, 'stage', item_id='q1', kind=k)['items'][0]
             self.assertEqual((it['st'], it['raw'], it['b']), (st, raw, [['s', ['稿']]]))
 
+    def test_final_parent_says_how_many_follow_ups_are_not_final(self):
+        s = [['s', ['稿']]]
+        bank = {'items': [{'id': 'p', 't': '原題', 'st': 'ok', 'raw': True, 'b': s},
+                          {'id': 'k1', 't': '追問一', 'parent': 'p', 'st': 'ok', 'raw': True, 'b': s},
+                          {'id': 'k2', 't': '追問二', 'parent': 'p', 'st': 'wip', 'raw': True, 'b': s}]}
+        self.assertIn('- 狀態：定案(只算這一題;追問 2 題,1 題還沒定案)', interview_bank.export_markdown(bank))
+        bank['items'][2]['st'] = 'ok'
+        self.assertEqual(interview_bank.kids_line(bank['items'], 'p'), '追問 2 題,都定案')
+        self.assertEqual(interview_bank.kids_line(bank['items'], 'k1'), '')
+
     def test_no_script_cannot_be_final(self):
         import interview_bank as ib
         with self.assertRaises(ValueError):

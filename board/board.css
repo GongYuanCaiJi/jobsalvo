@@ -545,6 +545,7 @@ details.iv-qf>summary{min-height:36px;font-size:13px;color:var(--ink-dim)}
 .iv-srch{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;margin:14px 0 4px;font-size:15px}
 .iv-srcd{font-size:12px;font-weight:400;color:var(--ink-dim)}
 .iv-for.real{border-color:var(--warm,#c77d1a);color:var(--warm,#c77d1a)}
+.iv-for.pend{border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
 .iv-foot.iv-srcfoot{display:flex;flex-direction:column;align-items:stretch;gap:4px}
 .iv-cite{font-size:13px;line-height:1.6;color:var(--ink-dim);overflow-wrap:anywhere}
 .iv-cite b{color:var(--ink);margin-right:6px}

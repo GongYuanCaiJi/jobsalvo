@@ -101,6 +101,7 @@ def show(a, data, fb):
             it = items.get(q, {})
             st = ib.to_form(it).get('stage') if it else '?'
             up = f"  ↳ 追問 {it['parent']}" if it.get('parent') else ''
+            up += f'  ({kl})' if (kl := ib.kids_line(bank['items'], q)) else ''
             print(f"    {q:14} {st:5} {it.get('t', '(題庫裡沒有)')}{up}")
             for k in ('cite', 'quote', 'why'):
                 if v.get(k):
@@ -137,7 +138,8 @@ def main():
         for it in ib.normalize(data.get('bank'))['items']:
             f = ib.to_form(it)
             if w in ' '.join(str(v) for v in f.values()).lower():
-                print(f"{f['id']:14} {f['stage']:5} {f['cat']}/{f['sub']}  {f['t']}")
+                kl = ib.kids_line(ib.normalize(data.get('bank'))['items'], f['id'])
+                print(f"{f['id']:14} {f['stage']:5} {f['cat']}/{f['sub']}  {f['t']}" + (f'  ({kl})' if kl else ''))
         return
     if a.cmd == 'get':
         it = next((x for x in ib.normalize(data.get('bank'))['items'] if x.get('id') == a.qid), None)

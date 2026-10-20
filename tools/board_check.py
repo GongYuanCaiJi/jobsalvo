@@ -175,6 +175,12 @@ CHECKS=[
      // 每一區寫的題數 = 那一區畫出來的題數(追問收在原題那一區,算在那一區)
      document.querySelectorAll('#app [data-ivsrcgrp]').forEach(function(g){var w=parseInt((g.querySelector('.iv-srch .n')||{}).textContent||'-1',10), got=g.querySelectorAll('details.ivrow').length;
        if(w!==got)bad.push('「'+NAME[g.getAttribute('data-ivsrcgrp')]+'」寫 '+w+' 題,底下列了 '+got+' 題');});
+     // 原題定案不代表追問都定案:有追問的那一行要寫還有幾題沒定案,跟收在裡面的追問對得上
+     document.querySelectorAll('#app details.ivrow[data-iv]').forEach(function(r){var ks=[...r.querySelectorAll(':scope>.iv-body>.iv-kids details.ivrow')];
+       var c=r.querySelector(':scope>summary [data-ivpend]'); if(!ks.length){if(c)bad.push(r.getAttribute('data-iv')+' 沒有追問,那一行卻寫了追問');return;}
+       var want=ks.filter(function(k){return !k.querySelector(':scope>summary .iv-st.st-final');}).length;
+       if(!c||+c.getAttribute('data-ivpend')!==want||c.textContent.indexOf(want?want+' 題還沒定案':'都定案')<0)
+         bad.push(r.getAttribute('data-iv')+' 的追問有 '+want+' 題沒定案,那一行寫「'+(c?c.textContent:'')+'」');});
      document.querySelectorAll('#app [data-ivsrcgrp]').forEach(function(g){var want=NAME[g.getAttribute('data-ivsrcgrp')];
        g.querySelectorAll(':scope>.ivlist>details.ivrow>.iv-body>.iv-srcfoot .iv-cite:first-child').forEach(function(c){
          if(c.textContent.replace('出處','').trim().indexOf(want)!==0)bad.push('「'+want+'」那一區有一題寫的出處是'+c.textContent);});});
@@ -274,11 +280,16 @@ CHECKS=[
    if(document.querySelector('#app .iv-fmt'))bad.push('又出現錄影／真人的標籤');
    // 題目那一行只准有:在哪一站、多長、「用在 N 場」「考過」「追問 N」。不准掛任何公司名(公司多了一行會掛滿,在別家底下也看不懂)
    var odd=rows.filter(function(r){return [...r.querySelectorAll(':scope>summary .iv-meta>*')].some(function(c){
-     return !(c.classList.contains('iv-st')||c.classList.contains('iv-dur')||(c.classList.contains('iv-for')&&/^(用在 [0-9]+ 場|考過|追問 [0-9]+)$/.test(c.textContent.trim())));});});
+     return !(c.classList.contains('iv-st')||c.classList.contains('iv-dur')||(c.classList.contains('iv-for')&&/^(用在 [0-9]+ 場|考過|追問 [0-9]+ · ([0-9]+ 題還沒定案|都定案))$/.test(c.textContent.trim())));});});
    if(odd.length)bad.push('題庫裡有 '+odd.length+' 題那一行掛著站、長度、用在幾場、考過、追問以外的標籤');
    if(!T.absent('#app [data-ivoc]'))bad.push('面試準備頁上有回頭改已投遞結果的按鈕');
    // 題庫裡的追問各自一行,點開要看得出是哪一題的追問
    if(document.querySelector('#app .iv-kids'))bad.push('題庫裡追問又收進原題(題庫一題一行,每一題算在自己那一站)');
+   // 題庫裡追問不收進原題,原題那一行照題庫裡所有掛它的追問算還有幾題沒定案
+   rows.forEach(function(r){var q=r.getAttribute('data-iv'), ks=rows.filter(function(x){return x.getAttribute('data-ivpa')===q;});
+     var want=ks.filter(function(x){return !x.querySelector(':scope>summary .iv-st.st-final');}).length, c=r.querySelector(':scope>summary [data-ivpend]');
+     if(ks.length&&(!c||+c.getAttribute('data-ivpend')!==want))bad.push('題庫裡 '+q+' 的追問有 '+want+' 題沒定案,那一行寫「'+(c?c.textContent:'沒寫')+'」');
+     if(!ks.length&&c)bad.push('題庫裡 '+q+' 沒有追問,那一行卻寫了追問');});
    kidIds.forEach(function(q){var r=document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-up');
      if(!r||r.textContent.indexOf('追問自')<0)bad.push('題庫裡 '+q+' 是追問,點開沒標是哪一題的追問');});
    // 題目那一行的狀態點了就能改:開四站選單、選了那顆跟著變、那一題不會因為點狀態就展開;改回原本

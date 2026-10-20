@@ -310,6 +310,15 @@ def problems(bank):
     return out
 
 
+def kids_line(items, qid):
+    """原題的站只算它自己的答案;追問各自有站。回「追問 N 題,M 題還沒定案」,沒有追問回空字串。"""
+    ks = [it for it in items if it.get('parent') == qid]
+    if not ks:
+        return ''
+    todo = sum(1 for it in ks if to_form(it)['stage'] != 'ok')
+    return f'追問 {len(ks)} 題,' + (f'{todo} 題還沒定案' if todo else '都定案')
+
+
 def export_markdown(bank):
     """Readable, one-way export of the canonical board bank."""
     bank = normalize(bank if isinstance(bank, dict) else {})
@@ -325,7 +334,8 @@ def export_markdown(bank):
         form = to_form(item)
         lines.extend(['', f'### {form["t"]}', '', f'- ID：{form["id"]}',
                       f'- 分類：{form["cat"]}', f'- 子題：{form["sub"] or "無"}',
-                      f'- 狀態：{stages.get(form["stage"], form["stage"])}',
+                      f'- 狀態：{stages.get(form["stage"], form["stage"])}'
+                      + (f'(只算這一題;{kl})' if (kl := kids_line(bank['items'], form['id'])) else ''),
                       f'- 預計秒數：{form["lim"] or "未設定"}', '', '#### 題面',
                       form['ask'] or '（空白）', '', '#### 考點', form['focus'] or '（空白）',
                       '', '#### 準備材料', form['ref'] or '（空白）',

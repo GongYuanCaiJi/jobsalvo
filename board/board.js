@@ -1792,13 +1792,17 @@
   // 在某一場底下:點開看這場的出處(哪裡查到的、為什麼要準備),可以改出處或從這場拿掉。
   // 題庫裡:標「考過」(有一場是查到的或被問過)和用在幾場,點開才列是哪幾場。
   // kids:這一題的追問(那幾題的 parent 指到它),收在它裡面,不另外佔一行。inKids:畫在原題裡面的追問。
+  // 原題的站只算原題自己的答案;追問各自有站。原題那一行寫還有幾題追問沒定案,收起來也看得到。
+  // 在某一場底下算收在它裡面的那幾題,題庫裡(不收)算題庫裡所有掛它的追問。
   function ivRowHTML(it,ctx,kids,inKids){
     var stg=ivStage(it), job=ctx&&jobOf(ctx)?ctx:'', ln=job?ivLink(job,it.id):null, used=job?[]:ivJobsOf(it.id);
     var real=used.filter(function(j){return ivLink(j,it.id).src!=='guess';});
+    var ks=kids||(job||inKids?[]:BANK.items.filter(function(x){return x.parent===it.id;}));
+    var todo=ks.filter(function(x){return ivStage(x)!=='final';}).length;
     var sum='<span class="iv-t">'+esc(it.t)+ivHitHTML(it)+'</span>'+
       '<span class="iv-meta">'+(real.length?'<span class="iv-for real">考過</span>':'')+(used.length?'<span class="iv-for">用在 '+used.length+' 場</span>':'')+
-      (kids&&kids.length?'<span class="iv-for">追問 '+kids.length+'</span>':'')+
-      '<button type="button" class="iv-st st-'+stg+'" data-ivstage="'+escA(it.id)+'" title="改這題走到哪一站">'+esc(ivStageShort(stg))+' ▾</button>'+ivDurHTML(it,'iv-dur')+'</span>';
+      (ks.length?'<span class="iv-for'+(todo?' pend':'')+'" data-ivpend="'+todo+'">追問 '+ks.length+(todo?' · '+todo+' 題還沒定案':' · 都定案')+'</span>':'')+
+      '<button type="button" class="iv-st st-'+stg+'" data-ivstage="'+escA(it.id)+'" title="改這一題自己走到哪一站(追問各自有站)">'+esc(ivStageShort(stg))+' ▾</button>'+ivDurHTML(it,'iv-dur')+'</span>';
     var foot=ln?'<div class="iv-foot iv-srcfoot"><div class="iv-cite"><b>出處</b>'+esc(ivSrcName(ln.src))+(ln.cite?' · '+ivCiteHTML(ln.cite):'')+'</div>'+
         (ln.quote?'<div class="iv-cite iv-quote"><b>原文</b>'+esc(ln.quote).replace(/\n/g,'<br>')+'</div>':'')+
         (ln.why?'<div class="iv-cite"><b>為什麼準備</b>'+esc(ln.why)+'</div>':'')+
@@ -1808,7 +1812,7 @@
     var ask=it.ask?'<div class="iv-ask">'+ivLinkify(it.ask)+'</div>':'';
     var focus=it.focus?'<div class="iv-focus"><b>考點</b>'+ivLinkify(it.focus)+'</div>':'';
     var ref=it.ref?'<div class="iv-focus"><b>準備材料</b>'+ivLinkify(it.ref)+'</div>':'';
-    var more=kids&&kids.length?'<div class="iv-kids"><div class="iv-co">會被追問</div>'+ivListHTML(kids,ctx,null,true)+'</div>':'';
+    var more=kids&&kids.length?'<div class="iv-kids"><div class="iv-co">會被追問'+(todo?' · '+todo+' 題還沒定案':'')+'</div>'+ivListHTML(kids,ctx,null,true)+'</div>':'';
     // 單獨列出來的追問(題庫、或原題不在這場):標是哪一題的追問
     var pa=it.parent&&!inKids?ivItem(it.parent):null, up=pa?'<p class="iv-up">↳ 追問自「'+esc(pa.t)+'」</p>':'';
     var ej=' data-ivjob="'+escA(job)+'"';
@@ -1827,7 +1831,7 @@
         '<div class="iv-say">'+ivBodyHTML(it)+'</div>'+
         (ask||focus||ref?fold('ivq:'+it.id,'題面、考點與準備材料','<div class="iv-q">'+ask+focus+ref+'</div>',{cls:'iv-qf'}):'')+more+foot;
     }
-    return fold('iv:'+(job||'')+':'+it.id,sum,'<div class="iv-body">'+body+'</div>',{cls:'ivrow',attr:' data-iv="'+escA(it.id)+'"'});
+    return fold('iv:'+(job||'')+':'+it.id,sum,'<div class="iv-body">'+body+'</div>',{cls:'ivrow',attr:' data-iv="'+escA(it.id)+'"'+(it.parent?' data-ivpa="'+escA(it.parent)+'"':'')});
   }
   // 面試清單一場一行:是哪個缺、下一場什麼時候怎麼面、幾題(定案幾題)。按了進那一場。
   function ivWhenLine(id){var n=ivNext(id), rs=ivRounds(id);
