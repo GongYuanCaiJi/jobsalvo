@@ -1705,7 +1705,7 @@
   function ivLinks(){return (BANK&&BANK.links)||{};}
   // 一筆關聯的現行樣子;舊資料('asked' 字串、note)跟 interview_bank.norm_link 同一套補法
   function ivLink(job,qid){var v=(ivLinks()[job]||{})[qid]; if(!v)return null; if(typeof v==='string')v={k:v};
-    var k=v.k==='asked'?'asked':'prep'; return {k:k,src:v.src||(k==='asked'?'me':'guess'),cite:v.cite||'',why:v.why||v.note||''};}
+    var k=v.k==='asked'?'asked':'prep'; return {k:k,src:v.src||(k==='asked'?'me':'guess'),cite:v.cite||'',quote:v.quote||'',why:v.why||v.note||''};}
   function ivKind(job,qid){var l=ivLink(job,qid); return l?l.k:'';}
   function ivJobsOf(qid){var L=ivLinks(); return Object.keys(L).filter(function(j){return L[j][qid]&&jobOf(j)&&!removed(j);});}
   function ivQsOf(job){var L=ivLinks()[job]||{}; return Object.keys(L).map(ivItem).filter(Boolean);}
@@ -1785,8 +1785,9 @@
   function ivStage(it){return it.st==='ok'?'final':it.st==='wip'?'wip':(it.raw?'first':'new');}
   function ivStageShort(k){for(var i=0;i<IV_STAGES.length;i++)if(IV_STAGES[i][0]===k)return IV_STAGES[i][1];return k;}
   // 出處說明裡的網址變成連結(只顯示網域),其他字照原樣
-  function ivCiteHTML(c){return esc(c).replace(/https?:\/\/[^\s<，。)）]+/g,function(u){
-    return '<a href="'+u+'" target="_blank" rel="noopener">'+u.replace(/^https?:\/\//,'').split('/')[0]+'↗</a>';});}
+  // 出處文字裡的網址換成「看原文↗」,點了直接開那一篇
+  function ivCiteHTML(c){return esc(c).replace(/https?:\/\/[^\s<，。;；)）]+/g,function(u){
+    return '<a href="'+u+'" target="_blank" rel="noopener">看原文↗</a>';});}
   // 一題收起來一行:題目、在哪一站、多長。ctx 是畫在哪一場底下(卡片 id),題庫裡是空的。
   // 在某一場底下:點開看這場的出處(哪裡查到的、為什麼要準備),可以改出處或從這場拿掉。
   // 題庫裡:標「考過」(有一場是查到的或被問過)和用在幾場,點開才列是哪幾場。
@@ -1799,6 +1800,7 @@
       (kids&&kids.length?'<span class="iv-for">追問 '+kids.length+'</span>':'')+
       '<button type="button" class="iv-st st-'+stg+'" data-ivstage="'+escA(it.id)+'" title="改這題走到哪一站">'+esc(ivStageShort(stg))+' ▾</button>'+ivDurHTML(it,'iv-dur')+'</span>';
     var foot=ln?'<div class="iv-foot iv-srcfoot"><div class="iv-cite"><b>出處</b>'+esc(ivSrcName(ln.src))+(ln.cite?' · '+ivCiteHTML(ln.cite):'')+'</div>'+
+        (ln.quote?'<div class="iv-cite iv-quote"><b>原文</b>'+esc(ln.quote).replace(/\n/g,'<br>')+'</div>':'')+
         (ln.why?'<div class="iv-cite"><b>為什麼準備</b>'+esc(ln.why)+'</div>':'')+
         '<div class="iv-foot-acts"><button type="button" class="iv-rm" data-ivlink="'+escA(it.id)+'" data-ivjob="'+escA(job)+'" data-ivkind="">從這場拿掉</button></div></div>'
       :used.length?'<div class="iv-foot"><span class="iv-foot-k">用在</span>'+used.map(function(j){
@@ -4427,13 +4429,14 @@
   var IV_EDIT_ST=[['todo','還沒答'],['first','答過第一輪'],['wip','磨合中'],['ok','定案,可以上場']];
   function ivRow(k,inner,help){return '<div class="cfg-row"><label class="cfg-k">'+k+'</label>'+inner+'</div>'+(help?'<div class="cfg-help">'+help+'</div>':'');}
   // 出處三欄:在某一場裡開的編輯框才有
-  function ivSrcFields(ln){ln=ln||{src:'guess',cite:'',why:''};
+  function ivSrcFields(ln){ln=ln||{src:'guess',cite:'',quote:'',why:''};
     return ivRow('出處','<select class="cfg-in" id="ive-src">'+IV_SRC.map(function(s){
         return '<option value="'+s[0]+'"'+(s[0]===ln.src?' selected':'')+'>'+esc(s[1]+' · '+s[2])+'</option>';}).join('')+'</select>')+
-      ivRow('出處連結','<input class="cfg-in" id="ive-cite" value="'+escA(ln.cite)+'" placeholder="https://… 或「面試趣 2026-06-21 那篇」">',
-        '「這家考過」「別家考過」一定要附,沒有出處就選「預想的」。')+
-      ivRow('為什麼準備','<textarea class="cfg-in big" rows="2" id="ive-why">'+esc(ln.why)+'</textarea>','例:職缺寫了模型微調;他說這場想練溝通。');}
-  function ivSrcVal(){var g=function(i){return ($(i)||{}).value||'';}; return {src:g('ive-src'),cite:g('ive-cite').trim(),why:g('ive-why').trim()};}
+      ivRow('出處連結','<input class="cfg-in" id="ive-cite" value="'+escA(ln.cite)+'" placeholder="面試趣 2026-06-21 https://interview.tw/i/…">',
+        '「這家考過」「別家考過」一定要附那一篇的網址,沒有出處就選「預想的」。')+
+      ivRow('原文','<textarea class="cfg-in big" rows="2" id="ive-quote" placeholder="那一篇怎麼寫就貼怎麼寫">'+esc(ln.quote)+'</textarea>','人家原文怎麼問。付費牆後面看不到的,貼看得到的那段。')+
+      ivRow('為什麼準備','<textarea class="cfg-in big" rows="2" id="ive-why">'+esc(ln.why)+'</textarea>','例:職缺寫了模型微調;你說這場想練溝通。');}
+  function ivSrcVal(){var g=function(i){return ($(i)||{}).value||'';}; return {src:g('ive-src'),cite:g('ive-cite').trim(),quote:g('ive-quote').trim(),why:g('ive-why').trim()};}
   function ivFormHTML(f,cats){
     var cs=(cats||[]).slice(); if(f.cat&&cs.indexOf(f.cat)<0)cs.push(f.cat);
     return '<div class="rzm-box iv-edit"><button class="rzm-x" type="button">✕ 關閉</button>'+

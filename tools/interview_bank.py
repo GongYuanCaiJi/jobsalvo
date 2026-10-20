@@ -5,7 +5,7 @@ interview_bank —— 「🎤 面試準備」的資料:題目、哪一場用哪�
 
 存在看板資料的 bank(格式見 docs/interview-bank.md),分三層,各放各的東西:
   items   題目。只放題目本身:題面(對方怎麼問)、考點、準備材料、答案、走到哪一站。不寫哪一家、不寫出處。
-  links   {卡片 id: {題目 id: {k, src, cite, why}}}。這場要準備還是被問過、這題從哪來(出處)、為什麼這場要準備。
+  links   {卡片 id: {題目 id: {k, src, cite, quote, why}}}。這場要準備還是被問過、這題從哪來(出處網址、原文怎麼寫)、為什麼這場要準備。
   rounds  {卡片 id: [{at, how, where, note}]}。這場面試排在什麼時候、怎麼面、在哪。
 看板網頁和 tools/iv.py 都只走這裡的 apply(),規則只寫在這一處:不合規則的寫入直接擋下並說要放哪。
 網頁送來的都是純文字,這裡轉成看板要的結構:
@@ -22,8 +22,8 @@ KINDS = ('prep', 'asked')     # 這場要準備 / 這場被問過
 # 出處:這題為什麼會出現在這場。順序就是面試頁上分區的順序(越可靠越前面)
 SRCS = {
     'me': '我被問過',          # 我在這場被問到(k 一定是 asked)
-    'this': '這家考過',        # 查到別人面這家/這個職缺被問過(cite 必填)
-    'other': '別家考過',       # 查到別人面別家同類職缺被問過(cite 必填)
+    'this': '這家考過',        # 查到別人面這家/這個職缺被問過(cite 要有那一篇的網址、quote 要有原文)
+    'other': '別家考過',       # 查到別人面別家同類職缺被問過(同上)
     'guess': '預想的',         # 沒查到出處:從職缺內容推的、常見題
 }
 HOWS = ('現場', '電話', '視訊', 'AI 錄影', '筆試', '其他')
@@ -120,13 +120,14 @@ def from_form(f, old=None):
 
 
 def norm_link(v):
-    """一筆關聯的現行樣子 {k, src, cite, why}。舊資料('prep'/'asked' 字串、note)照這裡補齊。"""
+    """一筆關聯的現行樣子 {k, src, cite, quote, why}。舊資料('prep'/'asked' 字串、note)照這裡補齊。"""
     v = {'k': v} if isinstance(v, str) else dict(v or {})
     if 'note' in v:
         v.setdefault('why', v.pop('note'))
     k = v.get('k') if v.get('k') in KINDS else 'prep'
     src = v.get('src') if v.get('src') in SRCS else ('me' if k == 'asked' else 'guess')
-    return {'k': k, 'src': src, 'cite': str(v.get('cite') or '').strip(), 'why': str(v.get('why') or '').strip()}
+    return {'k': k, 'src': src, 'cite': str(v.get('cite') or '').strip(), 'quote': str(v.get('quote') or '').strip(),
+            'why': str(v.get('why') or '').strip()}
 
 
 def check_link(v):
@@ -137,8 +138,12 @@ def check_link(v):
         raise ValueError('出處只能是:' + '、'.join(SRCS.values()))
     if (v['k'] == 'asked') != (v['src'] == 'me'):
         raise ValueError('「被問過」就是「我被問過」;別人被問過的記成要準備,出處選這家考過或別家考過')
-    if v['src'] in ('this', 'other') and not v['cite']:
-        raise ValueError('查到的考題要附出處(網址,或哪個網站哪一天哪一篇)')
+    if v['src'] in ('this', 'other'):
+        # 出處要點得進那一篇;只有自己被問過(「我 2026-08-28 在…被問過」)沒有網頁可附
+        if not re.search(r'https?://', v['cite']) and not v['cite'].startswith('我'):
+            raise ValueError('查到的考題要附那一篇的網址(https://…),點了要能直接開那一篇;查不到就選「預想的」')
+        if not v['quote']:
+            raise ValueError('查到的考題要貼原文:那一篇怎麼寫就貼怎麼寫;付費牆後面看不到的,寫看得到的那一段')
     return v
 
 
@@ -208,6 +213,7 @@ def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
             src = f.get('src') or ('me' if kind == 'asked' else old.get('src') if old.get('src') in ('this', 'other', 'guess') else 'guess')
             v = {'k': kind, 'src': src,
                  'cite': str(f['cite'] if 'cite' in f else old.get('cite') or '').strip(),
+                 'quote': str(f['quote'] if 'quote' in f else old.get('quote') or '').strip(),
                  'why': str(f['why'] if 'why' in f else old.get('why') or '').strip()}
             links.setdefault(job, {})[item_id] = check_link(v)
         else:
@@ -342,9 +348,11 @@ def selftest():
     """規則的最小檢查:擋得住該擋的、存得進該存的。board_check 每次都跑。"""
     b = apply({}, 'put', {'t': '自我介紹', 'cat': '自我介紹', 'script': '我是誰'})
     q = b['items'][0]['id']
-    for bad in ({'k': 'asked', 'src': 'this', 'cite': 'x'}, {'k': 'prep', 'src': 'other'}):
+    for bad in ({'k': 'asked', 'src': 'this', 'cite': 'https://x', 'quote': 'x'}, {'k': 'prep', 'src': 'other'},
+                {'k': 'prep', 'src': 'this', 'cite': '面試趣 2026-06-21 那篇', 'quote': 'x'},      # 沒網址點不進去
+                {'k': 'prep', 'src': 'this', 'cite': 'https://x'}):                                # 沒原文
         try:
-            check_link(dict({'cite': '', 'why': ''}, **bad)); raise SystemExit('沒擋到 ' + str(bad))
+            check_link(dict({'cite': '', 'quote': '', 'why': ''}, **bad)); raise SystemExit('沒擋到 ' + str(bad))
         except ValueError:
             pass
     try:
@@ -352,8 +360,9 @@ def selftest():
     except ValueError:
         pass
     assert apply(b, 'link', None, q, 'K')['links']['K'][q]['src'] == 'guess'   # 從題庫勾題:沒給出處就是預想的
-    b = apply(b, 'link', {'src': 'this', 'cite': 'https://x'}, q, 'J')
-    assert b['links']['J'][q] == {'k': 'prep', 'src': 'this', 'cite': 'https://x', 'why': ''}
+    b = apply(b, 'link', {'src': 'this', 'cite': 'https://x', 'quote': '怎麼評估一個模型的好壞'}, q, 'J')
+    assert b['links']['J'][q] == {'k': 'prep', 'src': 'this', 'cite': 'https://x', 'quote': '怎麼評估一個模型的好壞', 'why': ''}
+    check_link(norm_link({'src': 'other', 'cite': '我 2026-08-28 在別家的錄影面試被問過', 'quote': '你的優勢是什麼'}))   # 自己被問過沒有網頁
     b = apply(b, 'link', None, q, 'J', 'asked')
     assert b['links']['J'][q]['src'] == 'me'
     b = apply(b, 'round', {'at': '2026-10-23 15:00', 'how': '現場', 'where': '台北'}, None, 'J')
@@ -361,7 +370,7 @@ def selftest():
     assert [r['at'] for r in b['rounds']['J']] == ['2026-10-21T14:30', '2026-10-23T15:00']
     b = apply(b, 'round', {'old_at': '2026-10-21T14:30'}, None, 'J', None)
     assert len(b['rounds']['J']) == 1
-    assert norm_link('asked') == {'k': 'asked', 'src': 'me', 'cite': '', 'why': ''}
+    assert norm_link('asked') == {'k': 'asked', 'src': 'me', 'cite': '', 'quote': '', 'why': ''}
     kid = 'kid'
     b = apply(b, 'put', {'id': kid, 't': '追問', 'parent': q})
     for bad in ({'t': '追問的追問', 'parent': kid}, {'id': q, 't': '自我介紹', 'parent': kid}):

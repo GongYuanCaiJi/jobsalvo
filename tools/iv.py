@@ -8,7 +8,7 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
   iv.py find 薪水                    題庫裡找題(先找,有了就 link,不要再寫一題一樣的)
   iv.py put  題目.json [--card 萬蕙昇 --src guess --why "…"]
                                      新增或改一題(json 帶 id 就是改);帶 --card 就順便記進那一場
-  iv.py link 萬蕙昇 WH3 --src this --cite "https://…" [--why "…"]
+  iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞" [--why "…"]
   iv.py unlink 萬蕙昇 WH3
   iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" [--note "…"] [--old-at 舊時間]
   iv.py round 萬蕙昇 --del 2026-10-23T15:00
@@ -19,7 +19,8 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
 ref 準備材料、script 逐字稿(## 開頭是小標,只放同一個答案的段落或版本)、stage todo/first/wip/ok、lim 限時秒數、
 parent 追問哪一題:對方聽完回答接著問的另一題,一律另寫一題帶 "parent": "原題 id",不寫進原題逐字稿。
   例:{"t": "曲線下面積是什麼？", "parent": "ML-1", "cat": "技術基本功", "sub": "機器學習", "stage": "wip", "script": "…"}
-出處 --src:me 我被問過 / this 這家考過 / other 別家考過(這兩種要 --cite)/ guess 預想的(要 --why)。
+出處 --src:me 我被問過 / this 這家考過 / other 別家考過 / guess 預想的(要 --why)。
+this、other 要 --cite 那一篇的網址(點了直接開那一篇,不是公司頁)和 --quote 原文(那一篇怎麼寫就貼怎麼寫)。
 """
 import argparse, json, os, sys
 
@@ -64,7 +65,7 @@ def link_form(a):
         raise SystemExit('--src 只能是 ' + ' / '.join(f'{k}({v})' for k, v in ib.SRCS.items()))
     if a.src == 'guess' and not (a.why or '').strip():
         raise SystemExit('預想的題要 --why 寫為什麼這場會問(從職缺哪一句推的)')
-    return {'src': a.src, 'cite': a.cite or '', 'why': a.why or ''}
+    return {'src': a.src, 'cite': a.cite or '', 'quote': a.quote or '', 'why': a.why or ''}
 
 
 def when(r):
@@ -100,7 +101,7 @@ def show(a, data, fb):
             st = ib.to_form(it).get('stage') if it else '?'
             up = f"  ↳ 追問 {it['parent']}" if it.get('parent') else ''
             print(f"    {q:14} {st:5} {it.get('t', '(題庫裡沒有)')}{up}")
-            for k in ('cite', 'why'):
+            for k in ('cite', 'quote', 'why'):
                 if v.get(k):
                     print(f'{"":20}{k}: {v[k]}')
 
@@ -119,7 +120,7 @@ def main():
         else:
             p.add_argument('card'); p.add_argument('qid')
         p.add_argument('--src', default='guess' if name == 'put' else None, required=name == 'link')
-        p.add_argument('--cite'); p.add_argument('--why')
+        p.add_argument('--cite'); p.add_argument('--quote'); p.add_argument('--why')
     p = sub.add_parser('unlink'); p.add_argument('card'); p.add_argument('qid')
     p = sub.add_parser('round'); p.add_argument('card')
     for k in ('--at', '--how', '--where', '--note', '--old-at', '--del'):

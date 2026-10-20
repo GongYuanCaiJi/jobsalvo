@@ -189,10 +189,19 @@ CHECKS=[
        if(!await openEd(sq))bad.push('在這場裡編輯一題,框裡沒有出處');
        else{document.getElementById('ive-src').value='this'; document.getElementById('ive-cite').value=''; document.querySelector('#rzmodal [data-ivesave]').click(); await T.idle();
          if(!document.getElementById('ive-src'))bad.push('查到的考題沒附出處也存得進去');
-         else{document.getElementById('ive-cite').value='https://interview.example/check'; document.querySelector('#rzmodal [data-ivesave]').click();
+         else{document.getElementById('ive-cite').value='面試趣 2026-06-21 那篇'; document.getElementById('ive-quote').value='板子檢查的原文';
+           document.querySelector('#rzmodal [data-ivesave]').click(); await T.idle();
+           if(!document.getElementById('ive-src'))bad.push('查到的考題出處沒有網址(點不進那一篇)也存得進去');
+           document.getElementById('ive-quote').value=''; document.getElementById('ive-cite').value='https://interview.example/check';
+           document.querySelector('#rzmodal [data-ivesave]').click(); await T.idle();
+           if(!document.getElementById('ive-src'))bad.push('查到的考題沒貼原文也存得進去');
+           document.getElementById('ive-quote').value='板子檢查的原文'; document.querySelector('#rzmodal [data-ivesave]').click();
            await T.until(function(){return inGrp('this',sq);},5000);
+           var ft=inGrp('this',sq)&&inGrp('this',sq).closest('details.ivrow');
+           if(ft&&!ft.querySelector('.iv-srcfoot a[href="https://interview.example/check"]'))bad.push('出處的網址沒變成點得進去的連結');
+           if(ft&&(ft.querySelector('.iv-srcfoot')||{}).textContent.indexOf('原文板子檢查的原文')<0)bad.push('出處底下沒顯示原文');
            if(!inGrp('this',sq))bad.push('改成這家考過,那一題沒搬到這家考過那一區');
-           else if(await openEd(sq)){document.getElementById('ive-src').value='guess'; document.getElementById('ive-cite').value='';
+           else if(await openEd(sq)){document.getElementById('ive-src').value='guess'; document.getElementById('ive-cite').value=''; document.getElementById('ive-quote').value='';
              document.querySelector('#rzmodal [data-ivesave]').click();
              await T.until(function(){return inGrp('guess',sq);},5000);}}}
        var x0=document.querySelector('#rzmodal .rzm-x'); if(x0){x0.click(); await T.idle();}

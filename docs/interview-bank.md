@@ -21,7 +21,7 @@ python3 tools/iv.py show                    # 每一場什麼時候面、幾題�
 python3 tools/iv.py show 萬蕙昇              # 一場的面試時間和每一題
 python3 tools/iv.py find 薪水                # 先找題庫裡有沒有,有就 link,不要再寫一題一樣的
 python3 tools/iv.py put q.json --card 萬蕙昇 --src guess --why "職缺寫了模型微調"
-python3 tools/iv.py link 萬蕙昇 WH3 --src this --cite "https://… 或 面試趣 2026-06-21 那篇"
+python3 tools/iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞"
 python3 tools/iv.py unlink 萬蕙昇 WH3
 python3 tools/iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" --note "聯絡人…"
 python3 tools/iv.py round 萬蕙昇 --del 2026-10-23T15:00
@@ -60,12 +60,13 @@ python3 tools/iv.py check                   # 整份不合規則的地方
 ### 出處(`links` 的一筆)
 
 ```json
-{"k": "prep", "src": "this", "cite": "面試趣 2026-06-21 那篇", "why": "職缺寫了強化學習"}
+{"k": "prep", "src": "this", "cite": "面試趣 2026-06-21 https://interview.tw/i/6a37e69e59ac3155e40ef2d5", "quote": "怎麼評估一個模型的好壞", "why": ""}
 ```
 
 - `src`:`me` 我被問過 / `this` 這家考過 / `other` 別家考過 / `guess` 預想的。
 - `k`:`asked`(被問過)只跟 `me` 一起;其他都是 `prep`(要準備)。
-- `cite`:`this`、`other` 必填,網址或「哪個網站哪一天哪一篇」。查不到就是 `guess`,不准填一個看起來像出處的東西。
+- `cite`:`this`、`other` 必填,寫哪個網站哪一天,加**那一篇**的網址(面試趣 `interview.tw/i/…`、GoodJob `goodjob.life/experiences/…`),不是公司頁。看板上網址變成「看原文↗」,點了直接開那一篇。一筆出處來自兩篇就兩個網址都附。只有自己被問過、沒有網頁的例外,`cite` 用「我 2026-08-28 在…被問過」開頭。查不到就是 `guess`,不准填一個看起來像出處的東西。
+- `quote`:`this`、`other` 必填,那一篇的原文,怎麼寫就貼怎麼寫,不改寫。付費牆後面看不到的,貼看得到的那段,截斷的地方照原樣留「...」。題目 `t` 是我們整理過的問法,`quote` 是人家的原話,兩個都要。
 - `why`:為什麼這場要準備。`iv.py` 寫 `guess` 時必填(從職缺哪一句推的)。
 
 ### 面試時間(`rounds` 的一筆)

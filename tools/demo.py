@@ -111,7 +111,7 @@ def bank(js):
     return {'cps': 4.2, 'cats': ['自我介紹', '職涯方向與動機', '你做過的事', '反問面試官'], 'items': items,
             'links': {js[9]['id']: {
                 'q1': {'k': 'asked', 'src': 'me', 'cite': '', 'why': '(示範)一面時被問到'},
-                'q2': {'k': 'prep', 'src': 'this', 'cite': 'https://interview.example/notes/1', 'why': ''},
+                'q2': {'k': 'prep', 'src': 'this', 'cite': '(示範)面試趣 https://interview.example/notes/1', 'quote': '(示範)問我最難的一次專案怎麼收尾', 'why': ''},
                 'q4': {'k': 'prep', 'src': 'guess', 'cite': '', 'why': '(示範)難題那題常被追問'},
                 'q0': {'k': 'prep', 'src': 'guess', 'cite': '', 'why': '(示範)常見開場題'}}},
             'rounds': {js[9]['id']: [{'at': day + 'T10:00', 'how': '視訊', 'where': 'https://meet.example/demo', 'note': ''}]}}
