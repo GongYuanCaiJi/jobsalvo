@@ -1299,12 +1299,12 @@ class H(BaseHTTPRequestHandler):
             return self._json(200,{'ok':removed})
         self._send(404,'not found','text/plain; charset=utf-8')
     def do_POST_bank(self):
-        """🎤 面試準備:新增/改/刪一題。body = {op:'put', item:{編輯框的欄位}} 或 {op:'del', id}。回整份新的 bank。"""
+        """🎤 面試準備:body = {op, item?, id?, job?, kind?},照 interview_bank.apply(題目/出處/面試時間)。回整份新的 bank。"""
         import interview_bank as ib
         body=self._json_body()
         if body is None: return
         op=body.get('op')
-        if op not in ('put','del','link','stage'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
+        if op not in ('put','del','link','stage','round'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
         out={}
         def mut(data,fb):
             data['bank']=ib.apply(data.get('bank'),op,body.get('item'),body.get('id'),body.get('job'),body.get('kind'))

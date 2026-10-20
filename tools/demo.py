@@ -99,13 +99,22 @@ def bank(js):
     for i, (st, raw) in enumerate((('ok', True), ('wip', True), ('todo', True), ('todo', False))):
         items.append({'id': f'q{i}', 't': ['自我介紹', '為什麼想換工作', '講一個你解決過的難題', '你有什麼想問我們的'][i],
                       'cat': ['自我介紹', '職涯方向與動機', '你做過的事', '反問面試官'][i], 'sub': '',
-                      'ask': '<p>(示範題目)</p>', 'focus': '', 'covers': '', 'lim': 60 if i == 0 else 0,
+                      'ask': '<p>(示範題目)</p>', 'focus': '', 'lim': 60 if i == 0 else 0,
                       'st': st, 'raw': raw,
                       'b': [['h', '重點'], ['s', ['第一段逐字稿(示範)。', '第二段逐字稿(示範)。']]] if st != 'todo' else [],
                       'picks': []})
-    # 第 10 張(已投出、沒錄取)那一場被問過第 2 題:題目上不記公司,記在 links
+    # 追問:掛在「講一個你解決過的難題」底下
+    items.append({'id': 'q4', 't': '那個難題你怎麼確認真的修好了', 'cat': '你做過的事', 'sub': '', 'parent': 'q2',
+                  'ask': '', 'focus': '', 'lim': 0, 'st': 'todo', 'raw': False, 'b': [], 'picks': []})
+    # 第 10 張(已投出、沒錄取)那一場:題目上不記公司,哪一場用哪一題、出處記在 links;什麼時候面記在 rounds
+    day = (datetime.date.today() - datetime.timedelta(days=6)).isoformat()
     return {'cps': 4.2, 'cats': ['自我介紹', '職涯方向與動機', '你做過的事', '反問面試官'], 'items': items,
-            'links': {js[9]['id']: {'q1': 'asked'}}}
+            'links': {js[9]['id']: {
+                'q1': {'k': 'asked', 'src': 'me', 'cite': '', 'why': '(示範)一面時被問到'},
+                'q2': {'k': 'prep', 'src': 'this', 'cite': 'https://interview.example/notes/1', 'why': ''},
+                'q4': {'k': 'prep', 'src': 'guess', 'cite': '', 'why': '(示範)難題那題常被追問'},
+                'q0': {'k': 'prep', 'src': 'guess', 'cite': '', 'why': '(示範)常見開場題'}}},
+            'rounds': {js[9]['id']: [{'at': day + 'T10:00', 'how': '視訊', 'where': 'https://meet.example/demo', 'note': ''}]}}
 
 
 def extra_jobs(n):

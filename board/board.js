@@ -1670,34 +1670,48 @@
       '<span class="ctl-caret">▾</span></button>';
   }
 
-  // ---- 🎤 面試準備:面試題庫(外部程式把題庫寫進看板資料的 bank,格式見 docs/interview-bank.md) ----
-  // 投遞流程的最後一站。面試準備本身也是一條流水線,跟題庫檔頭〈面試進行方式〉一樣:
-  // 還沒答 → 答過第一輪(照錄原話)→ 磨合中 → 定案(上場照念)。一站一列、預設收起,點開那一站才列題目,
-  // 站裡再照「這題在問你什麼」分(自我介紹、你這個人、職涯方向與動機、你怎麼做事、你做過的事一件一區…)。
-  // 題目一律通用;實際被哪家考過的旁邊標那家(<!--考過--> 標記),不猜形式(錄影/真人)也不把題目分給哪一家。
-  // 畫面不顯示內部題號(使用者看不懂的代號不上畫面)。
-  // 點開一題是要唸的逐字稿,題組有子題按鈕;(b) 原話、(d) 磨稿筆記不上來(「現場要立刻處理的東西必須是 100% 有用資訊」)。
+  // ---- 🎤 面試準備(資料在看板的 bank,格式與規則見 docs/interview-bank.md;寫入只走 interview_bank.apply) ----
+  // 投遞流程的最後一站。三層各放各的,畫面也照這三層分:
+  //   面試(一張記成面試中/Offer 的卡):什麼時候面、怎麼面、在哪(bank.rounds)。清單照下一場的時間排。
+  //   這場的題目(bank.links):照出處分區,我被問過 → 這家考過 → 別家考過 → 預想的,查到的跟猜的一眼分得開。
+  //   題目本身(bank.items):題面只放對方怎麼問,考點、準備材料、逐字稿各一欄;題目上不寫哪一家、不寫出處。
+  // 題庫那一籤照走到哪一站排:還沒答 → 答過第一輪 → 磨合中 → 定案(上場照念)。畫面不顯示內部題號。
   var BANK=D.bank||null, ivQuery='', IVPICK={}, _ivHay={};
   function ivItem(id){var l=(BANK&&BANK.items)||[];for(var i=0;i<l.length;i++)if(l[i].id===id)return l[i];return null;}
+  // 面試時間:bank.rounds = {卡片 id: [{at:'2026-10-23T15:00', how:'現場', where, note}]},照時間排好
+  var IV_HOWS=['現場','電話','視訊','AI 錄影','筆試','其他'];
+  function ivRounds(id){return ((BANK&&BANK.rounds)||{})[id]||[];}
+  function ivToday(){var d=new Date(); return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
+  // 還沒面的第一輪(當天的也算還沒面完);全都過了回 null
+  function ivNext(id){var t=ivToday(); return ivRounds(id).filter(function(r){return r.at.slice(0,10)>=t;})[0]||null;}
+  function ivWhen(r){var d=new Date(r.at.slice(0,10)+'T00:00'), wd='日一二三四五六'.charAt(d.getDay());
+    return mmdd(r.at.slice(0,10))+'（'+wd+'）'+(r.at.length>10?' '+r.at.slice(11,16):'')+' '+r.how;}
   // 這一步只接上一步做完的:已投遞、而且他在那張卡上記成「🗣 面試中」或「🎉 Offer」的公司才會出現。
-  // 題庫裡有沒有它的專屬題不算數。以前會把「有專屬題的」也列進來,還在這一頁放一顆回頭改結果的按鈕,
-  // 他的話:「理論上要上步驟處理完才會跳這步,你等於是幫這職缺打了個專屬補丁」。
-  // 最近進面試的排前面:現在在準備的那一場通常是最新的
-  function ivSince(id){var a=(FB[id]||{}).oc_at||{}; return a.offer||a.iv||'';}
-  function ivJobIds(){return onPage('iv').map(function(j){return j.id;})
-    .sort(function(a,b){return ivSince(b).localeCompare(ivSince(a));});}
-  // 題目跟面試之間只有一種關係:bank.links = {卡片 id: {題目 id: 'prep' 這場要準備 | 'asked' 這場被問過}}。
-  // 面試就是看板上那張職缺卡;題目上不記任何公司,每一家走同一套,沒有哪一家的特例。
-  var IV_KIND={prep:'要準備',asked:'被問過'};
+  // 題庫裡有沒有它的題不算數(他的話:「理論上要上步驟處理完才會跳這步」)。
+  // 排序:下一場最近的在最上面;還沒記時間的接在後面;全部面完的放最後(最近面的先)
+  function ivCmp(a,b){var na=ivNext(a), nb=ivNext(b), ra=ivRounds(a), rb=ivRounds(b);
+    if(na||nb)return !na?1:!nb?-1:na.at.localeCompare(nb.at);
+    if(!ra.length||!rb.length)return (ra.length?1:0)-(rb.length?1:0);
+    return rb[rb.length-1].at.localeCompare(ra[ra.length-1].at);}
+  function ivJobIds(){return onPage('iv').map(function(j){return j.id;}).sort(ivCmp);}
+  // 題目跟面試之間只有一種關係:bank.links = {卡片 id: {題目 id: {k:'prep'|'asked', src, cite, why}}}。
+  // src 是這題為什麼出現在這場(出處),跟題目本身分開記:同一題在 A 場是我被問過、在 B 場可能只是預想的。
+  var IV_SRC=[['me','我被問過','你在這場實際被問到的'],['this','這家考過','查到別人面這家被問過,有出處'],
+    ['other','別家考過','查到別人面別家同類職缺被問過,有出處'],['guess','預想的','沒查到出處,從職缺內容推的或常見題']];
+  function ivSrcName(s){for(var i=0;i<IV_SRC.length;i++)if(IV_SRC[i][0]===s)return IV_SRC[i][1];return s;}
   var IVVIEW='iv', IVOPEN='';   // 頁籤(面試/題庫)、打開的是哪一場;只是這台裝置的方便
   try{IVVIEW=localStorage.getItem('iv_view')||'iv'; IVOPEN=sessionStorage.getItem('iv_open')||'';}catch(e){}
   function ivSetView(v,open){IVVIEW=v; IVOPEN=open||''; try{localStorage.setItem('iv_view',v); sessionStorage.setItem('iv_open',IVOPEN);}catch(e){}}
   function ivLinks(){return (BANK&&BANK.links)||{};}
-  function ivKind(job,qid){return (ivLinks()[job]||{})[qid]||'';}
+  // 一筆關聯的現行樣子;舊資料('asked' 字串、note)跟 interview_bank.norm_link 同一套補法
+  function ivLink(job,qid){var v=(ivLinks()[job]||{})[qid]; if(!v)return null; if(typeof v==='string')v={k:v};
+    var k=v.k==='asked'?'asked':'prep'; return {k:k,src:v.src||(k==='asked'?'me':'guess'),cite:v.cite||'',why:v.why||v.note||''};}
+  function ivKind(job,qid){var l=ivLink(job,qid); return l?l.k:'';}
   function ivJobsOf(qid){var L=ivLinks(); return Object.keys(L).filter(function(j){return L[j][qid]&&jobOf(j)&&!removed(j);});}
   function ivQsOf(job){var L=ivLinks()[job]||{}; return Object.keys(L).map(ivItem).filter(Boolean);}
   // 已經結束(沒錄取、沒下文…)但記過題目的那幾場:收在下面,題目被問過的紀錄還看得到
-  function ivEndedIds(){var live=ivJobIds(); return Object.keys(ivLinks()).filter(function(id){return live.indexOf(id)<0&&jobOf(id)&&!removed(id);});}
+  function ivEndedIds(){var live=ivJobIds(), all=Object.keys(ivLinks()).concat(Object.keys((BANK&&BANK.rounds)||{}));
+    return all.filter(function(id,i){return all.indexOf(id)===i&&live.indexOf(id)<0&&jobOf(id)&&!removed(id);}).sort(ivCmp);}
   function ivName(id){var j=jobOf(id); if(!j)return id;
     return cardName(j).replace(/（[^（）]*）\s*$/,'').replace(/\[([^\]]+)\]\([^)]*\)/g,'$1').replace(/\*\*/g,'').trim();}
   function ivPlain(h){return String(h||'').replace(/<[^>]+>/g,'').replace(/&nbsp;/g,' ').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');}
@@ -1756,7 +1770,7 @@
       (P.ver?'':'<button type="button" class="iv-pk'+(k<0?' on':'')+'" data-ivpk="-1">全部</button>')+'</div>';}
   // 搜尋:題目、題面、考點、涵蓋、子題、逐字稿都算。這一頁的搜尋字跟找工作區那個分開記。
   function ivHay(it){if(_ivHay[it.id])return _ivHay[it.id];
-    var s=[it.t,it.cat,it.sub,ivPlain(it.ask),ivPlain(it.focus),it.covers].concat((it.picks||[]).map(function(p){return p[0];}));
+    var s=[it.t,it.cat,it.sub,ivPlain(it.ask),ivPlain(it.focus),ivPlain(it.ref)].concat((it.picks||[]).map(function(p){return p[0];}));
     (it.b||[]).forEach(function(b){s.push(b[0]==='s'?b[1].join(' '):ivPlain(b[1]));});
     var raw=s.join(' ').replace(/\s+/g,' ');
     return (_ivHay[it.id]={raw:raw,low:raw.toLowerCase()});}
@@ -1770,81 +1784,111 @@
   var IV_STAGES=[['new','還沒答','還沒答'],['first','第一輪','答過第一輪，等磨'],['wip','磨合中','磨合中'],['final','定案','定案，可以上場']];
   function ivStage(it){return it.st==='ok'?'final':it.st==='wip'?'wip':(it.raw?'first':'new');}
   function ivStageShort(k){for(var i=0;i<IV_STAGES.length;i++)if(IV_STAGES[i][0]===k)return IV_STAGES[i][1];return k;}
+  // 出處說明裡的網址變成連結(只顯示網域),其他字照原樣
+  function ivCiteHTML(c){return esc(c).replace(/https?:\/\/[^\s<，。)）]+/g,function(u){
+    return '<a href="'+u+'" target="_blank" rel="noopener">'+u.replace(/^https?:\/\//,'').split('/')[0]+'↗</a>';});}
   // 一題收起來一行:題目、在哪一站、多長。ctx 是畫在哪一場底下(卡片 id),題庫裡是空的。
-  // 在某一場底下:多標「被問過」,點開可以改成要準備/被問過、從這場拿掉。題庫裡:只標用在幾場,點開才列是哪幾場。
-  function ivRowHTML(it,ctx){
-    var stg=ivStage(it), job=ctx&&jobOf(ctx)?ctx:'', kind=job?ivKind(job,it.id):'', used=job?[]:ivJobsOf(it.id);
+  // 在某一場底下:點開看這場的出處(哪裡查到的、為什麼要準備),可以改出處或從這場拿掉。
+  // 題庫裡:標「考過」(有一場是查到的或被問過)和用在幾場,點開才列是哪幾場。
+  // kids:這一題的追問(那幾題的 parent 指到它),收在它裡面,不另外佔一行。
+  function ivRowHTML(it,ctx,kids){
+    var stg=ivStage(it), job=ctx&&jobOf(ctx)?ctx:'', ln=job?ivLink(job,it.id):null, used=job?[]:ivJobsOf(it.id);
+    var real=used.filter(function(j){return ivLink(j,it.id).src!=='guess';});
     var sum='<span class="iv-t">'+esc(it.t)+ivHitHTML(it)+'</span>'+
-      '<span class="iv-meta">'+(kind==='asked'?'<span class="iv-for">被問過</span>':'')+(used.length?'<span class="iv-for">用在 '+used.length+' 場</span>':'')+
+      '<span class="iv-meta">'+(real.length?'<span class="iv-for real">考過</span>':'')+(used.length?'<span class="iv-for">用在 '+used.length+' 場</span>':'')+
+      (kids&&kids.length?'<span class="iv-for">追問 '+kids.length+'</span>':'')+
       '<button type="button" class="iv-st st-'+stg+'" data-ivstage="'+escA(it.id)+'" title="改這題走到哪一站">'+esc(ivStageShort(stg))+' ▾</button>'+ivDurHTML(it,'iv-dur')+'</span>';
-    var kb=function(k){return '<button type="button" class="iv-kb'+(kind===k?' on':'')+'"'+(kind===k?' disabled':'')+
-      ' data-ivlink="'+escA(it.id)+'" data-ivjob="'+escA(job)+'" data-ivkind="'+k+'">'+IV_KIND[k]+'</button>';};
-    var foot=job?'<div class="iv-foot"><span class="iv-foot-k">這場</span><span class="iv-kind">'+kb('prep')+kb('asked')+'</span>'+
-        '<button type="button" class="iv-rm" data-ivlink="'+escA(it.id)+'" data-ivjob="'+escA(job)+'" data-ivkind="">從這場拿掉</button></div>'
+    var foot=ln?'<div class="iv-foot iv-srcfoot"><div class="iv-cite"><b>出處</b>'+esc(ivSrcName(ln.src))+(ln.cite?' · '+ivCiteHTML(ln.cite):'')+'</div>'+
+        (ln.why?'<div class="iv-cite"><b>為什麼準備</b>'+esc(ln.why)+'</div>':'')+
+        '<div class="iv-foot-acts"><button type="button" class="iv-ghost" data-ivsrc="'+escA(it.id)+'" data-ivjob="'+escA(job)+'">✏️ 改出處</button>'+
+        '<button type="button" class="iv-rm" data-ivlink="'+escA(it.id)+'" data-ivjob="'+escA(job)+'" data-ivkind="">從這場拿掉</button></div></div>'
       :used.length?'<div class="iv-foot"><span class="iv-foot-k">用在</span>'+used.map(function(j){
-        return '<button type="button" class="rchip" data-ivopen="'+escA(j)+'">'+esc(ivName(j))+' · '+IV_KIND[ivKind(j,it.id)]+'</button>';}).join('')+'</div>':'';
+        return '<button type="button" class="rchip" data-ivopen="'+escA(j)+'">'+esc(ivName(j))+' · '+esc(ivSrcName(ivLink(j,it.id).src))+'</button>';}).join('')+'</div>':'';
     var ask=it.ask?'<div class="iv-ask">'+ivLinkify(it.ask)+'</div>':'';
-    var focus=it.focus?'<div class="iv-focus"><b>考點</b> '+ivLinkify(it.focus)+'</div>':'';
+    var focus=it.focus?'<div class="iv-focus"><b>考點</b>'+ivLinkify(it.focus)+'</div>':'';
+    var ref=it.ref?'<div class="iv-focus"><b>準備材料</b>'+ivLinkify(it.ref)+'</div>':'';
+    var more=kids&&kids.length?'<div class="iv-kids"><div class="iv-co">會被追問</div>'+ivListHTML(kids,ctx)+'</div>':'';
     var edit='<button type="button" class="iv-ghost" data-ivedit="'+escA(it.id)+'">✏️ 編輯</button>';
     var body;
     if(it.st==='todo'){
-      body=ask+focus+(it.covers?'<div class="iv-focus"><b>涵蓋</b> '+esc(it.covers)+'</div>':'')+
-        '<p class="iv-empty">'+(stg==='first'?'第一輪答過了，磨成定案就把逐字稿寫進來。':'還沒答過。')+'</p>'+
-        '<div class="iv-acts"><button type="button" class="iv-read" data-ivedit="'+escA(it.id)+'">✏️ 寫逐字稿</button></div>'+foot;
+      body=ask+focus+ref+
+        '<p class="iv-empty">'+(stg==='first'?'第一輪答過了，磨成定案就把逐字稿寫進來。':'還沒寫逐字稿。')+'</p>'+
+        '<div class="iv-acts"><button type="button" class="iv-read" data-ivedit="'+escA(it.id)+'">✏️ 寫逐字稿</button></div>'+more+foot;
     } else {
       // 題面跟題目一樣(「學經歷自我介紹。」)就不再摺一次
       if(ivPlain(it.ask).replace(/[。？?！!\s]/g,'')===it.t.replace(/[。？?！!\s]/g,''))ask='';
       body=ivPickHTML(it)+'<div class="iv-acts"><button type="button" class="iv-read" data-ivread="1">📖 大字讀稿</button>'+edit+'</div>'+
         '<div class="iv-say">'+ivBodyHTML(it)+'</div>'+
-        (ask||focus?fold('ivq:'+it.id,'題目原文與考點','<div class="iv-q">'+ask+focus+'</div>',{cls:'iv-qf'}):'')+foot;
+        (ask||focus||ref?fold('ivq:'+it.id,'題面、考點與準備材料','<div class="iv-q">'+ask+focus+ref+'</div>',{cls:'iv-qf'}):'')+more+foot;
     }
     return fold('iv:'+(job||'')+':'+it.id,sum,'<div class="iv-body">'+body+'</div>',{cls:'ivrow',attr:' data-iv="'+escA(it.id)+'"'});
   }
-  function ivStatus(id){var f=FB[id]||{}, o=OC.filter(function(x){return x[0]===(f.oc||'');})[0], at=(f.oc_at||{})[f.oc||''];
-    return (o?o[1]+' '+o[2]:'')+(at?' '+mmdd(at):'');}
-  // 面試清單一場一行:是哪個缺、現在狀態、幾題(定案幾題)。按了進那一場。100 場也只是 100 行,搜尋打公司名篩得出來。
+  // 面試清單一場一行:是哪個缺、下一場什麼時候怎麼面、幾題(定案幾題)。按了進那一場。
+  function ivWhenLine(id){var n=ivNext(id), rs=ivRounds(id);
+    return n?'🗓 '+ivWhen(n):rs.length?'面完了 · '+ivWhen(rs[rs.length-1]):'還沒記面試時間';}
   function ivJobRowHTML(id){var qs=ivQsOf(id), fin=qs.filter(function(it){return ivStage(it)==='final';}).length;
-    return '<button type="button" class="iv-jrow" data-ivopen="'+escA(id)+'"><span class="iv-t">'+esc(ivName(id))+'</span>'+
-      '<span class="iv-meta"><span class="iv-st">'+esc(ivStatus(id))+'</span><span class="iv-cnt">'+qs.length+' 題'+(qs.length?' · 定案 '+fin:'')+'</span></span>'+
+    var off=(FB[id]||{}).oc==='offer'?'<span class="iv-for real">🎉 Offer</span>':'';
+    return '<button type="button" class="iv-jrow" data-ivopen="'+escA(id)+'"><span class="iv-t">'+esc(ivName(id))+
+      '<span class="iv-when'+(ivNext(id)?' on':'')+'">'+esc(ivWhenLine(id))+'</span></span>'+
+      '<span class="iv-meta">'+off+'<span class="iv-cnt">'+qs.length+' 題'+(qs.length?' · 定案 '+fin:'')+'</span></span>'+
       '<span class="iv-go">›</span></button>';}
-  // 這一場在面什麼:狀態、職缺原頁、地點/門檻/薪資、agent 讀 JD 寫的摘要。不放改結果的按鈕(結果在已投出那張卡上記)
+  // 這一場什麼時候面:一輪一行(面完的變淡),每行可改;沒記就一行字加一顆「記一輪」
+  function ivRoundsHTML(id){var rs=ivRounds(id), t=ivToday();
+    return '<div class="iv-rounds">'+(rs.length?rs.map(function(r){var past=r.at.slice(0,10)<t;
+      return '<div class="iv-round'+(past?' past':'')+'"><div class="iv-round-x"><span class="iv-round-t">🗓 '+esc(ivWhen(r))+(past?' · 面完了':'')+'</span>'+
+        (r.where?'<span class="iv-round-w">'+ivCiteHTML(r.where)+'</span>':'')+(r.note?'<span class="iv-round-w">'+esc(r.note)+'</span>':'')+'</div>'+
+        '<button type="button" class="iv-ghost" data-ivround="'+escA(id)+'" data-ivat="'+escA(r.at)+'" aria-label="改這一輪">✏️</button></div>';}).join('')
+      :'<p class="iv-empty">還沒記面試時間。</p>')+
+      '<button type="button" class="iv-ghost iv-round-add" data-ivround="'+escA(id)+'" data-ivat="">＋ 記一輪面試時間</button></div>';}
+  // 這一場在面什麼:職缺原頁、地點/門檻/薪資、agent 讀 JD 寫的摘要。不放改結果的按鈕(結果在已投出那張卡上記)。
+  // 投遞日、記成面試中的日子不放:準備面試用不到(2026-10-20 他:「誰 care 它被遞進來的日期」)
   function ivJobHeadHTML(id){
-    var j=jobOf(id), f=FB[id]||{}, s=(j&&j.sum)||{};
-    var st='📮 已投出'+(f.sent_at?' '+mmdd(f.sent_at):'')+' · '+ivStatus(id);
+    var j=jobOf(id), s=(j&&j.sum)||{};
     var ok=function(x){return x&&!_EMPTY.test(String(x).trim());};
     var rows=[['這個缺要什麼',s.bar],['公司在做什麼',s.co]].filter(function(r){return ok(r[1]);});
     var sum=rows.length?'<div class="sum">'+rows.map(function(r){return '<div class="sr"><span class="srk">'+r[0]+'</span><span class="srv clamp c2" title="點一下看全文">'+esc(r[1])+'</span></div>';}).join('')+'</div>'
       :'<p class="iv-empty">這張卡還沒有 JD 摘要。</p>';
-    var link=/^https?:/.test(id)?' · <a class="jd-link" href="'+escA(id)+'" target="_blank" rel="noopener">看職缺原頁<span class="jd-go">↗</span></a>':'';
-    return '<div class="iv-job"><div class="iv-job-st"><span>'+esc(st)+link+'</span></div>'+(j?factsLine(j):'')+sum+'</div>';}
-  // 一場的頁面:在面什麼,接著這場的題目;題目從題庫勾進來,或在這裡寫新的
-  function ivJobPageHTML(id){var qs=ivQsOf(id);
+    var link=/^https?:/.test(id)?'<a class="jd-link" href="'+escA(id)+'" target="_blank" rel="noopener">看職缺原頁<span class="jd-go">↗</span></a>':'';
+    var off=(FB[id]||{}).oc==='offer'?'<span>🎉 Offer</span>':'';
+    return ivRoundsHTML(id)+'<div class="iv-job">'+(off||link?'<div class="iv-job-st">'+off+link+'</div>':'')+(j?factsLine(j):'')+sum+'</div>';}
+  // 一場的頁面:什麼時候面、在面什麼,接著這場的題目照出處分區(查到的在前、猜的在後),區裡再照大類
+  function ivJobPageHTML(id){var qs=ivQsOf(id), h='';
+    IV_SRC.forEach(function(s){var l=qs.filter(function(it){return ivLink(id,it.id).src===s[0];}); if(!l.length)return;
+      h+='<div class="iv-srcgrp" data-ivsrcgrp="'+s[0]+'"><h3 class="iv-srch">'+esc(s[1])+' <span class="n">'+l.length+'</span>'+
+        '<span class="iv-srcd">'+esc(s[2])+'</span></h3>'+ivGroupedHTML(l,id,qs)+'</div>';});
     return '<div class="ctlbar"><button class="ctl-act" type="button" data-ivopen="">← 所有面試</button></div>'+
       '<h2 class="iv-ptitle">'+esc(ivName(id))+'</h2>'+ivJobHeadHTML(id)+
       '<div class="applygrp"><h2 class="applyhd">這場的題目 <span class="n">'+qs.length+'</span></h2>'+
-      (qs.length?ivGroupedHTML(qs,id):'<p class="applyempty">還沒有題目。按「＋ 從題庫加題」勾，或寫一題新的。</p>')+
+      (qs.length?h:'<p class="applyempty">還沒有題目。按「＋ 從題庫加題」勾，或寫一題新的。</p>')+
       '<div class="ctlbar"><button class="ctl-act" type="button" data-ivpick="'+escA(id)+'">＋ 從題庫加題</button>'+
       '<button class="ctl-act" type="button" data-ivnew="'+escA(id)+'">＋ 寫一題新的</button></div></div>';}
-  // 從題庫加題:搜尋＋勾選,勾了就記成這場要準備、取消就拿掉
+  // 從題庫加題:搜尋＋勾選,勾了就記成這場要準備(出處先記預想的,點開那題可以改)、取消就拿掉
   function ivPickListHTML(job,q){q=(q||'').trim().toLowerCase();
     var list=BANK.items.filter(function(it){return !q||ivHay(it).low.indexOf(q)>=0;}), out='';
-    (BANK.cats||[]).concat(['其他']).filter(function(c,i,a){return a.indexOf(c)===i;}).forEach(function(c){
+    ivCats(list).forEach(function(c){
       var l=list.filter(function(it){return (it.cat||'其他')===c;}); if(!l.length)return;
-      out+='<div class="iv-co">'+esc(c)+'</div>'+l.map(function(it){var k=ivKind(job,it.id);
-        return '<label class="iv-pkrow"><input type="checkbox" data-ivpkq="'+escA(it.id)+'"'+(k?' checked':'')+'>'+
+      out+='<div class="iv-co">'+esc(c)+'</div>'+l.map(function(it){var ln=ivLink(job,it.id);
+        return '<label class="iv-pkrow"><input type="checkbox" data-ivpkq="'+escA(it.id)+'"'+(ln?' checked':'')+'>'+
           '<span class="iv-t">'+esc(it.t)+'</span><span class="iv-st st-'+ivStage(it)+'">'+esc(ivStageShort(ivStage(it)))+'</span>'+
-          (k==='asked'?'<span class="iv-for">被問過</span>':'')+'</label>';}).join('');});
+          (ln?'<span class="iv-for">'+esc(ivSrcName(ln.src))+'</span>':'')+'</label>';}).join('');});
     return out||'<p class="applyempty">沒有題目提到「'+esc(q)+'」。</p>';}
   function ivOpenPicker(job){
     modal('<div class="rzm-box iv-picker" data-ivpkjob="'+escA(job)+'"><button class="rzm-x" type="button">✕ 完成</button>'+
       '<h3>加題到「'+esc(ivName(job))+'」</h3><input class="cfg-in" id="ivpk-q" placeholder="🔍 搜題目／答案" autocomplete="off">'+
       '<div id="ivpk-list">'+ivPickListHTML(job,'')+'</div></div>','');}
-  function ivListHTML(list,ctx){return '<div class="ivlist">'+list.map(function(it){return ivRowHTML(it,ctx);}).join('')+'</div>';}
-  // 照「在問你什麼」排:大類順序照 bank.cats,小類(你做過的事一件一區)照題庫裡出現的順序
-  function ivGroupedHTML(list,ctx){var cats=BANK.cats||['其他'], out='';
-    cats.forEach(function(c){var l=list.filter(function(it){return (it.cat||'其他')===c;}); if(!l.length)return;
+  function ivListHTML(list,ctx,kids){return '<div class="ivlist">'+list.map(function(it){return ivRowHTML(it,ctx,(kids||{})[it.id]);}).join('')+'</div>';}
+  // 大類順序照 bank.cats,題庫裡有但 cats 沒列的接在後面(不會有題目因為大類拼錯就消失)
+  function ivCats(list){var cs=(BANK.cats||[]).slice();
+    list.forEach(function(it){var c=it.cat||'其他'; if(cs.indexOf(c)<0)cs.push(c);}); return cs;}
+  // 照「在問你什麼」排:大類、小類(你做過的事一件一區)照題庫裡出現的順序。
+  // all:判斷追問要不要收進原題用的整批(一場的全部題目);原題也在這批裡,追問就收進原題、不另佔一行
+  function ivGroupedHTML(list,ctx,all){var out='', ids={}, kids={};
+    (all||list).forEach(function(it){ids[it.id]=1;});
+    (all||list).forEach(function(it){if(it.parent&&ids[it.parent])(kids[it.parent]=kids[it.parent]||[]).push(it);});
+    var top=list.filter(function(it){return !(it.parent&&ids[it.parent]);});
+    ivCats(top).forEach(function(c){var l=top.filter(function(it){return (it.cat||'其他')===c;}); if(!l.length)return;
       var subs=[], by={}; l.forEach(function(it){var x=it.sub||''; if(!by[x]){by[x]=[];subs.push(x);} by[x].push(it);});
-      subs.forEach(function(x){out+='<div class="iv-co">'+esc(c)+(x?' · '+esc(x):'')+'</div>'+ivListHTML(by[x],ctx);});});
+      subs.forEach(function(x){out+='<div class="iv-co">'+esc(c)+(x?' · '+esc(x):'')+'</div>'+ivListHTML(by[x],ctx,kids);});});
     return out;}
   function renderIv(){
     inApplyView=true;
@@ -4367,20 +4411,30 @@
     m.style.top=(r.bottom+6)+'px';}
   document.addEventListener('keydown',function(e){if(e.key==='Escape')ivCloseStageMenu();});
   window.addEventListener('scroll',ivCloseStageMenu,{passive:true});
-  var IVNEWFOR='';   // 從某一場的「＋ 寫一題新的」開的編輯框:存了直接記成那一場要準備
+  var IVNEWFOR='';   // 從某一場的「＋ 寫一題新的」開的編輯框:存了直接記進那一場(出處在同一個框裡選)
   var IV_EDIT_ST=[['todo','還沒答'],['first','答過第一輪'],['wip','磨合中'],['ok','定案,可以上場']];
+  function ivRow(k,inner,help){return '<div class="cfg-row"><label class="cfg-k">'+k+'</label>'+inner+'</div>'+(help?'<div class="cfg-help">'+help+'</div>':'');}
+  // 出處三欄:題目編輯框(在某一場新增時)和「改出處」共用同一套
+  function ivSrcFields(ln){ln=ln||{src:'guess',cite:'',why:''};
+    return ivRow('出處','<select class="cfg-in" id="ive-src">'+IV_SRC.map(function(s){
+        return '<option value="'+s[0]+'"'+(s[0]===ln.src?' selected':'')+'>'+esc(s[1]+' · '+s[2])+'</option>';}).join('')+'</select>')+
+      ivRow('出處連結','<input class="cfg-in" id="ive-cite" value="'+escA(ln.cite)+'" placeholder="https://… 或「面試趣 2026-06-21 那篇」">',
+        '「這家考過」「別家考過」一定要附,沒有出處就選「預想的」。')+
+      ivRow('為什麼準備','<textarea class="cfg-in big" rows="2" id="ive-why">'+esc(ln.why)+'</textarea>','例:職缺寫了模型微調;他說這場想練溝通。');}
+  function ivSrcVal(){var g=function(i){return ($(i)||{}).value||'';}; return {src:g('ive-src'),cite:g('ive-cite').trim(),why:g('ive-why').trim()};}
   function ivFormHTML(f,cats){
     var cs=(cats||[]).slice(); if(f.cat&&cs.indexOf(f.cat)<0)cs.push(f.cat);
-    function row(k,inner){return '<div class="cfg-row"><label class="cfg-k">'+k+'</label>'+inner+'</div>';}
     return '<div class="rzm-box iv-edit"><button class="rzm-x" type="button">✕ 關閉</button>'+
-      '<h3>'+(f.id?'編輯題目':'新增題目')+'</h3><input type="hidden" id="ive-id" value="'+escA(f.id||'')+'">'+
-      row('題目','<input class="cfg-in" id="ive-t" value="'+escA(f.t||'')+'" placeholder="例:請簡單自我介紹">')+
-      row('大類','<select class="cfg-in" id="ive-cat">'+cs.map(function(c){return '<option'+(c===f.cat?' selected':'')+'>'+esc(c)+'</option>';}).join('')+'</select>'+
+      '<h3>'+(f.id?'編輯題目':IVNEWFOR?'在「'+esc(ivName(IVNEWFOR))+'」寫一題新的':'新增題目')+'</h3><input type="hidden" id="ive-id" value="'+escA(f.id||'')+'">'+
+      ivRow('題目','<input class="cfg-in" id="ive-t" value="'+escA(f.t||'')+'" placeholder="例:請簡單自我介紹">')+
+      ivRow('大類','<select class="cfg-in" id="ive-cat">'+cs.map(function(c){return '<option'+(c===f.cat?' selected':'')+'>'+esc(c)+'</option>';}).join('')+'</select>'+
         '<input class="cfg-in" id="ive-sub" value="'+escA(f.sub||'')+'" placeholder="小類(可空)">')+
-      row('走到哪','<select class="cfg-in" id="ive-stage">'+IV_EDIT_ST.map(function(x){return '<option value="'+x[0]+'"'+(x[0]===f.stage?' selected':'')+'>'+x[1]+'</option>';}).join('')+'</select>'+
+      ivRow('走到哪','<select class="cfg-in" id="ive-stage">'+IV_EDIT_ST.map(function(x){return '<option value="'+x[0]+'"'+(x[0]===f.stage?' selected':'')+'>'+x[1]+'</option>';}).join('')+'</select>'+
         '<label class="ive-lim">限時(秒,0 = 不限)<input class="cfg-in num" type="number" min="0" id="ive-lim" value="'+escA(f.lim||0)+'"></label>')+
-      row('題面','<textarea class="cfg-in big" rows="2" id="ive-ask">'+esc(f.ask||'')+'</textarea>')+
-      row('考點','<textarea class="cfg-in big" rows="2" id="ive-focus">'+esc(f.focus||'')+'</textarea>')+
+      (!f.id&&IVNEWFOR?ivSrcFields():'')+
+      ivRow('題面','<textarea class="cfg-in big" rows="2" id="ive-ask">'+esc(f.ask||'')+'</textarea>','只寫對方怎麼問。查到的考題照原文抄;哪裡查到的寫在出處。')+
+      ivRow('考點','<textarea class="cfg-in big" rows="2" id="ive-focus">'+esc(f.focus||'')+'</textarea>','對方在看什麼、答壞的樣子。')+
+      ivRow('準備材料','<textarea class="cfg-in big" rows="2" id="ive-ref">'+esc(f.ref||'')+'</textarea>','答之前要先讀懂的東西:筆記、影片第幾分、原始資料。')+
       '<div class="cfg-help">逐字稿:空一行就是下一段;一行用「## 」開頭是小標(例如「## 60 秒版」「## 90 秒版」)。</div>'+
       '<textarea class="cfg-in big" rows="12" id="ive-script">'+esc(f.script||'')+'</textarea>'+
       '<div class="cfg-row end">'+(f.id?'<button class="cfg-b warn" type="button" data-ivedel="1">🗑 刪掉這題</button>':'')+
@@ -4388,17 +4442,34 @@
   }
   function ivFormVal(){var g=function(i){return ($(i)||{}).value||'';};
     return {id:g('ive-id'),t:g('ive-t'),cat:g('ive-cat'),sub:g('ive-sub'),stage:g('ive-stage'),lim:parseInt(g('ive-lim'),10)||0,
-            ask:g('ive-ask'),focus:g('ive-focus'),script:g('ive-script')};}
+            ask:g('ive-ask'),focus:g('ive-focus'),ref:g('ive-ref'),script:g('ive-script')};}
   function ivPost(body){
     return fetch('/api/bank',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json().then(function(d){if(!r.ok||!d.ok)throw new Error(d.msg||('http '+r.status));
         BANK=d.bank; D.bank=d.bank; _ivHay={}; return d;});});
   }
+  // 一筆關聯照出處存:我被問過就是「被問過」,其他都是「要準備」
+  function ivLinkPost(id,job,ln){return ivPost({op:'link',id:id,job:job,kind:ln.src==='me'?'asked':'prep',item:ln});}
   function ivOpenEditor(id){
     if(!id){modal(ivFormHTML({stage:'todo',cat:''},(BANK&&BANK.cats)||['自我介紹','你這個人','職涯方向與動機','你怎麼做事','你做過的事','反問面試官','其他']),'');return;}
     fetch('/api/bank/form?id='+encodeURIComponent(id)).then(function(r){return r.json();}).then(function(d){
       if(!d.ok){snack('找不到這一題(可能剛被刪掉),重新整理再看');return;} modal(ivFormHTML(d.form,d.cats),'');});
   }
+  function ivOpenSrc(id,job){var it=ivItem(id); if(!it)return;
+    modal('<div class="rzm-box iv-edit" data-ivsrcbox="'+escA(id)+'" data-ivsrcjob="'+escA(job)+'"><button class="rzm-x" type="button">✕ 關閉</button>'+
+      '<h3>「'+esc(it.t)+'」在「'+esc(ivName(job))+'」的出處</h3>'+ivSrcFields(ivLink(job,id))+
+      '<div class="cfg-row end"><button class="cfg-b go" type="button" data-ivssave="1">💾 儲存</button></div></div>','');}
+  // 一輪面試:日期、時間(可空)、怎麼面、在哪(地址或視訊連結)、備註(聯絡人、要帶什麼)
+  function ivOpenRound(job,at){var r=ivRounds(job).filter(function(x){return x.at===at;})[0]||{at:'',how:'現場',where:'',note:''};
+    modal('<div class="rzm-box iv-edit" data-ivrbox="'+escA(job)+'" data-ivrold="'+escA(r.at)+'"><button class="rzm-x" type="button">✕ 關閉</button>'+
+      '<h3>'+(r.at?'改':'記')+'「'+esc(ivName(job))+'」的面試時間</h3>'+
+      ivRow('日期','<input class="cfg-in" type="date" id="ivr-date" value="'+escA(r.at.slice(0,10))+'">'+
+        '<input class="cfg-in" type="time" id="ivr-time" value="'+escA(r.at.slice(11,16))+'">')+
+      ivRow('怎麼面','<select class="cfg-in" id="ivr-how">'+IV_HOWS.map(function(h){return '<option'+(h===r.how?' selected':'')+'>'+esc(h)+'</option>';}).join('')+'</select>')+
+      ivRow('在哪','<input class="cfg-in" id="ivr-where" value="'+escA(r.where)+'" placeholder="地址,或視訊連結">')+
+      ivRow('備註','<input class="cfg-in" id="ivr-note" value="'+escA(r.note)+'" placeholder="聯絡人、要帶什麼">')+
+      '<div class="cfg-row end">'+(r.at?'<button class="cfg-b warn" type="button" data-ivrdel="1">🗑 刪掉這一輪</button>':'')+
+      '<button class="cfg-b go" type="button" data-ivrsave="1">💾 儲存</button></div></div>','');}
   document.addEventListener('click',function(e){
     // 點題目那一行的狀態:跳出四站讓他直接改(不用開編輯框)
     var sg=e.target.closest&&e.target.closest('[data-ivstage]');
@@ -4419,25 +4490,46 @@
     var pk=e.target.closest&&e.target.closest('[data-ivpick]');
     if(pk){ivOpenPicker(pk.getAttribute('data-ivpick')); return;}
     var ln=e.target.closest&&e.target.closest('[data-ivlink]');
-    if(ln){var lid=ln.getAttribute('data-ivlink'), ljob=ln.getAttribute('data-ivjob'), lk=ln.getAttribute('data-ivkind')||null;
-      ln.disabled=true; var was=ivKind(ljob,lid);
-      // 拿掉給一個復原:按錯了一鍵放回去(原本是要準備還是被問過照舊)
-      ivPost({op:'link',id:lid,job:ljob,kind:lk}).then(function(){renderApp();
-        snack(lk?'改成這場'+IV_KIND[lk]:'從這場拿掉了',lk?null:function(){ivPost({op:'link',id:lid,job:ljob,kind:was}).then(renderApp);});})
+    if(ln){var lid=ln.getAttribute('data-ivlink'), ljob=ln.getAttribute('data-ivjob'), was=ivLink(ljob,lid);
+      ln.disabled=true;
+      // 拿掉給一個復原:按錯了一鍵放回去(出處照舊)
+      ivPost({op:'link',id:lid,job:ljob,kind:null}).then(function(){renderApp();
+        snack('從這場拿掉了',was?function(){ivLinkPost(lid,ljob,was).then(renderApp);}:null);})
         .catch(function(err){ln.disabled=false; snack('沒存成('+err.message+'),再按一次');});
+      return;}
+    var sr=e.target.closest&&e.target.closest('[data-ivsrc]');
+    if(sr){ivOpenSrc(sr.getAttribute('data-ivsrc'),sr.getAttribute('data-ivjob')); return;}
+    if(e.target.closest&&e.target.closest('[data-ivssave]')){var sb=e.target.closest('.rzm-box');
+      ivLinkPost(sb.getAttribute('data-ivsrcbox'),sb.getAttribute('data-ivsrcjob'),ivSrcVal())
+        .then(function(){closeModal(); renderApp(); snack('出處改好了');}).catch(function(err){snack('沒存成:'+err.message);});
+      return;}
+    var rd=e.target.closest&&e.target.closest('[data-ivround]');
+    if(rd){ivOpenRound(rd.getAttribute('data-ivround'),rd.getAttribute('data-ivat')); return;}
+    var rs=e.target.closest&&e.target.closest('[data-ivrsave],[data-ivrdel]');
+    if(rs){var rb=rs.closest('.rzm-box'), rjob=rb.getAttribute('data-ivrbox'), rold=rb.getAttribute('data-ivrold');
+      var g=function(i){return ($(i)||{}).value||'';};
+      if(rs.hasAttribute('data-ivrdel')){var gone=ivRounds(rjob).filter(function(x){return x.at===rold;})[0];
+        ivPost({op:'round',job:rjob,kind:null,item:{old_at:rold}}).then(function(){closeModal(); renderApp();
+          snack('刪掉這一輪了',function(){ivPost({op:'round',job:rjob,kind:'set',item:gone}).then(renderApp);});}).catch(function(err){snack('沒刪成:'+err.message);});
+        return;}
+      if(!g('ivr-date')){snack('先選日期');return;}
+      ivPost({op:'round',job:rjob,kind:'set',item:{at:g('ivr-date')+(g('ivr-time')?'T'+g('ivr-time'):''),how:g('ivr-how'),
+          where:g('ivr-where'),note:g('ivr-note'),old_at:rold}})
+        .then(function(){closeModal(); renderApp(); snack('面試時間記好了');}).catch(function(err){snack('沒存成:'+err.message);});
       return;}
     var t=e.target.closest&&e.target.closest('[data-ivnew],[data-ivedit],[data-ivesave],[data-ivedel]'); if(!t)return;
     if(t.hasAttribute('data-ivnew')){IVNEWFOR=jobOf(t.getAttribute('data-ivnew'))?t.getAttribute('data-ivnew'):''; ivOpenEditor('');return;}
-    if(t.hasAttribute('data-ivedit')){e.preventDefault(); ivOpenEditor(t.getAttribute('data-ivedit'));return;}
+    if(t.hasAttribute('data-ivedit')){e.preventDefault(); IVNEWFOR=''; ivOpenEditor(t.getAttribute('data-ivedit'));return;}
     var f=ivFormVal();
     if(t.hasAttribute('data-ivesave')){
       if(!f.t.trim()){snack('先寫題目');return;}
-      // 在準備某一場時新增的題,直接放進這場要準備(不然存完它跑去題庫裡,他又找不到)
-      var job=!f.id&&IVNEWFOR, before={}; ((BANK&&BANK.items)||[]).forEach(function(x){before[x.id]=1;});
+      // 在準備某一場時新增的題,直接放進這場(不然存完它跑去題庫裡,他又找不到);出處同一個框裡選的
+      var job=!f.id&&IVNEWFOR, lnf=job?ivSrcVal():null, before={}; ((BANK&&BANK.items)||[]).forEach(function(x){before[x.id]=1;});
+      if(lnf&&(lnf.src==='this'||lnf.src==='other')&&!lnf.cite){snack('查到的考題要附出處連結;沒有出處就選「預想的」');return;}
       ivPost({op:'put',item:f}).then(function(d){
         var nu=job&&(d.bank.items||[]).filter(function(x){return !before[x.id];})[0];
-        return nu?ivPost({op:'link',id:nu.id,job:job,kind:'prep'}):d;})
-        .then(function(){closeModal(); renderApp(); snack(job?'存好了,放進這場要準備':'存好了');}).catch(function(err){snack('沒存成('+err.message+'),再按一次;一直不行就重新整理');});
+        return nu?ivLinkPost(nu.id,job,lnf):d;})
+        .then(function(){closeModal(); renderApp(); snack(job?'存好了,放進這場':'存好了');}).catch(function(err){snack('沒存成('+err.message+'),改好再按一次儲存');});
       return;}
     if(t.hasAttribute('data-ivedel')){
       ivPost({op:'del',id:f.id}).then(function(){closeModal(); renderApp();

@@ -141,7 +141,7 @@ CHECKS=[
  # 面試題庫是投遞流程的最後一站(🎤 面試準備)。現場要立刻用的東西必須 100% 是有用資訊,
  # 也沒必要把所有東西擠在同一個區塊。所以題目照每題走到哪一站分成流水線(還沒答→答過第一輪→磨合中→定案),一站一列預設收起;
  # 點開一題是逐字稿,題組的子題按鈕只顯示那一問的段落,大字讀稿開得起來、關得掉。
- ('面試準備:面試一場一行、點進那一場看在面什麼和它的題目、從題庫勾題;題目上不寫任何公司;題庫是流水線四站、題目一題不少;點開是逐字稿;大字讀稿開得起來',"""
+ ('面試準備:面試一場一行照面試時間排、點進那一場看面試時間和在面什麼、題目照出處分區、改出處與記面試時間、從題庫勾題;題目上不寫任何公司;題庫是流水線四站、題目一題不少;點開是逐字稿;大字讀稿開得起來',"""
    var t=document.querySelector('[data-tab="iv"]'); if(!t)return '沒有 🎤 面試準備那一籤';
    t.click(); await T.idle();
    var bad=[];
@@ -165,14 +165,57 @@ CHECKS=[
      var cnt=function(){return parseInt((document.querySelector('#app .applyhd .n')||{}).textContent||'-1',10);};
      var n0=cnt(), r0=document.querySelectorAll('#app details.ivrow').length;
      if(n0!==r0)bad.push('一場寫 '+n0+' 題,底下列了 '+r0+' 題');
-     // 這場的一題點開:改成被問過/要準備、再改回來,種類跟著變、題數不變
-     var lk=document.querySelector('#app [data-ivlink][data-ivkind]:not([data-ivkind=""]):not([disabled])');
-     if(lk){var lq=lk.getAttribute('data-ivlink'), want=lk.getAttribute('data-ivkind');
-       lk.click(); await T.idle();
-       var lk2=document.querySelector('#app [data-ivlink="'+lq+'"][data-ivkind]:not([data-ivkind=""]):not([disabled])');
-       if(!lk2||lk2.getAttribute('data-ivkind')===want)bad.push('按了改成'+(want==='asked'?'被問過':'要準備')+',那一題沒跟著變');
-       else{lk2.click(); await T.idle();}
-       if(cnt()!==n0)bad.push('改種類之後這場的題數變了');}
+     // 準備面試用不到的日子不上這頁(投遞日、記成面試中那天);面試時間一輪一行
+     if(/開始面試|已投出/.test(document.getElementById('app').textContent))bad.push('面試頁又出現投遞日或「開始面試」的日子');
+     if(!document.querySelector('#app .iv-rounds'))bad.push('點進一場沒有面試時間那一塊');
+     // 題目照出處分區,順序固定(我被問過→這家考過→別家考過→預想的);每一題的出處跟它在的那一區一樣
+     var ORDER=['me','this','other','guess'], NAME={me:'我被問過',this:'這家考過',other:'別家考過',guess:'預想的'};
+     var grps=[...document.querySelectorAll('#app [data-ivsrcgrp]')].map(function(g){return g.getAttribute('data-ivsrcgrp');});
+     if(grps.some(function(g,i){return i&&ORDER.indexOf(g)<ORDER.indexOf(grps[i-1]);}))bad.push('出處分區的順序亂了:'+grps.join('、'));
+     document.querySelectorAll('#app [data-ivsrcgrp]').forEach(function(g){var want=NAME[g.getAttribute('data-ivsrcgrp')];
+       g.querySelectorAll(':scope>.ivlist>details.ivrow>.iv-body>.iv-srcfoot .iv-cite:first-child').forEach(function(c){
+         if(c.textContent.replace('出處','').trim().indexOf(want)!==0)bad.push('「'+want+'」那一區有一題寫的出處是'+c.textContent);});});
+     // 改出處:選「這家考過」不附出處要擋下來;附了就搬到那一區;再改回原本
+     var sbt=document.querySelector('#app [data-ivsrcgrp="guess"] [data-ivsrc]');
+     if(!sbt)bad.push('預想的那一區沒有「改出處」');
+     else{var sq=sbt.getAttribute('data-ivsrc'); sbt.click(); await T.idle();
+       var sel=document.getElementById('ive-src'), cite=document.getElementById('ive-cite');
+       if(!sel||!cite)bad.push('改出處的框沒有出處和出處連結');
+       else{sel.value='this'; cite.value=''; document.querySelector('#rzmodal [data-ivssave]').click(); await T.idle();
+         if(!document.getElementById('ive-src'))bad.push('查到的考題沒附出處也存得進去');
+         else{document.getElementById('ive-cite').value='https://interview.example/check'; document.querySelector('#rzmodal [data-ivssave]').click();
+           await T.until(function(){return document.querySelector('#app [data-ivsrcgrp="this"] [data-ivsrc="'+sq+'"]');},5000);
+           if(!document.querySelector('#app [data-ivsrcgrp="this"] [data-ivsrc="'+sq+'"]'))bad.push('改成這家考過,那一題沒搬到這家考過那一區');
+           var sb2=document.querySelector('#app [data-ivsrc="'+sq+'"]'); if(sb2){sb2.click(); await T.idle();
+             document.getElementById('ive-src').value='guess'; document.getElementById('ive-cite').value='';
+             document.querySelector('#rzmodal [data-ivssave]').click();
+             await T.until(function(){return document.querySelector('#app [data-ivsrcgrp="guess"] [data-ivsrc="'+sq+'"]');},5000);}}}
+       var x0=document.querySelector('#rzmodal .rzm-x'); if(x0){x0.click(); await T.idle();}
+       if(cnt()!==n0)bad.push('改出處之後這場的題數變了');}
+     // 記一輪面試時間:存了出現在那一塊、刪了回原本
+     var nr0=document.querySelectorAll('#app .iv-round').length, add=document.querySelector('#app .iv-round-add');
+     if(!add)bad.push('沒有「記一輪面試時間」');
+     else{add.click(); await T.idle();
+       document.getElementById('ivr-date').value='2031-01-02'; document.getElementById('ivr-time').value='09:30';
+       document.getElementById('ivr-how').value='電話'; document.querySelector('#rzmodal [data-ivrsave]').click();
+       await T.until(function(){return document.querySelectorAll('#app .iv-round').length===nr0+1;},5000);
+       var nr=[...document.querySelectorAll('#app .iv-round')].filter(function(r){return r.textContent.indexOf('01/02（四） 09:30 電話')>=0;})[0];
+       if(!nr)bad.push('記了一輪 2031-01-02 09:30 電話,那一塊沒出現「01/02（四） 09:30 電話」');
+       else{nr.querySelector('[data-ivround]').click(); await T.idle(); document.querySelector('#rzmodal [data-ivrdel]').click();
+         await T.until(function(){return document.querySelectorAll('#app .iv-round').length===nr0;},5000);
+         if(document.querySelectorAll('#app .iv-round').length!==nr0)bad.push('刪掉那一輪之後沒回到原本');}}
+     // 追問收在原題裡面,不另佔一行
+     document.querySelectorAll('#app .iv-kids details.ivrow').forEach(function(k){
+       if(!k.parentNode.closest('details.ivrow'))bad.push('追問沒收在原題裡');});
+     // 從這場拿掉:少一題,按復原放回來(出處照舊)
+     var rmb=document.querySelector('#app details.ivrow [data-ivlink]');
+     if(!rmb)bad.push('題目底下沒有「從這場拿掉」');
+     else{var rq=rmb.getAttribute('data-ivlink'), rg=rmb.closest('[data-ivsrcgrp]').getAttribute('data-ivsrcgrp'); rmb.click();
+       await T.until(function(){return cnt()===n0-1;},5000);
+       if(cnt()!==n0-1)bad.push('從這場拿掉之後題數沒少('+n0+'→'+cnt()+')');
+       var ub=document.querySelector('#snack.on .snack-undo'); if(!ub)bad.push('從這場拿掉沒有復原');
+       else{ub.click(); await T.until(function(){return document.querySelector('#app [data-ivsrcgrp="'+rg+'"] [data-ivlink="'+rq+'"]');},5000);
+         if(!document.querySelector('#app [data-ivsrcgrp="'+rg+'"] [data-ivlink="'+rq+'"]'))bad.push('復原之後那一題沒回到原本的出處那一區');}}
      // 從題庫勾題:勾了這場多一題、取消回原本;題目不被複製
      var pk=document.querySelector('#app [data-ivpick]'); if(!pk)bad.push('那一場沒有「從題庫加題」');
      else{pk.click(); await T.idle();
@@ -195,10 +238,10 @@ CHECKS=[
    if(sum!==rows.length)bad.push('每一站的題數加起來是 '+sum+',頁上有 '+rows.length+' 題');
    if(sts.some(function(d){return d.open;})||rows.some(function(r){return r.open;}))bad.push('一進來就有東西是開著的');
    if(document.querySelector('#app .iv-fmt'))bad.push('又出現錄影／真人的標籤');
-   // 題目那一行只准有:在哪一站、多長、「用在 N 場」。不准掛任何公司名(公司多了一行會掛滿,在別家底下也看不懂)
+   // 題目那一行只准有:在哪一站、多長、「用在 N 場」「考過」「追問 N」。不准掛任何公司名(公司多了一行會掛滿,在別家底下也看不懂)
    var odd=rows.filter(function(r){return [...r.querySelectorAll(':scope>summary .iv-meta>*')].some(function(c){
-     return !(c.classList.contains('iv-st')||c.classList.contains('iv-dur')||(c.classList.contains('iv-for')&&/^用在 [0-9]+ 場$/.test(c.textContent.trim())));});});
-   if(odd.length)bad.push('題庫裡有 '+odd.length+' 題那一行掛著站、長度、用在幾場以外的標籤');
+     return !(c.classList.contains('iv-st')||c.classList.contains('iv-dur')||(c.classList.contains('iv-for')&&/^(用在 [0-9]+ 場|考過|追問 [0-9]+)$/.test(c.textContent.trim())));});});
+   if(odd.length)bad.push('題庫裡有 '+odd.length+' 題那一行掛著站、長度、用在幾場、考過、追問以外的標籤');
    if(!T.absent('#app [data-ivoc]'))bad.push('面試準備頁上有回頭改已投遞結果的按鈕');
    // 題目那一行的狀態點了就能改:開四站選單、選了那顆跟著變、那一題不會因為點狀態就展開;改回原本
    var sb=document.querySelector('#app details.ivrow [data-ivstage]');
@@ -2084,7 +2127,7 @@ UX_CHECKS.append(
    var names={}; [].forEach.call(document.querySelectorAll('#tabs .tab'),function(t){names[t.getAttribute('data-tab')]=t.textContent.trim();});
    for(const tab of ['none','like','meh','dislike','grow','all','prep','ready','ship','sent','iv','techerr','rm']){
      openTab(tab); await T.idle();
-     if(document.querySelector('#app article[data-fid], #app details.cogrp'))continue;     // 不是空的
+     if(document.querySelector('#app article[data-fid], #app details.cogrp, #app .iv-jrow'))continue;     // 不是空的
      var t=(document.getElementById('app').textContent||'').replace(/\s+/g,' ').trim();
      if(!t)bad.push((names[tab]||tab)+':整頁空白');
      else if(!NEXT.test(t))bad.push((names[tab]||tab)+':空的時候只寫「'+t.slice(0,30)+'」,沒講下一步');}
@@ -5300,6 +5343,8 @@ def main():
     fails=[]; took=[]; t_all=time.time()
     try:
         if shard==0:
+            import interview_bank
+            interview_bank.selftest()
             check_bank_export_and_history()
             if not a.quiet: print('  ✅ 題庫存檔、Markdown 匯出與資料夾版本紀錄')
     except Exception as e:  # noqa: BLE001 — 檢查本身出錯算這一條沒過,照實列進失敗清單

@@ -530,6 +530,26 @@ details.iv-qf>summary{min-height:36px;font-size:13px;color:var(--ink-dim)}
 .iv-focus{color:var(--ink-dim);margin-top:6px}
 .iv-focus b{color:var(--ink);margin-right:4px}
 .iv-empty{font-size:13px;color:var(--ink-dim);margin:10px 0 0}
+/* 面試時間:一輪一行,面完的變淡;清單那一行在公司名底下一行小字,還沒面的用主色 */
+.iv-when{display:block;margin-top:3px;font-size:12px;font-weight:400;color:var(--ink-dim)}
+.iv-when.on{color:var(--accent-ink);font-weight:700}
+.iv-rounds{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}
+.iv-round{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft)}
+.iv-round.past{border-color:var(--line);background:var(--surface);opacity:.75}
+.iv-round-x{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.iv-round-t{font-size:15px;font-weight:700}
+.iv-round-w{font-size:13px;color:var(--ink-dim);overflow-wrap:anywhere}
+.iv-round-add{align-self:flex-start}
+/* 這場的題目照出處分區:區名、題數、一句這區是什麼 */
+.iv-srcgrp{margin:6px 0 18px}
+.iv-srch{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px;margin:14px 0 4px;font-size:15px}
+.iv-srcd{font-size:12px;font-weight:400;color:var(--ink-dim)}
+.iv-for.real{border-color:var(--warm,#c77d1a);color:var(--warm,#c77d1a)}
+.iv-foot.iv-srcfoot{display:flex;flex-direction:column;align-items:stretch;gap:4px}
+.iv-cite{font-size:13px;line-height:1.6;color:var(--ink-dim);overflow-wrap:anywhere}
+.iv-cite b{color:var(--ink);margin-right:6px}
+.iv-foot-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.iv-kids{margin-top:12px}
 /* 大字讀稿:整個畫面換成稿子。手動捲(不做自動滾動),字級與碼錶在頂端那一條 */
 #rzmodal.rd{background:var(--bg);padding:0}
 #rzmodal.rd .rd-box{max-width:780px;width:100%;margin:0 auto;min-height:100%}
