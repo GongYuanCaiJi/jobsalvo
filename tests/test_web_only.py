@@ -1037,6 +1037,14 @@ class InterviewBank(unittest.TestCase):
         self.assertNotIn('<script', it['ask'])
         self.assertNotIn('<b>', it['b'][0][1])
 
+    def test_links_survive_an_edit(self):
+        import interview_bank as ib
+        url = 'https://youtu.be/x?t=866&a=1'
+        old = {'id': 'q1', 't': 'x', 'focus': f'第一集 <a href="{url.replace("&", "&amp;")}" target="_blank">14:26</a></p>'}
+        form = ib.to_form(old)
+        self.assertEqual(form['focus'], f'第一集 [14:26]({url})')   # 舊的 <a> 打開編輯框是 [文字](網址)
+        self.assertEqual(ib.to_form(ib.from_form(form, old))['focus'], form['focus'])   # 存回去再打開，一字不差
+
     def test_wip_without_script_stays_todo(self):
         import interview_bank as ib
         self.assertEqual(ib.from_form({'t': 'x', 'stage': 'ok'})['st'], 'todo')

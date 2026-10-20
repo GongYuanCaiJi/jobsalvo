@@ -4,7 +4,7 @@
 interview_bank —— 「🎤 面試準備」那一頁在網頁上直接新增、編輯、刪除題目。
 
 題庫存在看板資料的 bank(格式見 docs/interview-bank.md)。網頁送來的都是純文字,這裡轉成看板要的結構:
-  題面、考點        純文字 → 跳脫後包成 <p>(不收任何 HTML)
+  題面、考點        純文字 → 跳脫後包成 <p>(不收任何 HTML;連結寫 [文字](網址),看板顯示時才變成連結)
   逐字稿            空一行 = 下一段;「## 」開頭的一行 = 小標;小標把逐字稿切成好幾塊(A/B 版、60/90 秒版)
   站                todo(還沒答)/ first(答過第一輪)/ wip(磨合中)/ ok(定案)
 題目上不記任何公司。哪一場面試要準備、被問過哪一題,記在 bank['links'] = {卡片 id: {題目 id: 'prep' 或 'asked'}}:
@@ -18,8 +18,9 @@ STAGES = ('todo', 'first', 'wip', 'ok')
 
 
 def _plain(h):
-    """看板存的 HTML → 編輯框的純文字。"""
-    t = re.sub(r'<br\s*/?>', '\n', str(h or ''), flags=re.I)
+    """看板存的 HTML → 編輯框的純文字。連結寫成 [文字](網址),存回去還是純文字,看板顯示時才變成連結。"""
+    t = re.sub(r'<a\s[^>]*?href="([^"]*)"[^>]*>(.*?)</a>', r'[\2](\1)', str(h or ''), flags=re.I | re.S)
+    t = re.sub(r'<br\s*/?>', '\n', t, flags=re.I)
     t = re.sub(r'</p\s*>', '\n\n', t, flags=re.I)
     return html.unescape(re.sub(r'<[^>]+>', '', t)).strip()
 

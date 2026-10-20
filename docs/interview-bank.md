@@ -32,7 +32,7 @@ bd.set_data(lambda data, fb: data.__setitem__('bank', my_bank))
       "cat": "自我介紹",           // 大類(要在 cats 裡)
       "sub": "",                  // 小類,可空
       "ask": "<p>題面(HTML)</p>",
-      "focus": "",                // 考點(HTML),可空
+      "focus": "",                // 考點(HTML),可空;連結寫 [文字](網址),看板顯示時才變成連結
       "covers": "",               // 題組涵蓋哪些子題,可空
       "lim": 0,                   // 限時秒數,0 = 不限;念起來超過會標紅
       "st": "wip",                // "ok" = 定案、"wip" = 磨合中、"todo" = 還沒答案
