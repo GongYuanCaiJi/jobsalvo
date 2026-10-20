@@ -1743,12 +1743,12 @@
       head='';
       var len={c:0,w:0}, ps='';
       b[1].forEach(function(p){n++; var on=!keep||keep.indexOf(n)>=0; if(on)len=ivAdd(len,ivLen(p));
-        ps+='<p class="iv-seg'+(on?'':' off')+'" data-n="'+n+'">'+ivLinks(esc(p))+'</p>';});
+        ps+='<p class="iv-seg'+(on?'':' off')+'" data-n="'+n+'">'+ivLinkify(esc(p))+'</p>';});
       h+='<div class="iv-script">'+(multi?'<div class="iv-bd">≈'+ivClock(ivSecs(len))+' · '+ivLenText(len)+'</div>':'')+ps+'</div>';
     });
     return h;}
   // 題庫文字裡的 [文字](網址) 顯示成連結(開新分頁);存的一直是純文字,編輯框改了也不會掉。傳進來的已經跳脫過。
-  function ivLinks(h){return String(h||'').replace(/\[([^\]\n<]+)\]\((https?:\/\/[^\s)"'<]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');}
+  function ivLinkify(h){return String(h||'').replace(/\[([^\]\n<]+)\]\((https?:\/\/[^\s)"'<]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');}
   function ivPickHTML(it){var P=ivPicks(it); if(!P.list.length)return '';
     var k=ivPickIdx(it);
     return '<div class="iv-pick">'+P.list.map(function(p,i){
@@ -1783,8 +1783,8 @@
         '<button type="button" class="iv-rm" data-ivlink="'+escA(it.id)+'" data-ivjob="'+escA(job)+'" data-ivkind="">從這場拿掉</button></div>'
       :used.length?'<div class="iv-foot"><span class="iv-foot-k">用在</span>'+used.map(function(j){
         return '<button type="button" class="rchip" data-ivopen="'+escA(j)+'">'+esc(ivName(j))+' · '+IV_KIND[ivKind(j,it.id)]+'</button>';}).join('')+'</div>':'';
-    var ask=it.ask?'<div class="iv-ask">'+ivLinks(it.ask)+'</div>':'';
-    var focus=it.focus?'<div class="iv-focus"><b>考點</b> '+ivLinks(it.focus)+'</div>':'';
+    var ask=it.ask?'<div class="iv-ask">'+ivLinkify(it.ask)+'</div>':'';
+    var focus=it.focus?'<div class="iv-focus"><b>考點</b> '+ivLinkify(it.focus)+'</div>':'';
     var edit='<button type="button" class="iv-ghost" data-ivedit="'+escA(it.id)+'">✏️ 編輯</button>';
     var body;
     if(it.st==='todo'){
