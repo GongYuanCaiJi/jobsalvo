@@ -64,7 +64,7 @@ class InterviewLinksTest(unittest.TestCase):
     def test_editing_keeps_links_and_never_writes_a_company_on_the_question(self):
         import interview_bank as ib
         b = ib.apply({'items': [{'id': 'q1', 't': 'a'}], 'links': {'J': {'q1': {'k': 'prep', 'src': 'this', 'cite': 'https://x', 'quote': '原文', 'why': ''}}}}, 'put',
-                     form={'id': 'q1', 't': 'b', 'stage': 'todo', 'asked': 'Acme'})
+                     form={'id': 'q1', 'rev': 0, 't': 'b', 'stage': 'todo', 'asked': 'Acme'})
         self.assertEqual(b['links'], {'J': {'q1': {'k': 'prep', 'src': 'this', 'cite': 'https://x', 'quote': '原文', 'why': ''}}})
         self.assertNotIn('asked', b['items'][0])
 

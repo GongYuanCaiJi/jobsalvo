@@ -4440,7 +4440,7 @@
   function ivFormHTML(f,cats){
     var cs=(cats||[]).slice(); if(f.cat&&cs.indexOf(f.cat)<0)cs.push(f.cat);
     return '<div class="rzm-box iv-edit"><button class="rzm-x" type="button">✕ 關閉</button>'+
-      '<h3>'+(f.id?'編輯題目':IVPARENT&&ivItem(IVPARENT)?'「'+esc(ivItem(IVPARENT).t)+'」的追問':IVJOB?'在「'+esc(ivName(IVJOB))+'」寫一題新的':'新增題目')+'</h3><input type="hidden" id="ive-id" value="'+escA(f.id||'')+'">'+
+      '<h3>'+(f.id?'編輯題目':IVPARENT&&ivItem(IVPARENT)?'「'+esc(ivItem(IVPARENT).t)+'」的追問':IVJOB?'在「'+esc(ivName(IVJOB))+'」寫一題新的':'新增題目')+'</h3><input type="hidden" id="ive-id" value="'+escA(f.id||'')+'"><input type="hidden" id="ive-rev" value="'+escA(String(f.rev||0))+'">'+
       ivRow('題目','<input class="cfg-in" id="ive-t" value="'+escA(f.t||'')+'" placeholder="例:請簡單自我介紹">')+
       ivRow('大類','<select class="cfg-in" id="ive-cat">'+cs.map(function(c){return '<option'+(c===f.cat?' selected':'')+'>'+esc(c)+'</option>';}).join('')+'</select>'+
         '<input class="cfg-in" id="ive-sub" value="'+escA(f.sub||'')+'" placeholder="小類(可空)">')+
@@ -4465,7 +4465,7 @@
       '選了就收在那一題裡面,面試前點開那一題就看得到。');}
   function ivFormVal(){var g=function(i){return ($(i)||{}).value||'';};
     return {id:g('ive-id'),t:g('ive-t'),cat:g('ive-cat'),sub:g('ive-sub'),stage:g('ive-stage'),lim:parseInt(g('ive-lim'),10)||0,
-            ask:g('ive-ask'),focus:g('ive-focus'),ref:g('ive-ref'),script:g('ive-script'),parent:g('ive-parent')};}
+            ask:g('ive-ask'),focus:g('ive-focus'),ref:g('ive-ref'),script:g('ive-script'),parent:g('ive-parent'),rev:g('ive-rev')};}
   function ivPost(body){
     return fetch('/api/bank',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json().then(function(d){if(!r.ok||!d.ok)throw new Error(d.msg||('http '+r.status));
@@ -4544,6 +4544,8 @@
       if(lnf&&(lnf.src==='this'||lnf.src==='other')&&!lnf.cite){snack('查到的考題要附出處連結;沒有出處就選「預想的」');return;}
       ivPost({op:'put',item:f}).then(function(d){
         var qid=f.id||((d.bank.items||[]).filter(function(x){return !before[x.id];})[0]||{}).id;
+        // 題目已經存進去了:框裡換成存好的 id 和 rev,出處被擋改好再按儲存,才不會多一題或被當成舊版本擋下
+        var sv=ivItem(qid); if($('ive-id'))$('ive-id').value=qid||''; if(sv&&$('ive-rev'))$('ive-rev').value=String(sv.rev||0);
         return job&&qid?ivLinkPost(qid,job,lnf):d;})
         .then(function(){closeModal(); renderApp(); snack(job&&!f.id?'存好了,放進這場':'存好了');}).catch(function(err){snack('沒存成('+err.message+'),改好再按一次儲存');});
       return;}

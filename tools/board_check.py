@@ -206,6 +206,17 @@ CHECKS=[
              await T.until(function(){return inGrp('guess',sq);},5000);}}}
        var x0=document.querySelector('#rzmodal .rzm-x'); if(x0){x0.click(); await T.idle();}
        if(cnt()!==n0)bad.push('改出處之後這場的題數變了');}
+     // 編輯框開著的時候,別的地方(agent)先存了同一題:這邊再按儲存要擋下,不能整題蓋掉
+     var cq=document.querySelector('#app [data-ivedit][data-ivjob]');
+     if(cq&&await openEd(cq.getAttribute('data-ivedit'))){var cid=cq.getAttribute('data-ivedit');
+       var other=await fetch('/api/bank/form?id='+encodeURIComponent(cid)).then(function(r){return r.json();});
+       await fetch('/api/bank',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:'put',item:other.form})});
+       var before=document.getElementById('ive-script').value; document.getElementById('ive-script').value=before+' 板子檢查:晚一步存的';
+       document.querySelector('#rzmodal [data-ivesave]').click(); await T.idle();
+       var after=await fetch('/api/bank/form?id='+encodeURIComponent(cid)).then(function(r){return r.json();});
+       if(!document.getElementById('ive-src'))bad.push('別人先存了同一題,這邊再存還是存進去了(編輯框關了)');
+       if(after.form.script.indexOf('板子檢查:晚一步存的')>=0)bad.push('別人先存了同一題,這邊晚一步存的整題蓋掉了別人的');
+       var x1=document.querySelector('#rzmodal .rzm-x'); if(x1){x1.click(); await T.idle();}}
      // 在某一題底下加追問:框裡預設就是那一題的追問,出處也在同一個框(不存,只看框)
      var kb=document.querySelector('#app [data-ivkid][data-ivjob]');
      if(!kb)bad.push('題目底下沒有「＋ 加一題追問」');

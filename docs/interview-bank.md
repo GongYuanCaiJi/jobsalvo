@@ -20,6 +20,7 @@
 python3 tools/iv.py show                    # 每一場什麼時候面、幾題、出處分佈
 python3 tools/iv.py show 萬蕙昇              # 一場的面試時間和每一題
 python3 tools/iv.py find 薪水                # 先找題庫裡有沒有,有就 link,不要再寫一題一樣的
+python3 tools/iv.py get ML-1 > q.json        # 改一題:先拿現在的 json(含 rev),改完再 put
 python3 tools/iv.py put q.json --card 萬蕙昇 --src guess --why "職缺寫了模型微調"
 python3 tools/iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞"
 python3 tools/iv.py unlink 萬蕙昇 WH3
@@ -27,6 +28,8 @@ python3 tools/iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "
 python3 tools/iv.py round 萬蕙昇 --del 2026-10-23T15:00
 python3 tools/iv.py check                   # 整份不合規則的地方
 ```
+
+改一題一定先 `get` 再 `put`,不要自己從頭組一整題。每一題帶 `rev`,每存一次加一;`put` 帶的 `rev` 跟現在的不一樣,代表你讀出來之後有人改過這題(看板、別的 agent),這次會被擋下、不會蓋掉別人的改動。被擋就重新 `get`,把你的改動加在最新的版本上再存。
 
 卡片寫網址、網址的一段或公司名都可以,對到唯一一張就好。不合規則的寫入會被擋下並說要改哪裡,規則只寫在
 `tools/interview_bank.py` 的 `apply()`,網頁和 `iv.py` 都走它。

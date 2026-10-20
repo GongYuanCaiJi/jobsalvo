@@ -6,8 +6,9 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
   iv.py show                         有在準備的每一場:什麼時候面、幾題、出處分佈
   iv.py show 萬蕙昇                  一場的面試時間和每一題(題目 id、出處、為什麼)
   iv.py find 薪水                    題庫裡找題(先找,有了就 link,不要再寫一題一樣的)
+  iv.py get  ML-1 > q.json          拿一題現在的 json(含 rev);改一題一定先 get,改完再 put
   iv.py put  題目.json [--card 萬蕙昇 --src guess --why "…"]
-                                     新增或改一題(json 帶 id 就是改);帶 --card 就順便記進那一場
+                                     新增或改一題(json 帶 id 就是改,要帶 get 拿到的 rev);帶 --card 就順便記進那一場
   iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞" [--why "…"]
   iv.py unlink 萬蕙昇 WH3
   iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" [--note "…"] [--old-at 舊時間]
@@ -111,6 +112,7 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('show'); p.add_argument('card', nargs='?')
     p = sub.add_parser('find'); p.add_argument('word')
+    p = sub.add_parser('get'); p.add_argument('qid')
     p = sub.add_parser('check')
     for name in ('put', 'link'):
         p = sub.add_parser(name)
@@ -136,6 +138,12 @@ def main():
             f = ib.to_form(it)
             if w in ' '.join(str(v) for v in f.values()).lower():
                 print(f"{f['id']:14} {f['stage']:5} {f['cat']}/{f['sub']}  {f['t']}")
+        return
+    if a.cmd == 'get':
+        it = next((x for x in ib.normalize(data.get('bank'))['items'] if x.get('id') == a.qid), None)
+        if not it:
+            raise SystemExit(f'題庫裡沒有 {a.qid};用 iv.py find 找')
+        print(json.dumps(ib.to_form(it), ensure_ascii=False, indent=1))
         return
     if a.cmd == 'check':
         bad = ib.problems(data.get('bank'))

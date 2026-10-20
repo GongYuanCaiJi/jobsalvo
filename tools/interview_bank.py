@@ -84,7 +84,7 @@ def to_form(it):
     return {'id': it.get('id', ''), 't': it.get('t', ''), 'cat': it.get('cat', ''), 'sub': it.get('sub', ''),
             'ask': _plain(it.get('ask')), 'focus': _plain(it.get('focus')), 'ref': _plain(it.get('ref')),
             'lim': it.get('lim') or 0, 'parent': it.get('parent') or '',
-            'stage': stage, 'script': blocks_to_script(it.get('b'))}
+            'stage': stage, 'script': blocks_to_script(it.get('b')), 'rev': it.get('rev') or 0}
 
 
 def from_form(f, old=None):
@@ -107,6 +107,7 @@ def from_form(f, old=None):
         'st': {'ok': 'ok', 'wip': 'wip'}.get(stage, 'todo'),
         'raw': stage in ('first', 'wip', 'ok'),
         'b': script_to_blocks(f.get('script')),
+        'rev': ((old or {}).get('rev') or 0) + 1,
     })
     if 'parent' in f:
         it['parent'] = str(f.get('parent') or '').strip()
@@ -196,7 +197,7 @@ def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
             if it.get('id') == item_id:
                 if kind in ('wip', 'ok') and not any(b[0] == 's' for b in it.get('b') or []):
                     raise ValueError('這題還沒有逐字稿,先寫了才能算磨合中或定案')
-                items[i] = dict(it, st={'ok': 'ok', 'wip': 'wip'}.get(kind, 'todo'), raw=kind != 'todo')
+                items[i] = dict(it, st={'ok': 'ok', 'wip': 'wip'}.get(kind, 'todo'), raw=kind != 'todo', rev=(it.get('rev') or 0) + 1)
                 break
         else:
             raise ValueError('找不到這一題')
@@ -232,6 +233,10 @@ def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
         f = dict(form or {})
         fid = f.get('id')
         idx = next((i for i, it in enumerate(items) if fid and it.get('id') == fid), None)
+        # 樂觀鎖定:改一題要帶讀出來時的 rev;那之後有人存過這題就擋,不整題蓋掉別人的改動
+        if idx is not None and str(f.get('rev', '')) != str(items[idx].get('rev') or 0):
+            raise ValueError(f'「{items[idx].get("t")}」在你打開之後被改過了,這次沒存。重新打開再改'
+                             f'(agent:iv.py get {fid} 拿最新的 json,含 rev)')
         it = from_form(f, items[idx] if idx is not None else None)
         if heading_problem(it, idx is not None):
             raise ValueError(heading_problem(it, idx is not None))
@@ -373,7 +378,8 @@ def selftest():
     assert norm_link('asked') == {'k': 'asked', 'src': 'me', 'cite': '', 'quote': '', 'why': ''}
     kid = 'kid'
     b = apply(b, 'put', {'id': kid, 't': '追問', 'parent': q})
-    for bad in ({'t': '追問的追問', 'parent': kid}, {'id': q, 't': '自我介紹', 'parent': kid}):
+    get = lambda bank, i: to_form(next(x for x in bank['items'] if x['id'] == i))
+    for bad in ({'t': '追問的追問', 'parent': kid}, dict(get(b, q), parent=kid)):
         try:
             apply(b, 'put', bad); raise SystemExit('追問超過一層沒擋 ' + str(bad))
         except ValueError:
@@ -382,6 +388,19 @@ def selftest():
         apply(b, 'put', {'t': 'x', 'script': '答案\n\n## 可能的追問\n\n問?答'}); raise SystemExit('追問寫進逐字稿沒擋')
     except ValueError:
         pass
+    seen = get(b, q)                                   # 兩邊同時打開同一題
+    b = apply(b, 'put', dict(seen, script='A 改的'))
+    try:
+        apply(b, 'put', dict(seen, script='B 改的')); raise SystemExit('B 拿舊的版本存,蓋掉了 A')
+    except ValueError:
+        pass
+    b = apply(b, 'stage', None, q, None, 'first')
+    try:
+        apply(b, 'put', dict(get(b, q), rev=0)); raise SystemExit('改站之後拿舊版本存沒擋')
+    except ValueError:
+        pass
+    b = apply(b, 'put', dict(get(b, q), script='B 重新打開再改'))
+    assert get(b, q)['script'] == 'B 重新打開再改'
     assert problems({'items': [{'id': 'h', 't': 'h', 'b': [['h', '<h6>優點</h6>']]}]}), '小標的 HTML 沒抓到'
     assert not problems(b), problems(b)
 
