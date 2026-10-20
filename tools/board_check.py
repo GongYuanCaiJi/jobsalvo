@@ -156,7 +156,7 @@ CHECKS=[
    // 面試準備那頁一進來就是面試:填表進度那一列不放這頁(2026-10-12 他:「我完全找不到題目在哪裡」)
    var fl=document.getElementById('filllistbar'); if(fl&&fl.textContent.trim())bad.push('面試準備頁上面還攤著填表進度');
    if(document.querySelector('#app .iv-doc, [data-ctl="ivjob"], #app .iv-jc'))bad.push('面試準備頁又出現某一家的參考資料、選公司的選單或題目上的公司標籤');
-   var ended=[...document.querySelectorAll('#app details .iv-jrow')];
+   var ended=[...document.querySelectorAll('#app details .iv-jrow')], kidIds=[];
    var anyRow=document.querySelector('#app .iv-jrow');
    if(!anyRow&&ended.length){var ef=ended[0].closest('details'); ef.querySelector('summary').click(); await T.idle(); anyRow=ended[0];}
    if(anyRow){
@@ -172,26 +172,39 @@ CHECKS=[
      var ORDER=['me','this','other','guess'], NAME={me:'我被問過',this:'這家考過',other:'別家考過',guess:'預想的'};
      var grps=[...document.querySelectorAll('#app [data-ivsrcgrp]')].map(function(g){return g.getAttribute('data-ivsrcgrp');});
      if(grps.some(function(g,i){return i&&ORDER.indexOf(g)<ORDER.indexOf(grps[i-1]);}))bad.push('出處分區的順序亂了:'+grps.join('、'));
+     // 每一區寫的題數 = 那一區畫出來的題數(追問收在原題那一區,算在那一區)
+     document.querySelectorAll('#app [data-ivsrcgrp]').forEach(function(g){var w=parseInt((g.querySelector('.iv-srch .n')||{}).textContent||'-1',10), got=g.querySelectorAll('details.ivrow').length;
+       if(w!==got)bad.push('「'+NAME[g.getAttribute('data-ivsrcgrp')]+'」寫 '+w+' 題,底下列了 '+got+' 題');});
      document.querySelectorAll('#app [data-ivsrcgrp]').forEach(function(g){var want=NAME[g.getAttribute('data-ivsrcgrp')];
        g.querySelectorAll(':scope>.ivlist>details.ivrow>.iv-body>.iv-srcfoot .iv-cite:first-child').forEach(function(c){
          if(c.textContent.replace('出處','').trim().indexOf(want)!==0)bad.push('「'+want+'」那一區有一題寫的出處是'+c.textContent);});});
-     // 改出處:選「這家考過」不附出處要擋下來;附了就搬到那一區;再改回原本
-     var sbt=document.querySelector('#app [data-ivsrcgrp="guess"] [data-ivsrc]');
-     if(!sbt)bad.push('預想的那一區沒有「改出處」');
-     else{var sq=sbt.getAttribute('data-ivsrc'); sbt.click(); await T.idle();
-       var sel=document.getElementById('ive-src'), cite=document.getElementById('ive-cite');
-       if(!sel||!cite)bad.push('改出處的框沒有出處和出處連結');
-       else{sel.value='this'; cite.value=''; document.querySelector('#rzmodal [data-ivssave]').click(); await T.idle();
+     // 改出處:在這場裡按「編輯」,同一個框改出處;選「這家考過」不附出處要擋下來;附了就搬到那一區;再改回原本
+     if(!T.absent('#app [data-ivsrc]'))bad.push('一題又有兩顆編輯按鈕(編輯、改出處)');
+     var openEd=async function(q){var b=document.querySelector('#app [data-ivedit="'+q+'"][data-ivjob]'); if(!b)return false;
+       b.click(); await T.until(function(){return document.getElementById('ive-src');},5000); return !!document.getElementById('ive-src');};
+     var inGrp=function(g,q){return document.querySelector('#app [data-ivsrcgrp="'+g+'"] [data-ivedit="'+q+'"]');};
+     var sbt=document.querySelector('#app [data-ivsrcgrp="guess"] [data-ivedit][data-ivjob]');
+     if(!sbt)bad.push('預想的那一區沒有「編輯」');
+     else{var sq=sbt.getAttribute('data-ivedit');
+       if(!await openEd(sq))bad.push('在這場裡編輯一題,框裡沒有出處');
+       else{document.getElementById('ive-src').value='this'; document.getElementById('ive-cite').value=''; document.querySelector('#rzmodal [data-ivesave]').click(); await T.idle();
          if(!document.getElementById('ive-src'))bad.push('查到的考題沒附出處也存得進去');
-         else{document.getElementById('ive-cite').value='https://interview.example/check'; document.querySelector('#rzmodal [data-ivssave]').click();
-           await T.until(function(){return document.querySelector('#app [data-ivsrcgrp="this"] [data-ivsrc="'+sq+'"]');},5000);
-           if(!document.querySelector('#app [data-ivsrcgrp="this"] [data-ivsrc="'+sq+'"]'))bad.push('改成這家考過,那一題沒搬到這家考過那一區');
-           var sb2=document.querySelector('#app [data-ivsrc="'+sq+'"]'); if(sb2){sb2.click(); await T.idle();
-             document.getElementById('ive-src').value='guess'; document.getElementById('ive-cite').value='';
-             document.querySelector('#rzmodal [data-ivssave]').click();
-             await T.until(function(){return document.querySelector('#app [data-ivsrcgrp="guess"] [data-ivsrc="'+sq+'"]');},5000);}}}
+         else{document.getElementById('ive-cite').value='https://interview.example/check'; document.querySelector('#rzmodal [data-ivesave]').click();
+           await T.until(function(){return inGrp('this',sq);},5000);
+           if(!inGrp('this',sq))bad.push('改成這家考過,那一題沒搬到這家考過那一區');
+           else if(await openEd(sq)){document.getElementById('ive-src').value='guess'; document.getElementById('ive-cite').value='';
+             document.querySelector('#rzmodal [data-ivesave]').click();
+             await T.until(function(){return inGrp('guess',sq);},5000);}}}
        var x0=document.querySelector('#rzmodal .rzm-x'); if(x0){x0.click(); await T.idle();}
        if(cnt()!==n0)bad.push('改出處之後這場的題數變了');}
+     // 在某一題底下加追問:框裡預設就是那一題的追問,出處也在同一個框(不存,只看框)
+     var kb=document.querySelector('#app [data-ivkid][data-ivjob]');
+     if(!kb)bad.push('題目底下沒有「＋ 加一題追問」');
+     else{var kq=kb.getAttribute('data-ivkid'); kb.click(); await T.until(function(){return document.getElementById('ive-parent');},5000);
+       var pf=document.getElementById('ive-parent');
+       if(!pf||pf.value!==kq)bad.push('按「＋ 加一題追問」,框裡追問哪一題不是那一題');
+       if(!document.getElementById('ive-src'))bad.push('在這場加追問,框裡沒有出處');
+       var x1=document.querySelector('#rzmodal .rzm-x'); if(x1){x1.click(); await T.idle();}}
      // 記一輪面試時間:存了出現在那一塊、刪了回原本
      var nr0=document.querySelectorAll('#app .iv-round').length, add=document.querySelector('#app .iv-round-add');
      if(!add)bad.push('沒有「記一輪面試時間」');
@@ -205,6 +218,7 @@ CHECKS=[
          await T.until(function(){return document.querySelectorAll('#app .iv-round').length===nr0;},5000);
          if(document.querySelectorAll('#app .iv-round').length!==nr0)bad.push('刪掉那一輪之後沒回到原本');}}
      // 追問收在原題裡面,不另佔一行
+     kidIds=[...document.querySelectorAll('#app .iv-kids details.ivrow[data-iv]')].map(function(k){return k.getAttribute('data-iv');});
      document.querySelectorAll('#app .iv-kids details.ivrow').forEach(function(k){
        if(!k.parentNode.closest('details.ivrow'))bad.push('追問沒收在原題裡');});
      // 從這場拿掉:少一題,按復原放回來(出處照舊)
@@ -243,6 +257,10 @@ CHECKS=[
      return !(c.classList.contains('iv-st')||c.classList.contains('iv-dur')||(c.classList.contains('iv-for')&&/^(用在 [0-9]+ 場|考過|追問 [0-9]+)$/.test(c.textContent.trim())));});});
    if(odd.length)bad.push('題庫裡有 '+odd.length+' 題那一行掛著站、長度、用在幾場、考過、追問以外的標籤');
    if(!T.absent('#app [data-ivoc]'))bad.push('面試準備頁上有回頭改已投遞結果的按鈕');
+   // 題庫裡的追問各自一行,點開要看得出是哪一題的追問
+   if(document.querySelector('#app .iv-kids'))bad.push('題庫裡追問又收進原題(題庫一題一行,每一題算在自己那一站)');
+   kidIds.forEach(function(q){var r=document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-up');
+     if(!r||r.textContent.indexOf('追問自')<0)bad.push('題庫裡 '+q+' 是追問,點開沒標是哪一題的追問');});
    // 題目那一行的狀態點了就能改:開四站選單、選了那顆跟著變、那一題不會因為點狀態就展開;改回原本
    var sb=document.querySelector('#app details.ivrow [data-ivstage]');
    if(!sb)bad.push('題目那一行沒有可以點的狀態');

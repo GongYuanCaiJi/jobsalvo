@@ -227,8 +227,16 @@ def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
         fid = f.get('id')
         idx = next((i for i, it in enumerate(items) if fid and it.get('id') == fid), None)
         it = from_form(f, items[idx] if idx is not None else None)
-        if it.get('parent') and (it['parent'] == it['id'] or not any(x.get('id') == it['parent'] for x in items)):
-            raise ValueError('追問要掛在題庫裡另一題底下')
+        if heading_problem(it, idx is not None):
+            raise ValueError(heading_problem(it, idx is not None))
+        if it.get('parent'):
+            pa = next((x for x in items if x.get('id') == it['parent'] and x.get('id') != it['id']), None)
+            if not pa:
+                raise ValueError('追問要掛在題庫裡另一題底下')
+            if pa.get('parent'):
+                raise ValueError('追問只有一層:「' + pa.get('t', '') + '」本身是追問,掛到它的原題底下')
+            if any(x.get('parent') == it['id'] for x in items):
+                raise ValueError('這題底下有追問,不能再當別題的追問')
         if idx is None:
             items.append(it)
         else:
@@ -243,6 +251,19 @@ def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
     return bank
 
 
+def heading_problem(it, saved=True):
+    """逐字稿的小標只放同一個答案的段落或版本:寫了「追問」就是把另一題塞進來,有 HTML 就是舊資料沒清。"""
+    for blk in it.get('b') or []:
+        if blk and blk[0] == 'h':
+            h = str(blk[1])
+            if re.match(r'^[^（(]*追問', _plain(h)):   # 「可能的追問」;「沒 context 版（…不能賭他會追問）」不算
+                pa = f'"parent": "{it.get("id")}"' if saved else '"parent" 填這一題存好後的 id(iv.py put 會印出來)'
+                return f'「{it.get("t")}」的逐字稿有小標「{_plain(h)}」:那段拿掉,追問一題一題另寫,題目 json 帶 {pa}'
+            if re.search(r'<[a-z/][^>]*>', h):
+                return f'「{it.get("t")}」的小標「{_plain(h)}」裡有 HTML,打開編輯再存一次就會清掉'
+    return ''
+
+
 def problems(bank):
     """整份 bank 不合規則的地方(給 board_check 和 iv.py check 用)。回 [說明…]。"""
     bank = bank if isinstance(bank, dict) else {}
@@ -253,6 +274,8 @@ def problems(bank):
             out.append(f'「{it.get("t")}」的題面有「{hit.group(0)}」,要搬到考點或這場的出處')
         if it.get('covers'):
             out.append(f'「{it.get("t")}」還有舊的 covers 欄位')
+        if heading_problem(it):
+            out.append(heading_problem(it))
         if it.get('parent') and it['parent'] not in ids:
             out.append(f'「{it.get("t")}」追問的那一題不在題庫裡')
     for job, qs in (bank.get('links') or {}).items():
@@ -339,6 +362,18 @@ def selftest():
     b = apply(b, 'round', {'old_at': '2026-10-21T14:30'}, None, 'J', None)
     assert len(b['rounds']['J']) == 1
     assert norm_link('asked') == {'k': 'asked', 'src': 'me', 'cite': '', 'why': ''}
+    kid = 'kid'
+    b = apply(b, 'put', {'id': kid, 't': '追問', 'parent': q})
+    for bad in ({'t': '追問的追問', 'parent': kid}, {'id': q, 't': '自我介紹', 'parent': kid}):
+        try:
+            apply(b, 'put', bad); raise SystemExit('追問超過一層沒擋 ' + str(bad))
+        except ValueError:
+            pass
+    try:
+        apply(b, 'put', {'t': 'x', 'script': '答案\n\n## 可能的追問\n\n問?答'}); raise SystemExit('追問寫進逐字稿沒擋')
+    except ValueError:
+        pass
+    assert problems({'items': [{'id': 'h', 't': 'h', 'b': [['h', '<h6>優點</h6>']]}]}), '小標的 HTML 沒抓到'
     assert not problems(b), problems(b)
 
 

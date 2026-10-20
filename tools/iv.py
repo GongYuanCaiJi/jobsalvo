@@ -16,7 +16,9 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
 
 卡片可以寫網址、網址的一段或公司名,對到唯一一張就好。
 題目 json 的欄位:t 題目、cat 大類、sub 小類、ask 題面(只放對方怎麼問)、focus 考點(含答壞的樣子)、
-ref 準備材料、script 逐字稿(## 開頭是小標)、stage todo/first/wip/ok、lim 限時秒數、parent 追問哪一題。
+ref 準備材料、script 逐字稿(## 開頭是小標,只放同一個答案的段落或版本)、stage todo/first/wip/ok、lim 限時秒數、
+parent 追問哪一題:對方聽完回答接著問的另一題,一律另寫一題帶 "parent": "原題 id",不寫進原題逐字稿。
+  例:{"t": "曲線下面積是什麼？", "parent": "ML-1", "cat": "技術基本功", "sub": "機器學習", "stage": "wip", "script": "…"}
 出處 --src:me 我被問過 / this 這家考過 / other 別家考過(這兩種要 --cite)/ guess 預想的(要 --why)。
 """
 import argparse, json, os, sys
@@ -96,7 +98,8 @@ def show(a, data, fb):
         for q, v in rows:
             it = items.get(q, {})
             st = ib.to_form(it).get('stage') if it else '?'
-            print(f"    {q:14} {st:5} {it.get('t', '(題庫裡沒有)')}")
+            up = f"  ↳ 追問 {it['parent']}" if it.get('parent') else ''
+            print(f"    {q:14} {st:5} {it.get('t', '(題庫裡沒有)')}{up}")
             for k in ('cite', 'why'):
                 if v.get(k):
                     print(f'{"":20}{k}: {v[k]}')

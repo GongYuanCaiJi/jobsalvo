@@ -549,6 +549,7 @@ details.iv-qf>summary{min-height:36px;font-size:13px;color:var(--ink-dim)}
 .iv-cite{font-size:13px;line-height:1.6;color:var(--ink-dim);overflow-wrap:anywhere}
 .iv-cite b{color:var(--ink);margin-right:6px}
 .iv-foot-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.iv-up{margin:0 0 8px;font-size:12.5px;color:var(--ink-dim)}
 .iv-kids{margin-top:12px}
 /* 大字讀稿:整個畫面換成稿子。手動捲(不做自動滾動),字級與碼錶在頂端那一條 */
 #rzmodal.rd{background:var(--bg);padding:0}
