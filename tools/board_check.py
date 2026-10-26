@@ -305,29 +305,33 @@ CHECKS=[
        if(s2&&back){s2.click(); await T.idle(); var o=document.querySelector('#ivstmenu [data-ivst-set="'+back+'"]'); if(o){o.click();
          await T.until(function(){var x=document.querySelector('#app [data-ivstage="'+sid+'"]'); return x&&x.textContent===t0;},5000);}}}}
    rows=[...document.querySelectorAll('#app details.ivrow[data-iv]')];   // 改狀態會重畫,下面要用新的
-   var r=rows.filter(function(x){return x.querySelector('[data-ivpk="-1"]');})[0]||rows.filter(function(x){return x.querySelector('.iv-seg');})[0];
-   if(!r)return bad.concat('沒有任何一題有逐字稿').join('；');
-   var stg=r.closest('details.ivstage'); if(stg&&!stg.open){stg.querySelector('summary').click(); await T.idle();}
-   r.querySelector('summary').click(); await T.idle();
-   var all=r.querySelectorAll('.iv-seg:not(.off)').length;
+   var r0=rows.filter(function(x){return x.querySelector('[data-ivpk="-1"]');})[0]||rows.filter(function(x){return x.querySelector('.iv-seg');})[0];
+   if(!r0)return bad.concat('沒有任何一題有逐字稿').join('；');
+   var vr0=rows.filter(function(x){return x.querySelector('.iv-pick')&&!x.querySelector('[data-ivpk="-1"]');})[0];
+   // 資料版本一變,背景同步就整頁重畫:每次等完都照題號重新找那一題,不拿重畫前的舊元素
+   function ivRow(q){return q&&document.querySelector('#app details.ivrow[data-iv="'+q+'"]');}
+   var rid=r0.getAttribute('data-iv'), vid=vr0&&vr0.getAttribute('data-iv');
+   function r(){return ivRow(rid);} function stg(){return r().closest('details.ivstage');}
+   if(stg()&&!stg().open){stg().querySelector('summary').click(); await T.idle();}
+   r().querySelector('summary').click(); await T.idle();
+   var all=r().querySelectorAll('.iv-seg:not(.off)').length;
    if(!all)bad.push('點開沒有逐字稿');
-   var pk=r.querySelector('[data-ivpk="0"]');
+   var pk=r().querySelector('[data-ivpk="0"]');
    if(pk){pk.click(); await T.idle();
-     var n=r.querySelectorAll('.iv-seg:not(.off)').length;
+     var n=r().querySelectorAll('.iv-seg:not(.off)').length;
      if(!(n>0&&n<all))bad.push('點子題之後段落沒變少('+all+'→'+n+')');
-     r.querySelector('[data-ivpk="-1"]').click(); await T.idle();
-     if(r.querySelectorAll('.iv-seg:not(.off)').length!==all)bad.push('按「全部」沒回到全部段落');}
+     r().querySelector('[data-ivpk="-1"]').click(); await T.idle();
+     if(r().querySelectorAll('.iv-seg:not(.off)').length!==all)bad.push('按「全部」沒回到全部段落');}
    // 好幾版的稿子(60/90/180):一次只顯示一版,點另一版就換
-   var vr=rows.filter(function(x){return x.querySelector('.iv-pick')&&!x.querySelector('[data-ivpk="-1"]');})[0];
-   if(vr){var vs=vr.querySelectorAll('.iv-say .iv-script').length; if(vs!==1)bad.push('好幾版的稿子一次顯示了 '+vs+' 版');
-     var v1=vr.querySelector('[data-ivpk="1"]'), before=vr.querySelector('.iv-say').textContent;
-     if(v1){v1.click(); await T.idle(); if(vr.querySelector('.iv-say').textContent===before)bad.push('點另一版,稿子沒換');}}
-   r.querySelector('[data-ivread]').click(); await T.idle();
+   if(vid){var vs=ivRow(vid).querySelectorAll('.iv-say .iv-script').length; if(vs!==1)bad.push('好幾版的稿子一次顯示了 '+vs+' 版');
+     var v1=ivRow(vid).querySelector('[data-ivpk="1"]'), before=ivRow(vid).querySelector('.iv-say').textContent;
+     if(v1){v1.click(); await T.idle(); if(ivRow(vid).querySelector('.iv-say').textContent===before)bad.push('點另一版,稿子沒換');}}
+   r().querySelector('[data-ivread]').click(); await T.idle();
    var ov=document.getElementById('rzmodal');
    if(!ov||ov.style.display!=='flex'||!ov.querySelector('.rd-doc .iv-seg'))bad.push('大字讀稿沒打開');
    else{ov.querySelector('.rzm-x').click(); await T.idle(); if(ov.style.display!=='none')bad.push('大字讀稿關不掉');}
-   if(r.open)r.querySelector('summary').click();
-   if(stg&&stg.open)stg.querySelector('summary').click();
+   if(r().open)r().querySelector('summary').click();
+   if(stg()&&stg().open)stg().querySelector('summary').click();
    // 題目列上不准出現內部題號(使用者看不懂的代號)。
    var ids=rows.map(function(x){return x.querySelector('summary');}).filter(function(x){
      return /(^|[\\s(（])(AI-\\d+|[QFCG]\\d{1,2})(?=[\\s)）]|$)/.test(x.textContent);});
