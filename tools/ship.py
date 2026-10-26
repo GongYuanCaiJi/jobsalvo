@@ -82,7 +82,7 @@ def pick(j, fb):
 
 
 def record_sent(fb, url, j=None, version=None):
-    """標成已投出時記下實際寄出的是哪一份(sent_v = <語言>-<履歷 ID>)。只有這裡寫 sent_v;記過就不改。
+    """標成已投出時記下實際寄出的是哪一份(sent_v = <語言>-<履歷 ID>),連同實際附上的附件 id(sent_att)。只有這裡寫這兩欄;記過就不改。
     version:幫你填表送出前就記下的那一份(送出那幾分鐘他可能換了履歷);沒給就看這張的要寄的檔案(ship.json),
     都沒有才照現在挑的。挑不出來就不記(統計表算「不明」)。"""
     m = fb.get(url)
@@ -97,6 +97,10 @@ def record_sent(fb, url, j=None, version=None):
         version = f'{lang}-{resume_id}' if resume_id and lang else None
     if version:
         m['sent_v'] = version
+        lang, _, resume_id = version.partition('-')
+        # 實際附上的附件跟履歷版本一起凍結(同一個寫入點)
+        m['sent_att'] = [str(a.get('id') or '') for a in attachments_for(fb, url, resume_id)
+                         if (a.get('files') or {}).get(lang)]
     return version
 
 
@@ -168,14 +172,20 @@ def _safe_custom_path(rel):
     return full if full.startswith(home + os.sep) else None
 
 
+def _frozen(fb, url):
+    """已投出而且記了寄出版本:寄出去的檔不再跟著原稿、設定變(客製版不因原稿改過而判過期)。"""
+    m = (fb or {}).get(url) or {}
+    return bool(m.get('app') == 'sent' and m.get('sent_v'))
+
+
 def _stale(entry, source):
     """已收下的客製版是從哪一份原始檔做的(source_sig);原始檔後來換過(或沒了)就對不上,不寄它。"""
     expected = entry.get('source_sig')
     return bool(entry.get('status') == 'accepted' and expected and (not source or source_sig(source) != expected))
 
 
-def _custom_path(entry, source):
-    if entry.get('status') != 'accepted' or not entry.get('path') or _stale(entry, source):
+def _custom_path(entry, source, frozen=False):
+    if entry.get('status') != 'accepted' or not entry.get('path') or (not frozen and _stale(entry, source)):
         return None
     path = _safe_custom_path(entry['path'])
     return path if path and os.path.isfile(path) else None
@@ -187,7 +197,7 @@ def _chosen(fb, url, item_id, kind, source):
     if kind == 'resume':
         candidates.append(_legacy_entry(fb, url))
     for entry in candidates:
-        path = _custom_path(entry, source)
+        path = _custom_path(entry, source, _frozen(fb, url))
         if path:
             return path, entry
     return source, None
@@ -203,8 +213,27 @@ def _document(fb, url, item_id, kind, name, source, source_rel, skill, style):
         'effective_path': markdown_pdf.sent_file(path),
         'custom': used is not None, 'custom_rel': str(used['path']) if used else '',
         'style_path': style,
-        'stale': _stale(entry, source),
+        'stale': False if _frozen(fb, url) else _stale(entry, source),
     }
+
+
+def attachments_for(fb, url, resume_id):
+    """這張卡用這份履歷會附哪幾份附件(登記在設定裡的)。已投出的卡只算寄出那一次記下的(sent_att),
+    之後新登記、停用、改履歷範圍都不動已經寄出去的事實;這張不寄的(drop_att)照職缺要求排除。"""
+    m = (fb.get(url) or {})
+    if _frozen(fb, url) and isinstance(m.get('sent_att'), list):
+        sent = set(m['sent_att'])
+        return [a for a in cf.ATTACHMENTS if str(a.get('id') or '') in sent]
+    dropped = m.get('drop_att') or {}    # 這張不寄的附件(職缺要求,原句記在值裡,#449)
+    out = []
+    for attachment in cf.ATTACHMENTS:
+        if not attachment.get('enabled', True) or str(attachment.get('id') or '') in dropped:
+            continue
+        allowed = attachment.get('resume_ids') or []
+        if allowed and resume_id not in allowed:
+            continue
+        out.append(attachment)
+    return out
 
 
 def documents(j, fb):
@@ -222,13 +251,7 @@ def documents(j, fb):
                              (resume.get('files') or {}).get(lang, ''), str(resume.get('skill') or ''),
                              cf.path((resume.get('styles') or {}).get(lang) or '')))
         out[-1].update(item=resume_id, send_name=send_name(resume, lang))
-    dropped = (fb.get(url) or {}).get('drop_att') or {}    # 這張不寄的附件(職缺要求,原句記在值裡,#449)
-    for attachment in cf.ATTACHMENTS:
-        if not attachment.get('enabled', True) or str(attachment.get('id') or '') in dropped:
-            continue
-        allowed = attachment.get('resume_ids') or []
-        if allowed and resume_id not in allowed:
-            continue
+    for attachment in attachments_for(fb, url, resume_id):
         rel = (attachment.get('files') or {}).get(lang)
         if not rel:
             continue

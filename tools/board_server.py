@@ -404,8 +404,8 @@ def _after_card(cur, before, u, job, ev):
         old_apply=old.get('apply')
         ds.queue_workspace(cur,old_apply.get('workspace') if isinstance(old_apply,dict) else None,'card_removed')
         return
-    if ds.state(m)=='sent' and ds.state(old)!='sent':
-        _record_sent_version(cur,u,[job] if job else [])
+    if ds.state(m)=='sent' and (ds.state(old)!='sent' or ev=='resent'):
+        _record_sent_version(cur,u,[job] if job else [])   # 補寄(resent)先把舊的收進歷史,這裡重記這一包
     stated=not ds.same({k:old.get(k) for k in ds.STATE_FIELDS},{k:m.get(k) for k in ds.STATE_FIELDS})
     if job and not ev and not stated and any(old.get(f)!=m.get(f) for f in ds.SWAP_FIELDS):
         if _doc_sig(job,before)!=_doc_sig(job,cur):

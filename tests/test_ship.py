@@ -1072,6 +1072,48 @@ class ShipFiles(unittest.TestCase):
         ship.record_sent(fb, 'test://jobs/none', {'id': 'test://jobs/none', 'target': 'X · Z'})
         self.assertNotIn('sent_v', fb['test://jobs/none'])
 
+    def test_sent_card_freezes_the_attachments_it_actually_sent(self):
+        # 已投出時連附件清單一起記(sent_att);之後新登記、停用附件都不改寫已經寄出去的事實
+        job = self.job(recommend='general', lang='zh')
+        fb = {self.url: {'app': 'sent'}}
+        ship.record_sent(fb, self.url, job, version='zh-general')
+        self.assertEqual(fb[self.url]['sent_att'], ['letter'])
+        ship.cf.ATTACHMENTS.append({'id': 'late', 'name': '後來才登記', 'files': {'zh': 'resume/letter-zh.pdf'}, 'enabled': True})
+        self.addCleanup(ship.cf.ATTACHMENTS.pop)
+        ship.cf.ATTACHMENTS[0]['enabled'] = False
+        self.addCleanup(ship.cf.ATTACHMENTS[0].__setitem__, 'enabled', True)
+        names = [d['name'] for d in ship.documents(job, fb)]
+        self.assertEqual(names, ['通用版', '求職信'])
+        # 還沒投出的卡照現在的登記算
+        fb[self.url]['app'] = 'ship'
+        self.assertEqual([d['name'] for d in ship.documents(job, fb)], ['通用版', '後來才登記'])
+
+    def test_sent_card_keeps_its_custom_file_after_the_original_changes(self):
+        # 客製版是從哪份原稿做的(source_sig)只管還沒寄的卡;已寄出的,寄出去的就是那一份,原稿改了不退回通用版
+        path = self.custom('general-zh-mine.pdf')
+        mark = {'app': 'sent', 'sent_v': 'zh-general', 'custom_docs': {
+            'resume:general:zh': {'status': 'accepted', 'name': '通用版', 'path': path,
+                                  'source_sig': self.sig('general-zh.pdf')}}}
+        _env.tiny_pdf(os.path.join(self.home, 'resume', 'general-zh.pdf'), 'the-original-was-edited-later')
+        got = self.files_of(self.job(recommend='general', lang='zh'), mark)['files'][0]
+        self.assertEqual((got['custom'], got['stale']), (True, False))
+        mark['app'] = 'ship'
+        got = self.files_of(self.job(recommend='general', lang='zh'), mark)['files'][0]
+        self.assertEqual((got['custom'], got['stale']), (False, True))
+
+    def test_resent_records_the_new_package_and_keeps_the_old_one_in_history(self):
+        # 同一個職缺補寄了另一包:舊的寄出紀錄進投遞歷史,重記這一包
+        import delivery_state as ds
+        job = self.job(recommend='general', lang='zh')
+        fb = {self.url: {'app': 'sent', 'ds': 'sent', 'sent_by': 'manual'}}
+        ship.record_sent(fb, self.url, job, version='zh-general')
+        ds.fire(fb, self.url, 'resent', at='2026-10-22')
+        self.assertNotIn('sent_v', fb[self.url])
+        ship.record_sent(fb, self.url, job, version='en-general')
+        self.assertEqual((fb[self.url]['sent_v'], fb[self.url]['sent_att']), ('en-general', ['letter', 'essay']))
+        self.assertEqual(fb[self.url]['history'][-1],
+                         {'event': 'resent', 'at': '2026-10-22', 'sent_v': 'zh-general', 'sent_att': ['letter']})
+
 
 if __name__ == '__main__':
     unittest.main()
