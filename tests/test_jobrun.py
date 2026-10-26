@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """看板的「⏹ 停止」:會收工的流程第一次按只停底下的 agent、主程式留著收工;收工中再按一次才整串停掉。"""
 import os, sys, subprocess, tempfile, time, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -94,6 +95,22 @@ class PauseKeepsTheBoardWritable(unittest.TestCase):
                     time.sleep(0.05)
             fcntl.flock(f, fcntl.LOCK_UN)
         jobrun.control(path, (MARK,), 'stop')
+
+
+class FinishedWhileChecking(unittest.TestCase):
+    def test_a_run_that_writes_done_and_exits_between_the_read_and_the_pid_check_is_done(self):
+        """讀到還在跑、去查行程之前它剛好寫完 done 並結束:是跑完了,不是半路停掉(看板會講「跑到一半停掉了」)。"""
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='jobrun-test-'))
+        path = os.path.join(d, 'status.json')
+        jobrun.write(path, {'phase': 'judge', 'pid': 1})
+
+        def finished_then_gone(pid, names):
+            jobrun.write(path, {'phase': 'done', 'pid': pid})
+            return False
+        self.enterContext(mock.patch.object(jobrun, 'is_ours', finished_then_gone))
+        st = jobrun.read(path, (MARK,))
+        self.assertEqual(st['phase'], 'done')
+        self.assertFalse(st['running'])
 
 
 if __name__ == '__main__':

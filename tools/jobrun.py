@@ -48,7 +48,14 @@ def read(path, names):
     except (OSError, ValueError):   # 還沒跑過(或寫到一半):當成沒在跑
         return {'phase': '', 'running': False}
     if st.get('phase') not in END and not is_ours(st.get('pid') or 0, names):
-        st['phase'] = 'died'          # 狀態說在跑、行程卻不在了:半路被殺或當掉
+        # 讀檔和查行程之間它可能剛寫完結果就結束:再讀一次,還不是結束狀態才是半路被殺或當掉
+        try:
+            with open(path, encoding='utf-8') as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if st.get('phase') not in END:
+            st['phase'] = 'died'
     st['running'] = st.get('phase') not in END
     st['paused'] = st['running'] and os.path.exists(path + '.paused')
     st['finishing'] = st['running'] and finishing(path)
