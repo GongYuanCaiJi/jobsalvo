@@ -1,5 +1,7 @@
+import errno
 import os
 import plistlib
+import socket
 import sys
 import tempfile
 import threading
@@ -12,6 +14,88 @@ import install_service
 
 
 class BoardServerVersion(unittest.TestCase):
+    def test_auto_hosts_include_both_loopbacks_and_tailscale(self):
+        with mock.patch.object(board_server, 'tailscale_ip', return_value='100.64.0.1'):
+            self.assertEqual(board_server.resolve_hosts('auto'), ['127.0.0.1', '::1', '100.64.0.1'])
+
+    def test_occupied_ipv6_loopback_port_prevents_start(self):
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as blocker:
+            try:
+                blocker.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                blocker.bind(('::1', 0))
+            except OSError as error:
+                if error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT):
+                    self.skipTest('IPv6 loopback is unavailable')
+                raise
+            blocker.listen()
+            port = blocker.getsockname()[1]
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                try:
+                    probe.bind(('127.0.0.1', port))
+                except OSError as error:
+                    if error.errno == errno.EADDRINUSE:
+                        self.skipTest('random test port is already occupied on IPv4')
+                    raise
+
+            with tempfile.TemporaryDirectory(prefix='board-bind-') as root:
+                state = os.path.join(root, 'fake-board.html')
+                old_state = board_server.STATE
+                old_serving = board_server.SERVING[0]
+                try:
+                    with mock.patch.object(sys, 'argv', ['board_server.py', '--state', state,
+                                                         '--host', 'auto', '--port', str(port)]), \
+                            mock.patch.object(board_server, 'is_real', return_value=True), \
+                            mock.patch.object(board_server, 'first_run'), \
+                            mock.patch.object(board_server, 'resolve_hosts',
+                                              return_value=['127.0.0.1', '::1']), \
+                            mock.patch.object(board_server, 'start_pilot') as pilot, \
+                            mock.patch.object(board_server, 'PILOT', None), \
+                            mock.patch.object(board_server, '_drop_own_pidfile'):
+                        with self.assertRaises(OSError) as raised:
+                            board_server.main()
+                    self.assertEqual(raised.exception.errno, errno.EADDRINUSE)
+                    pilot.assert_not_called()
+                finally:
+                    board_server.STATE = old_state
+                    board_server.SERVING[0] = old_serving
+
+    def test_unavailable_ipv6_keeps_ipv4_startup(self):
+        with tempfile.TemporaryDirectory(prefix='board-bind-') as root:
+            state = os.path.join(root, 'fake-board.html')
+            old_state = board_server.STATE
+            old_serving = board_server.SERVING[0]
+            old_version = board_server.RUNNING_VERSION
+            real_socket = socket.socket
+
+            def without_ipv6(family, *args, **kwargs):
+                if family == socket.AF_INET6:
+                    raise OSError(errno.EAFNOSUPPORT, 'IPv6 is unavailable')
+                return real_socket(family, *args, **kwargs)
+
+            try:
+                with mock.patch.object(sys, 'argv', ['board_server.py', '--state', state,
+                                                     '--host', 'auto', '--port', '0']), \
+                        mock.patch.object(board_server, 'is_real', return_value=True), \
+                        mock.patch.object(board_server, 'first_run'), \
+                        mock.patch.object(board_server, 'resolve_hosts',
+                                          return_value=['127.0.0.1', '::1']), \
+                        mock.patch.object(board_server.ThreadingHTTPServer, 'serve_forever'), \
+                        mock.patch.object(board_server, 'migrate_marks'), \
+                        mock.patch.object(board_server.cf, 'upgrade_file'), \
+                        mock.patch.object(board_server, 'start_pilot') as pilot, \
+                        mock.patch.object(board_server, 'code_version', return_value='test-version'), \
+                        mock.patch.object(board_server, '_watch'), \
+                        mock.patch.object(board_server, 'PILOT', None), \
+                        mock.patch.object(board_server, '_drop_own_pidfile'), \
+                        mock.patch('socket.socket', side_effect=without_ipv6):
+                    board_server.main()
+                pilot.assert_called_once()
+            finally:
+                board_server.STATE = old_state
+                board_server.SERVING[0] = old_serving
+                board_server.RUNNING_VERSION = old_version
+
     def test_occupied_port_cannot_start_pilot(self):
         with tempfile.TemporaryDirectory(prefix='board-bind-') as root:
             state = os.path.join(root, 'fake-board.html')

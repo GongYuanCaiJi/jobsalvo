@@ -13,11 +13,13 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
                             這些只有使用者按得到;看板副本上跑假的,見 job_fake.py
 
 用法:python3 tools/board_server.py [--port 8899] [--state <board html>] [--host <ip>]
-預設綁兩個:127.0.0.1(純本機迴環,本機瀏覽器走 http://localhost:<port>)＋ Tailscale IP
-(自己的 tailnet 裝置才連得到,手機走這條)。抓不到 Tailscale IP 就只剩 localhost。
+預設綁本機 IPv4 127.0.0.1 和 IPv6 ::1(本機瀏覽器走 http://localhost:<port>),再加 Tailscale IP
+(自己的 tailnet 裝置才連得到,手機走這條)。抓不到 Tailscale IP 就只剩 localhost;沒有 IPv6 時略過 ::1。
 絕不綁 0.0.0.0:那會連同 Wi-Fi/LAN 的陌生人都能讀到你的履歷和求職資料。
 """
 import sys,os,re,json,argparse,threading,subprocess,shutil,time,signal,html,contextlib,copy,datetime
+import errno
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _HTTPServer
 import socketserver
 
@@ -28,6 +30,10 @@ class ThreadingHTTPServer(_HTTPServer):
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
+
+
+class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
 HERE=os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0,HERE)
 import board_doc as bd
@@ -1556,18 +1562,22 @@ def tailscale_ip():
         return None
 
 def resolve_hosts(arg):
-    """一律綁 127.0.0.1(純本機迴環,不經過網路卡),再加上 Tailscale IP 給手機連。
+    """一律綁 127.0.0.1 與 ::1(純本機迴環,不經過網路卡),再加上 Tailscale IP 給手機連。
     localhost 這條是給本機瀏覽器用的:裸 IP 的 origin 拿不到「永久允許這個站」,
     每個動作都要重按一次權限;localhost 是瀏覽器認得的固定站名,授權一次就記住。
     仍然絕不綁 0.0.0.0:那會把你的求職資料攤給同 Wi-Fi 的陌生人。"""
-    if arg=='auto':
-        ip=tailscale_ip()
-        if ip: return ['127.0.0.1',ip]
-        print('⚠ 抓不到 Tailscale IP,只綁 127.0.0.1(手機連不到)。開 Tailscale 再重起。')
-        return ['127.0.0.1']
     if arg in ('0.0.0.0','::'):
         sys.exit('拒絕綁 '+arg+':會把你的求職資料暴露給同 Wi-Fi/LAN 的陌生人。要對外只綁 Tailscale IP。')
-    return ['127.0.0.1'] if arg=='127.0.0.1' else ['127.0.0.1',arg]
+    hosts=['127.0.0.1','::1']
+    if arg=='auto':
+        ip=tailscale_ip()
+        if ip:
+            hosts.append(ip)
+        else:
+            print('⚠ 抓不到 Tailscale IP,只綁 localhost(手機連不到)。開 Tailscale 再重起。')
+    elif arg not in ('127.0.0.1','::1'):
+        hosts.append(arg)
+    return hosts
 
 def sandbox_home():
     """副本(沙箱、截圖、介面檢查、測試)用的暫存資料夾:設定頁的改動與上傳寫進這裡,不碰真的設定。
@@ -1620,7 +1630,7 @@ def main():
         shell_env.adopt()   # launchd 不讀 shell 設定:agent 的登入位置、PATH 從登入 shell 補上(#384)
     ap=argparse.ArgumentParser()
     ap.add_argument('--port',type=int,default=cf.PORT)
-    ap.add_argument('--host',default='auto',help='auto=127.0.0.1 ＋ Tailscale IP(預設,安全);或指定 IP。禁 0.0.0.0')
+    ap.add_argument('--host',default='auto',help='auto=127.0.0.1 ＋ ::1 ＋ Tailscale IP(預設,安全);或指定 IP。禁 0.0.0.0')
     ap.add_argument('--state',default=cf.LIVE)
     a=ap.parse_args(); STATE=os.path.abspath(a.state); SERVING[0]=True
     first_run(STATE)
@@ -1635,7 +1645,15 @@ def main():
             os.environ['JOBSALVO_HOME']=tmp; cf.reload(tmp)
         hosts=resolve_hosts(a.host)
         for h in hosts:
-            srvs.append(ThreadingHTTPServer((h,a.port),H))
+            try:
+                server=IPv6ThreadingHTTPServer if ':' in h else ThreadingHTTPServer
+                srvs.append(server((h,a.port),H))
+            except OSError as error:
+                if h == '::1' and error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL,
+                                                   errno.EPROTONOSUPPORT):
+                    print('⚠ 這台機器沒有可用的 IPv6 loopback,略過 ::1。')
+                    continue
+                raise
         migrate_marks(STATE)   # 舊資料寫回成現在的樣子:自動流程第一次盤點、頁面第一次載入之前
         if is_real():
             cf.upgrade_file()          # 設定檔裡現在不用的舊設定寫回拿掉
@@ -1644,7 +1662,10 @@ def main():
         launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1'
         threading.Thread(target=_watch,args=(srvs,RUNNING_VERSION,launchd),daemon=True).start()
         for h in hosts:
-            print(f'看板 server 起在 http://{"localhost" if h=="127.0.0.1" else h}:{a.port}  (狀態檔 {STATE})')
+            if h == '::1' and not any(server.server_address[0] == h for server in srvs):
+                continue
+            shown_host='localhost' if h=='127.0.0.1' else f'[{h}]' if ':' in h else h
+            print(f'看板 server 起在 http://{shown_host}:{a.port}  (狀態檔 {STATE})')
         for s in srvs[1:]:
             threading.Thread(target=s.serve_forever,daemon=True).start()
         srvs[0].serve_forever()
