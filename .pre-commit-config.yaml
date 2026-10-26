@@ -9,6 +9,12 @@ repos:
         entry: python3 tools/privacy_scan.py
         language: system
         pass_filenames: false
+      # 已定案的 ADR 只准改檔頭狀態;決策改了要新增一份(#549)
+      - id: adr-frozen
+        name: ADR 不改寫
+        entry: python3 tools/adr_frozen.py
+        language: system
+        pass_filenames: false
   # 模組歸屬:卡片編號、名字清理、找可投遞夾各自只准在一支程式裡做(規則與測試在 .semgrep/,semgrep --test .semgrep/)
   - repo: https://github.com/semgrep/pre-commit
     rev: v1.178.0
