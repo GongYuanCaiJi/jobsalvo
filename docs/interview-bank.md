@@ -20,10 +20,10 @@
 python3 tools/iv.py show                    # 每一場什麼時候面、幾題、出處分佈
 python3 tools/iv.py show 萬蕙昇              # 一場的面試時間和每一題
 python3 tools/iv.py find 薪水                # 先找題庫裡有沒有,有就 link,不要再寫一題一樣的
-python3 tools/iv.py get ML-1 > q.json        # 改一題:先拿現在的 json(含 rev),改完再 put
+python3 tools/iv.py get 薪水 > q.json        # 題目參數寫 id 或題目文字的一段都行,對到唯一一題才動;改一題:先拿現在的 json(含 rev),改完再 put
 python3 tools/iv.py put q.json --card 萬蕙昇 --src guess --why "職缺寫了模型微調"
-python3 tools/iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞"
-python3 tools/iv.py unlink 萬蕙昇 WH3
+python3 tools/iv.py link 萬蕙昇 "怎麼評估一個模型" --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞"
+python3 tools/iv.py unlink 萬蕙昇 "怎麼評估一個模型"
 python3 tools/iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" --note "聯絡人…"
 python3 tools/iv.py round 萬蕙昇 --del 2026-10-23T15:00
 python3 tools/iv.py check                   # 整份不合規則的地方

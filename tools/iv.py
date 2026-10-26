@@ -4,9 +4,11 @@
 iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 interview_bank.apply,不合的直接擋下並說要放哪。
 
   iv.py show                         有在準備的每一場:什麼時候面、幾題、出處分佈
-  iv.py show 萬蕙昇                  一場的面試時間和每一題(題目 id、出處、為什麼)
+  iv.py show 萬蕙昇                  一場的面試時間和每一題(題目、出處、為什麼;行尾 [ ] 是內部 id)
   iv.py find 薪水                    題庫裡找題(先找,有了就 link,不要再寫一題一樣的)
-  iv.py get  ML-1 > q.json          拿一題現在的 json(含 rev);改一題一定先 get,改完再 put
+  iv.py get  薪水 > q.json           拿一題現在的 json(含 rev);改一題一定先 get,改完再 put
+                                     題目參數(get/link/unlink)寫 id 或題目文字的一段都行,對到唯一一題才動;
+                                     對使用者說話一律講題目,不講 id(他在看板上看不到 id)
   iv.py put  題目.json [--card 萬蕙昇 --src guess --why "…"]
                                      新增或改一題(json 帶 id 就是改,要帶 get 拿到的 rev);帶 --card 就順便記進那一場
   iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞" [--why "…"]
@@ -42,6 +44,18 @@ def card(q, data):
         names = '、'.join(f"{j.get('company')} {j.get('title')} ({j.get('id')})" for j in hit[:6]) or '沒有'
         raise SystemExit(f'「{q}」要對到唯一一張卡,現在對到:{names}')
     return hit[0]
+
+
+def qref(q, data, loose=False):
+    """題目:寫 id,或題目文字的一段,對到唯一一題才動。id 只是內部主鍵,agent 和使用者看到的都是題目文字。"""
+    items = ib.normalize(data.get('bank'))['items']
+    hit = [it for it in items if it.get('id') == q] or [it for it in items if q.lower() in str(it.get('t') or '').lower()]
+    if len(hit) == 1:
+        return hit[0]
+    if not hit and loose:
+        return {'id': q, 't': q}
+    names = '、'.join(f"「{it.get('t')}」" for it in hit[:6]) or '沒有'
+    raise SystemExit(f'「{q}」要對到唯一一題,現在對到:{names}(再多寫幾個字,或用 iv.py find 找)')
 
 
 def write(op, form=None, item_id=None, job=None, kind='prep'):
@@ -100,12 +114,12 @@ def show(a, data, fb):
         for q, v in rows:
             it = items.get(q, {})
             st = ib.to_form(it).get('stage') if it else '?'
-            up = f"  ↳ 追問 {it['parent']}" if it.get('parent') else ''
+            up = f"  ↳ 追問「{items.get(it['parent'], {}).get('t', it['parent'])}」" if it.get('parent') else ''
             up += f'  ({kl})' if (kl := ib.kids_line(bank['items'], q)) else ''
-            print(f"    {q:14} {st:5} {it.get('t', '(題庫裡沒有)')}{up}")
+            print(f"    {st:5} {it.get('t', '(題庫裡沒有)')}{up}  [{q}]")
             for k in ('cite', 'quote', 'why'):
                 if v.get(k):
-                    print(f'{"":20}{k}: {v[k]}')
+                    print(f'{"":10}{k}: {v[k]}')
 
 
 def main():
@@ -139,13 +153,10 @@ def main():
             f = ib.to_form(it)
             if w in ' '.join(str(v) for v in f.values()).lower():
                 kl = ib.kids_line(ib.normalize(data.get('bank'))['items'], f['id'])
-                print(f"{f['id']:14} {f['stage']:5} {f['cat']}/{f['sub']}  {f['t']}" + (f'  ({kl})' if kl else ''))
+                print(f"{f['stage']:5} {f['cat']}/{f['sub']}  {f['t']}" + (f'  ({kl})' if kl else '') + f"  [{f['id']}]")
         return
     if a.cmd == 'get':
-        it = next((x for x in ib.normalize(data.get('bank'))['items'] if x.get('id') == a.qid), None)
-        if not it:
-            raise SystemExit(f'題庫裡沒有 {a.qid};用 iv.py find 找')
-        print(json.dumps(ib.to_form(it), ensure_ascii=False, indent=1))
+        print(json.dumps(ib.to_form(qref(a.qid, data)), ensure_ascii=False, indent=1))
         return
     if a.cmd == 'check':
         bad = ib.problems(data.get('bank'))
@@ -160,15 +171,17 @@ def main():
         qid = form.get('id') or next(it['id'] for it in bank['items'] if it['id'] not in before)
         if job:
             write('link', lf, qid, job, 'asked' if a.src == 'me' else 'prep')
-        print(f'寫好了:{qid}' + (f'(記進 {job})' if job else ''))
+        print(f"寫好了:「{form.get('t') or qref(qid, {'bank': bank})['t']}」[{qid}]" + (f'(記進 {job})' if job else ''))
         return
     job = card(a.card, data)['id']
     if a.cmd == 'link':
-        write('link', link_form(a), a.qid, job, 'asked' if a.src == 'me' else 'prep')
-        print(f'記好了:{a.qid} → {job}({ib.SRCS[a.src]})')
+        it = qref(a.qid, data)
+        write('link', link_form(a), it['id'], job, 'asked' if a.src == 'me' else 'prep')
+        print(f"記好了:「{it['t']}」→ {job}({ib.SRCS[a.src]})")
     elif a.cmd == 'unlink':
-        write('link', None, a.qid, job, None)
-        print(f'拿掉了:{a.qid} ← {job}')
+        it = qref(a.qid, data, loose=True)
+        write('link', None, it['id'], job, None)
+        print(f"拿掉了:「{it['t']}」← {job}")
     elif a.cmd == 'round':
         if a.__dict__['del']:
             write('round', {'old_at': a.__dict__['del']}, None, job, None)
