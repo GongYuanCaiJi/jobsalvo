@@ -12,7 +12,7 @@ evidence —— 每張卡每一輪的證據,集中放在那張卡自己的資料
   沒有卡的那幾輪(找缺的搜尋、分類建議)放證據夾/_<流程>/,格式一樣。
 
 kind:instruction 指示、agent_log 動作紀錄、handoff 交件單、check 程式的比對結果、page 讀頁、shot 截圖、
-note 其他(例如「這一輪沒有交件單」)。查錯第一步打開這裡(AGENTS.md「查錯先看證據」)。
+note 其他(例如「這一輪沒有交件單」)。查錯第一步打開這裡。
 
 證據夾在資料夾裡(現行看板)或暫存夾裡(副本),不進資料夾的版本紀錄(folder_history.GENERATED)。
 記不下來不能拖垮那一輪本身的工作:照實印到 stderr(跟 agent_run._record 一樣)。
