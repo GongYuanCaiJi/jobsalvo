@@ -13,6 +13,9 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
                                      新增或改一題(json 帶 id 就是改,要帶 get 拿到的 rev);帶 --card 就順便記進那一場
   iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞" [--why "…"]
   iv.py unlink 萬蕙昇 WH3
+  iv.py share 自我介紹               設成共有:每一場面試自動帶上,改一次全部更新(追問跟著原題);iv.py unshare 取消
+  iv.py variant 萬蕙昇 自我介紹 --script-file 稿.txt [--focus-file 考點.txt]
+                                     只改這場的逐字稿(和考點),共有版不動,不要複製題目;--clear 還原成共有版
   iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" [--note "…"] [--old-at 舊時間]
   iv.py round 萬蕙昇 --del 2026-10-23T15:00
   iv.py check                        整份題庫不合規則的地方
@@ -96,19 +99,23 @@ def show(a, data, fb):
         for jid in dict.fromkeys(ids):
             j = card(jid, data)
             qs = bank['links'].get(jid, {})
-            srcs = {s: sum(1 for v in qs.values() if v['src'] == s) for s in ib.SRCS}
+            srcs = {s: sum(1 for q, v in qs.items() if v['src'] == s and q not in ib.shared_ids(bank)) for s in ib.SRCS}
+            nsh = len(ib.shared_ids(bank))
             rs = bank['rounds'].get(jid, [])
             print(f"{j.get('company')} {j.get('title')}  [{(fb.get(jid) or {}).get('oc') or '—'}]  {jid}")
             print('   面試:' + ('; '.join(when(r) for r in rs) if rs else '還沒記時間'))
-            print(f'   {len(qs)} 題 · ' + ' · '.join(f'{ib.SRCS[s]} {n}' for s, n in srcs.items() if n))
+            print(f'   {len(ib.job_qids(bank, jid))} 題 · ' + ' · '.join(
+                [f'共有 {nsh}'] * bool(nsh) + [f'{ib.SRCS[s]} {n}' for s, n in srcs.items() if n]))
         return
     j = card(a.card, data)
     print(f"{j.get('company')} {j.get('title')}  {j['id']}")
     for r in bank['rounds'].get(j['id'], []):
         print('  面試 ' + when(r) + (' · ' + r['note'] if r.get('note') else ''))
     qs = bank['links'].get(j['id'], {})
-    for s, name in ib.SRCS.items():
-        rows = [(q, v) for q, v in qs.items() if v['src'] == s]
+    sh = ib.shared_ids(bank)
+    groups = [('共有', [(q, qs.get(q, {})) for q in sh])] + [
+        (name, [(q, v) for q, v in qs.items() if v['src'] == s and q not in sh]) for s, name in ib.SRCS.items()]
+    for name, rows in groups:
         if rows:
             print(f'  【{name}】')
         for q, v in rows:
@@ -116,7 +123,7 @@ def show(a, data, fb):
             st = ib.to_form(it).get('stage') if it else '?'
             up = f"  ↳ 追問「{items.get(it['parent'], {}).get('t', it['parent'])}」" if it.get('parent') else ''
             up += f'  ({kl})' if (kl := ib.kids_line(bank['items'], q)) else ''
-            print(f"    {st:5} {it.get('t', '(題庫裡沒有)')}{up}  [{q}]")
+            print(f"    {st:5} {it.get('t', '(題庫裡沒有)')}{up}{'  〔這場版〕' if v.get('ov') else ''}  [{q}]")
             for k in ('cite', 'quote', 'why'):
                 if v.get(k):
                     print(f'{"":10}{k}: {v[k]}')
@@ -139,6 +146,10 @@ def main():
         p.add_argument('--src', default='guess' if name == 'put' else None, required=name == 'link')
         p.add_argument('--cite'); p.add_argument('--quote'); p.add_argument('--why')
     p = sub.add_parser('unlink'); p.add_argument('card'); p.add_argument('qid')
+    for name in ('share', 'unshare'):
+        p = sub.add_parser(name); p.add_argument('qid')
+    p = sub.add_parser('variant'); p.add_argument('card'); p.add_argument('qid')
+    p.add_argument('--script-file'); p.add_argument('--focus-file'); p.add_argument('--clear', action='store_true')
     p = sub.add_parser('round'); p.add_argument('card')
     for k in ('--at', '--how', '--where', '--note', '--old-at', '--del'):
         p.add_argument(k)
@@ -173,7 +184,26 @@ def main():
             write('link', lf, qid, job, 'asked' if a.src == 'me' else 'prep')
         print(f"寫好了:「{form.get('t') or qref(qid, {'bank': bank})['t']}」[{qid}]" + (f'(記進 {job})' if job else ''))
         return
+    if a.cmd in ('share', 'unshare'):
+        it = qref(a.qid, data)
+        write('share', None, it['id'], None, a.cmd == 'share')
+        print(f"{'設成共有' if a.cmd == 'share' else '取消共有'}:「{it['t']}」")
+        return
     job = card(a.card, data)['id']
+    if a.cmd == 'variant':
+        it = qref(a.qid, data)
+        if a.clear:
+            write('variant', None, it['id'], job, None)
+            print(f"還原成共有版:「{it['t']}」← {job}")
+        else:
+            if not a.script_file:
+                raise SystemExit('要 --script-file 這場的逐字稿(或 --clear 還原成共有版)')
+            read = lambda p: open(p, encoding='utf-8').read() if p else ''
+            old = ib.effective(ib.normalize(data.get('bank')), job, it['id'])
+            write('variant', {'script': read(a.script_file), 'focus': read(a.focus_file) if a.focus_file else ib._plain(old.get('focus'))},
+                  it['id'], job)
+            print(f"這場版寫好了:「{it['t']}」→ {job}")
+        return
     if a.cmd == 'link':
         it = qref(a.qid, data)
         write('link', link_form(a), it['id'], job, 'asked' if a.src == 'me' else 'prep')

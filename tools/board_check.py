@@ -232,7 +232,7 @@ CHECKS=[
        if(!document.getElementById('ive-src'))bad.push('在這場加追問,框裡沒有出處');
        var x1=document.querySelector('#rzmodal .rzm-x'); if(x1){x1.click(); await T.idle();}}
      // 記一輪面試時間:存了出現在那一塊、刪了回原本
-     var nr0=document.querySelectorAll('#app .iv-round').length, add=document.querySelector('#app .iv-round-add');
+     var nr0=document.querySelectorAll('#app .iv-round').length, add=document.querySelector('#app .iv-round-acts [data-ivround][data-ivat=""]');
      if(!add)bad.push('沒有「記一輪面試時間」');
      else{add.click(); await T.idle();
        document.getElementById('ivr-date').value='2031-01-02'; document.getElementById('ivr-time').value='09:30';
@@ -337,6 +337,50 @@ CHECKS=[
      return /(^|[\\s(（])(AI-\\d+|[QFCG]\\d{1,2})(?=[\\s)）]|$)/.test(x.textContent);});
    if(ids.length)bad.push('題目列上還看得到內部題號('+ids.length+' 題)');
    document.querySelectorAll('[data-tab]')[0].click();
+   return bad.join('；');
+ """),
+ ('面試:題目設成共有就每一場都有、不複製;只改這一場不動共有版,還原回得去;共有那一頁和備忘預覽打得開',"""
+   var t=document.querySelector('[data-tab="iv"]'); if(!t)return '沒有 🎤 面試準備那一籤';
+   t.click(); await T.idle();
+   var bad=[], tabIv=document.querySelector('#app [data-ivview="iv"]'); if(tabIv){tabIv.click(); await T.idle();}
+   var jr=document.querySelector('#app .iv-jrow'); if(!jr)return '沒有任何一場面試可以點';
+   jr.click(); await T.idle();
+   var job=(document.querySelector('#app [data-ivsheet]')||{getAttribute:function(){return '';}}).getAttribute('data-ivsheet');
+   T.press('#app [data-ivsheet]'); await T.until(function(){return document.querySelector('#rzmodal .rzm-box');},5000);
+   if(!document.querySelector('#rzmodal iframe, #rzmodal a[download]'))bad.push('面試備忘預覽沒有 PDF');
+   var sx=document.querySelector('#rzmodal .rzm-x'); if(sx){sx.click(); await T.idle();}
+   var sb=document.querySelector('#app [data-ivshare][data-ivshareto="1"]'); if(!sb)return bad.concat('這場沒有可以設成共有的題').join('；');
+   var q=sb.getAttribute('data-ivshare'), rows=function(){return document.querySelectorAll('#app details.ivrow[data-iv="'+q+'"]').length;};
+   var n0=rows(); T.press('#app [data-ivshare="'+q+'"][data-ivshareto="1"]');
+   await T.until(function(){return document.querySelector('#app .iv-sharedgrp details.ivrow[data-iv="'+q+'"]');},5000);
+   if(!document.querySelector('#app .iv-sharedgrp details.ivrow[data-iv="'+q+'"]'))bad.push('設成共有,那一題沒到共有區');
+   if(rows()!==n0)bad.push('設成共有之後同一題在這場出現 '+rows()+' 次(應該 '+n0+',不複製)');
+   // 只改這一場:存了之後這場是新字,共有版的字沒變;還原回得去
+   var orig=(await fetch('/api/bank/form?id='+encodeURIComponent(q)).then(function(r){return r.json();})).form.script;
+   T.press('#app [data-ivvar="'+q+'"]'); await T.until(function(){return document.querySelector('#rzmodal [data-ivvbox]')&&document.getElementById('ivv-script');},5000);
+   document.getElementById('ivv-script').value=orig+' 板子檢查:只改這一場';
+   T.press('#rzmodal [data-ivvsave]');
+   await T.until(function(){return document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov');},5000);
+   if(!document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov'))bad.push('存了這場版,那一題沒標「這場版」');
+   var base=(await fetch('/api/bank/form?id='+encodeURIComponent(q)).then(function(r){return r.json();})).form.script;
+   var mine=(await fetch('/api/bank/form?id='+encodeURIComponent(q)+'&job='+encodeURIComponent(job)).then(function(r){return r.json();})).form.script;
+   if(base!==orig)bad.push('只改這一場,共有版的字也被改了');
+   if(mine.indexOf('板子檢查:只改這一場')<0)bad.push('這場看到的不是這場版');
+   T.press('#app [data-ivvarclr="'+q+'"]');
+   await T.until(function(){return !document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov');},5000);
+   if(document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov'))bad.push('還原成共有版之後還標著這場版');
+   var ub=document.querySelector('#snack.on .snack-undo'); if(!ub)bad.push('還原成共有版沒有復原');
+   else{ub.click(); await T.until(function(){return document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov');},5000);
+     if(!document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov'))bad.push('復原之後這場版沒回來');
+     T.press('#app [data-ivvarclr="'+q+'"]'); await T.until(function(){return !document.querySelector('#app details.ivrow[data-iv="'+q+'"] .iv-for.ov');},5000);}
+   // 共有那一頁:挑選框開得起來;取消共有回到原本
+   T.press('#app [data-ivshpick]'); await T.until(function(){return document.querySelector('#rzmodal [data-ivshbox]');},5000);
+   if(!document.querySelector('#rzmodal [data-ivshbox]'))bad.push('「加入共有」沒開出挑選框');
+   var px=document.querySelector('#rzmodal .rzm-x'); if(px){px.click(); await T.idle();}
+   T.press('#app [data-ivshare="'+q+'"][data-ivshareto="0"]');
+   await T.until(function(){return !document.querySelector('#app .iv-sharedgrp details.ivrow[data-iv="'+q+'"]');},5000);
+   if(document.querySelector('#app .iv-sharedgrp details.ivrow[data-iv="'+q+'"]'))bad.push('取消共有,那一題還在共有區');
+   if(rows()!==n0)bad.push('取消共有之後這場的題數變了');
    return bad.join('；');
  """),
  # 「留在原地」只對心情標記成立。他按了加入準備,卡片就該離開待評估——

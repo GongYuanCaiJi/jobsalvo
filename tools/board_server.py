@@ -1170,7 +1170,9 @@ class H(BaseHTTPRequestHandler):
         elif self.path.startswith('/api/bank/form?'):
             import interview_bank as ib
             bank=bd.parse(read_doc())['data'].get('bank') or {}
-            it=next((x for x in bank.get('items') or [] if x.get('id')==self._q('id')),None)
+            # job 有帶就給那一場看到的版本(有這場版就是這場版),表單才改得到這場的字
+            it=ib.effective(ib.normalize(bank),self._q('job'),self._q('id')) if self._q('job') else next(
+                (x for x in bank.get('items') or [] if x.get('id')==self._q('id')),None)
             self._json(200 if it else 404,{'ok':bool(it),'form':ib.to_form(it) if it else None,
                                           'cats':bank.get('cats') or ib.DEFAULT_CATS})
         elif self.path.startswith('/api/text?'):
@@ -1188,6 +1190,15 @@ class H(BaseHTTPRequestHandler):
                 import mimetypes
                 with open(f,'rb') as fh: self._send(200,fh.read(),mimetypes.guess_type(f)[0] or 'application/octet-stream')
             else: self._send(404,'not found','text/plain; charset=utf-8')
+        elif self.path.startswith('/api/iv/sheet?'):
+            import iv_sheet, markdown_pdf
+            try:
+                pdf=iv_sheet.render(bd.parse(read_doc())['data'],self._q('job'),cf.HOME)
+            except StopIteration:
+                return self._send(404,'沒有這一場','text/plain; charset=utf-8')
+            except markdown_pdf.RenderError as e:
+                return self._send(500,'面試備忘排不出來:%s'%e,'text/plain; charset=utf-8')
+            with open(pdf,'rb') as fh: self._send(200,fh.read(),'application/pdf')
         elif self.path.startswith('/api/preview/'):
             import pdf_preview
             from urllib.parse import urlparse
@@ -1310,7 +1321,7 @@ class H(BaseHTTPRequestHandler):
         body=self._json_body()
         if body is None: return
         op=body.get('op')
-        if op not in ('put','del','link','stage','round'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
+        if op not in ('put','del','link','stage','round','share','variant'): return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
         out={}
         def mut(data,fb):
             data['bank']=ib.apply(data.get('bank'),op,body.get('item'),body.get('id'),body.get('job'),body.get('kind'))

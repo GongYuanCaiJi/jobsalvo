@@ -80,6 +80,13 @@ class _SafeRawImage(InlineProcessor):
         return image, match.start(0), match.end(0)
 
 
+class _LineBreak(InlineProcessor):
+    """Permit a bare <br> (the only way to break a line inside a table cell)."""
+
+    def handleMatch(self, match, data):
+        return ElementTree.Element('br'), match.start(0), match.end(0)
+
+
 class _InertComment(InlineProcessor):
     def handleMatch(self, match, data):
         return '', match.start(0), match.end(0)
@@ -169,6 +176,7 @@ def convert(source_path, style_path, output_path, lang=''):
         parser.inlinePatterns.deregister('html')
         parser.inlinePatterns.register(_InertComment(r'<!--.*?-->', parser),
                                        'inert_comment', 171)
+        parser.inlinePatterns.register(_LineBreak(r'(?i)<br\s*/?>', parser), 'line_break', 169)
         parser.inlinePatterns.register(_SafeRawImage(r'(?i)<img\b[^>]*>', parser),
                                        'safe_raw_image', 170)
         body = parser.convert(raw)

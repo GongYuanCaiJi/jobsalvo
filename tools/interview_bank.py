@@ -5,7 +5,9 @@ interview_bank —— 「🎤 面試準備」的資料:題目、哪一場用哪�
 
 存在看板資料的 bank(格式見 docs/interview-bank.md),分三層,各放各的東西:
   items   題目。只放題目本身:題面(對方怎麼問)、考點、準備材料、答案、走到哪一站。不寫哪一家、不寫出處。
-  links   {卡片 id: {題目 id: {k, src, cite, quote, why}}}。這場要準備還是被問過、這題從哪來(出處網址、原文怎麼寫)、為什麼這場要準備。
+  links   {卡片 id: {題目 id: {k, src, cite, quote, why, ov?}}}。這場要準備還是被問過、這題從哪來(出處網址、原文怎麼寫)、為什麼這場要準備。
+          ov = 這場版:這一場想講得不一樣時,只換這場的逐字稿和考點({b, focus}),題目本身不複製。
+  共有    題目上 shared=True:每一場面試都自動帶上(不用一場一場勾),追問跟著原題。改一次全部更新;某一場要不同就用這場版。
   rounds  {卡片 id: [{at, how, where, note}]}。這場面試排在什麼時候、怎麼面、在哪。
 看板網頁和 tools/iv.py 都只走這裡的 apply(),規則只寫在這一處:不合規則的寫入直接擋下並說要放哪。
 網頁送來的都是純文字,這裡轉成看板要的結構:
@@ -84,7 +86,8 @@ def to_form(it):
     return {'id': it.get('id', ''), 't': it.get('t', ''), 'cat': it.get('cat', ''), 'sub': it.get('sub', ''),
             'ask': _plain(it.get('ask')), 'focus': _plain(it.get('focus')), 'ref': _plain(it.get('ref')),
             'lim': it.get('lim') or 0, 'parent': it.get('parent') or '',
-            'stage': stage, 'script': blocks_to_script(it.get('b')), 'rev': it.get('rev') or 0}
+            'stage': stage, 'script': blocks_to_script(it.get('b')), 'rev': it.get('rev') or 0,
+            'shared': bool(it.get('shared'))}
 
 
 def from_form(f, old=None):
@@ -109,10 +112,14 @@ def from_form(f, old=None):
         'b': script_to_blocks(f.get('script')),
         'rev': ((old or {}).get('rev') or 0) + 1,
     })
+    if 'shared' in f:
+        it['shared'] = bool(f.get('shared'))
     if 'parent' in f:
         it['parent'] = str(f.get('parent') or '').strip()
     if not it.get('parent'):
         it.pop('parent', None)
+    if not it.get('shared') or it.get('parent'):
+        it.pop('shared', None)                      # 追問跟著原題共有,自己不標
     it.pop('covers', None)
     it.setdefault('picks', [])
     if stage in ('wip', 'ok') and not any(b[0] == 's' for b in it['b']):
@@ -127,8 +134,12 @@ def norm_link(v):
         v.setdefault('why', v.pop('note'))
     k = v.get('k') if v.get('k') in KINDS else 'prep'
     src = v.get('src') if v.get('src') in SRCS else ('me' if k == 'asked' else 'guess')
-    return {'k': k, 'src': src, 'cite': str(v.get('cite') or '').strip(), 'quote': str(v.get('quote') or '').strip(),
-            'why': str(v.get('why') or '').strip()}
+    out = {'k': k, 'src': src, 'cite': str(v.get('cite') or '').strip(), 'quote': str(v.get('quote') or '').strip(),
+           'why': str(v.get('why') or '').strip()}
+    ov = v.get('ov')
+    if isinstance(ov, dict) and (ov.get('b') or ov.get('focus')):
+        out['ov'] = {'b': list(ov.get('b') or []), 'focus': ov.get('focus') or ''}
+    return out
 
 
 def check_link(v):
@@ -173,12 +184,37 @@ def normalize(bank):
     return bank
 
 
+def shared_ids(bank):
+    """共有的題:標了共有的原題,加上掛在它們底下的追問(追問跟著原題,不單獨共有)。"""
+    items = bank.get('items') or []
+    top = {it['id'] for it in items if it.get('shared') and not it.get('parent')}
+    return [it['id'] for it in items if it['id'] in top or it.get('parent') in top]
+
+
+def job_qids(bank, job):
+    """這一場要用的題:這場自己勾的,加上共有的。"""
+    have = {it['id'] for it in bank.get('items') or []}
+    own = [q for q in (bank.get('links') or {}).get(job, {}) if q in have]
+    return own + [q for q in shared_ids(bank) if q not in own]
+
+
+def effective(bank, job, qid):
+    """這一場看到的那一題:題目本身,有這場版的話逐字稿和考點換成這場的。"""
+    it = next((x for x in bank.get('items') or [] if x.get('id') == qid), None)
+    ov = ((bank.get('links') or {}).get(job) or {}).get(qid, {}).get('ov') if it else None
+    if not ov:
+        return it
+    return dict(it, b=ov.get('b') or it.get('b'), focus=ov.get('focus') or it.get('focus'), ov=True)
+
+
 def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
     """改 bank,回新的 bank;不合規則就 ValueError。
     op='put'    新增或改一題(form = 編輯框欄位)
     op='del'    刪一題(也從每一場拿掉,也拿掉別題對它的「追問」)
     op='stage'  只改走到哪一站(kind = todo/first/wip/ok)
     op='link'   把一題記進某一場(job = 卡片 id):kind='prep'/'asked',form = {src, cite, why};kind=None 從那一場拿掉
+    op='share'  設成共有或取消(kind = True/False);追問不能單獨共有,跟著原題
+    op='variant' 這場版:job = 卡片 id,form = {script, focus};kind=None 還原成共有版
     op='round'  某一場的一輪面試:form = {at, how, where, note, old_at?};kind=None 刪掉 old_at(或 at)那一輪"""
     bank = normalize(bank)
     items, links, rounds = bank['items'], bank['links'], bank['rounds']
@@ -216,9 +252,39 @@ def apply(bank, op, form=None, item_id=None, job=None, kind='prep'):
                  'cite': str(f['cite'] if 'cite' in f else old.get('cite') or '').strip(),
                  'quote': str(f['quote'] if 'quote' in f else old.get('quote') or '').strip(),
                  'why': str(f['why'] if 'why' in f else old.get('why') or '').strip()}
+            if old.get('ov'):
+                v['ov'] = old['ov']                 # 改出處不能把這場版弄丟
             links.setdefault(job, {})[item_id] = check_link(v)
         else:
             raise ValueError('只能是要準備、被問過或拿掉')
+    elif op == 'share':
+        for i, it in enumerate(items):
+            if it.get('id') == item_id:
+                if it.get('parent'):
+                    raise ValueError('追問跟著原題,不能單獨設成共有:把它的原題設成共有')
+                items[i] = dict(it, shared=True) if kind else {k: v for k, v in it.items() if k != 'shared'}
+                break
+        else:
+            raise ValueError('找不到這一題')
+    elif op == 'variant':
+        if not job:
+            raise ValueError('沒說是哪一場面試')
+        if not any(it.get('id') == item_id for it in items):
+            raise ValueError('找不到這一題')
+        old = links.get(job, {}).get(item_id)
+        if kind is None:
+            if old:
+                old = {k: v for k, v in old.items() if k != 'ov'}
+                if old.get('src') == 'guess' and not (old.get('why') or old.get('cite')):
+                    links[job].pop(item_id)         # 只是為了放這場版才有的關聯,版本拿掉就一起消失
+                else:
+                    links[job][item_id] = old
+        else:
+            f = dict(form or {})
+            if not str(f.get('script') or '').strip():
+                raise ValueError('這場版要有逐字稿;想用共有版就按還原')
+            ov = {'b': script_to_blocks(f.get('script')), 'focus': _para_html(f.get('focus'))}
+            links.setdefault(job, {})[item_id] = norm_link(dict(old or {}, ov=ov))
     elif op == 'round':
         if not job:
             raise ValueError('沒說是哪一場面試')
@@ -413,6 +479,26 @@ def selftest():
     assert get(b, q)['script'] == 'B 重新打開再改'
     assert problems({'items': [{'id': 'h', 't': 'h', 'b': [['h', '<h6>優點</h6>']]}]}), '小標的 HTML 沒抓到'
     assert not problems(b), problems(b)
+    # 共有:設了每一場都有,追問跟著原題;這場版只換這場,還原就回來
+    b = apply(b, 'link', None, q, 'K')
+    b = apply(b, 'share', None, q, None, True)
+    assert job_qids(b, 'Z') == [q, kid] and shared_ids(b) == [q, kid]
+    try:
+        apply(b, 'share', None, kid, None, True); raise SystemExit('追問單獨共有沒擋')
+    except ValueError:
+        pass
+    b = apply(b, 'variant', {'script': '這場講法', 'focus': '這場考點'}, q, 'Z')
+    assert blocks_to_script(effective(b, 'Z', q)['b']) == '這場講法' and effective(b, 'Z', q)['ov']
+    assert blocks_to_script(effective(b, 'J', q)['b']) == 'B 重新打開再改' and 'ov' not in effective(b, 'J', q)
+    b = apply(b, 'link', {'why': '改出處'}, q, 'Z')
+    assert b['links']['Z'][q]['ov'], '改出處把這場版弄丟了'
+    b = apply(b, 'variant', None, q, 'Z', None)
+    assert 'ov' not in effective(b, 'Z', q) and b['links']['Z'][q]['why'] == '改出處'   # 有出處的關聯留著
+    b = apply(b, 'variant', {'script': '只有這場版'}, q, 'Y')
+    b = apply(b, 'variant', None, q, 'Y', None)
+    assert 'Y' not in b['links']                                                          # 只為放這場版才有的關聯一起消失
+    b = apply(b, 'share', None, q, None, False)
+    assert shared_ids(b) == [] and not problems(b), problems(b)
 
 
 if __name__ == '__main__':

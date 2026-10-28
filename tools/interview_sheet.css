@@ -1,0 +1,43 @@
+/* 面試備忘:印出來或在平板上掃一眼用。字大、題目一眼找到、一句話放在醒目的框裡。 */
+@page { size: A4; margin: 7mm 8mm 8mm 8mm; }
+body {
+  font-family: "PingFang TC", "Heiti TC", "Noto Sans CJK TC", "Microsoft JhengHei", sans-serif;
+  font-size: 12pt; line-height: 1.7; color: #1a1a1a; margin: 0;
+}
+h1 { font-size: 19pt; margin: 0 0 2px; line-height: 1.35; }
+h1 + p { margin: 0 0 6px; font-size: 12.5pt; color: #444; }
+h2 {
+  font-size: 16pt; margin: 22px 0 8px; padding: 0 0 3px; color: #1f3a5f; border-bottom: 3px solid #1f3a5f;
+  break-after: avoid; page-break-after: avoid;
+}
+h3 {
+  font-size: 14pt; margin: 18px 0 4px; color: #1f3a5f; letter-spacing: 1px;
+  break-after: avoid; page-break-after: avoid;
+}
+h4 {
+  font-size: 15pt; margin: 20px 0 6px; padding-left: 9px; border-left: 6px solid #1f3a5f;
+  line-height: 1.4; break-after: avoid; page-break-after: avoid;
+}
+h5 {
+  font-size: 13.5pt; margin: 16px 0 5px 14px; padding-left: 8px; border-left: 4px solid #7a8da6;
+  line-height: 1.4; break-after: avoid; page-break-after: avoid;
+}
+p { margin: 6px 0; orphans: 3; widows: 3; }
+/* 一句話:最先看這個 */
+blockquote {
+  margin: 8px 0 10px; padding: 8px 12px; background: #fff4cc; border-left: 6px solid #e0a800;
+  font-size: 14pt; font-weight: 600; line-height: 1.55; break-inside: avoid; page-break-inside: avoid;
+}
+blockquote p { margin: 3px 0; }
+strong { font-weight: 700; }
+ul, ol { margin: 6px 0; padding-left: 22px; }
+li { margin: 3px 0; break-inside: avoid; }
+table { border-collapse: collapse; width: 100%; margin: 6px 0 4px; font-size: 9.9pt; line-height: 1.32; }
+th, td { border: 1px solid #b8c2d0; padding: 2.5px 8px; text-align: left; vertical-align: top; }
+th { background: #e4eaf2; white-space: nowrap; }
+td:first-child { width: 24%; font-weight: 600; }
+td:nth-child(2) { width: 35%; font-weight: 600; }
+td:nth-child(3) { color: #345; }
+tr { break-inside: avoid; page-break-inside: avoid; }
+li { font-size: 13pt; margin: 6px 0; }
+a { color: #1155aa; text-decoration: none; }
