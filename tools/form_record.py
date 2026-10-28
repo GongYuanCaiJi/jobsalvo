@@ -54,7 +54,8 @@ def _today():
 
 
 def _bank(fb):
-    return fb.setdefault('__ans__', [])
+    """常用答案(唯讀:看板伺服器的 fb 是好幾條請求共用的,讀的時候不能順手塞一個空清單進去)。"""
+    return fb.get('__ans__') or []
 
 
 def answer_fingerprint(entry):
@@ -233,7 +234,7 @@ def _answer(fb, url, x, prev_k, today):
     if x.get('pjw'):
         e['pjw'] = x['pjw']
     _mark(e, x, today)
-    _bank(fb).append(e)
+    fb.setdefault('__ans__', []).append(e)
     _absorb(e, x)
     return e
 

@@ -47,7 +47,8 @@ def profile_key(url):
     return (urlsplit(url or '').hostname or '').casefold()
 
 
-def registry():
+def _load_registry():
+    """從檔案讀一份新的;要改登記表的(_registry_writer 裡)用這個,改的是自己那一份。"""
     try:
         with open(REG, encoding='utf-8') as f:
             reg = json.load(f)
@@ -57,6 +58,32 @@ def registry():
         raise ValueError(f'平台履歷登記表讀不出來({os.path.basename(REG)}:{e})') from e
     if not isinstance(reg, dict):
         raise ValueError('平台履歷登記資料不是物件')
+    return reg
+
+
+_REG_CACHE = (None, None)
+
+
+def stamp():
+    """登記表現在是哪一份:換檔(inode)、內容被改(修改時間、狀態變更時間、大小)都會變;沒有這個檔回 None。"""
+    try:
+        st = os.stat(REG)
+    except FileNotFoundError:
+        return None
+    return (REG, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
+def registry():
+    """只讀用:檔案沒換過就用上次解析好的那一份,回傳的不能改(#607)。
+    登記表有幾十 MB,看板每算一次卡片下一步就要讀好幾次。"""
+    global _REG_CACHE
+    key = stamp()
+    if key is None:
+        return {}
+    cached_key, reg = _REG_CACHE
+    if cached_key != key:
+        reg = _load_registry()
+        _REG_CACHE = (key, reg)
     return reg
 
 
@@ -121,7 +148,7 @@ def identity(profile_url):
 @_registry_writer
 def remember(platform, lang, variant, read_url, edit_url=None):
     """agent 第一次告訴我們那一份在哪:記下來,下次程式自己讀。"""
-    reg = registry()
+    reg = _load_registry()
     entry = dict((reg.get(platform) or {}).get(f'{lang}/{variant}') or {})
     entry.update(read=read_url, edit=edit_url or read_url)
     reg.setdefault(platform, {})[f'{lang}/{variant}'] = entry
@@ -155,7 +182,7 @@ def _attachments_fp(lang, variant):
 @_registry_writer
 def remember_sync(platform, lang, variant, source, answers, master_fp=None, visuals=(), used_answers=None, attachments=None):
     """存檔成功後才更新這一份的原始履歷、常用答案、母稿與附件指紋和待看的截圖。這一份「是不是最新」只看這一筆(sync_baseline)。"""
-    reg = registry()
+    reg = _load_registry()
     entry = (reg.get(platform) or {}).get(f'{lang}/{variant}')
     if not isinstance(entry, dict):
         raise ValueError('平台履歷未登記')
@@ -173,7 +200,7 @@ def remember_sync(platform, lang, variant, source, answers, master_fp=None, visu
 @_registry_writer
 def remember_sync_visuals(platform, lang, variant, visuals):
     """只追加本輪逐處紀錄；驗收或失敗也要讓下一張卡看得到，不前進同步基準。"""
-    reg = registry()
+    reg = _load_registry()
     entry = (reg.get(platform) or {}).get(f'{lang}/{variant}')
     if not isinstance(entry, dict):
         raise ValueError('平台履歷未登記')
@@ -191,7 +218,7 @@ def attach_sync_visuals(platform, lang, variant, card_url, board):
     """每一輪截圖只交給其後第一張用這份履歷的卡。"""
     import shutil
     import evidence
-    reg = registry()
+    reg = _load_registry()
     entry = (reg.get(platform) or {}).get(f'{lang}/{variant}') or {}
     rows = entry.get('sync_visuals') or []
     old_card = entry.pop('sync_visuals_card', None)
@@ -226,7 +253,7 @@ def attach_sync_visuals(platform, lang, variant, card_url, board):
 @_registry_writer
 def clear_sync_visuals(platform, lang, variant, card_url, board=None):
     """送出後只移除待看索引；逐處文字與截圖仍留在證據夾供報告重建。"""
-    reg = registry()
+    reg = _load_registry()
     entry = (reg.get(platform) or {}).get(f'{lang}/{variant}')
     if isinstance(entry, dict):
         old_card = entry.pop('sync_visuals_card', None)
@@ -321,7 +348,7 @@ def status(board=None):
 @_registry_writer
 def remember_name(platform, lang, variant, name):
     """平台上那一份叫什麼(申請頁選平台履歷時顯示的字):程式在那一份的頁面上看到過才記。"""
-    reg = registry()
+    reg = _load_registry()
     slot = (reg.get(platform) or {}).get(f'{lang}/{variant}')
     if isinstance(slot, dict) and slot.get('name') != name:
         slot['name'] = name
@@ -561,7 +588,7 @@ def remember_application_history(platform, url):
     """平台的應徵紀錄頁(查回音用)。網址要屬於這個平台才記。"""
     if not url or not same_platform_url(url, platform):
         return False
-    reg = registry()
+    reg = _load_registry()
     reg.setdefault('_application_records', {})[platform] = url
     _save_registry(reg)
     return True

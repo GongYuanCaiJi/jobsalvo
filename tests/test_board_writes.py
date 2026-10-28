@@ -547,3 +547,36 @@ class SendQueue(unittest.TestCase):
         self.assertEqual(len(box), 1)
         self.assertIn('需要 agent 的瀏覽器', box[0]['msg'])
         self.assertAllowed('confirmed')
+
+
+class ServedVersion(TwoDevices):
+    """首頁帶的版本(sig)跟輪詢的 /api/rev 同一種算法:沒人改就對得上(載入後不再重抓大包),改了就對不上(#606)。
+    伺服器記著的那份看板(snapshot)在別的程式寫檔之後也要跟著換。"""
+
+    def test_page_version_matches_poll_until_someone_writes(self):
+        self.board('confirmed')
+        served = bd.parse(self.bs.serve_doc(self.bs.snapshot(), 3))['data']['sig']
+        rev, data = self.bs.content_sig()
+        self.assertEqual(served, {'rev': rev, 'gen': data + '.3'})
+        bd.set_fb(lambda fb: fb.setdefault(CARD, {}).update(note='x'), self.path)
+        self.assertNotEqual(self.bs.content_sig()[0], served['rev'])
+        self.assertEqual(self.bs.snapshot()['fb'][CARD]['note'], 'x')
+
+    def test_poll_version_moves_when_only_the_profile_registry_changes(self):
+        # 每張卡的下一步也照平台履歷登記表算:看板檔沒變、登記表換了,頁面也要重拿下一步
+        import profile_sync as ps
+        self.board('confirmed')
+        with mock.patch.object(ps, 'REG', os.path.join(self.dir, 'profiles.json')):
+            before = self.bs.content_sig()[0]
+            ps._save_registry({'104.com.tw': {}})
+            self.assertNotEqual(self.bs.content_sig()[0], before)
+
+    def test_save_answer_lists_only_the_cards_it_touched(self):
+        self.board('confirmed')
+        other = 'https://ex.test/other'
+        bd.set_data(lambda data, fb: data['jobs'].append({'id': other, 'target': 'y'}), self.path)
+        full = self.bs.next_steps(self.bs.snapshot())
+        only = self.bs.next_steps(self.bs.snapshot(), {CARD})
+        self.assertIn(other, full)
+        self.assertNotIn(other, only)
+        self.assertEqual(only[CARD], full[CARD])

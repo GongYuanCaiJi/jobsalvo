@@ -124,7 +124,7 @@ if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文�
         import threading
         captured = ps.capture_source(str(self.source))
         entered, release = threading.Event(), threading.Event()
-        original = ps.registry
+        original = ps._load_registry   # 寫入者讀登記表走這個(registry 是只讀的快取)
         def paused_read():
             reg = original()
             if not entered.is_set():
@@ -132,7 +132,7 @@ if (!JSON.stringify(r).includes('職缺標題')) throw new Error('沒讀到文�
                 if not release.wait(5):
                     raise TimeoutError('測試交錯等待逾時')
             return reg
-        with patch.object(ps, 'registry', side_effect=paused_read), ThreadPoolExecutor(max_workers=2) as pool:
+        with patch.object(ps, '_load_registry', side_effect=paused_read), ThreadPoolExecutor(max_workers=2) as pool:
             writer = pool.submit(ps.remember_sync, self.decision['platform'], 'zh', 'base',
                                  captured['text'], [], [], 'current')
             try:

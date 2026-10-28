@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Canonical card names and URL identifiers."""
+import functools
 import hashlib
 import urllib.parse
 import re
@@ -124,7 +125,25 @@ def same_company(a, b):
 
 def company(job, alias=None, extra_titles=None):
     """卡片歸在哪一家。alias = 設定 board.company_alias(鍵是小寫),使用者自訂的寫法優先;
-    extra_titles = 設定 board.title_words(使用者自己加的職稱字)。找不出來回 '其他'(看板的分組名)。"""
+    extra_titles = 設定 board.title_words(使用者自己加的職稱字)。找不出來回 '其他'(看板的分組名)。
+    只看卡的網址和職稱:同樣的輸入記住答案(看板每算一次每張卡的下一步,每張要問好幾次,每次都是一串正規表示式)。"""
+    alias_items = tuple(sorted((str(k), v) for k, v in (alias or {}).items()))
+    titles = tuple(extra_titles or ())
+    if not all(isinstance(v, str) for _, v in alias_items) or not all(isinstance(x, str) for x in titles):
+        return _company(job, alias, extra_titles)
+    if isinstance(job, dict):
+        url, target = str(job.get('id') or ''), job.get('target')
+    else:
+        url, target = '', job
+    return _company_of(url, str(target or ''), alias_items, titles)
+
+
+@functools.lru_cache(maxsize=8192)
+def _company_of(url, target, alias_items, titles):
+    return _company({'id': url, 'target': target}, dict(alias_items), list(titles))
+
+
+def _company(job, alias=None, extra_titles=None):
     title_rx = titleish(extra_titles) if extra_titles else _TITLEISH
     alias = {str(k).lower(): v for k, v in (alias or {}).items()}
 

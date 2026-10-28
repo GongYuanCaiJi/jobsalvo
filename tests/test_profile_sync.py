@@ -51,6 +51,14 @@ class SyncBaseline(unittest.TestCase):
         self.enterContext(patch.object(ps, 'REG', os.path.join(self.home, 'profiles.json')))
         ps.remember('platform.example', 'zh', 'one', 'https://platform.example/resume/one')
 
+    def test_reads_reuse_the_parsed_registry_until_a_write_replaces_it(self):
+        # 登記表很大:沒換檔就不重新解析;寫入(換檔)之後讀到的是新內容(#607)
+        first = ps.registry()
+        self.assertIs(ps.registry(), first)
+        ps.remember_name('platform.example', 'zh', 'one', '平台上的名字')
+        self.assertIsNot(ps.registry(), first)
+        self.assertEqual(ps.where('platform.example', 'zh', 'one')['name'], '平台上的名字')
+
     def test_status_tracks_master_edits_and_sync_baseline(self):
         ps.remember_sync('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
         self.assertEqual(ps.status()[0]['state'], 'ok')

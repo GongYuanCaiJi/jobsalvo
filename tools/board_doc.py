@@ -21,20 +21,23 @@ M4='</script><script id="data-fb" type="application/json">'
 M5='</script><script id="app-src">'
 SUF='</script></body></html>'
 
-def inner(h,p):
-    m=re.search(p,h,re.S)
-    if not m: sys.exit("找不到區塊 "+p[:40])
-    return m.group(1)
+def inner(h,start,end):
+    """start 之後、第一個 end 之前的那一段(跟非貪婪的 start(.*?)end 一樣)。
+    看板檔有十幾 MB:以前用 re.S 的 .*? 一格一格試,解析一次光找區塊就要 50ms。"""
+    i=h.find(start)
+    j=h.find(end,i+len(start)) if i>=0 else -1
+    if j<0: sys.exit("找不到區塊 "+start[:40])
+    return h[i+len(start):j]
 
 def parse(html):
     """把一份板子 html 拆成各區塊。data-jobs 回 dict、data-fb 回原字串(逐字搬他標記,不動)。"""
     return {
-      'sty':  inner(html,r'<style id="sty">(.*?)</style>'),
-      'thdr': inner(html,r'<template id="t-hdr">(.*?)</template>'),
-      'tail': inner(html,r'<template id="tail">(.*?)</template>'),
-      'app':  inner(html,r'<script id="app-src">(.*?)</script>'),
-      'data': json.loads(inner(html,r'<script id="data-jobs" type="application/json">(.*?)</script>')),
-      'fb':   inner(html,r'<script id="data-fb" type="application/json">(.*?)</script>'),
+      'sty':  inner(html,'<style id="sty">','</style>'),
+      'thdr': inner(html,'<template id="t-hdr">','</template>'),
+      'tail': inner(html,'<template id="tail">','</template>'),
+      'app':  inner(html,'<script id="app-src">','</script>'),
+      'data': json.loads(inner(html,'<script id="data-jobs" type="application/json">','</script>')),
+      'fb':   inner(html,'<script id="data-fb" type="application/json">','</script>'),
     }
 
 def stat_first(thdr, data):

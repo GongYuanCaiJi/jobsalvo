@@ -10,7 +10,7 @@
 一句話、要點與完整回答的分界是逐字稿裡單獨一行的 ──────;分界前以【要點】開頭的一段是要點,其餘是一句話。
 沒有分界的題,整份逐字稿就是回答。
 """
-import os, re, sys
+import os, re, sys, threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import interview_bank as ib
@@ -117,19 +117,56 @@ def build(data, job_id):
     return '\n'.join(md).rstrip() + '\n', title
 
 
+_RENDER = threading.RLock()
+
+
 def render(data, job_id, home):
-    """排成 PDF,回路徑。"""
+    """排成 PDF,回路徑。內容沒變、PDF 也比原稿和版面新,就直接用排好的那份:
+    排一次要開瀏覽器印,一秒多;預覽框、「開啟 PDF」、「下載 PDF」、題庫存檔後的預排都問同一份,不用各排一次。"""
     import markdown_pdf
     md, title = build(data, job_id)
     safe = re.sub(r'[\\/:*?"<>|\s]+', '-', title).strip('-') or 'interview'
     folder = os.path.join(home, '面試備忘')
     os.makedirs(folder, exist_ok=True)
     src = os.path.join(folder, f'{safe}-面試備忘.md')
-    with open(src, 'w', encoding='utf-8') as fh:
-        fh.write(md)
     pdf = src[:-3] + '.pdf'
-    markdown_pdf.render(src, pdf, STYLE, 'zh')
+    with _RENDER:   # 一次排一份:同時來的那幾個等前一個排完,就拿得到現成的
+        try:
+            with open(src, encoding='utf-8') as fh:
+                same = fh.read() == md
+        except (OSError, ValueError):   # 沒有這個檔、檔案壞了(不是 UTF-8):當作內容不同,重寫
+            same = False
+        if not same:
+            with open(src, 'w', encoding='utf-8') as fh:
+                fh.write(md)
+        if not _fresh(pdf, src):
+            markdown_pdf.render(src, pdf, STYLE, 'zh')
     return pdf
+
+
+def pdf_bytes(data, job_id, home):
+    """排好(或拿排好的)那一份 PDF 的內容。在同一把鎖裡讀:公司和職稱都一樣的兩場會排到同一個檔名,
+    鎖外才讀的話,另一場可能剛好把檔案換成它的。"""
+    with _RENDER:
+        with open(render(data, job_id, home), 'rb') as fh:
+            return fh.read()
+
+
+def _fresh(pdf, src):
+    """PDF 比原稿、版面(樣式、把原稿轉成網頁和印成 PDF 的那兩支)都新。"""
+    try:
+        made = os.stat(pdf).st_mtime_ns
+        return made >= max(os.stat(p).st_mtime_ns for p in (src, STYLE, os.path.join(HERE, 'markdown_html.py'),
+                                                            os.path.join(HERE, 'markdown_pdf.py')))
+    except OSError:
+        return False
+
+
+def interviews(data, fb):
+    """面試準備那一頁的每一場(已投出、面試中或拿到 Offer)。"""
+    return [j['id'] for j in data.get('jobs') or [] if isinstance(j, dict) and j.get('id')
+            and isinstance(fb.get(j['id']), dict) and fb[j['id']].get('app') == 'sent'
+            and fb[j['id']].get('oc') in ('iv', 'offer') and not fb[j['id']].get('rm')]
 
 
 def main():

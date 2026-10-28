@@ -107,6 +107,27 @@ def read_doc():
     """讀看板檔(對過指紋:被繞過正常寫入改過就丟 bd.Tampered,請求那一頭回 423 講原因)。"""
     return bd.read_doc(STATE)
 
+def snap_of(doc):
+    """一份看板內容拆好:parts(bd.parse)、fb(標記 dict)、rev / data_sig(標記、職缺資料的版本,/api/rev 給頁面比)。"""
+    parts=bd.parse(doc)
+    i3,i4,i5=doc.find(bd.M3),doc.find(bd.M4),doc.find(bd.M5)
+    return {'doc':doc,'parts':parts,'fb':json.loads(parts['fb'] or '{}'),
+            'rev':_hl.md5(doc[i4:i5].encode('utf-8')).hexdigest()[:12],
+            'data_sig':_hl.md5(doc[i3:i4].encode('utf-8')).hexdigest()[:12]}
+
+# 看板檔十幾 MB,每個請求、每次存檔以前都整份重讀重拆(存一次檔拆四遍)。改成整個程序只留一份,
+# 檔案換過(誰寫的都一樣:這支、reconcile、agent 呼叫的小工具)才重拆。寫檔一律原子換名(bd.write_doc),換過 inode 就不同;
+# 被繞過正常寫入改過的,狀態變更時間(ctime,改不回去)一定會變,重讀時照樣對指紋丟 bd.Tampered。
+_SNAP_LOCK=threading.Lock()
+_SNAP={'key':None,'snap':None}
+def snapshot():
+    """現行看板拆好的那一份(snap_of)。共用的:拿到的 parts、fb 只能讀,要改走 bd.rewrite / bd.set_fb。"""
+    st=os.stat(STATE); key=(STATE,st.st_ino,st.st_mtime_ns,st.st_ctime_ns,st.st_size)
+    with _SNAP_LOCK:
+        if _SNAP['key']!=key:
+            _SNAP['snap']=snap_of(read_doc()); _SNAP['key']=key
+        return _SNAP['snap']
+
 def page_cfg():
     """頁面要知道、但屬於設定不屬於資料的東西。每次送出時從設定現讀,不存進看板檔。"""
     import agent_report, autopilot, card
@@ -144,16 +165,14 @@ def ship_files_of(jobs, fb, only=None):
     return out
 
 
-def next_steps(doc, only=None):
+def next_steps(snap, only=None):
     """每張卡的下一步(next_step.of),加上常用答案的(__ans__,next_step.answers):頁面載入、輪詢、存檔回來的都是這一份,
-    看板照它畫。only:只要這幾張。
-    設定跟自動流程同一份(autopilot.flow);停著的頁上限要數整份看板,所以先算全部再挑。"""
+    看板照它畫。snap:snapshot 拆好的看板。only:只要這幾張(存檔回來只算動到的那幾張;停著的頁上限照樣數整份看板)。
+    設定跟自動流程同一份(autopilot.flow)。"""
     import autopilot, next_step
-    fb=json.loads(doc['fb'] or '{}')
-    out=next_step.of(fb,doc['data'].get('jobs') or [],doc['data'].get('status'),flow=autopilot.flow(),real=is_real(),
-                     build=build_state())
-    if only is not None:
-        out={k:v for k,v in out.items() if k in only}
+    fb=snap['fb']; data=snap['parts']['data']
+    out=next_step.of(fb,data.get('jobs') or [],data.get('status'),flow=autopilot.flow(),real=is_real(),
+                     build=build_state(),only=only)
     for u,due in list(QUEUED.items()):    # 確認了、排在後台等著送的:看板寫「幾秒後開始送出」,不給「▶ 送出」
         if isinstance(out.get(u),dict) and due>time.time():
             out[u].setdefault('view',{})['due']=round(due-time.time(),1)
@@ -202,20 +221,23 @@ def page_jobs(jobs):
     return card.label_jobs(lean_jobs(jobs),board.get('company_alias'),board.get('title_words'))
 
 
-def serve_doc(doc):
-    """送出去的那份:注入設定(cfg),並把 masters(大張的預覽圖)與履歷預覽抽掉,
+def serve_doc(snap, build_n=0):
+    """送出去的那份(snap:snap_of / snapshot 拆好的看板):注入設定(cfg),並把 masters(大張的預覽圖)與履歷預覽抽掉,
     改成真的展開那一區/點開那份履歷時才另外抓。檔案本身不動,只有這條 HTTP 回應不同。
-    直接開檔(file://)的人拿到的是完整的檔,照舊看得到。"""
+    直接開檔(file://)的人拿到的是完整的檔,照舊看得到。
+    build_n:讀檔之前記下的建包次數,跟這份內容一起組成頁面手上的版本(sig)。"""
     try:
-        d=bd.parse(doc)
+        d=snap['parts']
         data=dict(d['data']); data['cfg']=page_cfg()
+        # 這一份是哪一版(跟 /api/rev 同一種算法):頁面載入後第一次輪詢對得上,就不再把剛送來的大包抓一次(#606)
+        data['sig']={'rev':snap['rev']+registry_mark(),'gen':'%s.%d'%(snap['data_sig'],build_n)}
         import zhconv
         if zhconv.simplified(data['cfg'].get('read_lang')):
             data['cfg']['zh_tables']=zhconv.page_tables()   # 簡體:字典跟著頁面走,頁面自己把畫面上的字轉掉
         if data.get('masters'):
             data['masters_n']=len(data['masters']); data['masters']=[]
-        data['ship_files']=ship_files_of(data.get('jobs'),json.loads(d['fb'] or '{}'))
-        data['next']=next_steps(d)   # 每張卡的下一步:看板照它畫按鈕能不能按、為什麼不能
+        data['ship_files']=ship_files_of(data.get('jobs'),snap['fb'])
+        data['next']=next_steps(snap)   # 每張卡的下一步:看板照它畫按鈕能不能按、為什麼不能
         data['jobs']=page_jobs(data.get('jobs'))
         # 頁面程式用程式碼裡現在的那份。看板檔裡存的外殼要等下一次重建材料才會換新:
         # 以前按「更新」、伺服器也重啟了,畫面卻一直是上次重建時的舊版(連「⬆ 更新」鈕都沒有)。
@@ -228,7 +250,7 @@ def serve_doc(doc):
         import agent_report
         agent_report.report('看板',f'看板頁面沒辦法照現在的程式組好,先給你存檔裡的那一份(按鈕可能少了或是舊的):'
                                   f'{type(e).__name__}: {str(e)[:120]}',need='重新整理看板;一直出現就重開看板伺服器',live=STATE)
-        return doc
+        return snap['doc']
 
 _SHELL={'key':None,'parts':None}
 def current_shell():
@@ -246,18 +268,16 @@ def current_shell():
 # 會寫這個檔的不只這支:cut_tailor 收尾把卡推到「待你決定」、reconcile 裝新的職缺資料、
 # converge 進新缺,全部直接寫檔。只數 /api/save 的話,開著的頁面會一直停在舊的,
 # 在舊的上面一改還會被版本檢查擋下來。所以誰寫的都一樣:內容變了,數字就變。
-_SIG_LOCK=threading.Lock()
-_SIG={'key':None,'fb':'','data':''}
 def content_sig():
-    st=os.stat(STATE); key=(st.st_mtime_ns,st.st_size)
-    with _SIG_LOCK:
-        if _SIG['key']!=key:   # 只在檔案真的換過之後才重算,輪詢本身不讀 5MB
-            doc=read_doc()
-            i3,i4,i5=doc.find(bd.M3),doc.find(bd.M4),doc.find(bd.M5)
-            _SIG['data']=_hl.md5(doc[i3:i4].encode('utf-8')).hexdigest()[:12]
-            _SIG['fb']=_hl.md5(doc[i4:i5].encode('utf-8')).hexdigest()[:12]
-            _SIG['key']=key
-        return _SIG['fb'],_SIG['data']
+    """(標記版本, 職缺資料版本):檔案沒換過就是上次那份(snapshot),輪詢本身不讀檔。
+    標記版本也帶上平台履歷登記表的版本:每張卡的下一步(同步前後的證據)也照登記表算,它單獨變了頁面也要重拿下一步。"""
+    s=snapshot()
+    return s['rev']+registry_mark(),s['data_sig']
+
+def registry_mark():
+    import profile_sync
+    st=profile_sync.stamp()
+    return '.'+_hl.md5(repr(st).encode('utf-8')).hexdigest()[:8] if st else ''
 
 def cur_gen():
     """職缺資料的版本。背景 reconcile 跑完也要換(可投遞包生好了,頁面該重拿),
@@ -306,8 +326,9 @@ def write_fb(cmds, out=None):
         if slip is not None and c.get('ev')=='confirm':
             queue_send(c['u'],((got['cards'].get(c['u']) or {}).get('approve') or {}).get('at'))
     note_saved()
-    import chrome_door
-    chrome_door.close_if_idle(STATE)
+    if snapshot()['fb'].get('__browser_cleanup__'):   # 有排著要收的工作區才去收(收的那一支自己會整份重讀看板)
+        import chrome_door
+        chrome_door.close_if_idle(STATE)
     if out is not None:
         out.update(cards=got['cards'],undo=got['undo'])
     return got['rejected']
@@ -443,8 +464,7 @@ def _send_confirmed(u, at):
     其他原因送不出去(沒有 ego、確認後答案又改了…),照實寫進看板的回報,卡停在你已確認、給「▶ 送出」。"""
     import delivery_state as ds
     QUEUED.pop(u,None)
-    doc=bd.parse(read_doc())
-    m=json.loads(doc['fb'] or '{}').get(u) or {}
+    m=snapshot()['fb'].get(u) or {}
     if ds.state(m)!='confirmed' or (m.get('approve') or {}).get('at')!=at:
         return
     code,st=start_run('apply',{'stage':'submit','url':u})
@@ -480,13 +500,16 @@ def _doc_sig(job, fb):
         return 'err:'+type(e).__name__
 
 
+_EXPORTED={}
 def note_saved():
     """Refresh the one-way bank export and queue a local data-folder commit."""
     try:
         import interview_bank as ib
         import folder_history
-        bank = bd.parse(read_doc())['data'].get('bank') or {}
-        ib.export_file(bank, cf.HOME)
+        snap = snapshot()
+        if _EXPORTED.get('data') != (STATE, snap['data_sig']):   # 題庫在職缺資料裡:資料沒變(只存了標記)就不用重匯出
+            ib.export_file(snap['parts']['data'].get('bank') or {}, cf.HOME)
+            _EXPORTED['data'] = (STATE, snap['data_sig'])
         folder_history.note_saved(cf.HOME)
     except Exception as exc:  # noqa: BLE001 — 存檔已經寫進去了;版本紀錄沒排上照實寫進看板的回報
         import agent_report
@@ -494,6 +517,33 @@ def note_saved():
         print('⚠ '+msg)
         agent_report.report('看板',msg,need='看板上的資料已經存好,只是沒存成一版;下次存檔會再試',live=STATE)
 
+
+_SHEETS={'running':False,'again':False}
+_SHEETS_LOCK=threading.Lock()
+def prerender_sheets():
+    """題庫一存,就在背景把每一場面試的備忘先排好(iv_sheet.render 內容沒變就不重排):按「預覽、匯出面試備忘」直接拿排好的那份。
+    同時只跑一輪,跑的時候又存了就跑完再補一輪。只在現行看板做(副本、測試沒有要給人看的備忘,也不該叫瀏覽器)。"""
+    if not is_real(): return
+    with _SHEETS_LOCK:
+        if _SHEETS['running']:
+            _SHEETS['again']=True; return
+        _SHEETS['running']=True
+    def run():
+        import iv_sheet
+        while True:
+            with _SHEETS_LOCK: _SHEETS['again']=False
+            try:
+                snap=snapshot(); data=snap['parts']['data']
+                for u in iv_sheet.interviews(data,snap['fb']):
+                    try: iv_sheet.render(data,u,cf.HOME)
+                    except Exception as e:  # noqa: BLE001 — 預排失敗不擋別場:按預覽時會再排一次,失敗原因在那裡照實回報
+                        print(f'預排面試備忘失敗({u}):{e}',file=sys.stderr)
+            except Exception as e:  # noqa: BLE001 — 看板讀不到就這輪不預排:按預覽時會再排一次,失敗原因在那裡照實回報
+                print(f'預排面試備忘失敗:{e}',file=sys.stderr)
+            with _SHEETS_LOCK:
+                if not _SHEETS['again']:
+                    _SHEETS['running']=False; return
+    threading.Thread(target=run,daemon=True).start()
 
 _BUILD_LOCK=threading.Lock()
 # gen:每跑完一次 reconcile +1,給頁面判斷「卡片資料該重拿了」;done:最近那一輪有沒有跑完;
@@ -703,7 +753,7 @@ def _apply_busy():
 def sent_files():
     """已經填過、還在等的卡,現在要寄的檔案(哪一份、檔案內容的指紋):換檔之前先記,換完再比。"""
     import delivery_state, ship
-    doc=bd.parse(read_doc()); fb=json.loads(doc['fb']); out={}
+    s=snapshot(); doc=s['parts']; fb=s['fb']; out={}
     for j in doc['data'].get('jobs') or []:
         if delivery_state.state(fb.get(j.get('id'))) not in delivery_state.FILES_MATTER: continue   # 換檔才有意義的狀態
         try:
@@ -858,7 +908,7 @@ def start_run(kind,args):
     except (TypeError,ValueError): limit=0
     one=str(args.get('url') or '')
     if one and kind in ('prep','replies'):
-        fb0=json.loads(bd.parse(read_doc())['fb'])
+        fb0=snapshot()['fb']
         if kind=='prep' and (fb0.get(one) or {}).get('app')!='prep': return 400,{'msg':'這張不在準備履歷中'}
         if kind=='replies':
             import reply_run   # 查應徵進度查哪幾張只有一份規則:已投出的,加上送出結果不明的
@@ -907,8 +957,7 @@ def start_run(kind,args):
         selected=args.get('items')
         if not url or not isinstance(selected,list) or not selected:
             return 400,{'msg':'先選一張卡和至少一份檔案'}
-        data=bd.parse(read_doc())
-        fb=json.loads(data['fb'])
+        s=snapshot(); data=s['parts']; fb=s['fb']
         job=next((j for j in data['data'].get('jobs',[]) if j.get('id')==url),None)
         state=fb.get(url) or {}
         if not job or state.get('app') not in ('ready','ship'):
@@ -937,7 +986,7 @@ def start_run(kind,args):
         stage=args.get('stage'); url=str(args.get('url') or '')
         note=re.sub(r'\s+',' ',str(args.get('note') or '')).strip()[:500]
         if stage not in ('fill','fix','submit'): return 400,{'msg':'不知道要填表、修改還是送出'}
-        doc=bd.parse(read_doc()); fb=json.loads(doc['fb']); status=doc['data'].get('status')
+        s=snapshot(); doc=s['parts']; fb=s['fb']; status=doc['data'].get('status')
         if stage=='submit':
             import delivery_state as ds
             urls=[url] if url else [u for u,m in fb.items() if ds.app_of(m)=='ship']
@@ -1043,11 +1092,13 @@ class H(BaseHTTPRequestHandler):
         if self._foreign(False): return
         if self.path in ('/','/index.html'):
             trigger_source_sync()
-            self._send(200,serve_doc(read_doc()))
+            # 先記建包次數再讀檔:中間剛好建完的話,頁面拿到的是舊次數,第一次輪詢就會去重拿
+            with _BUILD_LOCK: build_n=_build_state['gen']
+            self._send(200,serve_doc(snapshot(),build_n))
         elif self.path=='/api/health':
             self._json(200,{'ok':True,'app':'jobsalvo','version':RUNNING_VERSION or code_version()})
         elif self.path=='/api/state':
-            d=bd.parse(read_doc()); self._send(200,d['fb'],'application/json; charset=utf-8')
+            self._send(200,snapshot()['parts']['fb'],'application/json; charset=utf-8')
         elif self.path.startswith('/api/customize/files?'):
             import customize as cu
             try:self._json(200,{'ok':True,'files':cu.list_files(self._q('u'),board=STATE)})
@@ -1057,7 +1108,7 @@ class H(BaseHTTPRequestHandler):
             try:self._json(200,dict({'ok':True},**cu.diff_for(self._q('u'),self._q('item'),board=STATE)))
             except Exception as e:self._json(400,{'ok':False,'msg':str(e)[:200]})  # noqa: BLE001 — 原因照實回給看板
         elif self.path.startswith('/api/resume?'):
-            u=self._q('u'); v=self._q('v'); d=bd.parse(read_doc())
+            u=self._q('u'); v=self._q('v'); d=snapshot()['parts']
             j=next((x for x in d['data'].get('jobs',[]) if x.get('id')==u),None)
             if j is None: self._json(404,{'ok':False,'msg':'找不到這張卡(可能剛被移除或重建),重新整理看板再試'})
             else:
@@ -1070,12 +1121,12 @@ class H(BaseHTTPRequestHandler):
         elif self.path=='/api/ship-files' or self.path.startswith('/api/ship-files?'):
             self.do_GET_ship_files()
         elif self.path=='/api/masters':
-            d=bd.parse(read_doc())
+            d=snapshot()['parts']
             self._json(200,d['data'].get('masters') or [])
         elif self.path=='/api/jobs':
             self.do_GET_jobs()
         elif self.path=='/api/next':
-            self._json(200,next_steps(bd.parse(read_doc())))
+            self._json(200,next_steps(snapshot()))
         elif self.path.startswith('/api/live?'):
             # 代投那張分頁「現在」的整頁畫面:agent 的視窗開在螢幕外(不搶他的畫面),他要看真的頁面就看這張。
             # apply_tab 用填這張的那段對話的身分當場截,不經過 agent、不動那一頁。
@@ -1088,7 +1139,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(409,'Agent 正在處理這一張,跑完再看(進度在最上面的「🚀 填表進度」)','text/plain; charset=utf-8')
             # 照這張卡記的那一家的門路截(chrome_door):那一家停用、移除或卡上沒記,那一頁接不回來,跟卡上講的一樣要重填
             import chrome_door
-            try: door=chrome_door.for_card((json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}).get('apply'))
+            try: door=chrome_door.for_card((snapshot()['fb'].get(u) or {}).get('apply'))
             except ValueError: door=None
             except chrome_door.Unreachable as gone:
                 if not gone.sure:                          # 設定檔讀不懂:判斷不了,卡不動
@@ -1169,7 +1220,7 @@ class H(BaseHTTPRequestHandler):
             self._json(200,d)
         elif self.path.startswith('/api/bank/form?'):
             import interview_bank as ib
-            bank=bd.parse(read_doc())['data'].get('bank') or {}
+            bank=snapshot()['parts']['data'].get('bank') or {}
             # job 有帶就給那一場看到的版本(有這場版就是這場版),表單才改得到這場的字
             it=ib.effective(ib.normalize(bank),self._q('job'),self._q('id')) if self._q('job') else next(
                 (x for x in bank.get('items') or [] if x.get('id')==self._q('id')),None)
@@ -1193,12 +1244,12 @@ class H(BaseHTTPRequestHandler):
         elif self.path.startswith('/api/iv/sheet?'):
             import iv_sheet, markdown_pdf
             try:
-                pdf=iv_sheet.render(bd.parse(read_doc())['data'],self._q('job'),cf.HOME)
+                pdf=iv_sheet.pdf_bytes(snapshot()['parts']['data'],self._q('job'),cf.HOME)
             except StopIteration:
                 return self._send(404,'沒有這一場','text/plain; charset=utf-8')
             except markdown_pdf.RenderError as e:
                 return self._send(500,'面試備忘排不出來:%s'%e,'text/plain; charset=utf-8')
-            with open(pdf,'rb') as fh: self._send(200,fh.read(),'application/pdf')
+            self._send(200,pdf,'application/pdf')
         elif self.path.startswith('/api/preview/'):
             import pdf_preview
             from urllib.parse import urlparse
@@ -1331,6 +1382,7 @@ class H(BaseHTTPRequestHandler):
         except ValueError as e:
             return self._json(400,{'ok':False,'msg':str(e)})
         note_saved()
+        prerender_sheets()
         return self._json(200,{'ok':True,'bank':out['bank']})
     def do_POST_settings(self):
         import settings_api as sa
@@ -1452,7 +1504,7 @@ class H(BaseHTTPRequestHandler):
         只讀,不寫檔、不重建。"""
         from urllib.parse import urlparse, parse_qs
         q=parse_qs(urlparse(self.path).query,keep_blank_values=True)
-        d=bd.parse(read_doc()); fb=json.loads(d['fb'] or '{}'); jobs=d['data'].get('jobs',[])
+        s=snapshot(); d=s['parts']; fb=s['fb']; jobs=d['data'].get('jobs',[])
         u=(q.get('u') or [''])[0]
         if not u:
             return self._json(200,ship_files_of(jobs,fb))
@@ -1468,12 +1520,12 @@ class H(BaseHTTPRequestHandler):
         self._json(200,ship_files_of(jobs,fb,only=u)[u])
     def do_GET_jobs(self):
         with _BUILD_LOCK: building=_build_state['running']
-        d=bd.parse(read_doc())
+        snap=snapshot(); d=snap['parts']
         # 驗收結果(status)也在職缺資料裡,要一起給:以前只給 jobs,重驗過之後頁面上的
         # 「⛔ 驗收未通過」還是舊的那一批,要他自己重整。
         jobs=d['data'].get('jobs',[])
         self._json(200,{'building':building,'gen':cur_gen(),'jobs':page_jobs(jobs),
-                                   'ship_files':ship_files_of(jobs,json.loads(d['fb'] or '{}')),
+                                   'ship_files':ship_files_of(jobs,snap['fb']),
                                    'status':d['data'].get('status'),'research':d['data'].get('research')})
 
     def _do_POST(self):
@@ -1486,7 +1538,7 @@ class H(BaseHTTPRequestHandler):
             if run_status('apply').get('running') and run_status('apply').get('url')==u:
                 return self._json(409,{'ok':False,'msg':'Agent 正在處理這一張,等它停下再接手'})
             import chrome_door, delivery_state as ds
-            m=json.loads(bd.parse(read_doc())['fb'] or '{}').get(u) or {}
+            m=snapshot()['fb'].get(u) or {}
             if ds.state(m)!='stuck' or not (m.get('apply') or {}).get('workspace'):
                 return self._json(200,{'ok':True,'handoff':False})
             try:
@@ -1555,7 +1607,7 @@ class H(BaseHTTPRequestHandler):
             # 有變動的那幾份的新下一步;動到常用答案、封鎖這類整份的資料就每一張都重算
             touched=set(got.get('cards',{}))
             self._json(200,{'ok':True,'building':building,'rejected':rejected,'cards':got.get('cards',{}),'undo':got.get('undo',[]),
-                            'next':next_steps(bd.parse(read_doc()),None if any(k.startswith('__') for k in touched) else touched)})
+                            'next':next_steps(snapshot(),None if any(k.startswith('__') for k in touched) else touched)})
         except bd.Tampered:
             raise
         except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)

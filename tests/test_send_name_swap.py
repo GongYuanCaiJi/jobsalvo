@@ -18,8 +18,7 @@ class SendNameSwap(unittest.TestCase):
     def snapshot(self, send_name, merged=''):
         doc = {'data': {'jobs': [{'id': URL}]}, 'fb': json.dumps({URL: {}})}
         docs = [{'id': 'resume:a:en', 'effective_path': '', 'send_name': send_name}]
-        with mock.patch.object(bs, 'read_doc', return_value=''), \
-                mock.patch('board_doc.parse', return_value=doc), \
+        with mock.patch.object(bs, 'snapshot', return_value={'parts': doc, 'fb': json.loads(doc['fb'])}), \
                 mock.patch('delivery_state.state', return_value='parked'), \
                 mock.patch('delivery_state.FILES_MATTER', frozenset({'parked'})), \
                 mock.patch('ship.documents', return_value=docs), \

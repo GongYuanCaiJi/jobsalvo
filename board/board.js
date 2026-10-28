@@ -2998,7 +2998,9 @@
             if(kind==='research')renderFind();});});   // 按鈕字從「送出中…」換回來
     }).catch(function(){snack('沒送出去，再按一次'); back();});
   }
-  var srvGen=null, srvRev=null, syncing=false;
+  // 伺服器送這一頁時就是這一版(D.sig);直接開檔沒有,就是 null(不知道,一定要拿)。
+  // 以前一律從 null 開始,頁面一載入就把剛送來的職缺、標記、下一步再抓一次、再畫一次(#606)
+  var srvGen=(D.sig||{}).gen||null, srvRev=(D.sig||{}).rev||null, syncing=false;
   function pullJobs(d){
     if(!d.jobs||!d.jobs.length)return false;
     jobs=d.jobs; LAZY={}; takeShip(d.ship_files);
@@ -3086,7 +3088,8 @@
     (function poll(){
       tries++;
       if(tries>120){watching=false;refreshBar();return;}   // 最多等 6 分鐘
-      fetch('/api/jobs').then(function(r){return r.json();}).then(function(d){
+      // 只問小包(gen、building 跟 /api/jobs 同名);以前每 3 秒抓整包職缺資料只為了讀這兩欄(#606)
+      fetch('/api/rev').then(function(r){return r.json();}).then(function(d){
         if(buildGen===null)buildGen=d.gen;
         if(d.building||d.gen===buildGen){setTimeout(poll,3000);return;}
         buildGen=d.gen; watching=false;

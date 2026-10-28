@@ -63,5 +63,27 @@ class IvSheetTest(unittest.TestCase):
         self.assertNotIn('| 反問', md)
 
 
+class RenderOnceTest(unittest.TestCase):
+    """內容沒變就用排好的那份 PDF,不再開瀏覽器排一次;題目一改就重排。"""
+
+    def test_unchanged_sheet_is_not_rendered_again(self):
+        import tempfile
+        from unittest import mock
+        made = []
+
+        def fake(src, pdf, style, lang):
+            made.append(src)
+            with open(pdf, 'wb') as fh:
+                fh.write(b'%PDF-1.4')
+        data = _data()
+        with tempfile.TemporaryDirectory() as home, mock.patch('markdown_pdf.render', side_effect=fake):
+            first = iv_sheet.render(data, 'J', home)
+            self.assertEqual(iv_sheet.render(data, 'J', home), first)
+            self.assertEqual(len(made), 1)
+            next(it for it in data['bank']['items'] if it['id'] == 'q2')['b'] = '改過的答案'
+            iv_sheet.render(data, 'J', home)
+            self.assertEqual(len(made), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -544,10 +544,11 @@ def refuse_save(cur, new):
     return None
 
 
-def of(fb, jobs, status=None, *, flow=None, now=None, real=True, build=None):
+def of(fb, jobs, status=None, *, flow=None, now=None, real=True, build=None, only=None):
     """看板上每張卡的下一步。fb:看板標記;jobs:看板上的卡;status:投遞前驗收的結果;
     flow:自動流程設定(沒給 = 都關著);now:現在幾點;real:是不是真的看板(副本等得短、不等建置);
-    build:建置(含投遞前驗收)的狀態,{'built': 最近跑完那一輪幾點開始的, 'running': 現在有沒有在跑}(推進可以投了要等它)。"""
+    build:建置(含投遞前驗收)的狀態,{'built': 最近跑完那一輪幾點開始的, 'running': 現在有沒有在跑}(推進可以投了要等它);
+    only:只算這幾張(整份看板才數得出來的,像停著的頁上限,照樣數全部)。"""
     flow = flow or {}
     jobs = [j for j in jobs or [] if isinstance(j, dict) and j.get('id')]
     a = fb.get('__auto__') if isinstance(fb.get('__auto__'), dict) else {}
@@ -560,6 +561,8 @@ def of(fb, jobs, status=None, *, flow=None, now=None, real=True, build=None):
     build = dict(build or {'built': 0, 'running': False}, real=real)
     out = {}
     for j in jobs:
+        if only is not None and j['id'] not in only:
+            continue
         auto, stop = _fix(fb, j, flow, rf, now, real, ctx)
         auto = auto or _requirement(fb, j, flow, tried) or _fill(fb, j, flow, tried, full) or _move(fb, j, flow, tried, status, build)
         out[j['id']] = card(fb, j['id'], status, auto,
