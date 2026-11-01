@@ -139,7 +139,7 @@ ship/              要寄的檔案:<卡名>-<網址 sha1 前 12 碼>/
 ```bash
 uv run python tools/reconcile.py      # 冪等:換上新的看板外殼、整理要寄的檔案、驗收、清過期夾
 uv run python -m unittest discover -s tests
-uv run python tools/board_check.py    # 開發用:用無頭 Chrome 在示範看板上實際點一遍;改介面時先跑 --fast
+uv run python tools/board_check.py    # 開發用:用無頭 Chrome 在示範看板上實際點一遍;改介面時先跑 --fast,它不跑無障礙、步數、第一屏,改介面要另跑 --only 無障礙、--only 步數、--only 第一屏
 pre-commit install                    # commit 前的檢查(.pre-commit-config.yaml,pre-commit 要另外裝);私人字串清單放 .git/info/private-words
 ```
 

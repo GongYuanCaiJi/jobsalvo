@@ -48,3 +48,12 @@ repos:
     hooks:
       - id: zizmor
         args: [--config, .github/zizmor.yml]   # 範本的設定:自己的共用 CI 跟 main 走,其他 action 鎖 commit
+  # 看板 CSS 只准用 docs/board-design.md 的 token(var(--…)):字級、字重、行高、間距、圓角、陰影、顏色。規則在 .stylelintrc.json
+  - repo: https://github.com/thibaudcolas/pre-commit-stylelint
+    rev: v17.16.0
+    hooks:
+      - id: stylelint
+        files: ^board/.*\.css$
+        # 系統的 node 會讓 stylelint 到系統的全域資料夾找外掛、找不到;改用 pre-commit 自己裝的 node,外掛跟 stylelint 裝在同一處
+        language_version: lts
+        additional_dependencies: [stylelint@17.16.0, stylelint-declaration-strict-value@1.12.1]

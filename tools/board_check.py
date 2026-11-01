@@ -14,7 +14,7 @@ board_check —— 看板的介面規矩,由程式擋,不靠誰記得。
 用法:
   uv run python tools/board_check.py            # 全部檢查,有問題回傳非 0
   uv run python tools/board_check.py --quiet    # 只在失敗時輸出
-  uv run python tools/board_check.py --fast     # 改介面時先跑的快版:跳過要等假流程/8 秒反悔期的幾條(SLOW)
+  uv run python tools/board_check.py --fast     # 改介面時先跑的快版:跳過慢檢查;搭配 --only 時仍跑指定項目
   uv run python tools/board_check.py --timing   # 最後列出每一條花幾秒
 reconcile 換外殼之前會先在副本上跑這支(完整版,不用 --fast),沒過就不換。
 等法:用 T.until(條件) / T.idle()(頁面沒有在路上的請求、沒有排著的存檔)/ T.resync(),不要寫死秒數;
@@ -454,17 +454,29 @@ AXE_VERSION, AXE_SHA256 = '4.13.0', 'c24f097bd2f451d4f933e8bc7d8d539f8672a2ebcb5
 
 
 def axe_source():
+    """固定版本的 axe-core 原始碼。快取讀取核對 sha256,下載後用同資料夾唯一暫存檔再換名。"""
     import hashlib, urllib.request
     path = os.path.expanduser(f'~/.cache/jobsalvo/axe-{AXE_VERSION}.min.js')
-    if not os.path.isfile(path):
+    def pinned(data):
+        return hashlib.sha256(data).hexdigest() == AXE_SHA256
+    data = b''
+    if os.path.isfile(path):
+        with open(path, 'rb') as f:
+            data = f.read()
+    if not pinned(data):
         data = urllib.request.urlopen(f'https://cdn.jsdelivr.net/npm/axe-core@{AXE_VERSION}/axe.min.js', timeout=60).read()
-        if hashlib.sha256(data).hexdigest() != AXE_SHA256:
+        if not pinned(data):
             raise RuntimeError('下載的 axe-core 跟固定的版本對不上,不用它')
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'wb') as f:
-            f.write(data)
-    with open(path, encoding='utf-8') as f:
-        return f.read()
+        tmp = tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False)
+        try:
+            with tmp:
+                tmp.write(data)
+            os.replace(tmp.name, path)
+        finally:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+    return data.decode('utf-8')
 
 
 HELPERS=r"""
@@ -506,6 +518,9 @@ window.T={
     return false;},
   // 跟伺服器對一次:先等存檔送完(存檔中的頁面不會去拿),再叫它拿,等拿完。
   resync:async function(){await T.idle(); T.sync(); await T.idle();},
+  // 每一串檢查開頭:看板資料已經換回示範那份,上一串在設定頁沒存的改動也一起丟掉(不然切分頁會先跳「沒存就切走」的對話框)
+  clean:async function(){var m=document.querySelector('#rzmodal [data-cfleave="stay"]'); if(m)m.click();
+    var d=document.getElementById('cfg-discard'); if(d&&!d.hidden){d.click(); await T.until(function(){var x=document.getElementById('cfg-discard'); return !x||x.hidden;},5000);}},
   // 按一顆按鈕:找不到就丟錯(這一條檢查失敗),不准略過(#407 R10)。tools/board_check 的覆蓋清單看的就是 T.press 按了哪幾種
   press:function(sel,root){var b=(root||document).querySelector(sel); if(!b)throw new Error('找不到按鈕 '+sel);
     if(b.disabled)throw new Error('按鈕停用中 '+sel+'('+(b.title||'')+')'); b.click(); return b;},
@@ -649,6 +664,51 @@ OUTCOME_CHECKS=[
    document.querySelector('[data-tab="none"]').click();
    return bad.join('；');
 """),
+ ('面試準備:面完了的那幾場排在最後、一場下面一排結果鈕,按了就記、那一場離開面試清單',"""
+   // 示範資料裡沒錄取那張記過一輪(六天前):改回面試中,它就是「面完了、還沒記結果」的那一場
+   document.querySelector('[data-tab="sent"]').click(); await T.idle();
+   var st=await T.state(), fid=Object.keys(st).filter(function(k){return st[k]&&st[k].oc==='rej';})[0], bad=[];
+   if(!fid)return '已投出沒有記成沒錄取的卡';
+   document.querySelectorAll('#app details.cogrp:not([open]) > summary.cohead').forEach(function(h){h.click();}); await T.idle();
+   T.press('#app article[data-fid="'+fid+'"] [data-oc="iv"]'); await T.idle();
+   document.querySelector('#tabs [data-tab="iv"]').click(); await T.idle();
+   // 前面的面試檢查點進過某一場(看板記得),先回到面試清單
+   var back=document.querySelector('#app [data-ivopen=""]'); if(back){back.click(); await T.idle();}
+   var row=document.querySelector('#app .iv-oc[data-fid="'+fid+'"]'), hd=[...document.querySelectorAll('#app > h2.applyhd')].filter(function(h){return h.textContent.indexOf('面完了,記結果')===0;})[0];
+   if(!hd)bad.push('沒有「面完了,記結果」那一段');
+   if(!row)bad.push('面完了那一場底下沒有結果鈕');
+   else{
+     if(hd&&!(hd.compareDocumentPosition(row)&Node.DOCUMENT_POSITION_FOLLOWING))bad.push('結果鈕不在「面完了」那一段裡');
+     var up=document.querySelector('#app > .ivlist .iv-jrow[data-ivopen="'+fid+'"]');
+     if(up&&hd&&(up.compareDocumentPosition(hd)&Node.DOCUMENT_POSITION_FOLLOWING))bad.push('面完了那一場還排在還沒面的前面');
+     if(row.querySelector('.oc-b.on')||!/還沒記/.test(row.textContent))bad.push('面完了那一場的結果列亮著「面試中」或沒寫「還沒記」(看起來像已經記好了)');
+     T.press('#app .iv-oc[data-fid="'+fid+'"] [data-oc="rej"]'); await T.idle();
+     if(((await T.state())[fid]||{}).oc!=='rej')bad.push('按「沒錄取」沒存進去');
+     if(document.querySelector('#app > .ivlist .iv-jrow[data-ivopen="'+fid+'"]'))bad.push('記成沒錄取之後還在面試清單上');}
+   document.querySelector('[data-tab="none"]').click();
+   return bad.join('；');
+ """),
+ ('面試準備:還沒記面試時間的那一場,清單那一列旁邊就有「記時間」,按了打開記時間的視窗',"""
+   // 示範資料裡等回音那張(沒記過面試時間):改成面試中,它就是清單上還沒記時間的那一場;測完改回等回音
+   document.querySelector('[data-tab="sent"]').click(); await T.idle();
+   var st=await T.state(), fid=Object.keys(st).filter(function(k){return st[k]&&st[k].app==='sent'&&!st[k].oc;})[0], bad=[];
+   if(!fid)return '已投出沒有等回音的卡';
+   document.querySelectorAll('#app details.cogrp:not([open]) > summary.cohead').forEach(function(h){h.click();}); await T.idle();
+   T.press('#app article[data-fid="'+fid+'"] [data-oc="iv"]'); await T.idle();
+   document.querySelector('#tabs [data-tab="iv"]').click(); await T.idle();
+   var back=document.querySelector('#app [data-ivopen=""]'); if(back){back.click(); await T.idle();}
+   var sel='#app .iv-jw [data-ivround="'+fid+'"][data-ivat=""]';
+   if(!document.querySelector(sel))bad.push('還沒記時間的那一場,清單那一列旁邊沒有「記時間」');
+   else{T.press(sel); await T.idle();
+     if(!document.getElementById('ivr-date'))bad.push('按「記時間」沒有打開記時間的視窗');
+     var x=document.querySelector('#rzmodal .rzm-x'); if(x){x.click(); await T.idle();}}
+   document.querySelector('[data-tab="sent"]').click(); await T.idle();
+   document.querySelectorAll('#app details.cogrp:not([open]) > summary.cohead').forEach(function(h){h.click();}); await T.idle();
+   T.press('#app article[data-fid="'+fid+'"] [data-oc=""]'); await T.idle();
+   if(((await T.state())[fid]||{}).oc)bad.push('改回等回音沒存進去');
+   document.querySelector('[data-tab="none"]').click();
+   return bad.join('；');
+ """),
  ('已投遞成效:來源平台拆分與拒絕理由連回原文',"""
    var t=document.querySelector('[data-tab="sent"]'); if(!t)return '沒有已投遞分頁'; t.click(); await T.idle();
    var funnel=document.querySelector('#funnel'), sum=funnel&&funnel.querySelector('.fn-sum');
@@ -677,12 +737,12 @@ OUTCOME_CHECKS=[
  ('已投遞分區:同一家公司的卡分在不同區(等回音、已結束),每區展開看到的都是自己那區的卡,不重複、不跑錯公司',"""
    document.querySelector('[data-tab="sent"]').click(); await T.idle();
    var st=await T.state(), bad=[], seen={};
-   var SEC={'🎉 Offer':'offer','🗣 面試中':'iv','⏳ 等回音':'wait','🗂 已結束':'end'}, END={rej:1,ghost:1,wd:1};
+   var SEC={'Offer':'offer','面試中':'iv','等回音':'wait','已結束':'end'}, END={rej:1,ghost:1,wd:1};
    function secOf(f){var s=(f||{}).oc||''; return END[s]?'end':(s||'wait');}
    var grps=[].slice.call(document.querySelectorAll('#app .applygrp'));
    for(var g=0;g<grps.length;g++){
      var h=grps[g].querySelector('h2'), k=null;
-     Object.keys(SEC).forEach(function(l){if(h&&h.textContent.indexOf(l)===0)k=SEC[l];});
+     Object.keys(SEC).forEach(function(l){if(h&&h.textContent.trim().indexOf(l)===0)k=SEC[l];});
      if(!k)continue;
      var cos=[].slice.call(grps[g].querySelectorAll('.cogrp'));
      for(var i=0;i<cos.length;i++){if(!cos[i].open){cos[i].querySelector('summary').click(); await T.idle();}
@@ -693,6 +753,41 @@ OUTCOME_CHECKS=[
          if(secOf(st[id])!==k)bad.push('「'+h.textContent.replace(/\\s+\\d+$/,'')+'」的「'+co+'」底下畫出別區的卡:'+id.slice(-30));});}}
    document.querySelector('[data-tab="none"]').click();
    return bad.slice(0,4).join('；');
+ """),
+ ('已投出:成效摘要下面一列狀態篩選,選一種只留那一組、張數跟選單寫的一樣,按「全部」回來,卡的狀態不動',"""
+   document.querySelector('[data-tab="sent"]').click(); await T.idle();
+   var bad=[], s0=JSON.stringify(await T.state()), sel='#app [data-ctl="sent"]', b=document.querySelector(sel);
+   if(!b){document.querySelector('[data-tab="none"]').click(); return '已投出在成效摘要和分組清單之間沒有狀態篩選';}
+   function groups(){return [].slice.call(document.querySelectorAll('#app .applygrp h2.applyhd')).map(function(h){
+     return [h.firstChild.textContent.trim(),+((h.querySelector('.n')||{}).textContent||-1),h.closest('.applygrp'),h];}).filter(function(g){
+     return ['Offer','面試中','等回音','已結束'].indexOf(g[0])>=0;});}
+   var fn=document.querySelector('#funnel'), g1=(groups()[0]||[])[3];
+   if((fn&&!(fn.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING))||(g1&&!(b.compareDocumentPosition(g1)&Node.DOCUMENT_POSITION_FOLLOWING)))
+     bad.push('狀態篩選不在成效摘要和分組清單之間');
+   b.click(); await T.idle();
+   var opts=[].slice.call(document.querySelectorAll('#ctlmenu .ctlopt')).map(function(o){
+     return [o.getAttribute('data-val'),o.querySelector('span').textContent.trim(),+((o.querySelector('b')||{}).textContent||-1)];});
+   b.click(); await T.idle();
+   var names=opts.map(function(o){return o[1];}).join('/');
+   if(names!=='全部/等回音/面試中/Offer/已結束')bad.push('選項是「'+names+'」,不是「全部/等回音/面試中/Offer/已結束」');
+   async function pick(v){document.querySelector(sel).click(); await T.idle();
+     var o=document.querySelector('#ctlmenu .ctlopt[data-val="'+v+'"]'); if(o){o.click(); await T.idle();} return !!o;}
+   for(var i=1;i<opts.length;i++){var o=opts[i];
+     if(!await pick(o[0])){bad.push('選單沒有「'+o[1]+'」');continue;}
+     var gs=groups(), v=(document.querySelector(sel+' .ctl-v')||{}).textContent;
+     if(v!==o[1])bad.push('選了「'+o[1]+'」,篩選鈕上寫「'+v+'」');
+     if(gs.length!==1||gs[0][0]!==o[1]){bad.push('選了「'+o[1]+'」,畫面上的組是「'+gs.map(function(g){return g[0];}).join('、')+'」');continue;}
+     if(gs[0][1]!==o[2])bad.push('選了「'+o[1]+'」,選單寫 '+o[2]+' 張,組標題寫 '+gs[0][1]+' 張');
+     var cos=[].slice.call(gs[0][2].querySelectorAll('.cogrp'));
+     for(var c=0;c<cos.length;c++){if(!cos[c].open){cos[c].querySelector('summary').click(); await T.idle();}}
+     var n=gs[0][2].querySelectorAll('article[data-fid]').length;
+     if(n!==o[2])bad.push('選了「'+o[1]+'」,選單寫 '+o[2]+' 張,打開是 '+n+' 張');}
+   if(!await pick('all'))bad.push('選單沒有「全部」');
+   else{var all=groups(), sum=all.reduce(function(a,g){return a+g[1];},0), want=opts.slice(1).filter(function(o){return o[2]>0;}).length;
+     if(all.length!==want||sum!==opts[0][2])bad.push('按「全部」回來,畫面是 '+all.length+' 組 '+sum+' 張,選單寫全部 '+opts[0][2]+' 張、有卡的 '+want+' 組');}
+   if(JSON.stringify(await T.state())!==s0)bad.push('篩完卡的狀態變了');
+   document.querySelector('[data-tab="none"]').click();
+   return bad.join('；');
  """),
 ]
 CHECKS=CHECKS+OUTCOME_CHECKS
@@ -861,6 +956,29 @@ WEB_CHECKS.append(('設定頁:偏好筆記分開顯示、編輯後存得住,手�
    return bad.join('；');
  """))
 
+WEB_CHECKS.append(('首頁「要你處理」:散在各頁要你動手的事列在最上面,點 Agent 回報那一顆就打開回報、捲到那裡',"""
+   // 放一件要你處理的回報(跟步數量測同一種假回報),檢查完拿掉
+   var st0=await T.state(), box0=(st0.__inbox__||[]).slice();
+   await T.put('__inbox__',box0.concat([{id:'boardcheck-wait',at:'2026-10-30T00:00:00',from:'代投',msg:'檢查用：待你確認資料',need:'確認申請資料',n:1,url:'https://example.com/login'}]));
+   await T.resync();
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
+   var bad=[], row=document.querySelector('#waitbar .waitrow');
+   if(!row){await T.put('__inbox__',box0); await T.resync(); return '首頁有要你處理的回報,最上面卻沒有「要你處理」';}
+   var d=document.querySelector('#inboxbar details.inbox-d'); if(d)d.open=false;
+   var ob=row.querySelector('[data-openinbox]');
+   if(!ob||!/回報 \\d+ 件/.test(ob.textContent))bad.push('「要你處理」的回報那一顆沒寫幾件');
+   if(d&&/要你處理/.test(d.querySelector('summary').textContent))bad.push('下面回報那一列又叫「要你處理」,跟上面那一列同名');
+   T.press('#waitbar [data-openinbox]'); await T.idle();
+   d=document.querySelector('#inboxbar details.inbox-d');
+   if(!d||!d.open)bad.push('按了回報那一顆,回報沒有打開');
+   else{var r=d.getBoundingClientRect(); if(r.top<0||r.top>window.innerHeight)bad.push('按了回報那一顆,回報不在畫面上'); d.open=false; await T.frame(); await T.idle();}
+   document.querySelector('[data-tab="ready"]').click(); await T.idle();
+   if(document.querySelector('#waitbar .waitrow'))bad.push('「要你處理」不只在首頁');
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
+   await T.put('__inbox__',box0); await T.resync();
+   return bad.join('；');
+ """))
+
 CHECKS=CHECKS+WEB_CHECKS
 # ── 表單答案庫、代投、agent 回報那幾條(規矩寫法一樣:會失敗的檢查)──
 #
@@ -940,25 +1058,60 @@ ANS_CHECKS = [
  ('答案一次確認完:一次一條,空的要寫才能確認,確認一條用到它的卡一起放行;分頁 ⚠ 跟著少', SEED + r"""
    var go=document.querySelector('#app [data-ansq]'); if(!go)return '可投遞有答案等他確認,卻沒有「▶ 答案一次確認完」';
    var errs=[]; window.addEventListener('error',function(ev){errs.push(ev.message);});
-   var b0=badge(); go.click(); await T.idle();
-   var seen=0;
+   // 還沒確認完就按「結束」:關掉後焦點回到開啟它的那顆(畫面重畫後的新按鈕),鍵盤使用者不用從頁首重找
+   go.focus(); go.click(); await T.idle(); T.press('#rzmodal .ansq-box .rzm-x'); await T.idle();
+   if(!(document.activeElement&&document.activeElement.matches&&document.activeElement.matches('[data-ansq]')))bad.push('按「結束」關掉後焦點沒回到開啟它的按鈕');
+   go=document.querySelector('#app [data-ansq]');
+   var b0=badge(); go.focus(); go.click(); await T.idle();
+   var seen=0, skipped=0, key=function(k,mod){if(document.activeElement)document.activeElement.blur(); document.dispatchEvent(new KeyboardEvent('keydown',{key:k,bubbles:true,ctrlKey:!!mod}));};
+   // 視窗裡就看得到、改得了共用／只給這個職缺(兩格分段切換):框裡先打字,切一次、切回來,打的字還在
+   var m0=document.getElementById('rzmodal'), pj=m0&&m0.querySelector('[data-anspj][aria-pressed="false"]');
+   if(!pj)bad.push('逐條確認視窗裡沒有共用／只給這個職缺的切換');
+   else{var pk=pj.getAttribute('data-anspj'), was=pj.getAttribute('data-pjv')==='0', ta0=m0.querySelector('[data-ansqv]'), orig=ta0.value, typed='還沒確認的字 '+Date.now();
+     if(document.activeElement!==ta0)bad.push('打開一條時焦點沒有在答案框裡(Enter 會確認還沒讀的答案)');
+     ta0.value=typed; pj.click(); await T.idle();
+     var pj2=document.querySelector('#rzmodal [data-anspj][aria-pressed="false"]');
+     if(!pj2||(pj2.getAttribute('data-pjv')==='0')===was)bad.push('視窗裡按了共用／只給這個職缺沒有切過去');
+     else{if((document.querySelector('#rzmodal [data-ansqv]')||{}).value!==typed)bad.push('切範圍把框裡還沒確認的字清掉了');
+       document.querySelector('#rzmodal [data-ansqv]').value=orig; pj2.click(); await T.idle();}
+     var pe=((await T.state()).__ans__||[]).filter(function(e){return e.k===pk;})[0]||{};
+     if(!!pe.pj!==was)bad.push('切回來之後存的範圍不對');
+     // 上一條:跳過一條再按上一條,回到剛才那一條
+     var k0=document.querySelector('#rzmodal [data-ansqv]').getAttribute('data-ansqv');
+     T.press('#rzmodal [data-ansq-skip]'); await T.idle();
+     T.press('#rzmodal [data-ansq-prev]'); await T.idle();
+     var kb=document.querySelector('#rzmodal [data-ansqv]');
+     if(!kb||kb.getAttribute('data-ansqv')!==k0)bad.push('按「上一條」沒有回到剛才那一條');}
    for(var i=0;i<10;i++){var m=document.getElementById('rzmodal'); if(!m||m.style.display!=='flex'||!m.querySelector('[data-ansqv]'))break;
      var ta=m.querySelector('[data-ansqv]'), k=ta.getAttribute('data-ansqv'); seen++;
-     if(!/^zz_/.test(k)){m.querySelector('[data-ansq-skip]').click(); await T.idle(); continue;}
+     // 不是這條要驗的就用鍵盤 → 跳過(鍵盤快速前進)
+     if(!/^zz_/.test(k)){if(skipped++){T.press('#rzmodal [data-ansq-skip]'); await T.idle(); continue;}
+       key('ArrowRight'); await T.idle();
+       if((document.querySelector('#rzmodal [data-ansqv]')||{}).getAttribute&&document.querySelector('#rzmodal [data-ansqv]').getAttribute('data-ansqv')===k){bad.push('按 → 沒有跳到下一條'); break;}
+       continue;}
      if(!ta.value.trim()){m.querySelector('[data-ansq-ok]').click(); await T.idle();
        if(document.querySelector('#rzmodal [data-ansqv]')!==ta&&document.querySelector('#rzmodal [data-ansqv]').getAttribute('data-ansqv')!==k)bad.push('空的答案沒寫就能確認');
        ta=document.querySelector('#rzmodal [data-ansqv]'); ta.value='測試答案';}
-     document.querySelector('#rzmodal [data-ansq-ok]').click(); await T.idle();}
+     // 單按 Enter 不確認(焦點掉到框外時多按一次就會確認下一條還沒讀的);Ctrl/⌘ + Enter 才確認
+     key('Enter'); await T.idle();
+     var kn=document.querySelector('#rzmodal [data-ansqv]'); if(!kn||kn.getAttribute('data-ansqv')!==k){bad.push('單按 Enter 就確認了'); break;}
+     key('Enter',1); await T.idle();}
    if(!seen)bad.push('按了沒有出現第一條');
    var mm=document.getElementById('rzmodal'); if(mm&&mm.style.display==='flex')bad.push('全部確認完,視窗沒有自己關(剩:'+((mm.querySelector('.ansq-q')||{}).textContent||'')+')');
    await T.idle();
    var st=await T.state(), a=(st.__ans__||[]), g=function(k){return a.filter(function(e){return e.k===k;})[0]||{};};
    if(g('zz_nat').inf)bad.push('確認了,那一條還標著我推論的');
+   var ub=document.querySelector('#snack.on .snack-undo');
+   if(!ub||!/確認了/.test(T.snack()))bad.push('確認完沒有「確認了 N 條」的復原');
    if(!String(g('zz_empty').v||g('zz_empty').zh||'').trim())bad.push('空的那一條寫了答案沒存進去');
    A=T.card(ids[0]); B=T.card(ids[1]);
    [A,B].forEach(function(c,i){if(c&&!/答案都確認過了/.test((line(c)||{}).textContent||''))bad.push('確認完第 '+(i+1)+' 張卡還在等答案('+((line(c)||{}).textContent||'')+')');});
    if(errs.length)bad.push('頁面丟了例外:'+errs.join('|'));
    if(badge()>=b0)bad.push('分頁 ⚠ 沒有跟著少('+b0+' → '+badge()+')');
+   // 按「復原」:這一輪確認的整批放回待確認
+   if(ub){ub.click(); await T.idle();
+     var st2=(await T.state()).__ans__||[], n2=st2.filter(function(e){return e.k==='zz_nat';})[0]||{};
+     if(!n2.inf)bad.push('按了復原,確認過的那一條沒有放回待確認');}
    return await done();
  """, 'ans_cards'),
  ('答案庫:預設收起(有待確認也只在標題亮 ⚠),一條一行字,點了那一條才展開,✓ 不用展開就能按,重畫後展開的還開著', SEED + r"""
@@ -1210,28 +1363,44 @@ ANS_CHECKS = [
    var jobs=JSON.parse(document.getElementById('data-jobs').textContent).jobs.filter(function(j){return !j.bk;});
    var box=[{id:'rzz1',at:'2026-01-01T09:00:00',from:'代投',msg:'測試:被網站的機器人驗證擋住 '+Date.now(),need:'測試用',n:1,url:'https://example.com/login'},   // 代投的回報屬於可投遞那一頁
             // agent 自己寫、沒有程式自己截的那一頁:列出來但標缺證據,不算要他處理、不寫「你要做的」(#315)
-            {id:'rzz2',at:'2026-01-01T09:01:00',from:'查回音',msg:'測試:信箱要登入 '+Date.now(),need:'去登入信箱',n:1,agent:true,noev:'這一輪沒有程式自己截的那一頁'}];
+            {id:'rzz2',at:'2026-01-01T09:01:00',from:'查回音',msg:'測試:信箱要登入 '+Date.now(),need:'去登入信箱',n:1,agent:true,noev:'這一輪沒有程式自己截的那一頁'},
+            {id:'rzz3',at:'2026-01-01T09:02:00',from:'平台履歷同步',msg:'測試:平台要登入 '+Date.now(),need:'去登入平台',n:1,agent:true,noev:'這一輪沒有程式自己截的那一頁'}];
    await T.put('__inbox__',box);
    await T.resync();
    document.querySelector('[data-tab="ship"]').click(); await T.idle();
    var bad=[], d=document.querySelector('#inboxbar details.inbox-d');
    if(!d)return '頁面最上面看不到 agent 回報';
    if(d.open)bad.push('agent 回報預設是開的');
-   if(!/1 件要你處理/.test(d.querySelector('summary').textContent))bad.push('標題看不出有 1 件要他處理(缺證據的那則不算)');
-   if(!/1 件缺證據/.test(d.querySelector('summary').textContent))bad.push('標題沒寫有 1 件缺證據');
+   if(!/1 件要你做/.test(d.querySelector('summary').textContent))bad.push('標題看不出有 1 件要他處理(缺證據的那則不算)');
+   if(!/2 件沒附截圖/.test(d.querySelector('summary').textContent))bad.push('標題沒寫有 2 件沒附截圖');
    var r2=document.querySelector('#inboxbar [data-ib="rzz2"]');
    // 要他處理的回報一定附他要去的那一頁(#389):標題列就點得開,開新分頁
    var link=document.querySelector('#inboxbar [data-ib="rzz1"] summary a[href="https://example.com/login"]');
    if(!link||link.target!=='_blank')bad.push('要他處理的回報沒附點得開的那一頁');
    if(!r2)bad.push('缺證據的回報沒列出來');
-   else{if(/你要做的/.test(r2.querySelector('summary').textContent))bad.push('缺證據的回報還寫「你要做的」');
-     if(!/缺證據/.test(r2.querySelector('summary').textContent))bad.push('缺證據的回報沒標缺證據');}
+   else{if(/你要做的/.test(r2.textContent))bad.push('缺證據的回報還寫「你要做的」');
+     // 沒附截圖的收在最後一個子開合,標題寫原因
+     var nvf=r2.closest('details.ib-noev');
+     if(!nvf||!/沒附截圖/.test(nvf.querySelector('summary').textContent))bad.push('缺證據的回報沒收進「沒附截圖,先別照做」');
+     var r1=document.querySelector('#inboxbar [data-ib="rzz1"]');
+     if(r1&&(r1.compareDocumentPosition(r2)&Node.DOCUMENT_POSITION_PRECEDING))bad.push('沒附截圖的排在要你做的前面');
+     // 每則有看板現成的重跑入口:查回音的是「查應徵進度」;平台履歷同步的是「全部同步」,按下去真的開始同步
+     if(!/查應徵進度/.test((r2.querySelector('[data-ibrerun^="replies"]')||{}).textContent||''))bad.push('查回音那則沒附「查應徵進度」');
+     var before=await fetch('/api/rev').then(function(x){return x.json();}), old=(before.sync||{}).t0||0;
+     if(!document.querySelector('#inboxbar [data-ib="rzz3"] [data-ibrerun="sync"]'))bad.push('平台履歷同步那則沒附「全部同步」');
+     else{T.press('#inboxbar [data-ib="rzz3"] [data-ibrerun="sync"]');
+       var sy=await T.until(async function(){var r=await fetch('/api/rev').then(function(x){return x.json();});
+         return r.sync&&r.sync.t0>old&&['done','nothing','incomplete'].indexOf(r.sync.phase)>=0?r.sync:null;},15000);
+       if(!sy)bad.push('按了回報裡的「全部同步」沒有開始同步');}}
    document.querySelector('[data-tab="none"]').click(); await T.idle();
    // 要他處理的事不能藏在別的分頁:待評估那頁也要看得到代投的回報,而且有一顆直接去「可以投了」
-   var dn=document.querySelector('#inboxbar details.inbox-d');
-   if(!dn||!/1 件要你處理/.test(dn.querySelector('summary').textContent))bad.push('在待評估那頁看不到代投的回報(要點到可以投了才看得到)');
-   else{dn.querySelector('summary').click(); await T.idle();
-     var rn=document.querySelector('#inboxbar [data-ib="rzz1"]'); if(rn){rn.querySelector('summary').click(); await T.idle();}
+   // 首頁:「要你處理」那一列直接寫這件回報要做什麼(測試用),下面回報的標題不再重複件數
+   var dn=document.querySelector('#inboxbar details.inbox-d'), wt=document.querySelector('#waitbar [data-openinbox]');
+   if(!dn||!wt||!/測試用/.test(wt.textContent))bad.push('在待評估那頁看不到代投的回報要做什麼(要點到可以投了才看得到)');
+   else{if(/件要你做/.test(dn.querySelector('summary').textContent))bad.push('首頁回報標題又寫了一次件數');
+     T.press('#waitbar [data-openinbox]'); await T.idle();
+     if(!dn.open||!document.querySelector('#inboxbar details[data-ib="rzz1"]').open)bad.push('按「要你處理」那一件,沒有打開那一則回報');
+     var rn=document.querySelector('#inboxbar [data-ib="rzz1"]');
      var go=rn&&rn.querySelector('[data-inboxtab="ship"]');
      if(!go)bad.push('別頁的回報沒有「去可以投了」');
      else{go.click(); await T.idle(); if(!document.querySelector('#tabs [data-tab="ship"].on'))bad.push('按了「去那一頁」沒有到可以投了');}}
@@ -1297,7 +1466,8 @@ SCROLL_CHECKS=[
    document.querySelector('[data-tab="none"]').click(); await T.idle();
    window.scrollTo(0,0); document.body.classList.remove('scrolled'); await T.idle();
    var pad=document.createElement('div'); document.getElementById('app').appendChild(pad);
-   var room=document.documentElement.scrollHeight-window.innerHeight; pad.style.height=Math.max(0,280-room)+'px';
+   // 用 body 量內容高度:頁面比畫面短時 documentElement.scrollHeight 會等於畫面高度,差就變 0,補 280 還是捲不動
+   var room=document.body.offsetHeight-window.innerHeight; pad.style.height=Math.max(0,280-room)+'px';
    await T.idle();
    var h0=document.documentElement.scrollHeight;
    var n=0, mo=new MutationObserver(function(){n++;}); mo.observe(document.body,{attributes:true,attributeFilter:['class']});
@@ -1571,7 +1741,7 @@ SAVE_CHECKS.append(
    sw.click(); await T.idle();
    // 指名要找的:加一個、再刪掉,兩邊都要真的動到
    var h=document.querySelectorAll('#app .cohead')[0]; if(h){h.click(); await T.idle();
-     var add=h.parentNode.querySelector('[data-coseed]');
+     var add=h.closest('.corow').querySelector('[data-coseed]');
      if(add){add.click(); await T.idle();
        var n1=((await T.state())['__seeds__']||[]).length;
        if(!n1)bad.push('「找這家更多」按了沒加進清單');
@@ -1614,9 +1784,9 @@ SAVE_CHECKS.append(
    document.querySelector('[data-tab="all"]').click(); await T.idle();
    T.open(0); await T.idle();
    var grp0=document.querySelector('#app details.cogrp[open]'); if(!grp0)return '沒有展開的公司';
-   var mb0=grp0.querySelector('[data-omore]'); if(!mb0)return '公司列沒有 ⋯';
+   var mb0=grp0.closest('.corow').querySelector('[data-omore]'); if(!mb0)return '公司列沒有 ⋯';
    mb0.click(); await T.idle();
-   var b=grp0.querySelector('.more-m [data-block]'); if(!b)return '⋯ 裡看不到封鎖';
+   var b=grp0.closest('.corow').querySelector('.more-m [data-block]'); if(!b)return '⋯ 裡看不到封鎖';
    var co=b.getAttribute('data-block');
    b.click(); await T.idle();
    // 封鎖名單在篩選列「🚫 已封鎖 N 家」點開的小視窗裡(已移除那一頁只放移除的卡片)
@@ -1646,12 +1816,12 @@ SAVE_CHECKS.append(
    var head=document.querySelector('#app summary.cohead'); if(!head)return '找不到公司列';
    var bad0=[];
    // 公司層級的動作一律在 ⋯ 裡:誤點 ⋯ 只是開選單,代價是零;攤在外面誤點就整家不見了
-   var mb=head.querySelector('[data-omore]'); if(!mb)return '公司列沒有 ⋯';
-   [].slice.call(head.querySelectorAll('button')).forEach(function(x){
+   var mb=head.closest('.corow').querySelector(':scope>.more [data-omore]'); if(!mb)return '公司列沒有 ⋯';
+   [].slice.call(head.querySelectorAll('button')).concat([].slice.call(head.closest('.corow').querySelectorAll(':scope>.more button'))).forEach(function(x){
      if(!x.hasAttribute('data-omore')&&!x.closest('.more-m'))
        bad0.push('公司列上又出現攤在外面的動作:'+x.textContent.trim());});
    mb.click(); await T.idle();
-   var b=head.parentNode.querySelector('.more-m [data-coprep]');
+   var b=head.closest('.corow').querySelector('.more-m [data-coprep]');
    if(!b)return (bad0.join('；')||'')+'；⋯ 裡看不到「全部進準備區」';
    var st0=await T.state();
    var before=Object.keys(st0).filter(function(k){return st0[k]&&st0[k].app;}).length;
@@ -2097,13 +2267,17 @@ CHECKS=CHECKS+FLOW_CHECKS
 # 介面一致性(可用性原則的「一致性」「使用者能控制」):同一件事在不同地方長得不一樣、不同的事長得一樣,
 # 都是他實際用的時候抓到的。寫成檢查:每一頁、每個公司選單、每張卡的按鈕都看一遍。
 UX_INV = FLOW_INV + r"""
-   // 同一個概念只能有一個圖示(分頁、按鈕、選單、標籤全部算)
-   var ICON={'喜歡':'👍','普通':'😐','不喜歡':'👎','差一點':'💪','移除':'🗑','已移除':'🗑','封鎖':'🚫','已封鎖':'🚫','出錯了':'🔧'};
+   // 同一個概念只能有一個圖示(分頁、按鈕、選單、標籤全部算)。圖示是 board.js 的 ic() 畫的 svg.ic,名字在 data-i;
+   // 按鈕開頭還是 emoji 字元的也算錯:介面圖示只用同一套單色線條圖示。
+   var ICON={'喜歡':'thumbs-up','普通':'meh','不喜歡':'thumbs-down','差一點':'trending-up','移除':'trash-2','已移除':'trash-2','封鎖':'ban','已封鎖':'ban','出錯了':'wrench'};
    function iconIssues(where){var bad=[];
      [].forEach.call(document.querySelectorAll('#tabs .tab, #app button, #app .more-m button, #ctlbar button, .ctl-act'),function(el){
-       var t=(el.textContent||'').replace(/\s+/g,' ').trim(), m=t.match(/^(\S+?)\s*(不喜歡|喜歡|普通|差一點|已移除|移除|已封鎖|封鎖|出錯了)(?=[\s\d(（]|$)/);
-       if(!m||/[\w一-鿿]/.test(m[1]))return;          // 開頭不是圖示的不算
-       var want=ICON[m[2]]; if(want&&m[1].replace(/️/g,'')!==want.replace(/️/g,''))bad.push(where+':「'+t.slice(0,16)+'」用 '+m[1]+',「'+m[2]+'」別處是 '+want);});
+       var t=(el.textContent||'').replace(/\s+/g,' ').trim(), m=t.match(/^(\S*?)\s*(不喜歡|喜歡|普通|差一點|已移除|移除|已封鎖|封鎖|出錯了)(?=[\s\d(（]|$)/);
+       if(!m)return;
+       if(m[1]){if(!/[\w一-鿿]/.test(m[1]))bad.push(where+':「'+t.slice(0,16)+'」開頭還是 '+m[1]+',介面圖示要用 ic()');
+         return;}                                     // 開頭是別的字(「這家全部移除」)不算
+       var ic=el.querySelector('svg.ic'), want=ICON[m[2]], got=ic&&ic.getAttribute('data-i');
+       if(want&&got&&got!==want)bad.push(where+':「'+t.slice(0,16)+'」用 '+got+',「'+m[2]+'」別處是 '+want);});
      return bad;}
    // 按鈕、選單項目的字不能被擠成兩行
    // 量法:暫時不准換行,高度變矮 = 原本被擠成兩行(數字小標字級不同,不能數文字的上緣)
@@ -2121,7 +2295,7 @@ UX_CHECKS=[
    bad=bad.concat(iconIssues('分頁列'));
    for(const tab of tabs){
      openTab(tab); await T.idle();
-     var mb=document.querySelector('#app .cohead .more-b'); if(mb){mb.click(); await T.idle();}
+     var mb=document.querySelector('#app .corow>.more>.more-b'); if(mb){mb.click(); await T.idle();}
      bad=bad.concat(iconIssues(tab), wrapIssues(tab));
      if(mb)document.body.click();}
    openTab('none'); document.body.click(); await T.idle();
@@ -2132,7 +2306,7 @@ UX_CHECKS=[
    [].forEach.call(document.querySelectorAll('#tabs .tab'),function(t){names[t.getAttribute('data-tab')]=t.textContent.replace(/[\d\s⚠△]+$/,'').replace(/^[^\w\u4e00-\u9fff]+/,'').trim();});
    // 先封鎖一家,「🚫 已封鎖」那顆才會出現;檢查完解除
    openTab('none'); await T.idle();
-   var mb=document.querySelector('#app .cohead .more-b'); if(mb){mb.click(); await T.idle();}
+   var mb=document.querySelector('#app .corow>.more>.more-b'); if(mb){mb.click(); await T.idle();}
    var blk=document.querySelector('#app .more-m:not([hidden]) [data-block]'), co=blk&&blk.getAttribute('data-block');
    if(blk){blk.click(); await T.idle();}
    [].forEach.call(document.querySelectorAll('[data-gotab]'),function(b){var k=b.getAttribute('data-gotab'), t=b.textContent.trim();
@@ -2157,8 +2331,8 @@ UX_CHECKS=[
      var g=document.querySelector('#app details.cogrp'); if(!g)continue;
      var cards=g.querySelectorAll('article[data-fid]'); if(!cards.length)continue;
      var cardTxt=[].map.call(cards,function(c){return c.textContent;}).join(' ');
-     var menu=g.querySelector('.cohead .more-m'), mt=menu?menu.textContent:'';
-     if(/送去準備履歷中/.test(cardTxt)&&!/這家全部送去準備履歷中/.test(mt))bad.push(tab+':卡片能送去準備履歷中,公司選單沒有「這家全部送去準備履歷中」');
+     var menu=g.closest('.corow').querySelector(':scope>.more>.more-m'), mt=menu?menu.textContent:'';
+     if(/送去準備履歷/.test(cardTxt)&&!/這家全部送去準備履歷/.test(mt))bad.push(tab+':卡片能送去準備履歷,公司選單沒有「這家全部送去準備履歷」');
      if(cards[0].querySelector('[data-rm="1"]')&&!/這家全部移除/.test(mt))bad.push(tab+':卡片能移除,公司選單沒有「這家全部移除」');}
    openTab('none'); await T.idle();
    return bad.join('；');
@@ -2168,7 +2342,7 @@ UX_CHECKS=[
    var f=document.querySelector('[data-fold="cfg:flow"]'); if(!f)return '設定頁沒有自動流程那一塊';
    if(!f.open)f.querySelector('summary').click(); await T.idle();
    var labels=[].map.call(f.querySelectorAll('label'),function(l){return l.querySelector('input[type=checkbox]')?l.textContent:'';}).join('｜');
-   [['按 👍 就送去準備','按讚就送去準備'],['自動準備履歷','新卡自動準備履歷'],['自動進「可以投了」','驗收過自動進可以投了'],
+   [['按「喜歡」就送去準備','按讚就送去準備'],['自動準備履歷','新卡自動準備履歷'],['自動進「可以投了」','驗收過自動進可以投了'],
     ['填表','進可以投了就讓 agent 填表'],['查應徵進度','每天自動查應徵進度']].forEach(function(x){
      if(labels.indexOf(x[0])<0)bad.push('「'+x[1]+'」沒有勾選框可以關');});
    document.querySelector('[data-tab="none"]').click(); await T.idle();   // 回到看板,後面的檢查從這裡開始
@@ -2210,7 +2384,7 @@ UX_CHECKS.append(
      openTab(tab); await T.idle(); await tryOne(tab,q('[data-err]'),'出錯了');
      for(const act of ['data-coprep','data-corm','data-block']){
        openTab(tab); await T.idle();
-       var mb=document.querySelector('#app .cohead .more-b'); if(mb){mb.click(); await T.idle();}
+       var mb=document.querySelector('#app .corow>.more>.more-b'); if(mb){mb.click(); await T.idle();}
        await tryOne(tab,function(){return document.querySelector('#app .more-m:not([hidden]) ['+act+']');},act.replace('data-',''));
        document.body.click();}}
    openTab('none'); await T.idle();
@@ -2379,6 +2553,21 @@ CHECKS.append((
       if(cases.length){T.press('[data-cust-diff][data-cust-url="'+cases[0].id+'"]'); await T.idle();
         if(!await T.until(function(){var m=document.querySelector('#rzmodal .custom-diff-box'); return m&&/客製加的一行/.test(m.textContent);},5000))
           bad.push('按了看差異沒打開原檔與客製版的差異('+T.snack()+')');
+        // 兩邊各自放大看,再回到對照:文字差異的開合留著、焦點回剛才那顆放大鈕
+        var raw=document.querySelector('#rzmodal .custom-compare-text');
+        if(!raw||raw.open)bad.push('文字差異沒有預設收著');
+        if(raw){T.press('#rzmodal .custom-compare-text summary');if(!raw.open)bad.push('文字差異不能展開');}
+        T.press('#rzmodal [data-cust-diff-zoom="custom"]');
+        var frame=document.querySelector('#rzmodal iframe.rzm-pdf');
+        if(!frame||!(frame.getAttribute('src')||'').startsWith('/api/file?path='))bad.push('放大客製檔案沒有開實際的檔案');
+        T.press('#rzmodal [data-cust-diff-back]');
+        var returned=document.querySelector('#rzmodal [data-cust-diff-zoom="custom"]'), txt=document.querySelector('#rzmodal .custom-compare-text');
+        if(!returned||document.activeElement!==returned||!txt||!txt.open)bad.push('回到對照沒留住文字差異的開合,或焦點沒回放大鈕');
+        var original=document.querySelector('#rzmodal [data-cust-diff-zoom="source"]');
+        if(original&&!original.disabled){T.press('#rzmodal [data-cust-diff-zoom="source"]');
+          var image=document.querySelector('#rzmodal .custom-compare-full .custom-compare-image');
+          if(!image||!(image.getAttribute('src')||'').startsWith('/api/source-preview?'))bad.push('放大原檔沒有用原檔的排版預覽');
+          T.press('#rzmodal [data-cust-diff-back]');}
         var x=document.querySelector('#rzmodal .rzm-x'); if(x)x.click();}
       return bad.join('；');
     """,
@@ -2529,8 +2718,8 @@ CHECKS.append((
         // (示範卡沒有履歷,照真卡的結構在第一張卡上補一列附件)
         var c0=document.querySelector('#app article[data-fid]');
         if(c0){var r=document.createElement('div'); r.className='vd-ship';
-          var pill='<span class="att-pill">Sandbox Attachment With A Deliberately Long Unbroken Title For Layout Testing Only</span>';
-          r.innerHTML='<button class="rz-open ship-rz" type="button">📄 English·測試</button><span class="ship-att">📎 '+pill+pill+'</span>';
+          var pill='<span class="att-pill"><span class="att-n">Sandbox Attachment With A Deliberately Long Unbroken Title For Layout Testing Only</span></span>';
+          r.innerHTML='<button class="rz-open ship-rz" type="button">English·測試</button><span class="ship-att"><span class="ship-att-k">附件 2 份</span>'+pill+pill+'</span>';
           var v=document.createElement('div'); v.className='vd y'; v.appendChild(r); c0.appendChild(v);}
         // 手機模擬下內容一撐寬,瀏覽器會把整頁縮小塞進去(innerWidth 跟著變大),要拿螢幕寬比
         var w=document.documentElement.scrollWidth, sw=screen.width;
@@ -2545,6 +2734,133 @@ CHECKS.append((
 
 
 CHECKS.append((
+    '導覽:手機「全部分頁」一打開看板是關的、分三組列全部分頁、選了就換頁並關起來;外觀淺色/深色/跟系統切得過去也記得住',
+    r"""
+      var bad=[], mob=matchMedia('(max-width:720px)').matches, m=document.getElementById('taball-m'), root=document.documentElement;
+      if(mob){
+        if(!m||!m.hidden)bad.push('一打開看板「全部分頁」就是開的');
+        T.press('#taball'); await T.frame(); m=document.getElementById('taball-m');
+        if(!m||m.hidden||!m.getBoundingClientRect().height)bad.push('按了「全部分頁」沒打開');
+        else{
+          var g=[].map.call(m.querySelectorAll('.ta-k'),function(x){return x.textContent;}).join('、');
+          if(g.indexOf('找工作、投遞流程、管理')!==0)bad.push('清單的分組是「'+g+'」');
+          if(m.querySelectorAll('[data-gotab]').length!==document.querySelectorAll('#tabs .tab').length)bad.push('清單跟分頁列的分頁數不一樣');
+          T.press('#taball-m [data-gotab="ready"]'); await T.idle();
+          if(!document.querySelector('#tabs .tab.on[data-tab="ready"]'))bad.push('清單選了「待你決定」沒換頁');
+          m=document.getElementById('taball-m'); if(!m||!m.hidden)bad.push('選了之後清單沒關');
+          T.press('#taball'); await T.frame();}
+      }else if(m&&m.getBoundingClientRect().height)bad.push('桌機看得到「全部分頁」清單');
+      var at=mob?'#taball-m ':'#hdr ', sys=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+      // 桌機的外觀收成一顆圖示鈕:一進來三選一是收著的,按了才打開
+      if(!mob){var tp=document.querySelector('#hdr .theme-pop');
+        if(!tp||!tp.hidden)bad.push('桌機頁首的外觀三選一一進來就攤開');
+        T.press('#hdr [data-themeopen]'); await T.frame();
+        if(!tp||tp.hidden||!tp.getBoundingClientRect().height)bad.push('按了外觀那顆沒打開三選一');}
+      try{
+        T.press(at+'[data-themeset="dark"]'); await T.frame();
+        if(root.getAttribute('data-theme')!=='dark'||getComputedStyle(document.body).backgroundColor!=='rgb(12, 14, 18)')bad.push('按「深色」畫面沒變深');
+        var keep=''; try{keep=localStorage.getItem('jobsalvo.theme');}catch(e){}
+        if(keep!=='dark')bad.push('「深色」沒記在這個瀏覽器');
+        T.press(at+'[data-themeset="light"]'); await T.frame();
+        if(root.getAttribute('data-theme')!=='light'||getComputedStyle(document.body).backgroundColor!=='rgb(246, 247, 249)')bad.push('按「淺色」畫面沒變淺');
+        T.press(at+'[data-themeset="system"]'); await T.frame();
+        if(root.getAttribute('data-theme')!==sys)bad.push('按「跟系統」沒照系統的外觀');
+        if((document.querySelector(at+'[data-themeset="system"]')||{}).getAttribute('aria-pressed')!=='true')bad.push('選中的那顆沒標 aria-pressed');
+      }finally{try{localStorage.removeItem('jobsalvo.theme');}catch(e){}}
+      if(mob){var b=document.getElementById('taball'); if(b&&b.getAttribute('aria-expanded')==='true')b.click();}
+      document.querySelector('#tabs [data-tab="none"]').click(); await T.idle();
+      return bad.join('；');
+    """,
+    'no_setup', {'viewports': ['mobile', 'wide'], 'fresh_page': True},
+))
+
+
+CHECKS.append((
+    '手機篩選收成一顆「篩選 · 排序」:一進來收著,按了攤成直式清單、不橫捲;改了條件鈕上寫幾個;公司列的計數寫字',
+    r"""
+      var bad=[];
+      document.querySelector('[data-tab="all"]').click(); await T.idle();
+      var bar=document.querySelector('#app .ctl-main');
+      if(!bar)return '找不到篩選那一排';
+      if(bar.getBoundingClientRect().height>0)bad.push('手機一進來篩選那一排就攤開(要收成一顆)');
+      T.press('#app [data-ctlfold]'); await T.frame();
+      bar=document.querySelector('#app .ctl-main');
+      var ctls=[].slice.call(bar.querySelectorAll('[data-ctl]'));
+      if(ctls.length<4)bad.push('打開後篩選只有 '+ctls.length+' 個');
+      if(ctls.some(function(c){var r=c.getBoundingClientRect(); return !r.height||r.right>innerWidth+1||r.left<-1;}))bad.push('打開後有篩選在畫面外');
+      if(bar.scrollWidth>bar.clientWidth+1)bad.push('打開後還是要橫捲');
+      // 改一個條件:收著的鈕上寫 1;改回來
+      var rg=bar.querySelector('[data-ctl="range"]'); rg.click(); await T.idle();
+      var opt=[].slice.call(document.querySelectorAll('#ctlmenu .ctlopt')).filter(function(o){return o.getAttribute('data-val')!=='0';})[0];
+      if(!opt)bad.push('進板選單沒有選項');
+      else{opt.click(); await T.idle();
+        var fb=document.querySelector('#app [data-ctlfold]');
+        if(!fb||!/1/.test((fb.querySelector('b')||{}).textContent||''))bad.push('改了一個條件,「篩選 · 排序」上沒寫 1');
+        document.querySelector('#app [data-ctl="range"]').click(); await T.idle();
+        document.querySelector('#ctlmenu .ctlopt[data-val="0"]').click(); await T.idle();}
+      // 公司列的計數:手機上圖示後面有字(沒有滑鼠提示)
+      var dot=document.querySelector('#app .codot');
+      if(dot&&!((dot.querySelector('.codot-w')||{}).offsetWidth))bad.push('手機公司列的計數只有圖示沒有字');
+      var fb2=document.querySelector('#app [data-ctlfold]'); if(fb2&&fb2.getAttribute('aria-expanded')==='true')fb2.click();
+      document.querySelector('[data-tab="none"]').click(); await T.idle();
+      return bad.join('；');
+    """,
+    'no_setup', {'viewports': ['mobile'], 'fresh_page': True},
+))
+
+
+CHECKS.append((
+    '設定頁「你的履歷」收著時寫每一份履歷的名稱,平台履歷寫實際狀態:回報裡同步卡在登入的算卡住,那一份旁邊「看回報」打開那一則',
+    r"""
+      // 回報寫了是哪一份(平台 語言/履歷)就對到那一份;示範資料沒登記平台履歷時,對不上的卡住也要單獨列出來
+      var bad=[], cf=await fetch('/api/settings').then(function(r){return r.json();}), ps=(cf.profile_status||[])[0]||{platform:'示範平台',lang:'zh',variant:'board-check'};
+      var keep=(await T.state()).__inbox__||[];
+      await T.put('__inbox__',[{id:'rzs1',at:'2026-01-01T09:00:00',from:'平台履歷同步',msg:ps.platform+' '+ps.lang+'/'+ps.variant+' 測試:要登入 '+Date.now(),
+        need:'在該頁完成登入',n:1,url:'https://example.com/login'}]);
+      await T.resync();
+      document.querySelector('[data-tab="cfg"]').click();
+      await T.until(function(){return document.querySelector('#app details[data-fold="cfg:resumes"]');},8000);
+      var d=document.querySelector('#app details[data-fold="cfg:resumes"]'), sm=d.querySelector('summary').textContent;
+      (((cf.effective||{}).resume||{}).resumes||[]).forEach(function(r){if(sm.indexOf(r.name||r.id)<0)bad.push('你的履歷收著沒寫「'+(r.name||r.id)+'」');});
+      if(!/份卡住|1 件同步回報要你處理/.test(sm))bad.push('你的履歷收著沒寫平台履歷卡住:'+sm.trim().slice(0,80));
+      if(!d.open)d.querySelector('summary').click(); await T.idle();
+      if(!document.querySelector('#app [data-openinbox="rzs1"]'))bad.push('卡住的那一份旁邊沒有「看回報」');
+      else{T.press('#app [data-openinbox="rzs1"]'); await T.idle();
+        var r=document.querySelector('#inboxbar [data-ib="rzs1"]'), ib=document.querySelector('#inboxbar details.inbox-d');
+        if(!r||!ib||!ib.open||(r.tagName==='DETAILS'&&!r.open))bad.push('按「看回報」沒有打開那一則回報');}
+      await T.put('__inbox__',keep); await T.resync();
+      document.querySelector('[data-tab="none"]').click(); await T.idle();
+      return bad.join('；');
+    """,
+    'no_setup', {'viewports': ['wide'], 'fresh_page': True},
+))
+
+
+CHECKS.append((
+    '設定頁「你的履歷」旁的「新增履歷」:按了打開那一塊、跳到新增那一格;收起來的各列右邊有摘要',
+    r"""
+      var bad=[]; document.querySelector('[data-tab="cfg"]').click();
+      await T.until(function(){return document.querySelector('#app [data-cfresgo]');},8000);
+      var d=document.querySelector('#app details[data-fold="cfg:resumes"]');
+      if(d&&d.open)d.querySelector('summary').click();
+      T.press('#app [data-cfresgo]'); await T.frame(); await T.frame();
+      d=document.querySelector('#app details[data-fold="cfg:resumes"]');
+      if(!d||!d.open)bad.push('按了新增履歷,你的履歷沒打開');
+      var nw=document.getElementById('cfg-rnew'), r=nw&&nw.getBoundingClientRect();
+      if(!nw||document.activeElement!==nw)bad.push('按了新增履歷,游標不在新履歷名稱那一格');
+      else if(r.top<0||r.bottom>innerHeight)bad.push('按了新增履歷,新增那一格不在畫面上');
+      ['cfg:search','cfg:research-skills','cfg:preferences','cfg:cats','cfg:apply','cfg:replies','cfg:flow','cfg:agent'].forEach(function(k){
+        var s=document.querySelector('#app details[data-fold="'+k+'"] > summary .n');
+        if(!s||!s.textContent.trim())bad.push(k+' 收起來右邊沒有摘要');});
+      if(d&&d.open)d.querySelector('summary').click();
+      document.querySelector('[data-tab="none"]').click(); await T.idle();
+      return bad.join('；');
+    """,
+    'no_setup', {'viewports': ['mobile', 'wide'], 'fresh_page': True},
+))
+
+
+CHECKS.append((
     '公司列 ⋯「跟別家是同一家」:併完只剩一家、張數加總、存進設定的公司別名;可以復原',
     r"""
       var bad=[], name=function(h){return h.querySelector('.coname').textContent;}, cnt=function(h){return +h.querySelector('.con').textContent;};
@@ -2553,8 +2869,8 @@ CHECKS.append((
       var hs=[].slice.call(document.querySelectorAll('#app .cohead')).filter(function(h){return name(h)!=='其他';});
       if(hs.length<2)return '示範看板不到兩家公司';
       var A=name(hs[0]), B=name(hs[1]), n=cnt(hs[0])+cnt(hs[1]);
-      hs[0].querySelector('[data-omore]').click(); await T.idle();
-      var mb=hs[0].querySelector('[data-comerge]'); if(!mb)return '公司列 ⋯ 裡沒有「跟別家是同一家」';
+      hs[0].closest('.corow').querySelector('[data-omore]').click(); await T.idle();
+      var mb=hs[0].closest('.corow').querySelector('[data-comerge]'); if(!mb)return '公司列 ⋯ 裡沒有「跟別家是同一家」';
       mb.click(); await T.idle();
       var opt=[].slice.call(document.querySelectorAll('#rzmodal [data-comerge-to]')).filter(function(b){return b.getAttribute('data-comerge-to')===B;})[0];
       if(!opt)return '選單裡找不到「'+B+'」';
@@ -2795,7 +3111,8 @@ CHECKS.append((
       else if(!ap.disabled)bad.push('還沒填過就能核准(真的送出會叫不回那段對話,整筆作廢)');
       var why=c.querySelector('.ap-why');
       if(!why||!/還沒填這張/.test(why.textContent))bad.push('卡上沒寫為什麼不能核准');
-      var main=c.querySelector('.ap-main');
+      // 有常用答案待確認時,填這張刻意退成次要,旁邊寫「先確認答案」;那時它仍是卡上的下一步
+      var main=c.querySelector('.ap-main')||(c.querySelector('.ap-hint')&&c.querySelector('#app [data-runone^="apply|"]'));
       if(!main||!/填這張/.test(main.textContent)||(main.getAttribute('data-runone')||'').indexOf('apply|')!==0)
         bad.push('主按鈕不是「讓 agent 填這張」');
       var vd=c.querySelector('.vd-b');
@@ -2807,22 +3124,58 @@ CHECKS.append((
 
 
 CHECKS.append((
-    '設定頁:四組分好;改了東西存檔列亮起來、黏在畫面底下;沒存就切走會提醒',
+    '設定頁:四組分好;改了東西存檔列亮起來、黏在畫面底下;頁首寫設定還沒存;沒存就切走先問',
     r"""
       var bad=[]; document.querySelector('[data-tab="cfg"]').click(); await T.idle();
       var g=[].slice.call(document.querySelectorAll('#app .cfg-grp')).map(function(x){return x.textContent;});
       if(g.join('|')!=='你的資料|找缺與判斷|投遞|Agent 與系統')bad.push('分組不對:'+g.join('|'));
       var sv=document.getElementById('cfg-save'); if(!sv)return bad.concat('沒有存檔列').join('；');
       if(sv.classList.contains('dirty'))bad.push('沒改東西存檔列就亮著');
+      if(getComputedStyle(sv).position!=='sticky')bad.push('沒改東西時存檔列沒有黏在底下(存檔狀態要一直看得到)');
+      var jb=[].slice.call(document.querySelectorAll('#app .cfg-jump [data-cfjump]'));
+      if(jb.length!==4)bad.push('頁頂跳到各組的鈕不是四顆:'+jb.length);
+      for(const b of jb){var k=b.getAttribute('data-cfjump'); T.press('#app [data-cfjump="'+k+'"]'); await T.frame(); await T.frame();   // 第二幀:捲動後分頁列縮起來
+        var hd=document.getElementById('cfg-g-'+k), r=hd&&hd.getBoundingClientRect(), top=document.getElementById('tabs').getBoundingClientRect().bottom;
+        if(!r||r.top<top-1||r.bottom>innerHeight)bad.push('按「'+b.textContent+'」沒跳到那一組('+(r?Math.round(r.top):'找不到')+')');}
+      window.scrollTo(0,0); await T.frame();
       var ag=document.querySelector('details[data-fold="cfg:agent"]'); ag.querySelector('summary').click(); await T.idle();
       var inp=document.querySelector('[data-cfa-model="0"]'), v0=inp.value;
       T.type(inp,v0+'x'); await T.idle();
       if(!document.getElementById('cfg-save').classList.contains('dirty'))bad.push('改了東西存檔列沒亮');
       if(getComputedStyle(document.getElementById('cfg-save')).position!=='sticky')bad.push('改了東西存檔列沒有黏在底下');
+      // 頁首不寫「已存」,寫「設定還沒存」而且點得到
+      if(!document.querySelector('#savebar [data-gotab="cfg"]'))bad.push('有沒存的設定,頁首還是寫已存');
+      // 沒存就切走:先擋下來問(存好再走／放棄改動／留在這裡),按留在這裡就還在設定頁、剛打的字還在
       document.querySelector('[data-tab="none"]').click(); await T.idle();
-      if(!/設定頁有改動還沒存/.test(T.snack()))bad.push('沒存就切走,沒有提醒');
-      document.querySelector('[data-tab="cfg"]').click(); await T.idle();
+      var ask=document.querySelector('#rzmodal [data-cfleave="stay"]');
+      if(!ask)bad.push('沒存就切走,沒有先問');
+      else{
+        // 對話框語意:讀屏知道這是要他決定的對話框、標題是什麼;焦點在框裡、Tab 不跑到背景;Esc = 留在這裡
+        var ov=document.getElementById('rzmodal'), lb=document.getElementById(ov.getAttribute('aria-labelledby')||'-');
+        if(ov.getAttribute('role')!=='alertdialog'||ov.getAttribute('aria-modal')!=='true')bad.push('離開設定的對話框沒有 alertdialog／aria-modal');
+        if(!lb||!/還沒存/.test(lb.textContent))bad.push('離開設定的對話框沒有用標題當名字');
+        if(!ov.contains(document.activeElement))bad.push('離開設定的對話框打開時焦點沒進框裡');
+        var fs=[].slice.call(ov.querySelectorAll('button')).filter(function(x){return x.offsetParent!==null;});
+        fs[fs.length-1].focus(); document.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+        if(document.activeElement!==fs[0])bad.push('離開設定的對話框按 Tab 跑出框外');
+        document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await T.idle();
+        if(document.querySelector('#rzmodal [data-cfleave]')&&ov.style.display==='flex')bad.push('離開設定的對話框按 Esc 沒關');
+        if(!document.querySelector('#tabs [data-tab="cfg"][aria-current="page"]'))bad.push('按 Esc 卻切走了(Esc 應該是留在這裡)');
+        document.querySelector('[data-tab="none"]').click(); await T.idle();
+        T.press('#rzmodal [data-cfleave="stay"]'); await T.idle();
+        if(!document.querySelector('#tabs [data-tab="cfg"][aria-current="page"]'))bad.push('按了留在這裡卻切走了');
+        inp=document.querySelector('[data-cfa-model="0"]'); if(!inp||inp.value!==v0+'x')bad.push('按了留在這裡,剛打的字不見了');}
       inp=document.querySelector('[data-cfa-model="0"]'); if(inp)T.type(inp,v0);
+      await T.idle();
+      if(!/已存/.test(document.getElementById('savebar').textContent))bad.push('改回原樣,頁首沒回到已存');
+      // 放棄改動再走:切過去、改動丟掉
+      inp=document.querySelector('[data-cfa-model="0"]'); T.type(inp,v0+'y'); await T.idle();
+      document.querySelector('[data-tab="none"]').click(); await T.idle();
+      if(!document.querySelector('#rzmodal [data-cfleave="drop"]'))bad.push('第二次切走沒有先問');
+      else{T.press('#rzmodal [data-cfleave="drop"]');
+        if(!await T.until(function(){return !!document.querySelector('#tabs [data-tab="none"][aria-current="page"]');},8000))bad.push('按了放棄改動沒有切過去');
+        document.querySelector('[data-tab="cfg"]').click(); await T.idle();
+        inp=document.querySelector('[data-cfa-model="0"]'); if(inp&&inp.value!==v0)bad.push('按了放棄改動,改的字還在');}
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
@@ -2851,10 +3204,12 @@ CHECKS.append((
         var doc=Array.from(document.querySelectorAll('.cfg-check')).filter(function(e){return /環境檢查/.test(e.textContent);})[0];
         var text=doc?doc.textContent:'';
         if(!/有要處理的提醒/.test(text))bad.push('環境檢查標題沒說有要處理的提醒');
-        if(!/⚠️ 資料夾版本紀錄｜bc-history-reason/.test(text))bad.push('版本紀錄那一列沒標 ⚠️ 或沒寫原因');
+        var hrow=Array.from(doc?doc.querySelectorAll('.cfg-file'):[]).filter(function(e){return /^\s*資料夾版本紀錄｜bc-history-reason/.test(e.textContent);})[0];
+        if(!hrow||!hrow.querySelector('svg.ic[data-i="triangle-alert"]'))bad.push('版本紀錄那一列沒標警告圖示或沒寫原因');
         if(!/處理方式：bc-history-fix/.test(text))bad.push('版本紀錄那一列沒寫處理方式');
         var all=document.body.textContent;
-        if(!/⚠️ 版本紀錄未啟用：bc-history-reason/.test(all)||!/bc-conversion-skipped/.test(all)
+        var srow=Array.from(document.querySelectorAll('.cfg-file')).filter(function(e){return /^\s*版本紀錄未啟用：bc-history-reason/.test(e.textContent);})[0];
+        if(!srow||!srow.querySelector('svg.ic[data-i="triangle-alert"]')||!/bc-conversion-skipped/.test(all)
            ||(all.match(/處理方式：bc-history-fix/g)||[]).length<2)
           bad.push('設定頁版本紀錄那列沒寫原因、沒轉的轉換或處理方式');
       }finally{
@@ -2961,7 +3316,7 @@ CHECKS.append((
 
 
 CHECKS.append((
-    '設定頁存檔:重讀設定時沒存的改動留著(按開機自動啟動會重讀);有沒存的改動時卡片上合併公司先擋',
+    '設定頁存檔:重讀設定時沒存的改動留著(按開機自動啟動會重讀);有沒存的改動時切去別頁先問',
     r"""
       var bad=[], before=(await fetch('/api/settings').then(function(r){return r.json();})).settings;
       var note=function(){var pf=document.querySelector('details[data-fold="cfg:preferences"]'); if(pf&&!pf.open)pf.querySelector('summary').click();
@@ -2973,20 +3328,11 @@ CHECKS.append((
       sv.click(); await T.idle(); await T.idle();
       if(note().value.indexOf('bc-keep')<0)bad.push('按了開機自動啟動,打到一半的字不見了');
       if(!document.getElementById('cfg-save').classList.contains('dirty'))bad.push('重讀之後存檔列變成「沒有改動」');
-      // 卡片上「🔗 跟別家是同一家」會存一次設定:有沒存的改動時先擋,不能連他還沒按儲存的一起存、也不能丟掉
+      // 有沒存的改動時切去別頁(卡片上的合併公司在那裡)先擋下來問;按留在這裡,打到一半的字還在
       document.querySelector('[data-tab="all"]').click(); await T.idle();
-      var mg=document.querySelector('#app [data-comerge]');
-      if(!mg)bad.push('找不到「跟別家是同一家」');
-      else{mg.click(); await T.idle();
-        var to=document.querySelector('#rzmodal [data-comerge-to]');
-        if(!to)bad.push('合併的選單沒有列公司');
-        else{to.click(); await T.idle(); await T.idle();
-          var after=(await fetch('/api/settings').then(function(r){return r.json();})).settings;
-          if(JSON.stringify((after.board||{}).company_alias||{})!==JSON.stringify((before.board||{}).company_alias||{}))
-            bad.push('設定頁有沒存的改動,合併照樣存進設定');
-          if(!/還沒存/.test(T.snack()))bad.push('合併被擋沒講原因(看到:'+T.snack().slice(0,40)+')');}}
-      document.querySelector('[data-tab="cfg"]').click(); await T.idle();
-      if(note().value.indexOf('bc-keep')<0)bad.push('合併之後回設定頁,打到一半的字不見了');
+      if(!document.querySelector('#rzmodal [data-cfleave="stay"]'))bad.push('有沒存的改動,切去別頁沒有先問');
+      else{T.press('#rzmodal [data-cfleave="stay"]'); await T.idle();}
+      if(note().value.indexOf('bc-keep')<0)bad.push('沒切走,打到一半的字卻不見了');
       // 擋合併的訊息叫他「先存或放棄」:設定頁要有「放棄改動」,按了回到沒有改動、剛打的字丟掉
       var dc=document.getElementById('cfg-discard');
       if(!dc||dc.hidden)bad.push('有沒存的改動,設定頁卻沒有「放棄改動」');
@@ -3209,7 +3555,9 @@ CHECKS.append((
       var rt=document.querySelectorAll('[data-cfa-runtime]');var sel=rt[rt.length-1];
       sel.value='claude-code';sel.dispatchEvent(new Event('change',{bubbles:true}));await T.idle();
       if(!document.querySelector('[data-cfbrowser="setup"]'))bad.push('沒有共用檢查 ego');
+      // 這裡改的設定不存:切走時會問,選放棄改動(不然停在設定頁,下一條重載後還在這頁)
       document.querySelector('[data-tab="none"]').click(); await T.idle();
+      T.press('#rzmodal [data-cfleave="drop"]'); await T.until(function(){return document.querySelector('#tabs [data-tab="none"][aria-current="page"]')&&!document.querySelector('#rzmodal');},5000);
       return bad.join('；');
     """, 'no_setup', {'fresh_page':True},
 ))
@@ -3301,7 +3649,8 @@ CHECKS.append((
       card().querySelector('.fb-b[data-s="'+want+'"]').click(); await T.idle();
       await T.until(function(){var c=card(); return c&&c.getAttribute('data-fid')!==fid0;},4000);
       var r0=document.querySelector('#app [data-rvat="0"]');
-      if(!r0||r0.querySelector('.rv-row-m').textContent!=={meh:'😐',grow:'💪'}[want])bad.push('標完清單那一列看不出標了什麼');
+      var rm=r0&&r0.querySelector('.rv-row-m svg.ic');
+      if(!rm||rm.getAttribute('data-i')!=={meh:'meh',grow:'trending-up'}[want])bad.push('標完清單那一列看不出標了什麼');
       // 點回第一張補原因
       r0.click(); await T.idle();
       if(!card()||card().getAttribute('data-fid')!==fid0)bad.push('點清單那一列沒換到那一張');
@@ -3325,9 +3674,9 @@ CHECKS.append((
       var bad=[]; document.querySelector('[data-tab="all"]').click(); await T.idle();
       var hs=document.querySelectorAll('#app summary.cohead'); if(hs.length<2)return '公司列不到兩列,蓋不蓋得住測不出來';
       var head=hs[0]; head.classList.add('done');
-      var mb=head.querySelector('[data-omore]'); if(!mb)return '公司列沒有 ⋯';
+      var mb=head.closest('.corow').querySelector(':scope>.more [data-omore]'); if(!mb)return '公司列沒有 ⋯';
       mb.click(); await T.idle();
-      var m=head.querySelector('.more-m'); if(!m||m.hidden)return '⋯ 點了沒打開';
+      var m=head.closest('.corow').querySelector(':scope>.more>.more-m'); if(!m||m.hidden)return '⋯ 點了沒打開';
       var op=1; for(var x=m;x&&x!==document.body;x=x.parentElement)op*=+getComputedStyle(x).opacity;
       if(op<0.99)bad.push('選單是半透明的(opacity '+op.toFixed(2)+')');
       m.scrollIntoView({block:'center'}); await T.idle();
@@ -3538,7 +3887,8 @@ CHECKS.append((
 
 # 快版(--fast)跳過的:這幾條要等副本上的假流程(job_fake)真的跑完,或等代投核准後 8 秒的反悔期,
 # 一條就 10~60 秒,合起來佔完整版一半以上的時間。規矩本身沒變,只是改介面時先不等它們。
-SLOW=('代投:','幫你填表:','代投修改:','找新職缺:','找新職缺面板','找缺紀錄:','跑準備區:')
+SLOW=('代投:','幫你填表:','代投修改:','找新職缺:','找新職缺面板','找缺紀錄:','跑準備區:',
+      '無障礙 WCAG 2.2 AA:','步數:','第一屏:')
 
 
 def flow_on(board):
@@ -3805,6 +4155,100 @@ CHECKS.append((
       return bad.join('；');
     """,
     'closed_ship_case',
+))
+def closed_ready_case(board):
+    """一張待你決定的卡,驗收查到它已經下架。"""
+    import board_doc as bd
+    parsed = bd.load(board)
+    job = parsed['data']['jobs'][12]
+
+    def put_fb(fb):
+        fb.setdefault(job['id'], {})['app'] = 'ready'
+        fb[job['id']].pop('rm', None)
+    bd.set_fb(put_fb, live=board, by='board_check')
+    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True,
+        'issues': [{'jid': job['id'], 't': 'x', 'stage': 'ready', 'msg': '職缺已下架(HTTP 回 404/410 或重導離開職缺頁)'}]}), live=board)
+    return {'id': job['id']}
+
+
+PRE['closed_ready_case'] = closed_ready_case
+CHECKS.append((
+    '待你決定:主數字寫可以送的張數,先不送的收成清單最後一個開合、一張一行寫原因,已下架的一次收掉',
+    r"""
+      var bad=[]; await T.resync();
+      document.querySelector('[data-tab="ready"]').click(); await T.idle();
+      var n=(document.querySelector('#app .applyhd .n')||{}).textContent||'', bn=+((document.querySelector('#readybar [data-bulkn]')||{}).textContent||-1);
+      var m=/^(\d+) 張可以送 · 共 (\d+)$/.exec(n.trim());
+      if(!m)bad.push('標題沒寫「N 張可以送 · 共 M」:'+n);
+      else if(+m[1]!==bn||+m[2]!==+m[1]+1)bad.push('標題寫 '+n+',送出鈕寫 '+bn+' 張,先不送的是 1 張');
+      var f=document.querySelector('#app details[data-fold="st:ready"]');
+      if(!f)bad.push('沒有「先不送」那個開合');
+      else{
+        var last=[...document.querySelectorAll('#app .applygrp > *')].pop();
+        if(last!==f)bad.push('「先不送」不在清單最後');
+        var sm=f.querySelector('summary').textContent;
+        if(sm.indexOf('1 張先不送')<0||sm.indexOf('1 張已下架')<0)bad.push('開合標題沒寫「1 張先不送:1 張已下架」:'+sm);
+        f.querySelector('summary').click(); await T.idle();
+        // 打開分段:「已下架」那一段一張一行,卡名點得到、跳到那張卡
+        var sec=[...f.querySelectorAll('.held-sec')].filter(function(x){return /^已下架/.test(x.querySelector('.held-t').textContent.trim());})[0];
+        var li=sec?sec.querySelectorAll('li'):[];
+        if(li.length!==1)bad.push('打開沒有「已下架」那一段、一張一行');
+        else{T.press('[data-todogo]',li[0]); await T.idle();
+          var cd=document.querySelector('#app article[data-fid="'+CSS.escape(P.id)+'"]');
+          if(!cd||!cd.getClientRects().length)bad.push('點「已下架」那一行的卡名沒有跳到那張卡');
+          f=document.querySelector('#app details[data-fold="st:ready"]'); if(f&&!f.open){f.querySelector('summary').click(); await T.idle();}}
+        T.press('#app details[data-fold="st:ready"] [data-closedrm="ready"]'); await T.idle();
+        var s=await T.state(); if(!(s[P.id]||{}).rm)bad.push('收掉之後那張沒有進已移除');
+        if(document.querySelector('#app details[data-fold="st:ready"]'))bad.push('收掉之後「先不送」還在');}
+      document.querySelector('[data-tab="none"]').click(); await T.idle();
+      return bad.join('；');
+    """,
+    'closed_ready_case',
+))
+CHECKS.append((
+    '待你決定:主按鈕旁那行接一句「其餘 N 張先不送(原因計數)」,點了捲到清單末端那段說明並展開,說明只有一份',
+    r"""
+      var bad=[]; await T.resync();
+      document.querySelector('[data-tab="ready"]').click(); await T.idle();
+      var f=document.querySelector('#app details[data-fold="st:ready"]');
+      if(!f){document.querySelector('[data-tab="none"]').click(); return '沒有「先不送」那個開合';}
+      var m=/^(\d+) 張先不送:(.+)$/.exec(f.querySelector('summary').textContent.split(' ')[0].trim());
+      var g=document.querySelector('#readybar [data-heldgo]');
+      if(!g){document.querySelector('[data-tab="none"]').click(); return '主按鈕旁那行後面沒有「其餘 N 張先不送(…)」';}
+      var want=m?'其餘 '+m[1]+' 張先不送('+m[2]+')':'';
+      if(g.textContent.trim()!==want)bad.push('主按鈕旁寫「'+g.textContent.trim()+'」,清單末端那段寫「'+want+'」');
+      if(document.querySelectorAll('#app .held-sec').length!==f.querySelectorAll('.held-sec').length||document.querySelector('#readybar .held-sec, #readybar [data-todogo]'))
+        bad.push('先不送的說明在上面又抄了一份');
+      window.scrollTo(0,0); await T.frame();
+      T.press('#readybar [data-heldgo]'); await T.idle(); await T.frame();
+      f=document.querySelector('#app details[data-fold="st:ready"]');
+      var r=f.querySelector('summary').getBoundingClientRect(), top=document.querySelector('#tabs').getBoundingClientRect().bottom;
+      if(!f.open)bad.push('點了那一句,清單末端那段說明沒展開');
+      if(r.top<top-1||r.bottom>innerHeight+1)bad.push('點了那一句,清單末端那段說明的標題不在畫面上(top '+Math.round(r.top)+'、分頁列底 '+Math.round(top)+'、視窗高 '+innerHeight+')');
+      if(f.open){f.querySelector('summary').click(); await T.idle();}
+      document.querySelector('[data-tab="none"]').click(); await T.idle();
+      return bad.join('；');
+    """,
+    # 前一條同一張卡剛按了收掉:重載頁面,不帶著那一頁記得的收掉
+    'closed_ready_case', {'viewports': ['wide', 'mobile'], 'fresh_page': True},
+))
+CHECKS.append((
+    '準備履歷:自動準備沒開時,同一行「打開自動準備」按了就打開設定、這一頁等著的卡也交給它',
+    r"""
+      var bad=[];
+      try{
+        await T.resync(); document.querySelector('[data-tab="prep"]').click(); await T.idle();
+        T.press('#app [data-autoprep]');
+        var on=await T.until(async function(){var c=await fetch('/api/settings').then(function(r){return r.json();});
+          return ((c.settings||{}).flow||{}).auto_prep===true;},10000);
+        if(!on)bad.push('按了「打開自動準備」,設定裡自動準備還是關的');
+        if(!await T.until(function(){return /自動準備打開了/.test(T.snack());},10000))bad.push('按了之後沒說打開了');
+        await T.idle();
+        if(document.querySelector('#app [data-autoprep]'))bad.push('打開之後「打開自動準備」還在');
+      }finally{""" + FLOW_OFF_JS + r"""}
+      return bad.join('；');
+    """,
+    'no_setup', {'fresh_page': True},
 ))
 def judged_closed_case(board):
     """一張待你決定的卡,驗收時 agent 判斷職缺關了(程式核對不了,只核對它抄的那一句在頁面上)(#317)。"""
@@ -4885,6 +5329,33 @@ APPLY_CHECKS.append((
 ))
 
 
+def closed_posting_case(board):
+    """兩張可投遞卡,agent 去填時發現職缺關了或換了(要你處理:不投就移除)。"""
+    shot.flow()
+    block = {'kind': 'posting', 'text': '這個網址上的職缺已經關了或換成別的'}
+    return _seed(board, [_filled('stuck', block=block), _filled('stuck', block=block)])
+
+
+APPLY_PRE['closed_posting_case'] = closed_posting_case
+APPLY_CHECKS.append((
+    '可投遞:要你處理的好幾張都是職缺關了,一顆鈕一起移除;已移除那一頁按「放回」整批回來',
+    OPEN_SHIP + r"""
+      var I=P.ids, bad=[]; if(!await openShip(I[0]))return '找不到那兩張可投遞卡';
+      T.press('#app .todo [data-todorm]'); await T.idle();
+      var s=await T.state(), day=(s[I[0]]||{}).rm;
+      I.forEach(function(id){if(!(s[id]||{}).rm)bad.push('按了「全部移除」,'+id+' 沒進已移除');});
+      if(!day)return bad.join('；');
+      document.querySelector('[data-tab="rm"]').click(); await T.idle();
+      T.press('#app [data-rmback="'+day+'"]'); await T.idle();
+      s=await T.state();
+      I.forEach(function(id){if((s[id]||{}).rm)bad.push('按了「放回」,'+id+' 還在已移除');});
+      document.querySelector('[data-tab="none"]').click();
+      return bad.join('；');
+    """,
+    'closed_posting_case', {'fresh_page': True},
+))
+
+
 def busy_buttons_case(board):
     """一張 agent 正在填、一張送出結果不明(用到一條答案):離開流程、換履歷/語言的按鈕要停用、寫原因(修正 11、14)。"""
     shot.flow()
@@ -5396,6 +5867,236 @@ CHECKS.append((
 ))
 
 
+# 量測檢查:路徑上的選擇器照目前介面寫,旁邊保留使用者看到的字。
+A11Y_SCENES = [
+    ('桌機首頁', 'home', ['wide', 'wide-dark']),
+    ('桌機新職缺第一家公司卡片', 'newjob', ['wide', 'wide-dark']),
+    ('桌機待你決定第一家公司卡片', 'ready', ['wide', 'wide-dark']),
+    ('桌機設定頁', 'settings', ['wide', 'wide-dark']),
+    ('手機首頁', 'home', ['mobile', 'mobile-dark']),
+    ('手機待你決定第一家公司卡片', 'ready', ['mobile', 'mobile-dark']),
+]
+A11Y_JS = r"""
+ var screen=__SCREEN__, scene=__SCENE__;
+ async function tab(id){var b=document.querySelector('#tabs [data-tab="'+id+'"]'); if(!b)throw new Error('找不到分頁 '+id); b.click(); await T.idle();}
+ async function firstCard(id){await tab(id); var h=document.querySelector('#app summary.cohead');
+   if(!h)throw new Error('沒有第一家公司'); if(!h.parentNode.open)h.click(); await T.idle();
+   var c=document.querySelector('#app article[data-fid]'); if(!c)throw new Error('展開後沒有第一張卡');
+   c.scrollIntoView({block:'start'}); window.scrollBy(0,-140); await T.frame();}
+ if(scene==='newjob')await firstCard('none');
+ else if(scene==='ready')await firstCard('ready');
+ else if(scene==='settings'){await tab('cfg'); window.scrollTo(0,0); await T.frame();}
+ else {await tab('none'); window.scrollTo(0,0); await T.frame();}
+ var theme=matchMedia('(prefers-color-scheme: dark)').matches?'深色':'淺色';
+ var tags=['wcag2a','wcag2aa','wcag21a','wcag21aa','wcag22a','wcag22aa'];
+ var result=await axe.run(document,{runOnly:{type:'tag',values:tags}});
+ function short(s,n){s=String(s||'').replace(/\s+/g,' ').trim(); return s.length>n?s.slice(0,n)+'…':s;}
+ return result.violations.map(function(v){
+   var nodes=v.nodes.slice(0,2).map(function(n,i){return '節點'+(i+1)+' html='+short(n.html,180)+' failure='+short(n.failureSummary,220);}).join('；');
+   return screen+'／'+theme+'：'+v.id+'（'+v.nodes.length+' 個節點）'+(nodes?'；'+nodes:'');
+ }).join('\n');
+"""
+for _screen, _scene, _profiles in A11Y_SCENES:
+    _body = A11Y_JS.replace('__SCREEN__', json.dumps(_screen, ensure_ascii=False)).replace('__SCENE__', json.dumps(_scene))
+    CHECKS.append((f'無障礙 WCAG 2.2 AA:{_screen}', _body, 'measure_none',
+                   {'viewports': _profiles, 'fresh_page': True}))
+
+STEP_ROUTES = {
+    'open': {'label': '首頁 → 一張一張看', 'steps': [], 'target': '#app [data-rvstart="1"]', 'target_click': False},
+    'mood': {'label': '首頁 → 第一家公司 → 喜歡',
+             'steps': [['#app .cohead', '第一家公司'], ['#app article[data-fid] [data-s="like"]', '喜歡']],
+             'target': '', 'target_click': False},
+    'ship': {'label': '首頁 → 待你決定 → 第一家公司 → 可以投了 → 讓 Agent 填這張',
+             'steps': [['#tabs [data-tab="ready"]', '待你決定'], ['#app .cohead', '第一家公司'],
+                       ['#app article[data-fid] [data-adv="ship"]', '可以投了'], ['#tabs [data-tab="ship"]', '可以投了']],
+             'target': '#app article[data-fid="同一張卡"] [data-runone^="apply|"]', 'target_click': True},
+    'inbox': {'label': '首頁 → Agent 回報 → 第一件「你要做的」 → 處理好了',
+              'steps': [['#inboxbar details.inbox-d > summary', 'Agent 回報'],
+                        ['#inboxbar [data-ib] .ans-hv', '第一件你要做的事']],
+              'target': '#inboxbar [data-ib] [data-inboxdone]', 'target_click': False},
+    'resume': {'label': '首頁 → 設定 → 你的履歷 → 上傳或換一份',
+               'steps': [['#tabs [data-tab="cfg"]', '設定'],
+                         ['#app details[data-fold="cfg:resumes"] > summary', '你的履歷']],
+               'target': '#app details[data-fold="cfg:resumes"]', 'target_click': False},
+}
+STEP_BUDGETS = {
+    'open': {'wide': {'clicks':0, 'scroll':0}, 'mobile': {'clicks':0, 'scroll':0}},
+    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
+    'ship': {'wide': {'clicks':5, 'scroll':0}, 'mobile': {'clicks':5, 'scroll':424}},
+    'inbox': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
+    'resume': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':136}},
+}
+# 上限是 main(90ffa9d)用這一版量法(每個畫面前還原資料)量到的數字。Linux 的 Chrome 字型不同、版面較高,同一個 main 在 CI 映像
+# (x99-runner:local)裡量到的手機捲動距離跟 Mac 不一樣,所以 Linux 用那裡量到的數字。
+if sys.platform.startswith('linux'):
+    STEP_BUDGETS['ship']['mobile']['scroll']=381
+    STEP_BUDGETS['resume']['mobile']['scroll']=365
+STEP_JS = r"""
+ var route=__ROUTES__[P.step], bad=[], clicks=0, scrollPx=0, movedFid='', taskRow=null;
+ document.documentElement.style.scrollBehavior='auto'; document.body.style.scrollBehavior='auto';
+ function topCover(){var h=0; [].forEach.call(document.querySelectorAll('body *'),function(e){
+   var p=getComputedStyle(e).position, r=e.getBoundingClientRect();
+   if((p==='fixed'||p==='sticky')&&r.top<=2&&r.bottom>0&&r.width>0&&r.height>0)h=Math.max(h,r.bottom);}); return h;}
+ function todoRow(){return [].find.call(document.querySelectorAll('#inboxbar [data-ib]'),function(r){
+   return r.querySelector('.ans-hv')&&r.querySelector('[data-inboxdone]');})||null;}
+ async function expose(el,label){
+   if(!el){bad.push('找不到「'+label+'」');return false;}
+   var p=el.parentElement, sc=null;
+   while(p&&p!==document.body){var cs=getComputedStyle(p); if(/auto|scroll|overlay/.test(cs.overflowX)&&p.scrollWidth>p.clientWidth+1){sc=p;break;} p=p.parentElement;}
+   if(sc){for(var x=0;x<3;x++){var cr=sc.getBoundingClientRect(), max=sc.scrollWidth-sc.clientWidth, sx=sc.scrollLeft;
+     var left=cr.left+sc.clientLeft+(sx>2?60:0), right=cr.left+sc.clientLeft+sc.clientWidth-(max-sx>2?60:0), er=el.getBoundingClientRect();
+     var dx=er.left<left?er.left-left:(er.right>right?er.right-right:0); if(!dx)break;
+     // 量測頁暫停吸附,否則瀏覽器會把分頁拉回箭頭底下,無法量到完整可見的最短距離。
+     sc.style.scrollBehavior='auto'; sc.style.scrollSnapType='none';
+     sc.scrollLeft=Math.max(0,Math.min(max,sx+dx)); await T.frame(); scrollPx+=Math.round(Math.abs(sc.scrollLeft-sx));}}
+   for(var n=0;n<3;n++){var r=el.getBoundingClientRect(), safe=topCover()+2;
+     if(r.top<safe-1&&window.scrollY>1&&el.closest('#tabs')){var sy0=window.scrollY;window.scrollTo(0,0);await T.frame();scrollPx+=Math.round(Math.abs(window.scrollY-sy0));continue;}
+     var low=r.bottom-innerHeight, high=r.top-safe, dy=low>high?0:(0<low?low:(0>high?high:0));
+     if(!dy)break; var sy=window.scrollY; window.scrollBy(0,dy); await T.frame(); scrollPx+=Math.round(Math.abs(window.scrollY-sy));}
+   var r=el.getBoundingClientRect(), safe=topCover()+1;
+   if(sc){var cr=sc.getBoundingClientRect(), max=sc.scrollWidth-sc.clientWidth, edge=cr.left+sc.clientLeft;
+     if(r.left<edge+(sc.scrollLeft>2?60:0)-1||r.right>edge+sc.clientWidth-(max-sc.scrollLeft>2?60:0)+1){bad.push('「'+label+'」仍被橫向導覽裁住');return false;}}
+   if(r.top<safe-1||r.bottom>innerHeight+1||r.left<0||r.right>innerWidth+1){bad.push('「'+label+'」無法完整出現在畫面內 ('+[Math.round(r.left),Math.round(r.top),Math.round(r.right),Math.round(r.bottom)].join(',')+'，viewport '+innerWidth+'×'+innerHeight+'，safe '+Math.round(safe)+')');return false;}
+   return true;
+ }
+ function resolve(sel){
+   if(P.step==='ship'&&sel==='#app article[data-fid] [data-adv="ship"]'){
+     var c=document.querySelector('#app article[data-fid]'); if(c){movedFid=c.getAttribute('data-fid'); return c.querySelector('[data-adv="ship"]');} return null;}
+   if(P.step==='inbox'&&sel==='#inboxbar [data-ib] .ans-hv'){
+     taskRow=todoRow(); return taskRow&&taskRow.querySelector(':scope > summary');}
+   if(P.step==='ship'&&sel===route.target&&movedFid){var card=document.querySelector('#app article[data-fid="'+CSS.escape(movedFid)+'"]'); return card&&card.querySelector('[data-runone^="apply|"]');}
+   if(P.step==='inbox'&&sel===route.target)return taskRow&&taskRow.querySelector('[data-inboxdone]');
+   if(P.step==='resume'&&sel===route.target){var up=document.querySelector('#app details[data-fold="cfg:resumes"] input[data-cfup]');return (up&&up.closest('label.cfg-b'))||document.querySelector('#app details[data-fold="cfg:resumes"] [data-cfresadd="1"]');}
+   return document.querySelector(sel);
+ }
+ function isDisabled(el){return el.matches(':disabled')||el.hasAttribute('disabled')||el.getAttribute('aria-disabled')==='true';}
+ async function clickStep(item){var el=resolve(item[0]); if(el&&isDisabled(el)){bad.push('路線步驟「'+item[1]+'」已停用');return false;} if(!await expose(el,item[1]))return false; el.click(); clicks++; await T.idle(); return true;}
+ if(P.step==='inbox'&&!todoRow()&&P.demo){
+   var state=await T.state(), box=(state.__inbox__||[]).filter(function(x){return x.id!=='boardcheck-step-path';});
+   box.push({id:'boardcheck-step-path',at:'2026-10-30T00:00:00',from:'代投',msg:'量測用：待你確認資料',need:'確認申請資料',n:1,url:'https://example.com/login'});
+   await T.put('__inbox__',box); await T.resync();
+ }
+ window.scrollTo(0,0); await T.frame();
+ if(P.step==='inbox'&&!todoRow())bad.push('沒有「要你處理」的待處理項目');
+ else {
+   for(var i=0;i<route.steps.length;i++){if(!await clickStep(route.steps[i]))break;}
+   if(!bad.length&&route.target){var target=resolve(route.target);
+     if(target&&isDisabled(target))bad.push('路線終點「'+route.label.split(' → ').pop()+'」已停用');
+     else if(await expose(target,route.target)){if(route.target_click)clicks++;}}
+ }
+ var budget=P.demo&&P.budget?P.budget:null;
+ if(budget){if(clicks>budget.clicks)bad.push(route.label+'：點擊多 '+(clicks-budget.clicks)+' 次（'+clicks+'，main 上限 '+budget.clicks+'）');
+   if(scrollPx>budget.scroll)bad.push(route.label+'：捲動多 '+(scrollPx-budget.scroll)+' px（'+scrollPx+'，main 上限 '+budget.scroll+'）');}
+ return JSON.stringify({_stepMeasure:{step:P.step,label:route.label,clicks:clicks,scroll:scrollPx,budget:budget},failures:bad});
+"""
+STEP_JS = STEP_JS.replace('__ROUTES__', json.dumps(STEP_ROUTES, ensure_ascii=False))
+for _step in STEP_ROUTES:
+    CHECKS.append((f'步數:{STEP_ROUTES[_step]["label"]}', STEP_JS, 'measure_none',
+                   {'viewports': ['wide', 'mobile'], 'fresh_page': True, 'step': _step}))
+
+FIRST_SCREEN_TARGETS = [
+    ('none', '新職缺', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '新職缺先開始一張一張看；沒有新缺時讀空畫面的下一步。'),
+    ('like', '喜歡', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '喜歡的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('meh', '普通', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '普通的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('dislike', '不喜歡', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '不喜歡的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('grow', '差一點', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '差一點的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('all', '全部', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '全部職缺先逐張檢查；空白時讀下一步說明。'),
+    ('prep', '準備履歷中', ['#app [data-prep="1"]', '#app p.applyempty', '#app .emptytab'], '準備這一階的履歷；沒有卡時讀空畫面的下一步。'),
+    ('ready', '待你決定', ['#app [data-readyall="1"]', '#app p.applyempty', '#app .emptytab'], '把驗收過的卡送到可以投了；空白時讀下一步說明。'),
+    ('ship', '可以投了', ['#app [data-applyrun="fill"]', '#app p.applyempty', '#app .emptytab'], '讓 Agent 開始填表；空白時讀下一步說明。'),
+    ('sent', '已投出', ['#app [data-replyrun="1"]', '#app p.applyempty', '#app .emptytab'], '查已投職缺的應徵進度；空白時讀下一步說明。'),
+    ('iv', '面試準備', ['#app p.applyempty', '#app .emptytab', '#app .iv-jrow'], '依面試狀態讀下一步說明，或打開第一場面試。'),
+    ('techerr', '出錯了', ['#app .emptytab', '#app .cohead'], '沒有錯誤卡時讀如何標記的說明；有錯誤卡時打開第一家公司。'),
+    ('rm', '已移除', ['#app .rmback button[data-rmback]', '#app article[data-fid] [data-rm="0"]'], '有卡時用整批或卡上的放回按鈕；沒有卡時讀空頁說明。'),
+    ('cfg', '設定', ['#app [data-cfgo="cfg:resumes"]', '#app details[data-fold="cfg:resumes"] > summary'], '未完成設定時先上傳履歷；已有履歷時展開「你的履歷」查看或更換檔案。'),
+]
+FIRST_SCREEN_JS = r"""
+ var rows=__TARGETS__, bad=[];
+ function visible(e){if(!e)return false;var s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;}
+ function isDisabled(e){return e.matches(':disabled')||e.hasAttribute('disabled')||e.getAttribute('aria-disabled')==='true';}
+ function hitName(e){return e?e.tagName.toLowerCase()+(e.id?'#'+e.id:'')+(typeof e.className==='string'&&e.className.trim()?'.'+e.className.trim().replace(/\s+/g,'.'):''):'空白';}
+ for(var i=0;i<rows.length;i++){
+   var row=rows[i], tab=document.querySelector('#tabs [data-tab="'+row[0]+'"]');
+   if(!tab){bad.push(row[1]+'：找不到分頁');continue;}
+   tab.click(); await T.idle();
+   if(row[0]==='cfg')await T.until(function(){return document.querySelector('#app [data-cfgo="cfg:resumes"]')||document.querySelector('#app details[data-fold="cfg:resumes"] > summary');},8000);
+   window.scrollTo(0,0); await T.frame();
+   var el=null, used='';
+   if(row[0]==='rm'){
+     var batch=document.querySelector(row[2][0]);
+     if(visible(batch)&&!isDisabled(batch)){el=batch;used=row[2][0];}
+     else{
+       var co=document.querySelector('#app .cogrp .cohead');
+       if(co&&!co.parentNode.open){co.click();await T.idle();await T.frame();}
+       var back=document.querySelector(row[2][1]);
+       if(visible(back)&&!isDisabled(back)){el=back;used=row[2][1];}
+       else{
+         var count=document.querySelector('#app .applyhd .n'), empty=document.querySelector('#app .applygrp > p.applyempty:last-child');
+         if(count&&Number(count.textContent)===0&&visible(empty)){el=empty;used='#app .applygrp > p.applyempty:last-child';}
+       }
+     }
+   }else for(var j=0;j<row[2].length;j++){var c=document.querySelector(row[2][j]);if(visible(c)&&!isDisabled(c)){el=c;used=row[2][j];break;}}
+   if(!el){bad.push(row[1]+'：找不到主要下一步（'+row[3]+'）');continue;}
+   var r=el.getBoundingClientRect(), full=r.top>=-1&&r.left>=-1&&r.bottom<=innerHeight+1&&r.right<=innerWidth+1;
+   if(!full)bad.push(row[1]+'：主要下一步未完整在第一屏（'+used+'，y='+Math.round(r.top)+'..'+Math.round(r.bottom)+'）');
+   var hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+   if(hit!==el&&!el.contains(hit))bad.push(row[1]+'：主要下一步中心點被 '+hitName(hit)+' 蓋住（'+used+'）');
+ }
+ return bad.join('；');
+"""
+FIRST_SCREEN_JS = FIRST_SCREEN_JS.replace('__TARGETS__', json.dumps(FIRST_SCREEN_TARGETS, ensure_ascii=False))
+CHECKS.append(('第一屏:14 個分頁的主要下一步都完整可見、中心點沒有被遮住', FIRST_SCREEN_JS, 'measure_none',
+               {'viewports': ['wide', 'mobile'], 'fresh_page': True}))
+PRE['measure_none'] = lambda _board: None
+
+def long_facts_case(board):
+    import board_doc as bd
+    loc = 'Remote-first across North America, Europe, and Asia; candidates may work from any approved home office with quarterly travel.'
+    salary = 'TWD 1,200,000–1,800,000 per year, plus annual performance bonus, equity, and a flexible benefits allowance.'
+    co = 'Acme Cloud'
+    def mutate(data, _fb):
+        job = data['jobs'][0]
+        job['sum']['loc'] = loc
+        job['sum']['salary'] = salary
+    bd.set_data(mutate, live=board)
+    return {'co': co, 'loc': loc, 'salary': salary}
+
+PRE['long_facts_case'] = long_facts_case
+
+CHECKS.append((
+    '卡片地點與薪資顯示全文、點擊展開', r"""
+      var bad=[], tab=document.querySelector('#tabs [data-tab="all"]');
+      if(!tab)return '找不到全部職缺分頁';
+      tab.click(); await T.idle();
+      var group=[].find.call(document.querySelectorAll('.cogrp'),function(g){
+        var n=g.querySelector('.coname'); return n&&n.textContent.trim()===P.co;
+      });
+      if(!group)return '找不到測試公司「'+P.co+'」；目前公司列：'+[].map.call(document.querySelectorAll('.cogrp .coname'),function(n){return n.textContent.trim();}).slice(0,8).join('、');
+      var summary=group.querySelector('summary'); if(summary&&!group.open)summary.click(); await T.idle();
+      var card=[].find.call(group.querySelectorAll('.cards>.card'),function(c){
+        return [].some.call(c.querySelectorAll('.facts .fact'),function(f){return f.textContent.indexOf(P.loc.slice(0,28))>=0;});
+      });
+      if(!card)return '測試職缺沒有出現在公司卡片列';
+      var pairs=[['地點',P.loc],['薪資',P.salary]];
+      for(var i=0;i<pairs.length;i++){
+        var label=pairs[i][0], expected=pairs[i][1], prefix=expected.slice(0,28);
+        var fact=[].find.call(card.querySelectorAll('.facts .fact'),function(x){return x.textContent.indexOf(prefix)>=0;});
+        if(!fact){bad.push(label+'欄位沒有顯示');continue;}
+        var text=fact.querySelector('.fact-t'), visible=(text||fact).textContent.trim();
+        if(visible!==expected)bad.push(label+'只有 '+visible.length+'/'+expected.length+' 字');
+        if(!text){bad.push(label+'沒有可展開文字');continue;}
+        var line=parseFloat(getComputedStyle(text).lineHeight), before=text.getBoundingClientRect().height;
+        if(!(line>0&&before>0&&before<=line*2+1))bad.push(label+'收合高度 '+Math.round(before)+'px，不是兩行內');
+        text.click();
+        if(!await T.until(function(){return text.classList.contains('open')&&text.getBoundingClientRect().height>before+Math.max(1,line*.5);},900))
+          bad.push(label+'點擊後沒有量到全文展開');
+      }
+      return bad.join('；');
+    """, 'long_facts_case', {'viewports':['mobile'], 'fresh_page':True}
+))
+
+
+
 def chains(todo):
     """把「接著上一條」的檢查(opts 的 with_previous)跟上一條綁成一串;分組時一串整個放同一組、照順序跑。"""
     out=[]
@@ -5405,6 +6106,13 @@ def chains(todo):
         else:
             out.append([item])
     return out
+
+
+def checks_for_run(only='', fast=False):
+    todo=[x for x in CHECKS if only in x[0]] if only else CHECKS
+    if fast and not only:
+        todo=[x for x in todo if not any(x[0].startswith(p) for p in SLOW)]
+    return todo
 
 
 def run_shards(n):
@@ -5431,12 +6139,21 @@ def main():
                     help='分成幾組同時跑(每組自己的看板副本、瀏覽器,互不干擾);CI 用 4')
     ap.add_argument('--shard',default='',help=argparse.SUPPRESS)   # 內部用:i/N,只跑第 i 組
     ap.add_argument('--fast',action='store_true',
-                    help='改介面時自己先跑的快版:跳過要等假流程跑完、等 8 秒反悔期的那幾條(SLOW)。'
+                    help='改介面時自己先跑的快版:跳過慢檢查;搭配 --only 時仍執行指定項目。'
                          'CI 一律跑完整版,不准用這個')
     a=ap.parse_args()
+    selected=checks_for_run(a.only,a.fast)
+    if not selected:
+        sys.exit(f'沒有符合的檢查：--only「{a.only}」；零項檢查不算成功。')
     if a.workers>1 and not a.shard:
         sys.exit(run_shards(a.workers))
     shard,shards=(int(x) for x in a.shard.split('/')) if a.shard else (0,1)
+    todo=[x for c in chains(selected)[shard::shards] for x in c]
+    if not todo:
+        sys.exit(f'分組 {shard+1}/{shards} 沒有分到檢查；零項檢查不算成功。')
+    if a.fast:
+        if a.only: print(f'快版：保留 --only 指定的 {len(selected)} 條檢查')
+        else: print(f'快版:跳過 {len(CHECKS)-len(selected)} 條慢的(完整版才算數,CI 跑完整版)')
     fails=[]; took=[]; t_all=time.time()
     try:
         if shard==0:
@@ -5474,30 +6191,46 @@ def main():
         prelude=HELPERS+'\nif(typeof axe==="undefined"){'+axe_source()+'\n}'   # 檢查用的 T、無障礙檢查 axe
         page.goto(sb.url)
         trace_dir=os.environ.get('BOARD_CHECK_TRACES') or os.path.join(tempfile.gettempdir(),'board-check-traces')
-        todo=[x for x in CHECKS if a.only in x[0]] if a.only else CHECKS
-        if a.fast:
-            todo=[x for x in todo if not any(x[0].startswith(p) for p in SLOW)]
-            print(f'快版:跳過 {len(CHECKS)-len(todo)} 條慢的(完整版才算數,CI 跑完整版)')
-        todo=[x for c in chains(todo)[shard::shards] for x in c]
         # 每一串檢查從同一份示範看板開始:前一串改過的卡、封鎖名單不帶到下一串(不然換了分組或順序,後面的檢查就湊不到卡)
         pristine=bd.read_doc(sb.copy)
         for item in todo:
             name,body=item[0],item[1]
             first=not (len(item)>3 and item[3].get('with_previous'))
-            if first:
+            step_check=len(item)>3 and item[3].get('step')
+            if first and not step_check:
                 with bd.live_lock(sb.copy): bd.write_doc(sb.copy,pristine)
             profiles=(item[3].get('viewports',['desktop']) if len(item)>3 else [None])
             for profile in profiles:
                 t0=time.time()
                 try:
+                    if step_check:
+                        with bd.live_lock(sb.copy): bd.write_doc(sb.copy,pristine)
                     arg=PRE[item[2]](sb.copy) if len(item)>2 else None
+                    if step_check:
+                        step=item[3]['step']
+                        arg={'step':step,'demo':not bool(a.board),'viewport':profile,
+                             'budget':STEP_BUDGETS.get(step,{}).get(profile)}
                     # 頁面是載入時讀設定(自動流程開關)的那幾條:先重新載入頁面再跑
                     fresh=sb.url if len(item)>3 and item[3].get('fresh_page') else None
-                    msg=page.run("(async function(P){%s%s})(%s)"%('await T.resync();' if first else '',body,json.dumps(arg)),
+                    if step_check and fresh:
+                        # 看板會記住上次分頁;量測指定從首頁出發,先清掉這一個畫面偏好再重載。
+                        page.run("localStorage.removeItem('sts_view')",prelude)
+                    msg=page.run("(async function(P){%s%s})(%s)"%('await T.clean(); await T.resync();' if first else '',body,json.dumps(arg)),
                                  prelude,profile,fresh)
                 except Exception as e:  # noqa: BLE001 — 檢查本身出錯算這一條沒過,照實列進失敗清單
                     msg='檢查本身出錯:'+str(e)[:120]
                 report=name+(f' ({profile})' if profile is not None and len(profiles)>1 else '')
+                if name.startswith('步數:'):
+                    try:
+                        result=json.loads(msg)
+                        step_result=result.get('_stepMeasure')
+                        if step_result:
+                            msg='；'.join(result.get('failures') or [])
+                            budget=step_result.get('budget')
+                            suffix=f"；main 上限 {budget['clicks']} 點、{budget['scroll']} px" if budget else ''
+                            print(f"  📏 {report}：{step_result['clicks']} 點擊、捲動 {step_result['scroll']} px{suffix}")
+                    except (TypeError, ValueError, AttributeError):
+                        pass
                 took.append((time.time()-t0,report))
                 if msg:
                     fails.append((report,msg))

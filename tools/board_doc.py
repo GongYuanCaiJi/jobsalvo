@@ -12,7 +12,7 @@ import config as _cf
 
 def pre():
     """文件開頭。"""
-    return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, '
+    return ('<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, '
             'initial-scale=1"><title>jobsalvo</title><style id="sty">')
 M1='</style></head><body><div class="wrap"><div id="hdr"></div><div id="tabs" class="tabs"></div><div id="app"></div></div><template id="t-hdr">'
 M2='</template><template id="tail">'

@@ -9,23 +9,29 @@ import contextlib, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import chrome_door  # noqa: E402
 
-# 檢查的尺寸(CDP 模擬,手機連觸控一起);desktop / None 是不模擬
+# 檢查的尺寸(CDP 模擬,手機連觸控一起);desktop / None 不模擬尺寸,主題仍明確設成淺色
 VIEWPORTS = {'mobile': {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True},
-             'wide': {'width': 1440, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False}}
+             'mobile-dark': {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True},
+             'wide': {'width': 1440, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False},
+             'wide-dark': {'width': 1440, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False}}
 # 頁面裡的確認框一律當成按了確定(例如按停止時的確認框)
 DIALOGS = 'window.confirm=function(){return true;};window.alert=function(){};window.prompt=function(m,d){return d||"";};'
 
 
 # 在頁面裡開跑、結果寫進 window.__dev(ego 的 page.evaluate 有 15 秒安全逾時,長的檢查要另外等)
 START = 'window.__dev=undefined;Promise.resolve(%s).then(function(v){window.__dev={v:v};},function(e){window.__dev={e:String(e)};});1'
+PAGE_RELOAD_ERROR = '頁面在檢查途中重新載入了'
 
 
 def _size(viewport):
     """要送的 CDP 指令:(方法, 參數) 清單。viewport 是 VIEWPORTS 的名字或 {'width','height','deviceScaleFactor','mobile'}。"""
-    m = VIEWPORTS.get(viewport) if isinstance(viewport, str) else viewport
+    name = viewport if isinstance(viewport, str) else ''
+    m = VIEWPORTS.get(name) if name else viewport
+    scheme = 'dark' if name.endswith('-dark') else 'light'
     return ([('Emulation.setDeviceMetricsOverride', m) if m else ('Emulation.clearDeviceMetricsOverride', {})]
             + [('Emulation.setTouchEmulationEnabled',
-                {'enabled': True, 'maxTouchPoints': 1} if m and m.get('mobile') else {'enabled': False})])
+                {'enabled': True, 'maxTouchPoints': 1} if m and m.get('mobile') else {'enabled': False})]
+            + [('Emulation.setEmulatedMedia', {'features': [{'name': 'prefers-color-scheme', 'value': scheme}]})])
 
 
 class Ego:
@@ -53,18 +59,24 @@ class Ego:
              'await page.waitForTimeout(2500);\n' if goto else '')
             + 'await page.waitForFunction(()=>document.readyState==="complete",undefined,{timeout:60000});\n'
             + self._sized(viewport) + ('await page.waitForTimeout(200);\n' if viewport else '')
+            + 'const t0=await page.evaluate("performance.timeOrigin");\n'
             + f'await page.evaluate({json.dumps(DIALOGS + prelude + ";1")});\n'
-            'const t0=await page.evaluate("performance.timeOrigin");\n'
             f'await page.evaluate({json.dumps(START % expr)});\n'
             f'await page.waitForFunction(t=>window.__dev!==undefined||performance.timeOrigin!==t,t0,{{timeout:{timeout * 1000}}});\n'
             'const r=await page.evaluate("window.__dev");\n'
-            'if(!r)throw new Error("頁面在檢查途中重新載入了");\n'
+            f'if(!r)throw new Error({json.dumps(PAGE_RELOAD_ERROR)});\n'
             'if(r.e)throw new Error(r.e);\n'
             'return r.v;', timeout + 30)
 
     def screenshot(self, path, full=False, viewport=None):
-        self._js(self._sized(viewport)
-                 + f'await page.screenshot({{path:{json.dumps(os.path.abspath(path))},fullPage:{json.dumps(full)},raw:true}});\n')
+        # 尺寸、深淺色模擬不跨呼叫:兩次呼叫之間頁面跟著系統的深淺色,這裡再設回來時,有 transition 的底色
+        # (公司列)會從深色慢慢淡回淺色,截到一條半深的灰底(#616 評審的「展開後公司列變深灰」)。
+        # 分頁在背景時動畫跑得很慢,等固定時間不可靠:截圖這一下先關掉 transition,截完再放回來
+        off = ('await page.evaluate(() => {const s=document.createElement("style");s.id="__shot_notrans";'
+               's.textContent="*,*::before,*::after{transition:none!important}";document.head.appendChild(s);});\n')
+        on = 'await page.evaluate(() => {const s=document.getElementById("__shot_notrans"); if(s)s.remove();});\n'
+        self._js(off + self._sized(viewport)
+                 + f'await page.screenshot({{path:{json.dumps(os.path.abspath(path))},fullPage:{json.dumps(full)},raw:true}});\n' + on)
 
 
 class Chrome:
@@ -85,8 +97,19 @@ class Chrome:
             self.cdp.send(m, p)
         if viewport:
             self.page.wait_for_timeout(200)
-        self.page.evaluate(DIALOGS + prelude + ';1')
-        return self.page.evaluate(expr)
+        time_origin = self.page.evaluate('performance.timeOrigin')
+        try:
+            self.page.evaluate(DIALOGS + prelude + ';1')
+            return self.page.evaluate(expr)
+        except Exception as error:
+            try:
+                self.page.wait_for_load_state('load', timeout=60000)
+                reloaded = self.page.evaluate('performance.timeOrigin') != time_origin
+            except Exception:  # noqa: BLE001 — 載入檢查只是診斷，失敗時保留原檢查錯誤
+                raise error from None
+            if reloaded:
+                raise RuntimeError(f'{PAGE_RELOAD_ERROR}: {error}') from error
+            raise
 
     def screenshot(self, path, full=False, viewport=None):
         for m, p in _size(viewport):

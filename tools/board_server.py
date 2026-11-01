@@ -43,6 +43,7 @@ import jobrun
 REPO=cf.HOME
 
 LOCK=threading.Lock()
+_SAVE_ORDER={}  # 同一分頁的每欄存檔序號；離頁 keepalive 可能比舊自動存先到。
 STATE=None  # board html 檔路徑
 RUNNING_VERSION=''
 
@@ -305,7 +306,7 @@ def _manual_sent_problem(job, fb):
         return '先在卡上挑一份履歷和語言,再按「我已在外部送出」(要記寄出的是哪一份)'
     return None
 
-def write_fb(cmds, out=None):
+def write_fb(cmds, out=None, client_id=None, save_seq=None):
     """看板送來的一串指令(#407 R8):照 apply_cmds 套在磁碟上「現在」那一份。單寫者鎖。回不收的那幾道。
     out:收這一包動到的那幾份存好的樣子(cards)和每一道的復原單(undo,跟 cmds 對齊;不收的是 None)。"""
     cmds=[c if isinstance(c,dict) else {} for c in cmds or []]
@@ -321,7 +322,20 @@ def write_fb(cmds, out=None):
                 if problems: changed[u]=problems
     got={}
     with LOCK:
+        order=_SAVE_ORDER.get(client_id,{}) if client_id else {}
+        if client_id:
+            # 同分頁同欄只接受較新的 set；舊包中的其他欄與事件仍照常處理。
+            cmds=[dict(c,set={f:v for f,v in c['set'].items()
+                              if order.get((str(c.get('u') or ''),f),0)<save_seq})
+                  if isinstance(c.get('set'),dict) else c for c in cmds]
         bd.rewrite(lambda d: got.update(zip(('rejected','undo','cards'),apply_cmds(d,cmds,changed))),STATE,by='看板')
+        got['save_order']=str(time.monotonic_ns())
+        if client_id:
+            rejected={x['i'] for x in got['rejected']}
+            for i,c in enumerate(cmds):
+                if i not in rejected and isinstance(c.get('set'),dict):
+                    for f in c['set']: order[(str(c.get('u') or ''),f)]=save_seq
+            _SAVE_ORDER[client_id]=order
     for c,slip in zip(cmds,got['undo']):
         if slip is not None and c.get('ev')=='confirm':
             queue_send(c['u'],((got['cards'].get(c['u']) or {}).get('approve') or {}).get('at'))
@@ -330,7 +344,7 @@ def write_fb(cmds, out=None):
         import chrome_door
         chrome_door.close_if_idle(STATE)
     if out is not None:
-        out.update(cards=got['cards'],undo=got['undo'])
+        out.update(cards=got['cards'],undo=got['undo'],save_order=got['save_order'])
     return got['rejected']
 
 
@@ -1592,8 +1606,13 @@ class H(BaseHTTPRequestHandler):
                 # 看板只送指令:送整份標記的是還開著的舊版分頁,照它存會把別處的新改動蓋掉
                 self._json(409,{'ok':False,'err':'stale','msg':'這個分頁的程式是舊版,請重新整理再存'}); return
             cmds=body['cmds']
+            client_id,save_seq=body.get('client_id'),body.get('save_seq')
+            if (client_id is not None or save_seq is not None) and not (
+                    isinstance(client_id,str) and 0<len(client_id)<=128 and
+                    type(save_seq) is int and 0<save_seq<=9007199254740991):
+                self._json(400,{'ok':False,'msg':'存檔身分或順序無效，請重新整理再試'}); return
             got={}
-            rejected=write_fb(cmds,got)
+            rejected=write_fb(cmds,got,client_id,save_seq)
             sets=[c.get('set') for c in cmds if isinstance(c,dict) and isinstance(c.get('set'),dict)]
             # 有卡進待你決定/可投遞、或換了要寄的檔(履歷、語言、自己的檔)→ 背景生可投遞包(single-flight),使用者不用再等人建。
             # 換檔不建的話,夾子裡一直是舊的那一份,自動重填就拿它去傳(#448);接著要跑的填表會先等這一輪建完(_source_preflight)
@@ -1607,7 +1626,8 @@ class H(BaseHTTPRequestHandler):
             # 有變動的那幾份的新下一步;動到常用答案、封鎖這類整份的資料就每一張都重算
             touched=set(got.get('cards',{}))
             self._json(200,{'ok':True,'building':building,'rejected':rejected,'cards':got.get('cards',{}),'undo':got.get('undo',[]),
-                            'next':next_steps(snapshot(),None if any(k.startswith('__') for k in touched) else touched)})
+                            'next':next_steps(snapshot(),None if any(k.startswith('__') for k in touched) else touched),
+                            'save_order':got.get('save_order')})
         except bd.Tampered:
             raise
         except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)

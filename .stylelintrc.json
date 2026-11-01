@@ -1,0 +1,54 @@
+{
+  "plugins": [
+    "stylelint-declaration-strict-value"
+  ],
+  "rules": {
+    "scale-unlimited/declaration-strict-value": [
+      [
+        "font",
+        "font-size",
+        "font-weight",
+        "line-height",
+        "/^margin/",
+        "/^padding/",
+        "gap",
+        "row-gap",
+        "column-gap",
+        "/^border(-(top|right|bottom|left|start|end))?-radius$/",
+        "/^border-(start|end)-(start|end)-radius$/",
+        "box-shadow",
+        "color",
+        "background-color",
+        "/^border(-(top|right|bottom|left|block|inline))?-color$/",
+        "outline-color",
+        "fill",
+        "stroke",
+        "caret-color",
+        "text-decoration-color",
+        "accent-color"
+      ],
+      {
+        "ignoreValues": [
+          "0",
+          "auto",
+          "inherit",
+          "initial",
+          "unset",
+          "none",
+          "normal",
+          "transparent",
+          "currentColor"
+        ],
+        "ignoreFunctions": false,
+        "expandShorthand": true,
+        "recurseLonghand": true,
+        "disableFix": true
+      }
+    ],
+    "declaration-property-value-disallowed-list": {
+      "/.*/": [
+        "/var\\(\\s*--[\\w-]+\\s*,/"
+      ]
+    }
+  }
+}

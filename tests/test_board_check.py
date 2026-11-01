@@ -1,4 +1,6 @@
+import hashlib
 import json
+import multiprocessing
 import os
 import re
 import sys
@@ -6,11 +8,59 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401
 import board_check  # noqa: E402
+import dev_browser  # noqa: E402
+
+
+def _axe_source_process(home, fake, sha256, ready, release, download_barrier, results, gate=False):
+    import builtins
+
+    path = os.path.join(home, '.cache', 'jobsalvo', f'axe-{board_check.AXE_VERSION}.min.js')
+    original_open, original_replace = builtins.open, os.replace
+
+    class Response:
+        def read(self):
+            if download_barrier is not None and not gate:
+                download_barrier.wait(20)
+            return fake
+
+    def urlopen(*_args, **_kwargs):
+        return Response()
+
+    def gated_open(file, mode='r', *args, **kwargs):
+        handle = original_open(file, mode, *args, **kwargs)
+        if gate and os.path.abspath(os.fspath(file)) == path and 'w' in mode:
+            ready.set()
+            if not release.wait(20):
+                handle.close()
+                raise TimeoutError('等待快取競爭測試解除閘門逾時')
+        return handle
+
+    def gated_replace(source, destination):
+        if gate and os.path.abspath(destination) == path:
+            ready.set()
+            if not release.wait(20):
+                raise TimeoutError('等待快取競爭測試解除閘門逾時')
+        return original_replace(source, destination)
+
+    try:
+        with mock.patch.dict(os.environ, HOME=home), \
+                mock.patch.object(board_check, 'AXE_SHA256', sha256), \
+                mock.patch('urllib.request.urlopen', urlopen):
+            if gate:
+                with mock.patch('builtins.open', gated_open), \
+                        mock.patch.object(os, 'replace', gated_replace):
+                    source = board_check.axe_source()
+            else:
+                source = board_check.axe_source()
+        results.put(('ok', source))
+    except (OSError, RuntimeError, ValueError) as error:
+        results.put(('error', repr(error)))
 
 
 class BoardCheckSetup(unittest.TestCase):
@@ -140,3 +190,226 @@ class EveryButtonIsPressed(unittest.TestCase):
                   "if(bad.length){console.error(bad.join('\\n'));process.exit(1);}")
         r = subprocess.run(['node', '-e', script], input=bodies, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class CheckSelection(unittest.TestCase):
+    def test_fast_keeps_explicitly_selected_slow_checks(self):
+        selected = board_check.checks_for_run('步數', fast=True)
+
+        self.assertTrue(selected)
+        self.assertTrue(all(item[0].startswith('步數:') for item in selected))
+
+    def test_fast_without_only_skips_slow_checks(self):
+        selected = board_check.checks_for_run(fast=True)
+
+        self.assertTrue(selected)
+        self.assertFalse(any(item[0].startswith(board_check.SLOW) for item in selected))
+
+    def test_no_matching_check_exits_nonzero_with_an_explanation(self):
+        with mock.patch.object(sys, 'argv', ['board_check.py', '--only', 'no-such-check']):
+            with self.assertRaises(SystemExit) as result:
+                board_check.main()
+
+        self.assertNotEqual(result.exception.code, 0)
+        self.assertIn('沒有符合的檢查', str(result.exception))
+
+    def test_empty_shard_exits_nonzero_with_an_explanation(self):
+        with mock.patch.object(sys, 'argv', ['board_check.py', '--only', '第一屏', '--shard', '1/100']):
+            with self.assertRaises(SystemExit) as result:
+                board_check.main()
+
+        self.assertNotEqual(result.exception.code, 0)
+        self.assertIn('沒有分到檢查', str(result.exception))
+
+
+class AxeSource(unittest.TestCase):
+    """#616:好幾組同時第一次跑,後到的那組會讀到先到的那組寫到一半的快取檔,把空字串當 axe 裝進頁面。"""
+    FAKE = '/* fake axe */window.axe={run:function(){}};'.encode('utf-8')
+
+    def run_axe_source(self, cache, network=True):
+        with tempfile.TemporaryDirectory(prefix='axe-source-') as home:
+            path = os.path.join(home, '.cache', 'jobsalvo', f'axe-{board_check.AXE_VERSION}.min.js')
+            if cache is not None:
+                os.makedirs(os.path.dirname(path))
+                with open(path, 'wb') as f:
+                    f.write(cache)
+            fetched = mock.Mock()
+            fetched.return_value.read.return_value = self.FAKE
+            if not network:
+                fetched.side_effect = AssertionError('快取是好的,不該下載')
+            with mock.patch.dict(os.environ, HOME=home), \
+                    mock.patch.object(board_check, 'AXE_SHA256', hashlib.sha256(self.FAKE).hexdigest()), \
+                    mock.patch('urllib.request.urlopen', fetched):
+                source = board_check.axe_source()
+            with open(path, 'rb') as f:
+                saved = f.read()
+            leftovers = [n for n in os.listdir(os.path.dirname(path)) if n != os.path.basename(path)]
+        return source, saved, leftovers
+
+    def test_an_empty_or_half_written_cache_is_not_used(self):
+        for broken in (b'', self.FAKE[:10]):
+            with self.subTest(cache=broken):
+                source, saved, _ = self.run_axe_source(broken)
+                self.assertEqual(source, self.FAKE.decode('utf-8'))
+                self.assertEqual(saved, self.FAKE)
+
+    def test_a_good_cache_is_used_without_downloading(self):
+        source, _, _ = self.run_axe_source(self.FAKE, network=False)
+        self.assertEqual(source, self.FAKE.decode('utf-8'))
+
+    def test_a_cold_cache_downloads_once_and_leaves_no_temp_file(self):
+        source, saved, leftovers = self.run_axe_source(None)
+        self.assertEqual((source, saved, leftovers), (self.FAKE.decode('utf-8'), self.FAKE, []))
+
+    def test_a_failed_replace_removes_the_temporary_file(self):
+        with tempfile.TemporaryDirectory(prefix='axe-source-failure-') as home:
+            path = os.path.join(home, '.cache', 'jobsalvo', f'axe-{board_check.AXE_VERSION}.min.js')
+            fetched = mock.Mock()
+            fetched.return_value.read.return_value = self.FAKE
+            with mock.patch.dict(os.environ, HOME=home), \
+                    mock.patch.object(board_check, 'AXE_SHA256', hashlib.sha256(self.FAKE).hexdigest()), \
+                    mock.patch('urllib.request.urlopen', fetched), \
+                    mock.patch.object(board_check.os, 'replace', side_effect=OSError('rename failed')):
+                with self.assertRaisesRegex(OSError, 'rename failed'):
+                    board_check.axe_source()
+            self.assertEqual(os.listdir(os.path.dirname(path)), [])
+
+    def test_concurrent_processes_share_a_cold_cache_safely(self):
+        context = multiprocessing.get_context('spawn')
+        with tempfile.TemporaryDirectory(prefix='axe-source-processes-') as home:
+            path = os.path.join(home, '.cache', 'jobsalvo', f'axe-{board_check.AXE_VERSION}.min.js')
+            os.makedirs(os.path.dirname(path))
+            ready, release, results = context.Event(), context.Event(), context.Queue()
+            download_barrier = context.Barrier(4)
+            sha256 = hashlib.sha256(self.FAKE).hexdigest()
+            processes = []
+            writer = context.Process(
+                target=_axe_source_process,
+                args=(home, self.FAKE, sha256, ready, release, download_barrier, results, True),
+            )
+            processes.append(writer)
+            try:
+                writer.start()
+                self.assertTrue(ready.wait(20), '寫入行程沒有到達快取寫入閘門')
+
+                readers = [context.Process(
+                    target=_axe_source_process,
+                    args=(home, self.FAKE, sha256, ready, release, download_barrier, results),
+                ) for _ in range(4)]
+                processes.extend(readers)
+                for process in readers:
+                    process.start()
+                reader_results = [results.get(timeout=20) for _ in readers]
+                release.set()
+                writer_result = results.get(timeout=20)
+                for process in processes:
+                    process.join(20)
+                    self.assertEqual(process.exitcode, 0)
+
+                expected = self.FAKE.decode('utf-8')
+                self.assertEqual(reader_results, [('ok', expected)] * len(readers))
+                self.assertEqual(writer_result, ('ok', expected))
+                with open(path, 'rb') as cached:
+                    self.assertEqual(cached.read(), self.FAKE)
+                self.assertEqual(os.listdir(os.path.dirname(path)), [os.path.basename(path)])
+            finally:
+                release.set()
+                for process in processes:
+                    if process.pid is not None:
+                        process.join(2)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join()
+                results.close()
+                results.join_thread()
+
+
+class ChromeRun(unittest.TestCase):
+    def test_reload_after_successful_result_does_not_override_it(self):
+        class ReloadingPage:
+            time_origin = 1
+
+            def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def evaluate(self, expression):
+                if expression == 'performance.timeOrigin':
+                    return self.time_origin
+                if expression.startswith(dev_browser.DIALOGS):
+                    return 1
+                self.time_origin = 2
+                return 42
+
+        chrome = dev_browser.Chrome(ReloadingPage(), mock.Mock())
+        self.assertEqual(chrome.run('42'), 42)
+
+    def test_reload_after_prelude_reports_the_reload_error(self):
+        class ReloadingPage:
+            time_origin = 1
+
+            def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def evaluate(self, expression):
+                if expression == 'performance.timeOrigin':
+                    return self.time_origin
+                if expression.startswith(dev_browser.DIALOGS):
+                    self.time_origin = 2
+                    return 1
+                raise RuntimeError('axe is not defined')
+
+        chrome = dev_browser.Chrome(ReloadingPage(), mock.Mock())
+        with self.assertRaisesRegex(RuntimeError, '頁面在檢查途中重新載入了: axe is not defined'):
+            chrome.run('axe.run()', prelude='window.axe={};')
+
+    def test_load_wait_failure_does_not_hide_check_error(self):
+        class LoadFailingPage:
+            load_waits = 0
+
+            def wait_for_load_state(self, *_args, **_kwargs):
+                self.load_waits += 1
+                if self.load_waits > 1:
+                    raise RuntimeError('reload wait failed')
+
+            def evaluate(self, expression):
+                if expression == 'performance.timeOrigin':
+                    return 1
+                if expression.startswith(dev_browser.DIALOGS):
+                    return 1
+                raise RuntimeError('axe is not defined')
+
+        chrome = dev_browser.Chrome(LoadFailingPage(), mock.Mock())
+        with self.assertRaisesRegex(RuntimeError, 'axe is not defined'):
+            chrome.run('axe.run()')
+
+    def test_time_origin_failure_does_not_hide_check_error(self):
+        class TimeOriginFailingPage:
+            time_origin_reads = 0
+
+            def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def evaluate(self, expression):
+                if expression == 'performance.timeOrigin':
+                    self.time_origin_reads += 1
+                    if self.time_origin_reads > 1:
+                        raise RuntimeError('timeOrigin read failed')
+                    return 1
+                if expression.startswith(dev_browser.DIALOGS):
+                    return 1
+                raise RuntimeError('axe is not defined')
+
+        chrome = dev_browser.Chrome(TimeOriginFailingPage(), mock.Mock())
+        with self.assertRaisesRegex(RuntimeError, 'axe is not defined'):
+            chrome.run('axe.run()')
+
+
+class FirstScreenTargets(unittest.TestCase):
+    def test_removed_page_targets_restore_actions_not_the_persistent_hint(self):
+        removed = next(row for row in board_check.FIRST_SCREEN_TARGETS if row[0] == 'rm')
+
+        self.assertEqual(removed[2], [
+            '#app .rmback button[data-rmback]',
+            '#app article[data-fid] [data-rm="0"]',
+        ])
+        self.assertIn("count&&Number(count.textContent)===0&&visible(empty)", board_check.FIRST_SCREEN_JS)
