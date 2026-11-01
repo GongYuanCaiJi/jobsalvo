@@ -356,7 +356,8 @@ def view(fb, url, status, nx):
     why:擋住的原因;buttons:按鈕 [{b, label, main, adv, off}](off = 停用的原因);todo:要你處理的那一句;
     fill:🚀 填表進度放哪一格 {kind, text}(已送出的沒有);busy、stage:agent 正在做(狀態表的 working)哪一段;
     up:叫得回那隻 agent 在原頁改;eye:給「👀 看現在的頁面」;rf:幾欄等著照新答案重打;
-    soon:確認了、可以送(看板剛按確認的那幾秒改寫成「幾秒後開始送出」);review:填好了停著等你看。"""
+    soon:確認了、可以送(看板剛按確認的那幾秒改寫成「幾秒後開始送出」);review:填好了停著等你看。
+    字開頭不帶符號:圖示名放在按鈕、fill 的 ic 欄和 line_ic(看板用同一套線條圖示畫)。"""
     m = fb.get(url) if isinstance(fb.get(url), dict) else {}
     a = m.get('apply') or {}
     f = m.get('form')
@@ -391,7 +392,9 @@ def view(fb, url, status, nx):
                     else ['bad', f'🤖 {agent} {"修改" if a.get("stage") == "fix" else "填表"}卡住:{issue or "原因不明"}'])
     else:
         line.append(['idle', f'🤖 {agent} 還沒填這張'])
-    eye = up and bool(f) and not working
+    # 要本人登入、驗證的那一頁(接手):表單還沒開始填、可能沒有表單,頁還開著就給 👀(按了由 /api/live 交給他)
+    human = (a.get('block') or {}).get('kind') == 'human'
+    eye = up and (bool(f) or human) and not working
     shots = ([['live', '', '👀 看現在的頁面']] if eye else [['ev', a['ev'], '填表時的截圖']] if a.get('ev') else [])
     proof = a.get('proof') if done and ok else None
     if isinstance(proof, dict) and proof.get('ev'):
@@ -504,15 +507,44 @@ def view(fb, url, status, nx):
             main = [{'b': 'rm', 'label': '🗑 不投了,移除這張', 'main': True, 'adv': False},
                     fill(f'職缺其實沒變,讓 {agent} 重填', adv=False)]
         else:
-            main = [fix(True) if can_fix else fill(f'▶ 處理好了,讓 {agent} 重填')]
+            # 那一頁還開著:登入完叫 agent 在原頁接著做;頁已經不在了(沒開到頁、工作區收掉):叫不出來,
+            # 唯一的路是讓 agent 重開那一頁,它停在登入那一步時 👀 就叫得出來
+            main = [fix(True) if can_fix else fill(f'▶ 處理好了,讓 {agent} 重填' if up else f'▶ 讓 {agent} 重開那一頁')]
         side = []
         fill_cell = {'kind': 'bad', 'text': '🚧 ' + block[:60]}
     elif s in ('gone', 'nopage') and not auto_do:
         # 只是頁面沒了或那一輪沒跑完:重填是程式的事,不算要你處理;填表進度算在還沒填
         todo, fill_cell = '', {'kind': 'todo'}
-    return {'locked': False, 'busy': working, 'stage': stage, 'line': line, 'shots': shots, 'why': why,
-            'buttons': [b for b in main + side if b], 'todo': todo, 'fill': fill_cell, 'up': up, 'eye': eye, 'rf': rf,
-            'soon': s == 'confirmed' and not prob, 'review': s == 'parked' and bool(a.get('session'))}
+    return _icons({'locked': False, 'busy': working, 'stage': stage, 'line': line, 'shots': shots, 'why': why,
+                   'buttons': [b for b in main + side if b], 'todo': todo, 'fill': fill_cell, 'up': up, 'eye': eye, 'rf': rf,
+                   'soon': s == 'confirmed' and not prob, 'review': s == 'parked' and bool(a.get('session'))})
+
+
+# 卡上的圖示跟看板其他地方同一套線條圖示(看板的 ic() 名字):字開頭的表情符號拆出來成 ic,字本身不帶符號
+_GLYPH = {'▶': 'play', '🗑': 'trash-2', '🤖': 'bot', '⏳': 'hourglass', '✅': 'circle-check', '📄': 'file-text', '📤': 'send',
+          '🚧': 'octagon-x', '📎': 'paperclip', '📐': 'file-pen-line', '✏': 'pencil', '❌': 'circle-x', '⚠': 'triangle-alert'}
+_GLYPH_RE = re.compile('^(' + '|'.join(map(re.escape, _GLYPH)) + ')\ufe0f?\\s*')
+
+
+def _icon_split(text):
+    m = _GLYPH_RE.match(text) if isinstance(text, str) else None
+    return (text[m.end():], _GLYPH[m[1]]) if m else (text, '')
+
+
+def _icons(v):
+    """按鈕 label、那一行的字、填表進度的字:開頭的符號拆成 ic 欄(按鈕、填表進度)、line_ic(跟 line 一行對一行)。"""
+    def btn(b):
+        label, ic = _icon_split(b.get('label'))
+        return dict(b, label=label, ic=ic) if ic else b
+
+    v['buttons'] = [btn(b) for b in v['buttons']]
+    split = [_icon_split(x[1]) if len(x) > 1 else (None, '') for x in v['line']]
+    v['line'] = [[x[0], t] + list(x[2:]) if len(x) > 1 else x for x, (t, _) in zip(v['line'], split)]
+    v['line_ic'] = [ic for _, ic in split]
+    if v['fill'].get('text'):
+        text, ic = _icon_split(v['fill']['text'])
+        if ic: v['fill'] = dict(v['fill'], text=text, ic=ic)
+    return v
 
 
 SWAPPING = ('files_changed',)                          # 換檔(換履歷、語言、自己的檔、客製版)

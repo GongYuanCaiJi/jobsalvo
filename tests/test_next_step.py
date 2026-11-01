@@ -76,7 +76,8 @@ class ConfirmButton(unittest.TestCase):
         fb = ready_to_confirm()
         ds.fire(fb, URL, 'files_changed', why='送出檔名改了')
         lines = [line[1] for line in step(fb)['view']['line']]
-        self.assertIn('📄 送出檔名改了:申請頁上是舊的,要重填', lines)
+        self.assertIn('送出檔名改了:申請頁上是舊的,要重填', lines)
+        self.assertIn('file-text', step(fb)['view']['line_ic'])     # 圖示跟看板其他地方同一套,不是字裡的表情符號
         self.assertFalse(any('停在送出前' in x for x in lines))
 
     def test_an_answer_still_waiting_for_you_blocks_it(self):
@@ -367,6 +368,21 @@ class CardView(unittest.TestCase):
                                             'todo': True, 'fill': 'bad'})
                 self.assertTrue(all(block['text'] in t for t in (v['line'][0][1], v['todo'], v['fill']['text'])))
                 self.assertIsNone(does(fb, jobs, URL))
+
+    def test_a_page_waiting_for_you_to_sign_in(self):
+        # 要本人登入(接手):頁還開著就給看現在的頁面,不用等到有表單;頁已經不在,唯一的路是讓 agent 重開那一頁
+        for up in (True, False):
+            with self.subTest(up=up):
+                fb, jobs = flow_board(**{URL: 'stuck'})
+                a = fb[URL]['apply']
+                a['block'] = {'kind': 'human', 'text': '要你本人登入'}
+                fb[URL].pop('form', None)
+                if not up:
+                    a.pop('session', None)
+                v = steps(fb, jobs)[URL]['view']
+                self.assertEqual(v['eye'], up)
+                if not up:
+                    self.assertEqual([b['label'] for b in v['buttons']], ['讓 Agent 重開那一頁'])
 
     def test_a_card_whose_files_miss_a_posting_requirement_is_handled_step_by_step(self):
         # 要寄的檔跟職缺要求不符(#449):自動客製 → 改的時候等 → 通過自動收下 → 可投遞夾重建 → 重填;舊卡也接;
