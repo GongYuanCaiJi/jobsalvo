@@ -27,7 +27,7 @@ import config as cf
 import ship
 import card
 
-STAGE = {'prep': '準備履歷中', 'ready': '已準備', 'ship': '可以投了'}
+STAGE = {'prep': '準備履歷', 'ready': '已準備', 'ship': '可以投了'}
 SENT = {'like': '喜歡', 'meh': '普通', 'dislike': '不喜歡', 'grow': '差一點', 'techerr': '出錯了'}
 LINK_FETCH_WORKERS = 6
 LINK_AGENT_BATCH = 8   # 一次把幾十頁全文塞給同一隻 agent 容易整批判不出來,分小批問

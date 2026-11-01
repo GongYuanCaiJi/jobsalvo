@@ -466,7 +466,7 @@ def run_finish(board, out_dir=None):
             msg=f'準備履歷 agent 沒完成:{result.message()}'
             _status({'phase':'failed','t0':t0,'n':len(rows),'worker_outcome':result.status,
                      'worker_rc':result.returncode,'finished_at':time.time(),'msg':msg})
-            _report(msg,'在「準備履歷中」按「看紀錄」確認後再重跑',board)
+            _report(msg,'在「準備履歷」那一頁按「看紀錄」確認後再重跑',board)
             return result
         bad=check_written(rows,t0,out_dir)
         with evidence.activated(rnd):     # 安檢門核對每一張的交件單,比對結果記進那一張的證據
@@ -491,7 +491,7 @@ def run_finish(board, out_dir=None):
         rc=subprocess.run([sys.executable,RECONCILE,'--board',board],cwd=cf.HOME)
         if rc.returncode:
             msg=f'判斷已寫進看板,但要寄的檔案重建失敗(結束碼 {rc.returncode})'
-            _report(msg,'在「準備履歷中」按「看紀錄」確認後重跑',board)
+            _report(msg,'在「準備履歷」那一頁按「看紀錄」確認後重跑',board)
         elif bad:
             msg=f'這一輪完成:{moved["ready"]} 張已推進,{len(bad)} 張留在「正在準備」(這一輪沒判到)'
         else:
@@ -556,7 +556,7 @@ def main():
     def keep(j):
         if not str(j.get('id','')).startswith('http'): return False
         if only: return card.card_id_from_url(j['id']) in only
-        # 跟看板上「準備履歷中」那一頁同一份(移除的、公司封鎖了的不跑)
+        # 跟看板上「準備履歷」那一頁同一份(移除的、公司封鎖了的不跑)
         return ds.place_of(FB, j)=='prep'
     def title(j): return card.name(j)
     rows=[(j['id'],title(j)) for j in d['data']['jobs'] if keep(j)]

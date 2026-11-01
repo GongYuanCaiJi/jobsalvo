@@ -909,7 +909,7 @@ def start_run(kind,args):
     one=str(args.get('url') or '')
     if one and kind in ('prep','replies'):
         fb0=snapshot()['fb']
-        if kind=='prep' and (fb0.get(one) or {}).get('app')!='prep': return 400,{'msg':'這張不在準備履歷中'}
+        if kind=='prep' and (fb0.get(one) or {}).get('app')!='prep': return 400,{'msg':'這張不在「準備履歷」那一階'}
         if kind=='replies':
             import reply_run   # 查應徵進度查哪幾張只有一份規則:已投出的,加上送出結果不明的
             if one not in reply_run.to_check(fb0): return 400,{'msg':'這張不在已投出,也不是送出結果不明'}
