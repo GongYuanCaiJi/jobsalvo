@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -100,3 +101,32 @@ class StageTest(unittest.TestCase):
         import interview_bank as ib
         with self.assertRaises(ValueError):
             ib.apply({'items': [{'id': 'q1', 'b': []}]}, 'stage', item_id='q1', kind='ok')
+
+    def test_editor_rejects_unscripted_late_stages_without_silently_downgrading(self):
+        import interview_bank as ib
+        bank = ib.apply({}, 'put', form={'id': 'q1', 't': '面試練習', 'stage': 'first'})
+        original = dict(bank)
+        form = ib.to_form(bank['items'][0])
+        for stage in ('wip', 'ok'):
+            with self.subTest(stage=stage):
+                with self.assertRaisesRegex(ValueError, '逐字稿'):
+                    ib.apply(bank, 'put', form=dict(form, stage=stage, script=' \n '))
+                self.assertEqual(bank, original)
+                saved = ib.apply(bank, 'put', form=dict(form, stage=stage, script='保留我實際寫的逐字稿'))
+                self.assertEqual(ib.to_form(saved['items'][0])['stage'], stage)
+
+
+class RoundPersistenceTest(unittest.TestCase):
+    def test_long_round_notes_and_location_survive_save_reload_and_edit(self):
+        note = '\n'.join(f'{i}：聯絡人與面試準備 — bring the portfolio <draft>.' for i in range(40))
+        where = 'https://example.test/interview?' + 'access=long-meeting-link&' * 20
+        form = {'at': '2026-11-01', 'how': '視訊', 'where': where, 'note': note}
+        bank = interview_bank.apply({}, 'round', form=form, job='job-1', kind='set')
+        reloaded = interview_bank.normalize(json.loads(json.dumps(bank)))
+        self.assertEqual(reloaded['rounds']['job-1'], [form])
+
+        edited = dict(form, at='2026-11-02', note=note + '\n補上會議議程', old_at=form['at'])
+        bank = interview_bank.apply(reloaded, 'round', form=edited, job='job-1', kind='set')
+        self.assertEqual(len(bank['rounds']['job-1']), 1)
+        self.assertEqual(bank['rounds']['job-1'][0]['where'], where)
+        self.assertEqual(bank['rounds']['job-1'][0]['note'], edited['note'])

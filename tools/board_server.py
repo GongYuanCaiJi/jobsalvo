@@ -375,7 +375,7 @@ def apply_cmds(d, cmds, changed=None):
                 if sets and (u.startswith('__') or u in cur or u in jobs):
                     ds.put(cur,u,sets)
             if u and not u.startswith('__'):
-                _after_card(cur,before,u,jobs.get(u),ev)
+                _after_card(cur,before,u,jobs.get(u),ev,restoring='back' in c)
         except _Refused as x:
             rejected.append({'i':i,'u':u,'ev':ev,'msg':str(x)[:200]})   # 擋下來但卡上記了原因(確認前頁面變了)
             touched.add(u)
@@ -422,7 +422,7 @@ def _event(cur, u, ev, data, jobs, changed, status):
         agent_report.apply_resolve(cur,u,'你確認其實送出了' if ev=='actually_sent' else '你標了已在外部送出')
 
 
-def _after_card(cur, before, u, job, ev):
+def _after_card(cur, before, u, job, ev, *, restoring=False):
     """一道指令動到一張卡之後,後台自己補的事:到已送出記寄出的是哪一份;沒帶事件卻換了履歷、語言、
     自己的檔,要寄的檔案真的變了就送「換檔」(填好的頁上傳的是舊檔,#341)。"""
     import delivery_state as ds
@@ -431,7 +431,7 @@ def _after_card(cur, before, u, job, ev):
         old_apply=old.get('apply')
         ds.queue_workspace(cur,old_apply.get('workspace') if isinstance(old_apply,dict) else None,'card_removed')
         return
-    if ds.state(m)=='sent' and (ds.state(old)!='sent' or ev=='resent'):
+    if not restoring and ds.state(m)=='sent' and (ds.state(old)!='sent' or ev=='resent'):
         _record_sent_version(cur,u,[job] if job else [])   # 補寄(resent)先把舊的收進歷史,這裡重記這一包
     stated=not ds.same({k:old.get(k) for k in ds.STATE_FIELDS},{k:m.get(k) for k in ds.STATE_FIELDS})
     if job and not ev and not stated and any(old.get(f)!=m.get(f) for f in ds.SWAP_FIELDS):

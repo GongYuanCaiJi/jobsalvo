@@ -1045,9 +1045,10 @@ class InterviewBank(unittest.TestCase):
         self.assertEqual(form['focus'], f'第一集 [14:26]({url})')   # 舊的 <a> 打開編輯框是 [文字](網址)
         self.assertEqual(ib.to_form(ib.from_form(form, old))['focus'], form['focus'])   # 存回去再打開，一字不差
 
-    def test_wip_without_script_stays_todo(self):
+    def test_later_stage_without_script_is_rejected(self):
         import interview_bank as ib
-        self.assertEqual(ib.from_form({'t': 'x', 'stage': 'ok'})['st'], 'todo')
+        with self.assertRaisesRegex(ValueError, '還沒有逐字稿'):
+            ib.from_form({'t': 'x', 'stage': 'ok'})
 
     def test_put_edit_delete(self):
         import interview_bank as ib

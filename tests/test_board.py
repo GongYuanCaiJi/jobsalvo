@@ -550,6 +550,52 @@ class Http(HttpBase):
         self.assertEqual(self.save(*got['undo'][0])['rejected'], [])
         self.assertEqual(read_fb(self.path)[a], before)
 
+    def test_undo_of_retry_preserves_missing_and_existing_sent_snapshots(self):
+        """舊寄件紀錄未知就維持未知,復原不能拿目前的履歷和附件補成歷史。"""
+        import config as cf, ship
+        a = JOBS[0]['id']
+        rid = next(iter(cf.RESUMES))
+        attachments = [{'id': 'current-%d' % i, 'files': {'en': 'current.pdf'}} for i in range(3)]
+        with mock.patch.object(ship, 'read_info', return_value={'variant': rid, 'lang': 'en'}), \
+                mock.patch.object(ship, 'attachments_for', return_value=attachments):
+            for snapshot in ({}, {'sent_v': 'zh-old', 'sent_att': ['historical-file']}):
+                with self.subTest(snapshot=snapshot):
+                    card = dict({'app': 'sent', 'ds': 'sent', 'resume_id': rid, 'lang': 'en',
+                                 'sent_by': 'manual', 'sent_at': '2026-01-02', 'oc': 'rej',
+                                 'replies': {'items': [{'kind': 'confirm'}]},
+                                 'form': {'plat': 'x', 'f': [], 'lock': 1}}, **snapshot)
+                    bd.rewrite(lambda d: d.update(fb={a: card}), self.path, by='測試')
+                    before = read_fb(self.path)[a]
+                    got = self.save({'u': a, 'ev': 'retry'})
+                    self.assertEqual(got['rejected'], [])
+                    self.assertTrue(read_fb(self.path)[a]['tries'])
+                    back = self.save(*got['undo'][0])
+                    self.assertEqual(back['rejected'], [])
+                    self.assertEqual(back['cards'][a], before)
+                    self.assertEqual(read_fb(self.path)[a], before)
+
+    def test_real_sent_events_still_record_the_current_package(self):
+        import config as cf, ship
+        a = JOBS[0]['id']
+        rid = next(iter(cf.RESUMES))
+        attachments = [{'id': 'current-file', 'files': {'en': 'current.pdf'}}]
+        with mock.patch.object(ship, 'read_info', return_value={'variant': rid, 'lang': 'en'}), \
+                mock.patch.object(ship, 'attachments_for', return_value=attachments):
+            for event, state in (('sent_manual', 'todo'), ('actually_sent', 'unsure'), ('resent', 'sent')):
+                with self.subTest(event=event):
+                    card = {'app': 'ship', 'ds': state, 'resume_id': rid, 'lang': 'en'}
+                    if event == 'resent':
+                        card.update(app='sent', sent_v='zh-old', sent_att=['historical-file'])
+                    bd.rewrite(lambda d: d.update(fb={a: card}), self.path, by='測試')
+                    got = self.save({'u': a, 'ev': event, 'data': {'sent_at': '2026-01-03'}})
+                    self.assertEqual(got['rejected'], [])
+                    saved = read_fb(self.path)[a]
+                    self.assertEqual((saved['ds'], saved['sent_v'], saved['sent_att']),
+                                     ('sent', 'en-' + rid, ['current-file']))
+                    if event == 'resent':
+                        self.assertEqual((saved['history'][-1]['sent_v'], saved['history'][-1]['sent_att']),
+                                         ('zh-old', ['historical-file']))
+
     def test_moving_to_ready_builds_the_pack(self):
         self.req('/api/save', {'cmds': [{'u': JOBS[1]['id'], 'set': {'app': 'ready'}}]})
         self.assertEqual(self.builds, [1])

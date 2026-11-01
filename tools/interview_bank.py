@@ -123,7 +123,7 @@ def from_form(f, old=None):
     it.pop('covers', None)
     it.setdefault('picks', [])
     if stage in ('wip', 'ok') and not any(b[0] == 's' for b in it['b']):
-        it['st'] = 'todo'                       # 沒有逐字稿就不算磨合中/定案
+        raise ValueError('這題還沒有逐字稿,先寫了才能算磨合中或定案;也可以先選還沒答或答過第一輪')
     return it
 
 
@@ -167,8 +167,8 @@ def norm_round(r):
     how = str(r.get('how') or '').strip()
     if how not in HOWS:
         raise ValueError('面試方式只能是:' + '、'.join(HOWS))
-    return {'at': at, 'how': how, 'where': str(r.get('where') or '').strip()[:200],
-            'note': str(r.get('note') or '').strip()[:300]}
+    return {'at': at, 'how': how, 'where': str(r.get('where') or '').strip(),
+            'note': str(r.get('note') or '').strip()}
 
 
 def normalize(bank):
