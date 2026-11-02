@@ -130,6 +130,26 @@
     'x':'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
   };
   function ic(n){return '<svg class="ic" data-i="'+n+'" viewBox="0 0 24 24" aria-hidden="true">'+(ICONS[n]||'')+'</svg>';}
+  // jobsalvo 標誌(#660):job 黑、salvo 紅;l 是斜架在 v 上的砲管、最後的 o 是砲車輪子,砲口正前方噴出一條淡煙、射出三張排成扇形的履歷。
+  // job、sa 是正文的字(不用另外的字型);砲管、v、輪子、煙、履歷是圖,圖的單位是 48px 字下的像素、y=80 是基線
+  function _res(t){return '<g transform="'+t+'"><rect width="14" height="18" rx="2.2"/><rect class="w" x="2.8" y="2.8" width="4.4" height="4.4" rx=".8"/>'+
+    '<rect class="w" x="2.8" y="10" width="8.4" height="1.8" rx=".9"/><rect class="w" x="2.8" y="13.3" width="6" height="1.6" rx=".8" opacity=".8"/></g>';}
+  // 射出去的東西:砲口沿砲管方向一串越來越小的煙點,加三張履歷。文字標誌和小圖示共用這一份
+  var SHOT='<g opacity=".3"><circle cx="174.5" cy="23.8" r="1.9"/><circle cx="176.9" cy="20.6" r="1.6"/><circle cx="179.3" cy="17.4" r="1.35"/>'+
+    '<circle cx="181.7" cy="14.2" r="1.1"/><circle cx="184.1" cy="11" r=".9"/></g>'+
+    _res('translate(192.9 -3.8) scale(.8) rotate(-30 7 9)')+_res('translate(184.4 -10.9) scale(.8) rotate(-10 7 9)')+_res('translate(174 -14.7) scale(.8) rotate(10 7 9)');
+  var LOGO='<span class="logo" role="img" aria-label="jobsalvo"><span aria-hidden="true">job<span class="logo-r">sa</span></span>'+
+    '<svg class="logo-c" viewBox="128 -16 80 108" aria-hidden="true"><path d="M151 54h7.5l4.5 14 4.5-14h7.5l-8.5 26h-7z"/>'+
+    '<g transform="rotate(-53 151 55)"><rect x="119" y="50" width="64" height="10" rx="2"/><rect x="179" y="47" width="6" height="16" rx="1.5"/></g>'+
+    '<g fill="none" stroke="var(--brand)"><circle cx="191" cy="67" r="10.5" stroke-width="7"/><path d="M191 59V75M183 67H199" stroke-width="2.2" stroke-linecap="round"/></g>'+
+    SHOT+'</svg></span>';
+  // 小圖示:就是射出去的那一份(煙加三張履歷)。側欄收成窄欄時放這個(32px),瀏覽器分頁小圖示也是同一張
+  var MARK_IN='<g class="b">'+SHOT+'</g>';
+  var MARK='<svg class="logo-mark" viewBox="164 -21 52 52" role="img" aria-label="jobsalvo">'+MARK_IN+'</svg>';
+  (function(){var l=document.createElement('link'); l.rel='icon'; l.type='image/svg+xml';
+    l.href='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="164 -21 52 52"><style>.b{fill:#b8322a}.w{fill:#fff}'+
+      '@media (prefers-color-scheme:dark){.b{fill:#d9584a}.w{fill:#151514}}</style>'+MARK_IN+'</svg>');
+    document.head.appendChild(l);})();
   // 後台送來的字前面那個圖示(下一步的 ic 欄):字本身不帶空白,間距用 CSS 補,畫面上的字才跟後台一字不差
   function icLead(n){return n&&ICONS[n]?'<svg class="ic lead" data-i="'+n+'" viewBox="0 0 24 24" aria-hidden="true">'+ICONS[n]+'</svg>':'';}
   // 外觀:淺色、深色、跟系統(預設)。選擇記在這個瀏覽器的 localStorage;讀不到、寫不進去就跟系統。
@@ -464,6 +484,7 @@
   // 公司列的開合跟其他開合一樣記在 FOLD(key = 'co:'+coKey),重整就全部收起來。
   function coKey(cat,co){return cat+'|'+co;}
   $('hdr').innerHTML=$('t-hdr').innerHTML;
+  $('hdr').querySelector('.brand').innerHTML=LOGO;
   // 桌機的外觀切換放在頁首右邊(手機收在「全部分頁」清單最底下)
   // 很少用到:收成一顆圖示鈕,點開才是三選一(以前三格有框的分段鈕放在頁首最顯眼的地方,比搜尋還重)
   (function(){var sb=$('savebar'); if(sb)sb.insertAdjacentHTML('afterend','<span class="theme-w"><button type="button" class="tool-b" data-themeopen="1" aria-expanded="false" aria-label="外觀" title="外觀">'+
@@ -1063,7 +1084,7 @@
       return '<button type="button" class="bn-b'+(on?' on':'')+'" data-botgrp="'+g+'"'+(on?' aria-current="true"':'')+
         ' aria-label="'+TAB_GRP_T[g]+(n?(g==='flow'?','+n+' 條常用答案待確認':','+n+' 張出錯了'):'')+'">'+
         '<span class="bn-i">'+ic(TAB_GRP_IC[g])+(n?'<span class="bn-n">'+n+'</span>':'')+'</span><span class="bn-l">'+TAB_GRP_T[g]+'</span></button>';}).join('');
-    $('tabs').innerHTML='<div class="side-brand"><span class="side-name">jobsalvo</span><span class="side-sub">求職工作台</span>'+
+    $('tabs').innerHTML='<div class="side-brand">'+MARK+'<span class="side-name">'+LOGO+'</span>'+
       '<button type="button" class="side-tog" data-sidetog="1" aria-expanded="'+!SIDEOFF+'" aria-label="'+(SIDEOFF?'展開側欄':'收起側欄')+'">'+ic('panel-left')+'</button></div>'+
       '<nav class="tabnav" aria-label="分頁">'+h+'</nav><nav class="botnav" aria-label="分頁群組">'+bn+'</nav>';
     renderPageHd();
