@@ -63,6 +63,11 @@
     'chart-column':'<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
     'check':'<path d="M20 6 9 17l-5-5"/>',
     'chevron-right':'<path d="m9 18 6-6-6-6"/>',
+    'chevron-down':'<path d="m6 9 6 6 6-6"/>',
+    'chevron-left':'<path d="m15 18-6-6 6-6"/>',
+    'panel-left':'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>',
+    'briefcase':'<path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/>',
+    'menu':'<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/>',
     'circle':'<circle cx="12" cy="12" r="10"/>',
     'circle-arrow-up':'<circle cx="12" cy="12" r="10"/><path d="m16 12-4-4-4 4"/><path d="M12 16V8"/>',
     'circle-check':'<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
@@ -1005,78 +1010,63 @@
   //  其他 = 技術錯誤、已移除、設定。以前 14 顆長一樣排一排,看不出流程往哪走。
   var TAB_GRP={none:'find',like:'find',meh:'find',dislike:'find',grow:'find',all:'find',
     prep:'flow',ready:'flow',ship:'flow',sent:'flow',iv:'flow',techerr:'misc',rm:'misc',cfg:'misc'};
-  var TAB_GRP_T={find:'找工作',flow:'投遞流程',misc:'管理'};
+  var TAB_GRP_T={find:'找工作',flow:'投遞流程',misc:'出錯與設定'};
+  var TAB_GRP_IC={find:'briefcase',flow:'send',misc:'menu'};
+  // 手機底部三組導覽:按一組回到那一組上次停的分頁(記在這台裝置)
+  var LASTTAB={}; try{LASTTAB=JSON.parse(localStorage.getItem('jobsalvo.lasttab')||'{}')||{};}catch(e){}
+  // 桌機側欄收起來剩一條窄欄(圖示加張數,每一頁、每個數字照樣點得到);記在 localStorage,讀不到就是展開
+  var SIDEOFF=false; try{SIDEOFF=localStorage.getItem('jobsalvo.side')==='off';}catch(e){}
+  function sideSet(off){SIDEOFF=off; document.body.classList.toggle('side-off',off);
+    try{if(off)localStorage.setItem('jobsalvo.side','off'); else localStorage.removeItem('jobsalvo.side');}catch(e){}
+    [].forEach.call(document.querySelectorAll('[data-sidetog]'),function(b){b.setAttribute('aria-expanded',String(!off)); b.setAttribute('aria-label',off?'展開側欄':'收起側欄');});}
+  sideSet(SIDEOFF);
+  document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-sidetog]'); if(!b)return;
+    var fromHd=!!b.closest('#hdr'); sideSet(!SIDEOFF);
+    var to=document.querySelector(fromHd?'#tabs [data-sidetog]':'#hdr [data-sidetog]'); if(to)try{to.focus();}catch(err){}});
   // 每一頁頂端的一句:這頁要做什麼。一句只講一件事,手機上要放得進一行
   var PAGE_DESC={none:'新進板的職缺,一張一張看過、表態。',like:'想投的職缺;挑好的送去準備履歷。',meh:'還好、沒有想投的職缺。',
     dislike:'不想要的這種缺。',grow:'方向對,條件還差一點;會拿來找類似的。',all:'看板上所有職缺。',
     prep:AGENT+' 替每張卡準備要寄的檔案。',ready:FLOW.auto_advance?'驗收過的會自動進「可以投了」。':'送去「可以投了」,或先客製。',
     ship:AGENT+' 幫你填表,你確認了才送出。',sent:'查應徵進度,記下回音。',iv:'準備還在進行的面試。',
     techerr:'網址打不開或資料抓錯的卡。',rm:'移除的卡,隨時可以放回。',cfg:'履歷、附件,和找缺、填表的做法。'};
-  var TABALL_OPEN=false;
-  function closeTabAll(){if(!TABALL_OPEN)return; TABALL_OPEN=false; var m=$('taball-m'), b=$('taball'); if(m)m.hidden=true; if(b)b.setAttribute('aria-expanded','false');}
-  (function(){var p=document.createElement('div'); p.id='pagehd'; var t=$('tabs'); t.parentNode.insertBefore(p,t.nextSibling);
-    document.addEventListener('click',function(e){if(!e.target.closest('#tabs'))closeTabAll();});
-    document.addEventListener('keydown',function(e){if(e.key==='Escape'&&TABALL_OPEN){closeTabAll(); var b=$('taball'); if(b)b.focus();}});
-    // 視窗放大到桌機版面時「全部分頁」那顆不見了:開著的清單一起關掉,不蓋在桌機導覽上
-    var mq=window.matchMedia('(max-width:720px)'); (mq.addEventListener?mq.addEventListener.bind(mq,'change'):mq.addListener.bind(mq))(function(q){if(!q.matches)closeTabAll();});})();
+  (function(){var p=document.createElement('div'); p.id='pagehd'; var t=$('tabs'); t.parentNode.insertBefore(p,t.nextSibling);})();
+  // 頁首:左邊分頁名加一句這頁要做什麼,右邊(.pg-act)放這一頁的主要動作(一張一張看那一條,renderApp 畫);
+  // 只換字不重畫,數字更新時不會把右邊的動作洗掉。桌機頁頂另有麵包屑「組名 / 分頁名」(側欄已經有名字)
   function renderPageHd(){var p=$('pagehd'); if(!p)return;
-    p.innerHTML='<h1 class="pg-t">'+esc(tabLabel(active))+'</h1><p class="pg-d">'+esc(PAGE_DESC[active]||'')+'</p>';}
-  // 手機的「全部分頁」:跟分頁列同樣三組的完整清單(全名加張數),選了就換頁、關起來。用 data-gotab,不給 data-tab:
-  // 別處拿 #tabs [data-tab] 找分頁籤,清單裡的不能被當成分頁籤
-  function tabAllHTML(c){var g='';
-    return '<div class="taball-m" id="taball-m"'+(TABALL_OPEN?'':' hidden')+'>'+TABS.map(function(t){var k=t[0], s='';
-      if(TAB_GRP[k]!==g){s=(g?'</div>':'')+'<div class="ta-grp"><div class="ta-k">'+TAB_GRP_T[TAB_GRP[k]]+'</div>'; g=TAB_GRP[k];}
-      var wn=k==='ship'?ansTodo().length:0;
-      return s+'<button type="button" class="ta-i'+(active===k?' on':'')+'" data-gotab="'+k+'"'+(active===k?' aria-current="page"':'')+'>'+ic(t[1])+
-        '<span class="ta-l">'+t[2]+'</span>'+(wn?'<span class="warnn">'+ic('triangle-alert')+wn+' 條答案待確認</span>':'')+
-        (k==='cfg'?'':'<span class="n">'+(c[k]||0)+'</span>')+'</button>';}).join('')+'</div><div class="ta-grp"><div class="ta-k">外觀</div>'+themeSegHTML()+'</div></div>';}
+    if(!p.firstChild)p.innerHTML='<div class="pg-tt"><h1 class="pg-t"></h1><p class="pg-d"></p></div><div class="pg-act" id="pg-act"></div>';
+    p.querySelector('.pg-t').textContent=tabLabel(active); p.querySelector('.pg-d').textContent=PAGE_DESC[active]||'';
+    var cr=$('crumb'); if(cr)cr.innerHTML=esc(TAB_GRP_T[TAB_GRP[active]]||'')+' <span class="crumb-s">/</span> <b>'+esc(tabLabel(active))+'</b>';}
+  // 桌機:左邊一條側欄,三組各一個框(找工作、投遞流程、出錯了與已移除),設定在最底下。
+  // 手機:頂端只放目前那一組的一排格子,底部固定三組導覽(找工作／投遞流程／出錯與設定),換組回到那組上次停的分頁。
+  // 分頁籤一律在 #tabs 裡(別處拿 #tabs [data-tab] 找分頁籤),手機上別組的只是不顯示
   function renderTabs(){
-    var c=counts(), h='', grp='';
+    var c=counts(), h='', grp='', g0=TAB_GRP[active];
+    if(g0&&LASTTAB[g0]!==active){LASTTAB[g0]=active; try{localStorage.setItem('jobsalvo.lasttab',JSON.stringify(LASTTAB));}catch(e){}}
     TABS.forEach(function(t){
       var key=t[0];
-      if(TAB_GRP[key]!==grp){if(grp)h+='</div>'; if(grp==='find')h+='<div class="tabrow2">'; grp=TAB_GRP[key];
-        h+='<div class="tabgrp g-'+grp+'" role="group" aria-label="'+TAB_GRP_T[grp]+'">'+(TAB_GRP_T[grp]?'<span class="tabgrp-k">'+TAB_GRP_T[grp]+'</span>':'');}
-      // 面試準備是已投出裡面試中的那幾張,不是下一站:前面用分隔點,不用 ›
-      else if(grp==='flow')h+='<span class="tab-arr" aria-hidden="true">'+(key==='iv'?'·':ic('chevron-right'))+'</span>';
+      if(TAB_GRP[key]!==grp){if(grp)h+='</div></div>'; grp=TAB_GRP[key];
+        h+='<div class="tabgrp g-'+grp+'" role="group" aria-label="'+TAB_GRP_T[grp]+'"><span class="tabgrp-k">'+TAB_GRP_T[grp]+'</span><div class="tabbox">';}
       var cls='tab'+(active===key?(' on '+(key)):'');
       // 可投遞那一籤多帶一個 ⚠:答案庫裡還有幾條我推論的在等他確認。不另開分頁,比照客製工單的做法。
       var wn=(key==='ship')?ansTodo().length:0;
-      // 「還在進行中的面試/offer」以前掛在已投遞那一籤當 🗣 小徽章;現在 🎤 面試準備那一籤的數字就是它,不重複講。
-      // 準備履歷正在跑標沙漏。沒在跑、有卡等著按開始的事只寫在準備履歷那一頁最上面(以前這裡標暫停,看起來像一顆暫停鈕)
+      // 準備履歷正在跑標沙漏
       var run=(key==='prep'&&PREP.running)?'<span class="ivn">'+ic('hourglass')+'</span>':'';
-      // 捲下去縮成一列、放不下時名字會收起來:名字一直放在 title 和 aria-label 裡;手機上名字收起來時,圖示下面留一行短名(data-short,CSS 畫)
-      // ⚠ 那個數字是常用答案、不是這一階的卡:看得到的字標「答案」,title、aria-label 寫全
+      // ⚠ 那個數字是常用答案、不是這一階的卡:看得到的字標「答案」,title、aria-label 寫全;很窄的手機寫短名(data-short,CSS 畫)
       var wt=wn?' · '+wn+' 條常用答案待你確認':'';
       h+='<button class="'+cls+'" data-tab="'+key+'"'+(active===key?' aria-current="page"':'')+' data-short="'+(TAB_SHORT[key]||t[2])+'" title="'+t[2]+wt+'" aria-label="'+t[2]+(key==='cfg'?'':' '+(c[key]||0))+wt+'"><span class="tico">'+ic(t[1])+'</span>'+
-         '<span class="tlbl">'+t[2]+'</span>'+(key==='cfg'?'':'<span class="cnt"><span class="n">'+(c[key]||0)+'</span>'+
-         (wn?'<span class="warnn">'+ic('triangle-alert')+wn+'<span class="warnw" aria-hidden="true"></span></span>':'')+run+'</span>')+'</button>';
+         '<span class="tlbl">'+t[2]+'</span>'+(key==='cfg'?'':'<span class="cnt">'+
+         (wn?'<span class="warnn">'+wn+' 答案</span>':'')+'<span class="n'+(key==='techerr'&&c[key]?' hot':'')+'">'+(c[key]||0)+'</span>'+run+'</span>')+'</button>';
     });
-    // .tabscroll、.tabrows 只給桌機捲下去時橫捲用;手機兩列格子(找工作、投遞流程),右邊一欄設定與「全部分頁」(排法見 board.css)
-    $('tabs').innerHTML='<div class="tabscroll"><div class="tabrows">'+h+'</div></div></div></div>'+
-      // 出錯了只收在「全部分頁」裡:有出錯的卡就把張數寫在這一格(取代圖示),外面看得到
-      '<button type="button" class="tab-all" id="taball" aria-expanded="'+TABALL_OPEN+'" aria-controls="taball-m">'+ic('list')+'<span class="ta-al">全部分頁</span>'+
-        (c.techerr?'<span class="ta-te">出錯了 '+c.techerr+'</span>':'')+'</button>'+tabAllHTML(c);
+    h+='</div></div>';
+    // 底部徽章:投遞流程寫常用答案待確認的條數(跟可以投了那一籤同一個數),出錯與設定寫出錯了的張數
+    var bn=['find','flow','misc'].map(function(g){var n=g==='flow'?ansTodo().length:g==='misc'?(c.techerr||0):0, on=g0===g;
+      return '<button type="button" class="bn-b'+(on?' on':'')+'" data-botgrp="'+g+'"'+(on?' aria-current="true"':'')+
+        ' aria-label="'+TAB_GRP_T[g]+(n?(g==='flow'?','+n+' 條常用答案待確認':','+n+' 張出錯了'):'')+'">'+
+        '<span class="bn-i">'+ic(TAB_GRP_IC[g])+(n?'<span class="bn-n">'+n+'</span>':'')+'</span><span class="bn-l">'+TAB_GRP_T[g]+'</span></button>';}).join('');
+    $('tabs').innerHTML='<div class="side-brand"><span class="side-name">jobsalvo</span><span class="side-sub">求職工作台</span>'+
+      '<button type="button" class="side-tog" data-sidetog="1" aria-expanded="'+!SIDEOFF+'" aria-label="'+(SIDEOFF?'展開側欄':'收起側欄')+'">'+ic('panel-left')+'</button></div>'+
+      '<nav class="tabnav" aria-label="分頁">'+h+'</nav><nav class="botnav" aria-label="分頁群組">'+bn+'</nav>';
     renderPageHd();
-    fitTabs();
-    // 只捲分頁列自己,避免 scrollIntoView 帶著整頁垂直移動。
-    centerTab();
-  }
-  // 桌機捲下去時:放不下時非目前分頁改寫短名(data-short,CSS 畫;全名照樣在 title、aria-label、文字內容裡)。手機是格子,不走這裡。
-  // 目前分頁一定是全名加數字。還是放不下就在 .tabscroll 裡橫捲。
-  function tabScroll(){var t=$('tabs'); return t&&t.querySelector('.tabscroll');}
-  function fitTabs(){
-    var t=$('tabs'), s=tabScroll(); if(!s)return;
-    t.classList.remove('fit-tight');
-    if(!document.body.classList.contains('scrolled')||!window.matchMedia('(min-width:721px)').matches)return;
-    if(s.scrollWidth>s.clientWidth+1)t.classList.add('fit-tight');
-  }
-  // 把目前分頁橫向置中,桌機沒有溢出時會自然留在原位。靠左那幾顆(不捲就整顆看得到)捲回開頭:組名才看得到
-  function centerTab(){
-    var t=tabScroll(); if(!t)return;
-    var on=t.querySelector('.tab.on'); if(!on)return;
-    var x=t.scrollLeft+(on.getBoundingClientRect().left-t.getBoundingClientRect().left);
-    var want=x+on.offsetWidth<t.clientWidth*.6?0:x-(t.clientWidth-on.offsetWidth)/2;
-    t.scrollLeft=Math.max(0,Math.min(want,t.scrollWidth-t.clientWidth));
   }
   // 標籤顏色照設定裡的順序輪流用四種,同一個標籤永遠同一色。
   function _tagCls(x){for(var i=0;i<TAGS.length;i++)if(TAGS[i].name===x)return 'c'+(i%4);return 'c3';}
@@ -1418,10 +1408,10 @@
   function sentBtnsHTML(sent,id){
     if(id&&removed(id))return '<div class="fb-btns"><button class="stage-b back" data-rm="0" type="button">↩︎ 放回看板</button></div>';
     return '<div class="fb-btns">'+
-      '<button class="fb-b like'+(sent==='like'?' on':'')+'" data-s="like" type="button" title="'+escA(MOOD_HINT.like)+'">'+ic('thumbs-up')+' 喜歡</button>'+
-      '<button class="fb-b meh'+(sent==='meh'?' on':'')+'" data-s="meh" type="button" title="'+escA(MOOD_HINT.meh)+'">'+ic('meh')+' 普通</button>'+
       '<button class="fb-b dislike'+(sent==='dislike'?' on':'')+'" data-s="dislike" type="button" title="'+escA(MOOD_HINT.dislike)+'">'+ic('thumbs-down')+' 不喜歡</button>'+
+      '<button class="fb-b meh'+(sent==='meh'?' on':'')+'" data-s="meh" type="button" title="'+escA(MOOD_HINT.meh)+'">'+ic('meh')+' 普通</button>'+
       '<button class="fb-b grow'+(sent==='grow'?' on':'')+'" data-s="grow" type="button" title="'+escA(MOOD_HINT.grow)+'">'+ic('trending-up')+' 差一點</button>'+
+      '<button class="fb-b like'+(sent==='like'?' on':'')+'" data-s="like" type="button" title="'+escA(MOOD_HINT.like)+'">'+ic('thumbs-up')+' 喜歡</button>'+
       '</div>';}   // 出錯了與移除一律走卡片右側那條(errBtnHTML/rmBtnHTML),不在心情列重複一顆
   // 管線階段用的一行事實:死線最要緊,地點和薪只給一眼。
   // _EMPTY:卡上已經存的舊摘要裡 agent 寫的佔位字(research.blank 同一組);新的摘要沒值就是空的
@@ -1607,8 +1597,9 @@
     var _rmd=_rm?cc.map(rmDay).filter(function(x){return x!==null;}):[], _how=_sent?'投出':_rmd.length?'移除':'進板';
     var _days=_rmd.length?_rmd:cc.map(function(j){return daysSince(_sent?(FB[j.id]||{}).sent_at:j.added);}).filter(function(x){return x!==null;});
     var _min=_days.length?Math.min.apply(null,_days):null;
-    var _age=(_min===null)?'':'<span class="coage" title="這家最新那張的'+_how+'時間">'+(_min<=0?'今天':(_min===1?'昨天':_min+' 天前'))+_how+'</span>';
-    var _newdot=_fresh?'<span class="conew" title="'+_fresh+' 張是 '+NEW_DAYS+' 天內進板的">近 '+NEW_DAYS+' 天 '+_fresh+' 張</span>':'';   // 不寫「N 張新」:分頁「新職缺」的新是還沒表態,這裡是 7 天內進板,同一個字兩個意思
+    // 欄名(近 7 天、進板)放在 .co-k:新職缺那幾頁桌機排成表格,表頭已經寫了,格子裡就收掉
+    var _age=(_min===null)?'':'<span class="coage" title="這家最新那張的'+_how+'時間">'+(_min<=0?'今天':(_min===1?'昨天':_min+' 天前'))+'<span class="co-k">'+_how+'</span></span>';
+    var _newdot=_fresh?'<span class="conew" title="'+_fresh+' 張是 '+NEW_DAYS+' 天內進板的"><span class="co-k">近 '+NEW_DAYS+' 天</span>'+_fresh+' 張</span>':'';   // 不寫「N 張新」:分頁「新職缺」的新是還沒表態,這裡是 7 天內進板,同一個字兩個意思
     var body='';
     if(_op) cc.forEach(function(j){body+=cardHTML(j);});
     LAZY[_k]=cc;
@@ -1650,7 +1641,9 @@
   // 不然展開時畫的是後畫那一區的卡(LAZY 被蓋掉)、開合也連動。其他頁一頁只有一組,照舊用公司名。
   function coCat(sec){return /^sent-/.test(sec||'')?sec:'';}
   function _grouped(list,sec){
-    var g=_coOrder(list,sec), out='<div class="cogrid">';
+    // 新職缺那幾頁(browse)桌機排成表格:公司｜職缺｜近 7 天｜進板｜共,表頭一列
+    var g=_coOrder(list,sec), out='<div class="cogrid'+(sec==='browse'?' cotable':'')+'">'+
+      (sec==='browse'?'<div class="cothd" aria-hidden="true"><span>公司</span><span>職缺</span><span>近 '+NEW_DAYS+' 天</span><span>進板</span><span>共</span></div>':'');
     g.cos.forEach(function(co){out+=coGroupHTML(coCat(sec),co,sortJobs(g.byCo[co]));});
     return out+'</div>';}
   // 公司的順序(畫公司列、「一張一張看」排卡片共用,兩邊看到的順序一樣)
@@ -2078,7 +2071,7 @@
     return '<button type="button" class="ctl" data-ctl="'+name+'">'+
       '<span class="ctl-k">'+label+'</span>'+
       '<span class="ctl-v">'+esc(now[1])+'</span>'+
-      '<span class="ctl-caret">▾</span></button>';
+      '<span class="ctl-caret">'+ic('chevron-down')+'</span></button>';
   }
 
   // ---- 🎤 面試準備(資料在看板的 bank,格式與規則見 docs/interview-bank.md;寫入只走 interview_bank.apply) ----
@@ -2463,6 +2456,7 @@
     return [['','全部','']].concat(fk.map(function(x){return [x,x,fc[x]];}));}
   function renderApp(){
     inApplyView=false;
+    var pa=$('pg-act'); if(pa)pa.innerHTML='';
     scopeTop();
     syncQ();
     if(active!=='cfg')CFGAWAY=true;   // 看過別的分頁:回設定頁時重讀(renderCfg)
@@ -2526,7 +2520,8 @@
     var out=_grouped(list,'browse'); LASTLIST=list;
     // 出錯了:頁面有卡時也講這是什麼、該怎麼辦(以前只有空頁才有說明)
     var errHint=active==='techerr'?'<p class="applyempty">'+ic('info')+' 這些卡是被標成「出錯了」的:網址打不開、指到別的缺,或卡上的資料抓錯了。打開卡看過沒問題,按「不是出錯,放回原處」;不要了就移除。</p>':'';
-    $('app').innerHTML=chips+errHint+rvBarHTML(list)+out; refreshAllCards(); autogrowAll($('app'));
+    if(pa)pa.innerHTML=rvBarHTML(list);
+    $('app').innerHTML=chips+errHint+out; refreshAllCards(); autogrowAll($('app'));
   }
   // 這一頁空的時候講下一步(空畫面不能只寫「沒有」)
   function emptyNext(tab){
@@ -2560,7 +2555,7 @@
       (risk.length?'<button class="stage-b rv-risk" type="button" data-riskrm="1">移除 <b class="bulk-n" data-bulkn="risk">'+bulkN('risk',risk)+'</b> 張可能已關的</button>':'')+
       (meh.length?'<button class="stage-b rv-risk" type="button" data-mehrm="1">移除 <b class="bulk-n" data-bulkn="meh">'+bulkN('meh',meh)+'</b> 張放超過一個月的</button>':'')+
       // 出錯了那一頁進去是檢查(放回原處或移除),不是表態
-      '<button class="stage-b adv rv-start" type="button" data-rvstart="1">'+ic('play')+(active==='techerr'?' 一張一張檢查':' 一張一張看')+'</button>'+
+      '<button class="stage-b adv rv-start" type="button" data-rvstart="1">'+ic('play')+(active==='techerr'?' 一張一張檢查':' 一張一張看')+'<span class="rv-n">'+n+'</span></button>'+
       (risk.length?bulkPvHTML('risk',risk,'原頁打不開、掛超過半年或死線已過的。'+rmHint,function(j){return esc(riskWhy(j));}):'')+
       (meh.length?bulkPvHTML('meh',meh,'標「普通」、進板超過一個月還沒往下走的(表態照樣留著給找缺學你的口味)。'+rmHint,function(j){return esc(addedText(j));}):'')+'</div>';}
   // 批次動作(可能已關、放太久的普通一次移除,待你決定一次送去可以投了)按之前看得到是哪幾張:按鈕後面一個開合,一張一行打勾。
@@ -2622,6 +2617,16 @@
     clearTimeout(_rvTimer); REVIEW.i=k; REVIEW.last=null; rvSave(); renderApp(); window.scrollTo(0,0);
     var ta=document.querySelector('#app .rv-card .fb-t'); if(ta){try{ta.focus({preventScroll:true});}catch(e){}}}
   function rvCur(){return REVIEW&&REVIEW.ids[REVIEW.i];}
+  // 訊息條的「復原」:表態放回去(順手收回的準備履歷也放回),順手加入的準備履歷用後台給的復原單收回,回到那張
+  function rvUndoMood(id,prev,prepP){var f=FB[id]=FB[id]||{};
+    if(prev.s)f.s=prev.s; else delete f.s;
+    if(!prepP){if(prev.app)f.app=prev.app; else delete f.app;}
+    if(prev.likeprep)f.likeprep=prev.likeprep; else if(!prepP)delete f.likeprep;
+    if(!prev.s)delete justMarked[id];
+    markDirty(id);
+    if(prepP)prepP.then(function(r){if(r&&r.ok)undo(r.undo);});
+    if(REVIEW){REVIEW.marked=Math.max(0,REVIEW.marked-1); REVIEW.last=null; var k=REVIEW.ids.indexOf(id); if(k>=0){rvAt(k); return;}}
+    renderAll(id);}
   // 這張處理掉了(表態、加入準備、移除):停一下讓他看到按下去的樣子,再換下一張
   function rvDone(id,ms){if(!REVIEW||rvCur()!==id)return; clearTimeout(_rvTimer);
     _rvTimer=setTimeout(function(){if(REVIEW&&rvCur()===id)rvGo(1);},ms==null?600:ms);}
@@ -2647,7 +2652,8 @@
     var ta=REVIEW.noreason&&document.querySelector('#app .rv-card .fb-t'); if(ta){try{ta.focus({preventScroll:true});}catch(e){}}}
   function renderReview(){
     var R=REVIEW, n=R.ids.length, id=R.ids[R.i], j=id&&jobOf(id);
-    var top='<div class="rv-top"><button class="stage-b rv-x" type="button" data-rvexit="1">'+ic('x')+' 結束</button>'+
+    var top='<div class="rv-top"><button class="stage-b rv-x" type="button" data-rvexit="1" aria-label="結束">'+ic('chevron-left')+'<span class="rv-x-l">結束</span></button>'+
+      '<span class="rv-tco">'+(j?esc(companyOf(j)):'')+'</span><span class="rv-left">還有 <b>'+Math.max(0,n-R.i)+'</b> 張</span>'+
       '<span class="rv-pos"><b>'+Math.min(R.i+1,n)+'</b> / '+n+'</span>'+
       '<span class="rv-bar"><i style="width:'+Math.round(Math.min(R.i,n)*100/n)+'%"></i></span>'+
       '<span class="rv-keys">1–4 表態 · P 加入準備 · ← → 上一張/跳過 · Esc 結束</span></div>';
@@ -2660,7 +2666,7 @@
         '<span class="rv-last-m">剛才 '+(RV_MOOD[R.last.s]?ic(RV_MOOD[R.last.s]):'')+'</span>'+
         '<span class="rv-last-t">'+esc(cardName(L))+'</span><b>'+ic('pen-line')+' 補原因</b></button>':'';
       var f=FB[id]||{}, where=f.app?'已進「'+({prep:'準備履歷',ready:READY_NAME,ship:'可以投了',sent:'已投出'}[f.app]||f.app)+'」':(f.rm?'已移除':'');
-      main='<div class="rv-co">'+esc(companyOf(j))+(where?'<span class="rv-where">'+esc(where)+'</span>':'')+'</div>'+
+      main=(where?'<div class="rv-co"><span class="rv-where">'+esc(where)+'</span></div>':'')+
         lastChip+'<div class="rv-card">'+cardHTML(j)+'</div>';
     }
     $('app').innerHTML='<div class="rv">'+top+rvListHTML()+'<div class="rv-main">'+main+'</div></div>';
@@ -2682,7 +2688,7 @@
     var t=e.target; if(t&&(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)||t.isContentEditable))return;
     var ov=$('rzmodal'); if(ov&&ov.style.display==='flex')return;
     var card=document.querySelector('#app .rv-card article'), k=e.key.toLowerCase();
-    var mood={'1':'like','2':'meh','3':'dislike','4':'grow'}[k];
+    var mood={'1':'dislike','2':'meh','3':'grow','4':'like'}[k];   // 跟心情鈕由左到右同一個順序
     if(mood&&card){var b=card.querySelector('.fb-b[data-s="'+mood+'"]'); if(b){e.preventDefault(); b.click();} return;}
     if(k==='p'&&card){var p=card.querySelector('[data-adv="prep"]'); if(p){e.preventDefault(); p.click();} return;}
     if(k==='arrowright'||k==='j'){e.preventDefault(); rvGo(1); return;}
@@ -2846,9 +2852,9 @@
   // 破壞性動作(移除/技術錯誤/封鎖)做完,就地跳一條可以按回去的訊息。
   // 以前要自己切到別的分頁才找得回來,等於做完就失聯。
   var _snapTimer=null;
-  function snack(msg, undoFn, next){
+  function snack(msg, undoFn, next, sub){
     var el=$('snack'); if(!el){el=document.createElement('div'); el.id='snack'; document.body.appendChild(el);}
-    el.innerHTML='<span>'+esc(msg)+'</span>'+
+    el.innerHTML=(sub?'<span class="snack-t"><b>'+esc(msg)+'</b><span class="snack-sub">'+esc(sub)+'</span></span>':'<span>'+esc(msg)+'</span>')+
       (next?'<button type="button" class="snack-next">'+esc(next.label)+'</button>':'')+
       (undoFn?'<button type="button" class="snack-undo">復原</button>':'');
     el.className='on';
@@ -3266,7 +3272,7 @@
     var blb=e.target.closest&&e.target.closest('[data-blocklist]');
     if(blb){openBlockList(); return;}
     var gt=e.target.closest&&e.target.closest('[data-gotab]');
-    if(gt){closeTabAll(); switchTab(gt.getAttribute('data-gotab')); return;}
+    if(gt){switchTab(gt.getAttribute('data-gotab')); return;}
     var mb=e.target.closest&&e.target.closest('[data-omore]');
     if(mb){e.preventDefault(); e.stopPropagation();
       var m=mb.parentNode.querySelector('.more-m');
@@ -3627,13 +3633,13 @@
   }
 
   $('tabs').addEventListener('click',function(e){
-    // 「全部分頁」開關;清單裡選了一頁就關(換頁本身走 document 上 data-gotab 那一支)
-    if(e.target.closest('#taball')){TABALL_OPEN=!TABALL_OPEN; var m=$('taball-m'); if(m)m.hidden=!TABALL_OPEN; $('taball').setAttribute('aria-expanded',String(TABALL_OPEN)); return;}
+    var g=e.target.closest('[data-botgrp]');
+    if(g){g=g.getAttribute('data-botgrp'); var k=LASTTAB[g];
+      if(TAB_GRP[k]!==g)k=TABS.filter(function(t){return TAB_GRP[t[0]]===g;})[0][0];
+      if(k!==active||REVIEW){switchTab(k); var next=document.querySelector('#tabs [data-botgrp="'+g+'"]'); if(next)next.focus();}
+      else window.scrollTo(0,0); return;}
     var t=e.target.closest('.tab');
-    if(!t)return; switchTab(t.getAttribute('data-tab'));
-    // 桌機捲下去時分頁籤是單列橫捲的,按到半露的那個要把它捲進來,不然下次找不到。
-    // 同樣只能動分頁列自己的橫向捲軸(理由見 centerTab)。
-    centerTab();});
+    if(t)switchTab(t.getAttribute('data-tab'));});
   // 手機橫捲的篩選列:哪一邊還有東西就亮那一邊的箭頭(CSS 的 .more-l/.more-r),點箭頭往那邊捲大半列。
   // 篩選列每次重畫都是新的元素,所以畫面有變動、視窗變寬窄都重算一次;捲動事件不冒泡,用 capture 接。
   function markEdges(el){var max=el.scrollWidth-el.clientWidth;
@@ -3705,7 +3711,7 @@
     // 誤觸要能當場反悔:復原單送回去,這張沒被別處動過就整張放回;已經開始重填了,換回來的那一欄照樣算換檔(修正 12)
     press(id,null,set,what+'切成「'+label+'」',{then:function(){askShip(id);}});
   }
-  $('app').addEventListener('click',function(e){
+  function appClick(e){
     if(e.target.closest('[data-rvstart]')){rvStart(); return;}
     var atk=e.target.closest('[data-autotake]');
     if(atk){var stg=atk.getAttribute('data-autotake'), A=FB['__auto__']; if(!A)return;
@@ -3978,9 +3984,15 @@
       // 以前卡留在流程裡,agent 照樣替它準備、填表。後台收了才算
       if((now==='dislike'||now==='meh')&&['prep','ready','ship'].indexOf(FB[id].app)>=0){
         var lw=dsBusyWhy(id); if(lw){snack(lw); return;}
-        press(id,{ev:'leave'},{s:now,app:null,likeprep:null},'改成'+(now==='dislike'?'不喜歡':'普通')+',這張一起退出流程了',
-          {then:function(){justMarked[id]=1; if(REVIEW){REVIEW.marked++; REVIEW.last={id:id,s:now}; rvSave(); rvDone(id);}}});
+        var reviewMode=!!REVIEW;
+        press(id,{ev:'leave'},{s:now,app:null,likeprep:null},reviewMode?'':'改成'+(now==='dislike'?'不喜歡':'普通')+',這張一起退出流程了',
+          {then:function(r){justMarked[id]=1; if(REVIEW){REVIEW.marked++; REVIEW.last={id:id,s:now}; rvSave(); rvDone(id);}
+            if(reviewMode)snack('已標「'+MOOD_WORD[now]+'」，換下一張',function(){undo(r.undo);
+              if(REVIEW){REVIEW.marked=Math.max(0,REVIEW.marked-1); REVIEW.last=null;
+                var k=REVIEW.ids.indexOf(id); if(k>=0){rvAt(k); return;}}
+              renderAll(id);},null,MOOD_HINT[now].split('(')[0]);}});
         return;}
+      var prev={s:was,app:FB[id].app,likeprep:FB[id].likeprep};
       FB[id].s=now;
       var autoPrep=false;
       // 👍 就是要投:同時加入準備(自動流程會接著準備、填表)。取消 👍 或改成別的,這一下替他加的也一起收回。
@@ -3993,11 +4005,14 @@
       markDirty(id);
       if(patchCard(id)){renderTabs(); refreshBar();}   // 只換那一張,頁面不動
       else renderAll(id);
-      if(REVIEW&&now){REVIEW.marked++; REVIEW.last={id:id,s:now}; rvSave(); rvDone(id);}   // 一張一張看:標完換下一張;按錯按 ← 回來
       // 順手加的那一下另外送:「復原」只收回加入準備,👍 留著
-      if(autoPrep)press(id,null,{app:'prep',likeprep:1},REVIEW?'':'也送去準備履歷了,'+AGENT+' 會接著準備');
+      var prepP=autoPrep?press(id,null,{app:'prep',likeprep:1},REVIEW?'':'也送去準備履歷了,'+AGENT+' 會接著準備'):null;
+      if(REVIEW&&now){REVIEW.marked++; REVIEW.last={id:id,s:now}; rvSave(); rvDone(id);   // 一張一張看:標完換下一張
+        snack('已標「'+MOOD_WORD[now]+'」，換下一張',function(){rvUndoMood(id,prev,prepP);},null,MOOD_HINT[now].split('(')[0]);}
       return;}
-  });
+  }
+  // 頁首那一行(一張一張看、移除可能已關的)是從清單搬上去的同一組按鈕:點擊走同一份
+  $('app').addEventListener('click',appClick); $('pagehd').addEventListener('click',appClick);
   $('app').addEventListener('input',function(e){var ta=e.target.closest('.fb-t');if(!ta)return;autogrow(ta);var id=ta.closest('article').getAttribute('data-fid');FB[id]=FB[id]||{};FB[id].n=ta.value;markDirty(id,'text');});
   $('app').addEventListener('input',function(e){var ta=e.target.closest('.rz-fb');if(!ta)return;autogrow(ta);var id=ta.closest('article').getAttribute('data-fid');FB[id]=FB[id]||{};FB[id].rzfb=ta.value;ta.classList.toggle('has',!!ta.value);markDirty(id,'text');});
   // 答案庫的文字。打字當下不重畫整頁(捲動位置和游標都會跑掉),只就地更新那一列。
@@ -4095,16 +4110,8 @@
     tt.addEventListener('click',function(){window.scrollTo({top:0,behavior:'smooth'});});
     document.body.appendChild(tt);
     var tick=false;
-    // 捲過一段就把分頁列縮成一行。縮起來頁面會變矮,瀏覽器的捲動錨定就把位置往回推、又判成該展開、
-    // 頁面變高、位置推回去——一秒來回 60 次,整排在最上面狂閃(頁面只比畫面長一點點時,例如選單超出畫面底部)。
-    // 根本做法:縮起來少掉的高度,在分頁列後面用一個佔位補回去,頁面排版高度不變,位置不會被推、可捲的空間也不變。
-    // 用佔位元素、不用外距:外距會跟後面空著的那條(例如沒有回報時的 📣)合併,補回去的高度被吃掉一截。
-    // 另外兩道:①進出用不同門檻(遲滯);②頁面本來就沒多高就不縮(縮了也沒意義)。
-    function setScrolled(on){var tb=$('tabs'), sp=$('tabs-spacer');
-      if(tb&&!sp){sp=document.createElement('div'); sp.id='tabs-spacer'; tb.parentNode.insertBefore(sp,tb.nextSibling);}
-      if(!on){document.body.classList.remove('scrolled'); fitTabs(); if(sp)sp.style.height=''; return;}
-      var h0=tb?tb.offsetHeight:0; document.body.classList.add('scrolled'); fitTabs();
-      if(sp)sp.style.height=Math.max(0,h0-tb.offsetHeight)+'px';}
+    // 捲過一段才出現回頂鈕;進出用不同門檻(遲滯),頁面本來就沒多高就不出現
+    function setScrolled(on){document.body.classList.toggle('scrolled',on);}
     function onScroll(){ if(tick)return; tick=true;
       requestAnimationFrame(function(){tick=false;
         var y=window.pageYOffset||document.documentElement.scrollTop;
@@ -4122,10 +4129,6 @@
           if(el!==tt&&!tt.contains(el)&&el.closest('button,a[href],input,select,textarea,summary,label'))hit=true;});});
       tt.classList.toggle('dodge',hit);}
     window.addEventListener('scroll',onScroll,{passive:true}); onScroll();
-    // 視窗寬度變了(縮放視窗、手機轉向):重排放不放得下、目前分頁捲回畫面裡。
-    // 不重算佔位:要先展開再縮回去才量得到,展開那一下頁面變矮、捲動位置被夾住會跳。
-    // ponytail: 佔位高度用的是開始捲時的寬度,縮放視窗後要等回到頂端再捲下去才重算
-    window.addEventListener('resize',function(){fitTabs(); centerTab();});
     var _sv=null;   // 捲動位置防抖存,不要每一幀都寫
     window.addEventListener('scroll',function(){clearTimeout(_sv);_sv=setTimeout(saveView,400);},{passive:true});
   })();
@@ -4546,28 +4549,34 @@
     var sh=onPage('ship').filter(function(j){var S=cardState(j); return !S.locked&&!S.busy&&S.todo;}).length;
     // 待你決定、準備履歷只列真的要他按的:自動推進、自動準備會接的、正在跑的不列
     var rd=FLOW.auto_advance?0:readyPassList().length, pw=PREP.running?0:prepWaiting().length;
-    var it=[na?'<button class="wt-b" type="button" data-ansq="1">常用答案 <b>'+na+'</b> 條待確認</button>':'',
-      sh?'<button class="wt-b" type="button" data-gotab="ship">可以投了 <b>'+sh+'</b> 件卡住</button>':'',
+    var it=[na?wtCell(na,'常用答案待確認','data-ansq="1"'):'',
+      sh?wtCell(sh,'可以投了卡住','data-gotab="ship"'):'',
       // 回報直接寫最急那件要做什麼、對誰;點了打開那一則。下面回報的標題就不再寫這個數字
       ib?inboxWaitHTML(ib):'',
-      rd?'<button class="wt-b" type="button" data-gotab="ready">待你決定 <b>'+rd+'</b> 張可以送</button>':'',
-      pw?'<button class="wt-b" type="button" data-gotab="prep">準備履歷 <b>'+pw+'</b> 張還沒開始</button>':''].filter(Boolean);
-    return it.length?'<div class="waitrow"><span class="wt-k">要你處理</span>'+it.join('')+'</div>':'';
+      rd?wtCell(rd,'待你決定可以送','data-gotab="ready"'):'',
+      pw?wtCell(pw,'準備履歷還沒開始','data-gotab="prep"'):''].filter(Boolean);
+    return it.length?'<div class="waitrow"><div class="wt-hd"><span class="wt-dot" aria-hidden="true"></span><span class="wt-k">要你處理</span></div>'+
+      '<div class="wt-grid">'+it.join('')+'</div></div>':'';
   }
+  // 一件一格:上面大數字(警示色),下面一行講是什麼;整格就是那顆鈕
+  function wtCell(n,what,attr){return '<button class="wt-b" type="button" '+attr+'><b class="wt-n">'+n+'</b><span class="wt-l">'+what+'</span></button>';}
   // 「回報 3 件:完成 Cloudflare 安全驗證(104)」:你要做的取第一句,太長截掉;對象是那張卡的公司,沒有卡就是回報從哪來
   // 最急 = 擋住投遞的:可以投了那張卡的排最前,再來是有卡的,最後才是流程本身的(找缺、同步);同一級新的在前。不看是不是這一頁
   function inboxUrgency(x){var a=x.job&&jobOf(x.job)?(FB[x.job]||{}).app:''; return (a==='ship'?2:0)+(a?1:0);}
   function inboxWaitHTML(n){var it=inboxOpen().filter(inboxTodo).sort(function(a,b){return (inboxUrgency(b)-inboxUrgency(a))||String(b.at).localeCompare(String(a.at));})[0], j=it.job&&jobOf(it.job);
     var need=ibText(it.need||it.msg).split(/[;；。\n]/)[0].trim(); if(need.length>26)need=need.slice(0,25)+'…';
     var who=j?companyOf(j):((/^\S+\.(?:com|tw|io|org|net)\S*/.exec(it.msg||'')||[])[0]||(IB_FROM[it.from]||[])[0]||'');
-    return '<button class="wt-b" type="button" data-openinbox="'+escA(it.id)+'">回報 <b>'+n+'</b> 件:'+esc(need)+(who?'('+esc(who)+')':'')+'</button>';}
+    return wtCell(n,'回報：'+esc(need)+(who?'（'+esc(who)+'）':''),'data-openinbox="'+escA(it.id)+'"');}
+  // 要你處理自己一個框,放在填表進度、回報、找新職缺那一排(#topbars)上面
   function renderWait(){var tb=$('topbars'); if(!tb)return; var w=$('waitbar');
-    if(!w){w=document.createElement('div'); w.id='waitbar'; tb.insertBefore(w,tb.firstChild);}
+    if(!w){w=document.createElement('div'); w.id='waitbar'; tb.parentNode.insertBefore(w,tb);}
     w.innerHTML=waitHTML();}
   document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-openinbox]'); if(!b)return;
     var d=document.querySelector('#inboxbar details.inbox-d'); if(!d)return;
     d.open=true; var r=document.querySelector('#inboxbar [data-ib="'+CSS.escape(b.getAttribute('data-openinbox'))+'"]');
-    if(r&&r.tagName==='DETAILS')r.open=true; (r||d).scrollIntoView({block:'start'});});
+    if(r&&r.tagName==='DETAILS')r.open=true;
+    // 捲到回報那一塊的標題;那一則在畫面外才再往下捲到它
+    d.scrollIntoView({block:'start'}); if(r&&r.getBoundingClientRect().bottom>window.innerHeight)r.scrollIntoView({block:'nearest'});});
   // 每頁才有的幾條(回報、找新職缺、你的履歷)放在分頁籤「下面」:放上面的話,切頁時它們一出一沒,
   // 分頁籤整排跟著上下跳,手指/滑鼠剛好點不到下一顆。
   // 這幾條收在同一個容器(#topbars)裡,一條一列:樣子見 board.css 的 #topbars。
@@ -5045,9 +5054,8 @@
     var save=$('cfg-save');
     if(save&&save.classList.contains('dirty')){var sr=save.getBoundingClientRect();
       if(sr.height&&sr.bottom>0&&sr.top<height)bottom=Math.min(bottom,sr.top-8);}
-    document.querySelectorAll('#tabs').forEach(function(bar){var r=bar.getBoundingClientRect(), s=window.getComputedStyle(bar);
-      if(r.height&&r.bottom>0&&r.top<height&&(s.position==='fixed'||(s.position==='sticky'&&r.top<=(parseFloat(s.top)||0)+1)))
-        top=Math.max(top,r.bottom+8);});
+    var nav=document.querySelector('#tabs .botnav'), nr=nav&&nav.getBoundingClientRect();
+    if(nr&&nr.height&&nr.top<height)bottom=Math.min(bottom,nr.top-8);
     document.documentElement.style.setProperty('--cfg-scroll-top',top+'px');
     document.documentElement.style.setProperty('--cfg-scroll-bottom',Math.max(0,height-bottom)+'px');
     return {top:top,bottom:bottom};}

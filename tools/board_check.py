@@ -381,6 +381,7 @@ CHECKS=[
    await T.until(function(){return !document.querySelector('#app .iv-sharedgrp details.ivrow[data-iv="'+q+'"]');},5000);
    if(document.querySelector('#app .iv-sharedgrp details.ivrow[data-iv="'+q+'"]'))bad.push('取消共有,那一題還在共有區');
    if(rows()!==n0)bad.push('取消共有之後這場的題數變了');
+   document.querySelector('#tabs [data-tab="none"]').click(); await T.idle();   // 下一條從新職缺出發
    return bad.join('；');
  """),
  # 「留在原地」只對心情標記成立。他按了加入準備,卡片就該離開待評估——
@@ -966,7 +967,7 @@ WEB_CHECKS.append(('首頁「要你處理」:散在各頁要你動手的事列�
    if(!row){await T.put('__inbox__',box0); await T.resync(); return '首頁有要你處理的回報,最上面卻沒有「要你處理」';}
    var d=document.querySelector('#inboxbar details.inbox-d'); if(d)d.open=false;
    var ob=row.querySelector('[data-openinbox]');
-   if(!ob||!/回報 \\d+ 件/.test(ob.textContent))bad.push('「要你處理」的回報那一顆沒寫幾件');
+   if(!ob||!/^\\s*\\d+\\s*回報/.test(ob.textContent))bad.push('「要你處理」的回報那一格沒寫幾件');
    if(d&&/要你處理/.test(d.querySelector('summary').textContent))bad.push('下面回報那一列又叫「要你處理」,跟上面那一列同名');
    T.press('#waitbar [data-openinbox]'); await T.idle();
    d=document.querySelector('#inboxbar details.inbox-d');
@@ -1459,10 +1460,10 @@ VERIFY_CHECKS=[
    return bad?'soft 連結提示被當成確定下架的一鍵移除候選':'';
  """, 'status_issue'),
 ]
-# 分頁列捲下去會縮成一行。縮了頁面變矮 → 瀏覽器的捲動錨定把位置往回推 → 又判成該展開 → 又變高……
-# 頁面只比畫面長一點點時(例如打開的選單超出畫面底部)一秒來回 60 次,整排在最上面狂閃。
+# 捲下去會切成「已捲動」(回頂鈕出現)。以前分頁列跟著縮成一行,縮了頁面變矮 → 捲動錨定把位置往回推 → 又判成該展開……
+# 頁面只比畫面長一點點時一秒來回 60 次。現在分頁列不縮了,這條守住「切換不改頁面高度、不來回閃」。
 SCROLL_CHECKS=[
- ('分頁列縮起來不改頁面高度:頁面只比畫面長一點點時捲下去也不會來回閃',"""
+ ('捲下去切成已捲動不改頁面高度:頁面只比畫面長一點點時也不會來回閃',"""
    document.querySelector('[data-tab="none"]').click(); await T.idle();
    window.scrollTo(0,0); document.body.classList.remove('scrolled'); await T.idle();
    var pad=document.createElement('div'); document.getElementById('app').appendChild(pad);
@@ -1474,9 +1475,9 @@ SCROLL_CHECKS=[
    window.scrollTo(0,200); await T.stays(function(){return n<=2;},1000); mo.disconnect();
    var bad=[];
    if(n>2)bad.push('捲到 200 之後 1 秒內縮放切換了 '+n+' 次');
-   if(!document.body.classList.contains('scrolled'))bad.push('捲到 200 分頁列沒有縮起來');
+   if(!document.body.classList.contains('scrolled'))bad.push('捲到 200 沒有切成已捲動');
    var h1=document.documentElement.scrollHeight;
-   if(Math.abs(h1-h0)>1)bad.push('分頁列縮起來頁面高度從 '+h0+' 變成 '+h1);
+   if(Math.abs(h1-h0)>1)bad.push('捲下去頁面高度從 '+h0+' 變成 '+h1);
    pad.remove(); window.scrollTo(0,0); document.body.classList.remove('scrolled'); await T.idle();
    return bad.join('；');
  """),
@@ -2253,6 +2254,7 @@ FLOW_CHECKS=[
    var fid=a.getAttribute('data-fid'), before=window.__jobsalvoFlow.fb(fid);
    var dis=a.querySelector('.fb-b[data-s="dislike"]'); if(!dis)return '準備履歷中的卡沒有表態按鈕';
    dis.click(); await T.idle();
+   if(T.snack().indexOf('改成不喜歡,這張一起退出流程了')<0)bad.push('非讀卡模式的離開流程訊息變了');
    if(window.__jobsalvoFlow.fb(fid).app)bad.push('改成不喜歡還留在流程裡(app='+window.__jobsalvoFlow.fb(fid).app+')');
    inv().forEach(function(x){bad.push(x);});
    var u=document.querySelector('#snack.on .snack-undo'); if(!u)bad.push('沒有復原'); else {u.click(); await T.idle();}
@@ -2644,23 +2646,25 @@ def review_cards(board):
     import board_doc as bd, time as _t
     d=bd.load(board); fb=json.loads(d['fb'])
     have=[j for j in d['data']['jobs'] if not fb.get(j['id']) and not j.get('bk')]
-    need=max(0,3-len(have))
+    need=max(0,4-len(have))
     if need:
         today=_t.strftime('%Y-%m-%d')
         new=[{'id':f'https://example.test/review/{int(_t.time())}-{i}','cat':'其他',
               'target':f'(檢查用)一張一張看 {i} · 檢查公司','chan':'官方','ammo':'','note':'',
               'bk':False,'dead':False,'added':today,'sum':{'fit':'檢查用'}} for i in range(need)]
         bd.set_data(lambda data,_fb: data['jobs'].extend(new), live=board)
-    return {'added':need}
+    d=bd.load(board); fb=json.loads(d['fb'])
+    prep_id=next(j['id'] for j in d['data']['jobs'] if not fb.get(j['id']) and not j.get('bk'))
+    return {'added':need,'prep_id':prep_id}
 PRE['review_cards'] = review_cards
 
 CHECKS.append((
     '一張一張看:一次一張、表態存得進去而且自動換下一張,← 回得去看得到剛標的,→ 跳過,結束回到清單',
     r"""
       var bad=[], card=function(){return document.querySelector('#app .rv-card article[data-fid]');};
-      if(P&&P.added)await T.resync();
+      if(P)await T.resync();
       document.querySelector('[data-tab="none"]').click(); await T.idle();
-      var go=document.querySelector('#app [data-rvstart]'); if(!go)return '待評估那頁沒有「一張一張看」';
+      var go=document.querySelector('[data-rvstart]'); if(!go)return '待評估那頁沒有「一張一張看」';
       go.click(); await T.idle();
       var c1=card(); if(!c1)return '按了之後沒有出現卡片';
       if(document.querySelectorAll('#app article[data-fid]').length!==1)bad.push('一次不只一張');
@@ -2670,13 +2674,19 @@ CHECKS.append((
       // 上一張、跳過跟表態鈕一起在底下黏著那段(拇指搆得到);頂端那條不黏,不會蓋住公司名
       var nav=c1.querySelector('.card>.fb [data-rvgo="1"]');
       if(!nav)bad.push('跳過鈕不在底下黏著那一段');
-      else if(nav.getBoundingClientRect().bottom>innerHeight+1)bad.push('跳過鈕不在畫面裡');
+      else{var nr=nav.getBoundingClientRect();
+        if(nr.bottom>innerHeight+1)bad.push('跳過鈕不在畫面裡');
+        if(matchMedia('(max-width:720px)').matches&&nr.height<44)bad.push('手機跳過鈕不到 44px');}
       if(getComputedStyle(document.querySelector('#app .rv-top')).position==='sticky')bad.push('頂端那條還黏著(會蓋住公司名)');
       var fid=c1.getAttribute('data-fid'), s0=((await T.state())[fid]||{}).s||'';
       var want=s0==='grow'?'meh':'grow';
       c1.querySelector('.fb-b[data-s="'+want+'"]').click(); await T.idle();
       await T.until(function(){var c=card(); return c&&c.getAttribute('data-fid')!==fid;},4000);
       if((((await T.state())[fid]||{}).s||'')!==want)bad.push('表態沒存進去');
+      if(matchMedia('(max-width:720px)').matches){
+        var toast=document.querySelector('#snack.on'), navNow=document.querySelector('#app .rv-card .rv-navrow');
+        if(toast&&navNow&&!await T.until(function(){return toast.getBoundingClientRect().bottom<=navNow.getBoundingClientRect().top+1;},1000))
+          bad.push('訊息條壓到上一張／跳過');}
       var c2=card(); if(!c2||c2.getAttribute('data-fid')===fid)bad.push('標完沒有換下一張('+((document.querySelector('#app .rv-pos')||{}).textContent||'')+')');
       var fid2=c2&&c2.getAttribute('data-fid');
       // 標完才想補原因:上面那一條「剛才 ✍️ 補原因」點了回到剛才那張
@@ -2699,6 +2709,47 @@ CHECKS.append((
       if(!document.querySelector('#app .cohead'))bad.push('結束後清單不見了');
       if(document.getElementById('tabs').offsetHeight===0)bad.push('結束後分頁列沒回來');
       if(!s0&&(((await T.state())[fid]||{}).s||''))bad.push('再按一次同一顆沒有取消表態');
+      if(P&&P.prep_id){
+        // 準備履歷那頁沒有讀卡模式;卡是在讀卡途中被送去準備履歷的(例如按喜歡順手加入準備),再改成普通／不喜歡要走離開流程
+        document.querySelector('#tabs [data-tab="none"]').click(); await T.idle();
+        var prepBefore=(await T.state())[P.prep_id]||{}, start=document.querySelector('#pagehd [data-rvstart]');
+        if(!start)bad.push('新職缺沒有「一張一張看」');
+        else{
+          start.click(); await T.idle();
+          var leaveCard=card(), hops=0;
+          while(leaveCard&&leaveCard.getAttribute('data-fid')!==P.prep_id&&hops++<400){
+            var next=document.querySelector('#app [data-rvgo="1"]'); if(!next||next.disabled)break;
+            next.click(); await T.frame(); leaveCard=card();}
+          if(!leaveCard||leaveCard.getAttribute('data-fid')!==P.prep_id)bad.push('讀卡模式找不到檢查卡');
+          else{
+            await T.put(P.prep_id,Object.assign({},prepBefore,{app:'prep'})); await T.resync();
+            if((((await T.state())[P.prep_id])||{}).app!=='prep')bad.push('檢查卡沒有在準備履歷中');
+            if(!card()||card().getAttribute('data-fid')!==P.prep_id)bad.push('跟伺服器對過之後讀卡沒停在檢查卡');
+            var leaveMoods=[['dislike','不喜歡','不想要這種缺'],['meh','普通','還好,沒有想投']];
+            for(var mi=0;mi<leaveMoods.length;mi++){
+              var mood=leaveMoods[mi], button=document.querySelector('#app .rv-card .fb-b[data-s="'+mood[0]+'"]');
+              if(!button){bad.push('讀卡中的準備卡沒有「'+mood[1]+'」');break;}
+              var oldSnack=document.getElementById('snack'); if(oldSnack)oldSnack.className='';
+              button.click();
+              var expectedTitle='已標「'+mood[1]+'」，換下一張';
+              var toast=await T.until(function(){var e=document.querySelector('#snack.on'), t=e&&e.querySelector('.snack-t b');
+                return e&&e.querySelector('.snack-undo')&&t&&t.textContent===expectedTitle?e:null;},8000);
+              if(!toast){bad.push('標「'+mood[1]+'」沒有復原訊息');break;}
+              await T.idle(); if((((await T.state())[P.prep_id])||{}).app)bad.push('標「'+mood[1]+'」沒有退出流程');
+              if((toast.querySelector('.snack-t b')||{}).textContent!==expectedTitle)bad.push('標「'+mood[1]+'」訊息標題不一致');
+              if((toast.querySelector('.snack-sub')||{}).textContent!==mood[2])bad.push('標「'+mood[1]+'」沒有一般表態提示');
+              toast.querySelector('.snack-undo').click(); await T.idle();
+              if(!card()||card().getAttribute('data-fid')!==P.prep_id)bad.push('讀卡復原沒有回到原卡');
+              var returned=(await T.state())[P.prep_id]||{};
+              if(returned.app!=='prep'||returned.s)bad.push('讀卡復原沒有還原準備階段與表態');
+              var review=JSON.parse(localStorage.getItem('sts_review')||'{}');
+              if(review.marked!==0)bad.push('讀卡復原沒有扣回表態計數');
+            }
+          }
+          var exit=document.querySelector('#app [data-rvexit]'); if(exit){exit.click(); await T.idle();}
+        }
+        await T.put(P.prep_id,prepBefore); await T.resync();
+      }
       return bad.join('；');
     """,
     'review_cards', {'viewports': ['desktop', 'mobile']},
@@ -2734,40 +2785,64 @@ CHECKS.append((
 
 
 CHECKS.append((
-    '導覽:手機「全部分頁」一打開看板是關的、分三組列全部分頁、選了就換頁並關起來;外觀淺色/深色/跟系統切得過去也記得住',
+    '導覽:桌機側欄三組全看得到;手機頂端只放目前那一組、底部三組導覽換組回到那組上次停的分頁;外觀淺色/深色/跟系統切得過去也記得住',
     r"""
-      var bad=[], mob=matchMedia('(max-width:720px)').matches, m=document.getElementById('taball-m'), root=document.documentElement;
+      var bad=[], mob=matchMedia('(max-width:720px)').matches, root=document.documentElement;
+      function shown(sel){var e=document.querySelector(sel); return !!(e&&e.getBoundingClientRect().height);}
+      var g=[].map.call(document.querySelectorAll('#tabs .tabgrp'),function(x){return x.getAttribute('aria-label');}).join('、');
+      if(g!=='找工作、投遞流程、出錯與設定')bad.push('分頁的分組是「'+g+'」');
       if(mob){
-        if(!m||!m.hidden)bad.push('一打開看板「全部分頁」就是開的');
-        T.press('#taball'); await T.frame(); m=document.getElementById('taball-m');
-        if(!m||m.hidden||!m.getBoundingClientRect().height)bad.push('按了「全部分頁」沒打開');
-        else{
-          var g=[].map.call(m.querySelectorAll('.ta-k'),function(x){return x.textContent;}).join('、');
-          if(g.indexOf('找工作、投遞流程、管理')!==0)bad.push('清單的分組是「'+g+'」');
-          if(m.querySelectorAll('[data-gotab]').length!==document.querySelectorAll('#tabs .tab').length)bad.push('清單跟分頁列的分頁數不一樣');
-          T.press('#taball-m [data-gotab="ready"]'); await T.idle();
-          if(!document.querySelector('#tabs .tab.on[data-tab="ready"]'))bad.push('清單選了「待你決定」沒換頁');
-          m=document.getElementById('taball-m'); if(!m||!m.hidden)bad.push('選了之後清單沒關');
-          T.press('#taball'); await T.frame();}
-      }else if(m&&m.getBoundingClientRect().height)bad.push('桌機看得到「全部分頁」清單');
-      var at=mob?'#taball-m ':'#hdr ', sys=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
-      // 桌機的外觀收成一顆圖示鈕:一進來三選一是收著的,按了才打開
-      if(!mob){var tp=document.querySelector('#hdr .theme-pop');
+        if(!shown('#tabs .botnav'))bad.push('手機底部沒有三組導覽');
+        document.querySelector('#tabs [data-tab="none"]').click(); await T.idle();   // 看板記得上次停的分頁:從找工作那組出發
+        if(shown('#tabs [data-tab="ready"]'))bad.push('在找工作那組時,頂端還看得到投遞流程的分頁');
+        document.querySelector('#tabs [data-tab="like"]').click(); await T.idle();
+        var flowButton=document.querySelector('#tabs [data-botgrp="flow"]'); flowButton.focus(); flowButton.click(); await T.idle();
+        var focusedFlow=document.querySelector('#tabs [data-botgrp="flow"]');
+        if(document.activeElement!==focusedFlow)bad.push('換組重畫後焦點沒有回到新的投遞流程按鈕');
+        var on=(document.querySelector('#tabs .tab.on')||{}).getAttribute&&document.querySelector('#tabs .tab.on').getAttribute('data-tab');
+        if(['prep','ready','ship','sent','iv'].indexOf(on)<0)bad.push('按了底部「投遞流程」沒換到那一組');
+        if(!shown('#tabs [data-tab="ready"]'))bad.push('換到投遞流程後頂端看不到那一組的分頁');
+        document.querySelector('#tabs [data-tab="ship"]').click(); await T.idle();
+        T.press('#tabs [data-botgrp="find"]'); await T.idle();
+        if(!document.querySelector('#tabs .tab.on[data-tab="like"]'))bad.push('按回底部「找工作」沒回到上次停的「喜歡」');
+        T.press('#tabs [data-botgrp="flow"]'); await T.idle();
+        if(!document.querySelector('#tabs .tab.on[data-tab="ship"]'))bad.push('按回底部「投遞流程」沒回到上次停的「可以投了」');
+        if(document.documentElement.scrollWidth>innerWidth+1)bad.push('手機導覽讓頁面橫捲');
+      }else{
+        if(shown('#tabs .botnav'))bad.push('桌機看得到手機的底部導覽');
+        ['none','ready','techerr','cfg'].forEach(function(k){if(!shown('#tabs [data-tab="'+k+'"]'))bad.push('桌機側欄看不到「'+k+'」');});
+        // 收起側欄:剩一條窄欄,每一頁和張數照樣看得到、點得到;頁頂多一顆展開鈕;展開回來
+        if(shown('#hdr [data-sidetog]'))bad.push('側欄展開著,頁頂還有展開鈕');
+        T.press('#tabs [data-sidetog]'); await T.idle();
+        var tw=document.getElementById('tabs').offsetWidth;
+        if(tw>80)bad.push('按了收起側欄,側欄還有 '+tw+' 寬');
+        [].forEach.call(document.querySelectorAll('#tabs .tab'),function(t){var k=t.getAttribute('data-tab');
+          if(!shown('#tabs [data-tab="'+k+'"]'))bad.push('收起側欄後看不到「'+k+'」那一頁');
+          else if(k!=='cfg'&&!(t.querySelector('.n')||{}).offsetWidth)bad.push('收起側欄後「'+k+'」看不到張數');});
+        var hb=document.querySelector('#hdr [data-sidetog]');
+        if(!shown('#hdr [data-sidetog]')||hb.getAttribute('aria-expanded')!=='false')bad.push('收起側欄後頁頂沒有展開鈕');
+        T.press('#hdr [data-sidetog]'); await T.idle();
+        if(document.getElementById('tabs').offsetWidth<200)bad.push('按了展開側欄沒展開回來');
+        try{localStorage.removeItem('jobsalvo.side');}catch(e){}
+      }
+      var at='#hdr ', sys=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+      // 外觀收成頁首一顆圖示鈕(桌機手機一樣):一進來三選一是收著的,按了才打開
+      {var tp=document.querySelector('#hdr .theme-pop');
         if(!tp||!tp.hidden)bad.push('桌機頁首的外觀三選一一進來就攤開');
         T.press('#hdr [data-themeopen]'); await T.frame();
         if(!tp||tp.hidden||!tp.getBoundingClientRect().height)bad.push('按了外觀那顆沒打開三選一');}
       try{
         T.press(at+'[data-themeset="dark"]'); await T.frame();
-        if(root.getAttribute('data-theme')!=='dark'||getComputedStyle(document.body).backgroundColor!=='rgb(12, 14, 18)')bad.push('按「深色」畫面沒變深');
+        if(root.getAttribute('data-theme')!=='dark'||getComputedStyle(document.body).backgroundColor!=='rgb(17, 17, 16)')bad.push('按「深色」畫面沒變深');
         var keep=''; try{keep=localStorage.getItem('jobsalvo.theme');}catch(e){}
         if(keep!=='dark')bad.push('「深色」沒記在這個瀏覽器');
         T.press(at+'[data-themeset="light"]'); await T.frame();
-        if(root.getAttribute('data-theme')!=='light'||getComputedStyle(document.body).backgroundColor!=='rgb(246, 247, 249)')bad.push('按「淺色」畫面沒變淺');
+        if(root.getAttribute('data-theme')!=='light'||getComputedStyle(document.body).backgroundColor!=='rgb(246, 246, 244)')bad.push('按「淺色」畫面沒變淺');
         T.press(at+'[data-themeset="system"]'); await T.frame();
         if(root.getAttribute('data-theme')!==sys)bad.push('按「跟系統」沒照系統的外觀');
         if((document.querySelector(at+'[data-themeset="system"]')||{}).getAttribute('aria-pressed')!=='true')bad.push('選中的那顆沒標 aria-pressed');
       }finally{try{localStorage.removeItem('jobsalvo.theme');}catch(e){}}
-      if(mob){var b=document.getElementById('taball'); if(b&&b.getAttribute('aria-expanded')==='true')b.click();}
+      try{localStorage.removeItem('jobsalvo.lasttab');}catch(e){}
       document.querySelector('#tabs [data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
@@ -2782,6 +2857,8 @@ CHECKS.append((
       document.querySelector('[data-tab="all"]').click(); await T.idle();
       var bar=document.querySelector('#app .ctl-main');
       if(!bar)return '找不到篩選那一排';
+      var touchFold=document.querySelector('#app [data-ctlfold]');
+      if(touchFold&&touchFold.getBoundingClientRect().height<44)bad.push('手機「篩選 · 排序」不到 44px');
       if(bar.getBoundingClientRect().height>0)bad.push('手機一進來篩選那一排就攤開(要收成一顆)');
       T.press('#app [data-ctlfold]'); await T.frame();
       bar=document.querySelector('#app .ctl-main');
@@ -3134,8 +3211,8 @@ CHECKS.append((
       if(getComputedStyle(sv).position!=='sticky')bad.push('沒改東西時存檔列沒有黏在底下(存檔狀態要一直看得到)');
       var jb=[].slice.call(document.querySelectorAll('#app .cfg-jump [data-cfjump]'));
       if(jb.length!==4)bad.push('頁頂跳到各組的鈕不是四顆:'+jb.length);
-      for(const b of jb){var k=b.getAttribute('data-cfjump'); T.press('#app [data-cfjump="'+k+'"]'); await T.frame(); await T.frame();   // 第二幀:捲動後分頁列縮起來
-        var hd=document.getElementById('cfg-g-'+k), r=hd&&hd.getBoundingClientRect(), top=document.getElementById('tabs').getBoundingClientRect().bottom;
+      for(const b of jb){var k=b.getAttribute('data-cfjump'); T.press('#app [data-cfjump="'+k+'"]'); await T.frame(); await T.frame();
+        var hd=document.getElementById('cfg-g-'+k), r=hd&&hd.getBoundingClientRect(), tb=document.getElementById('tabs').getBoundingClientRect(), top=tb.width<innerWidth/2?0:tb.bottom;   // 桌機分頁在左邊側欄,不擋上面
         if(!r||r.top<top-1||r.bottom>innerHeight)bad.push('按「'+b.textContent+'」沒跳到那一組('+(r?Math.round(r.top):'找不到')+')');}
       window.scrollTo(0,0); await T.frame();
       var ag=document.querySelector('details[data-fold="cfg:agent"]'); ag.querySelector('summary').click(); await T.idle();
@@ -3637,7 +3714,7 @@ CHECKS.append((
       var bad=[], card=function(){return document.querySelector('#app .rv-card article[data-fid]');};
       if(P&&P.added)await T.resync();
       document.querySelector('[data-tab="none"]').click(); await T.idle();
-      document.querySelector('#app [data-rvstart]').click(); await T.idle();
+      document.querySelector('[data-rvstart]').click(); await T.idle();
       var list=document.querySelector('#app .rv-list');
       if(!list||!list.offsetWidth)return '寬螢幕沒有左邊的清單';
       var rows=list.querySelectorAll('[data-rvat]'), n=+((document.querySelector('#app .rv-pos')||{}).textContent||'/0').split('/')[1];
@@ -4109,19 +4186,23 @@ CHECKS.append((
     r"""
       var bad=[]; await T.resync();
       document.querySelector('[data-tab="none"]').click(); await T.idle();
-      var b=document.querySelector('#app [data-riskrm]'); if(!b)return '待評估沒有「可能已關:收掉」';
+      var b=document.querySelector('[data-riskrm]'); if(!b)return '待評估沒有「可能已關:收掉」';
+      if(matchMedia('(max-width:720px)').matches){
+        var riskAction=document.querySelector('#pagehd .pg-act .rv-risk'), bulkSummary=document.querySelector('#pagehd .pg-act .bulkpv>summary');
+        if(riskAction&&riskAction.getBoundingClientRect().height<44)bad.push('手機「移除可能已關」不到 44px');
+        if(bulkSummary&&bulkSummary.getBoundingClientRect().height<44)bad.push('手機批次預覽不到 44px');}
       b.click(); await T.idle();
       var s=await T.state(); if(!(s[P.id]||{}).rm)bad.push('收掉之後那張沒有進已移除');
       var un=document.querySelector('#snack .snack-undo'); if(!un)bad.push('收掉之後沒有「復原」');
       else{un.click(); await T.idle(); s=await T.state(); if((s[P.id]||{}).rm)bad.push('按了復原,那張還在已移除');}
-      document.querySelector('#app [data-rvstart]').click(); await T.idle();
+      document.querySelector('[data-rvstart]').click(); await T.idle();
       var last=null; for(var i=0;i<400;i++){var c=document.querySelector('#app .rv-card article'); if(!c)break; last=c.getAttribute('data-fid');
         document.querySelector('#app [data-rvgo="1"]').click(); await T.frame();}
       if(last!==P.id)bad.push('一張一張看時,可能已關的那張沒排在最後');
       document.querySelector('#app [data-rvexit]').click(); await T.idle();
       return bad.join('；');
     """,
-    'risky_case',
+    'risky_case', {'viewports': ['mobile', 'wide']},
 ))
 
 
@@ -4222,7 +4303,7 @@ CHECKS.append((
       window.scrollTo(0,0); await T.frame();
       T.press('#readybar [data-heldgo]'); await T.idle(); await T.frame();
       f=document.querySelector('#app details[data-fold="st:ready"]');
-      var r=f.querySelector('summary').getBoundingClientRect(), top=document.querySelector('#tabs').getBoundingClientRect().bottom;
+      var r=f.querySelector('summary').getBoundingClientRect(), tb=document.querySelector('#tabs').getBoundingClientRect(), top=tb.width<innerWidth/2?0:tb.bottom;   // 桌機分頁在左邊側欄,不擋上面
       if(!f.open)bad.push('點了那一句,清單末端那段說明沒展開');
       if(r.top<top-1||r.bottom>innerHeight+1)bad.push('點了那一句,清單末端那段說明的標題不在畫面上(top '+Math.round(r.top)+'、分頁列底 '+Math.round(top)+'、視窗高 '+innerHeight+')');
       if(f.open){f.querySelector('summary').click(); await T.idle();}
@@ -5902,7 +5983,7 @@ for _screen, _scene, _profiles in A11Y_SCENES:
                    {'viewports': _profiles, 'fresh_page': True}))
 
 STEP_ROUTES = {
-    'open': {'label': '首頁 → 一張一張看', 'steps': [], 'target': '#app [data-rvstart="1"]', 'target_click': False},
+    'open': {'label': '首頁 → 一張一張看', 'steps': [], 'target': '[data-rvstart="1"]', 'target_click': False},
     'mood': {'label': '首頁 → 第一家公司 → 喜歡',
              'steps': [['#app .cohead', '第一家公司'], ['#app article[data-fid] [data-s="like"]', '喜歡']],
              'target': '', 'target_click': False},
@@ -5921,7 +6002,8 @@ STEP_ROUTES = {
 }
 STEP_BUDGETS = {
     'open': {'wide': {'clicks':0, 'scroll':0}, 'mobile': {'clicks':0, 'scroll':0}},
-    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
+    # 手機首頁照 G 版在公司列上面放了「要你處理」大數字格和三條流程(#657),第一家公司的卡要往下捲一點才按得到喜歡
+    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':40}},
     'ship': {'wide': {'clicks':5, 'scroll':0}, 'mobile': {'clicks':5, 'scroll':424}},
     'inbox': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
     'resume': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':136}},
@@ -5936,7 +6018,7 @@ STEP_JS = r"""
  document.documentElement.style.scrollBehavior='auto'; document.body.style.scrollBehavior='auto';
  function topCover(){var h=0; [].forEach.call(document.querySelectorAll('body *'),function(e){
    var p=getComputedStyle(e).position, r=e.getBoundingClientRect();
-   if((p==='fixed'||p==='sticky')&&r.top<=2&&r.bottom>0&&r.width>0&&r.height>0)h=Math.max(h,r.bottom);}); return h;}
+   if((p==='fixed'||p==='sticky')&&r.top<=2&&r.bottom>0&&r.width>=innerWidth/2&&r.height>0)h=Math.max(h,r.bottom);}); return h;}   // 窄的(桌機左邊側欄)不算蓋住上面
  function todoRow(){return [].find.call(document.querySelectorAll('#inboxbar [data-ib]'),function(r){
    return r.querySelector('.ans-hv')&&r.querySelector('[data-inboxdone]');})||null;}
  async function expose(el,label){
@@ -5995,12 +6077,12 @@ for _step in STEP_ROUTES:
                    {'viewports': ['wide', 'mobile'], 'fresh_page': True, 'step': _step}))
 
 FIRST_SCREEN_TARGETS = [
-    ('none', '新職缺', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '新職缺先開始一張一張看；沒有新缺時讀空畫面的下一步。'),
-    ('like', '喜歡', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '喜歡的職缺先逐張檢查；空白時讀下一步說明。'),
-    ('meh', '普通', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '普通的職缺先逐張檢查；空白時讀下一步說明。'),
-    ('dislike', '不喜歡', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '不喜歡的職缺先逐張檢查；空白時讀下一步說明。'),
-    ('grow', '差一點', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '差一點的職缺先逐張檢查；空白時讀下一步說明。'),
-    ('all', '全部', ['#app [data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '全部職缺先逐張檢查；空白時讀下一步說明。'),
+    ('none', '新職缺', ['[data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '新職缺先開始一張一張看；沒有新缺時讀空畫面的下一步。'),
+    ('like', '喜歡', ['[data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '喜歡的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('meh', '普通', ['[data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '普通的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('dislike', '不喜歡', ['[data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '不喜歡的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('grow', '差一點', ['[data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '差一點的職缺先逐張檢查；空白時讀下一步說明。'),
+    ('all', '全部', ['[data-rvstart="1"]', '#app p.applyempty', '#app .emptytab'], '全部職缺先逐張檢查；空白時讀下一步說明。'),
     ('prep', '準備履歷中', ['#app [data-prep="1"]', '#app p.applyempty', '#app .emptytab'], '準備這一階的履歷；沒有卡時讀空畫面的下一步。'),
     ('ready', '待你決定', ['#app [data-readyall="1"]', '#app p.applyempty', '#app .emptytab'], '把驗收過的卡送到可以投了；空白時讀下一步說明。'),
     ('ship', '可以投了', ['#app [data-applyrun="fill"]', '#app p.applyempty', '#app .emptytab'], '讓 Agent 開始填表；空白時讀下一步說明。'),
@@ -6214,7 +6296,8 @@ def main():
                     fresh=sb.url if len(item)>3 and item[3].get('fresh_page') else None
                     if step_check and fresh:
                         # 看板會記住上次分頁;量測指定從首頁出發,先清掉這一個畫面偏好再重載。
-                        page.run("localStorage.removeItem('sts_view')",prelude)
+                        # 捲動後 400ms 才記畫面(防抖):先等上一條留下的那一下記完,再清,不然重載前又被寫回去
+                        page.run("(async function(){await new Promise(function(r){setTimeout(r,500);}); localStorage.removeItem('sts_view');})()",prelude)
                     msg=page.run("(async function(P){%s%s})(%s)"%('await T.clean(); await T.resync();' if first else '',body,json.dumps(arg)),
                                  prelude,profile,fresh)
                 except Exception as e:  # noqa: BLE001 — 檢查本身出錯算這一條沒過,照實列進失敗清單
