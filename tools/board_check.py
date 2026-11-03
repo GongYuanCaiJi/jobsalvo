@@ -6830,16 +6830,15 @@ STEP_ROUTES = {
 STEP_BUDGETS = {
     'open': {'wide': {'clicks':0, 'scroll':0}, 'mobile': {'clicks':0, 'scroll':0}},
     # 手機首頁照 G 版在公司列上面放了「要你處理」大數字格和三條流程(#657),第一家公司的卡要往下捲一點才按得到喜歡
-    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':40}},
-    'ship': {'wide': {'clicks':5, 'scroll':0}, 'mobile': {'clicks':5, 'scroll':424}},
+    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':23}},
+    'ship': {'wide': {'clicks':5, 'scroll':0}, 'mobile': {'clicks':5, 'scroll':344}},
     'inbox': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
-    'resume': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':136}},
+    'resume': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
 }
-# 上限是 main(90ffa9d)用這一版量法(每個畫面前還原資料)量到的數字。Linux 的 Chrome 字型不同、版面較高,同一個 main 在 CI 映像
-# (x99-runner:local)裡量到的手機捲動距離跟 Mac 不一樣,所以 Linux 用那裡量到的數字。
-if sys.platform.startswith('linux'):
-    STEP_BUDGETS['ship']['mobile']['scroll']=381
-    STEP_BUDGETS['resume']['mobile']['scroll']=365
+# 捲動上限是 CI(Linux)量到的數字,只在 Linux 算(#728)。字型不同版面高度就不同,Mac 量到的捲動只印出來;點擊次數各平台一樣,照算。
+if not sys.platform.startswith('linux'):
+    for _b in STEP_BUDGETS.values():
+        for _v in _b.values(): _v['scroll']=None
 STEP_JS = r"""
  var route=__ROUTES__[P.step], bad=[], clicks=0, scrollPx=0, movedFid='', taskRow=null;
  document.documentElement.style.scrollBehavior='auto'; document.body.style.scrollBehavior='auto';
@@ -6895,7 +6894,7 @@ STEP_JS = r"""
  }
  var budget=P.demo&&P.budget?P.budget:null;
  if(budget){if(clicks>budget.clicks)bad.push(route.label+'：點擊多 '+(clicks-budget.clicks)+' 次（'+clicks+'，main 上限 '+budget.clicks+'）');
-   if(scrollPx>budget.scroll)bad.push(route.label+'：捲動多 '+(scrollPx-budget.scroll)+' px（'+scrollPx+'，main 上限 '+budget.scroll+'）');}
+   if(budget.scroll!=null&&scrollPx>budget.scroll)bad.push(route.label+'：捲動多 '+(scrollPx-budget.scroll)+' px（'+scrollPx+'，main 上限 '+budget.scroll+'）');}
  return JSON.stringify({_stepMeasure:{step:P.step,label:route.label,clicks:clicks,scroll:scrollPx,budget:budget},failures:bad});
 """
 STEP_JS = STEP_JS.replace('__ROUTES__', json.dumps(STEP_ROUTES, ensure_ascii=False))
@@ -7347,7 +7346,7 @@ def main():
                         if step_result:
                             msg='；'.join(result.get('failures') or [])
                             budget=step_result.get('budget')
-                            suffix=f"；main 上限 {budget['clicks']} 點、{budget['scroll']} px" if budget else ''
+                            suffix=(f"；main 上限 {budget['clicks']} 點、"+(f"{budget['scroll']} px" if budget['scroll'] is not None else '捲動只在 CI 算')) if budget else ''
                             print(f"  📏 {report}：{step_result['clicks']} 點擊、捲動 {step_result['scroll']} px{suffix}")
                     except (TypeError, ValueError, AttributeError):
                         pass
