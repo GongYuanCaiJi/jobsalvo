@@ -12,6 +12,7 @@ import chrome_door  # noqa: E402
 # 檢查的尺寸(CDP 模擬,手機連觸控一起);desktop / None 不模擬尺寸,主題仍明確設成淺色
 VIEWPORTS = {'mobile': {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True},
              'mobile-dark': {'width': 390, 'height': 844, 'deviceScaleFactor': 1, 'mobile': True},
+             'narrow': {'width': 320, 'height': 640, 'deviceScaleFactor': 1, 'mobile': True},   # 最窄的手機(iPhone SE 一代)
              'wide': {'width': 1440, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False},
              'wide-dark': {'width': 1440, 'height': 900, 'deviceScaleFactor': 1, 'mobile': False}}
 # 頁面裡的確認框一律當成按了確定(例如按停止時的確認框)

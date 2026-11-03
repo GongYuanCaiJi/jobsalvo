@@ -69,6 +69,25 @@ def _move(fb, job, flow, tried, status, build):
     return None
 
 
+def prep_why(fb, job, flow, tried, auto):
+    """準備區的卡,自動準備開著卻不接,是哪一種原因(會接、不在準備區、自動準備沒開是 None):
+    note 上一輪沒產出(等他決定);tried 自動試過一次沒成功;old 打開自動準備之前就在這裡,交給自動它才會接。
+    同一張只算一種,先到先算:看板頁頂各原因的張數加起來才等於還沒準備的張數。公司被封鎖、移除的不在準備那一頁,
+    不會落到這裡,所以沒有「其他」。"""
+    i = job['id']
+    m = fb.get(i)
+    if not flow.get('auto_prep') or not isinstance(m, dict) or m.get('app') != 'prep' or (auto or {}).get('do') == 'prep':
+        return None
+    if job.get('prep_note'):
+        return 'note'
+    if 'prep:' + i in tried:
+        return 'tried'
+    a = fb.get('__auto__')
+    if isinstance(a, dict) and i in (a.get('skip') or []) and ds.app_of(m) != 'rm' and not ds.company_blocked(fb, job):
+        return 'old'
+    return None
+
+
 # 送出結果不明的卡上寫的那一句:查到底送出沒有是程式的事(查應徵進度),不是他的
 UNSURE_LINE = '{agent} 會去信箱和平台的應徵紀錄查到底送出沒有'
 
@@ -445,8 +464,12 @@ def view(fb, url, status, nx):
             why, todo = '⚠ 確認失效:' + prob, '確認失效(' + prob + '),先取消確認'
             side.append({'b': 'unapprove', 'label': '取消確認', 'main': False, 'adv': False})
         if n_ask:
-            main = []           # 答案要他確認:表單那一行已經有「去常用答案看」,這裡不重複
-            todo = stuck if done and not ok else f'{n_ask} 條答案等你確認'
+            # 填表不會停在待確認的答案,擋的是確認送出:還沒填好的卡(沒填過、頁不見了、卡住)照樣給填表入口;
+            # 自動重填(fill)會接手的不給,不叫他按;其他自動流程(改檔等)在接的照樣給。有自動流程在接的,
+            # 「要你處理」只寫答案那件事(跟沒有待確認答案的同類卡一樣,agent 會做的不算他的事)
+            button = fill(f'▶ 讓 {agent} ' + ('重填這張' if done else '填這張')) if not (done and ok) and auto_do != 'fill' else None
+            main = [button] if button else []
+            todo = stuck if done and not ok and not auto_do else f'{n_ask} 條答案等你確認'
         elif auto_do == 'fix':
             line.append(autoline)
             auto = True
@@ -599,4 +622,5 @@ def of(fb, jobs, status=None, *, flow=None, now=None, real=True, build=None, onl
         auto = auto or _requirement(fb, j, flow, tried) or _fill(fb, j, flow, tried, full) or _move(fb, j, flow, tried, status, build)
         out[j['id']] = card(fb, j['id'], status, auto,
                             stop, ctx, j)
+        out[j['id']]['prep_why'] = prep_why(fb, j, flow, tried, auto)
     return out

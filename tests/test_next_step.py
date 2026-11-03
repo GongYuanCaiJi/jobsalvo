@@ -519,6 +519,41 @@ class BlockedCompany(unittest.TestCase):
                 self.assertIsNotNone(steps(fb, jobs)[URL]['auto'])
 
 
+class PrepWhy(unittest.TestCase):
+    """準備區的卡,自動準備開著卻不接的原因(#703):頁頂照這個分開寫,每張只算一種。"""
+
+    def board(self):
+        fb, jobs = flow_board(auto='prep', old='prep', oldtried='prep', tried='prep', note='prep', blocked='prep')
+        fb['__auto__']['skip'] = ['old', 'oldtried', 'blocked']
+        fb['__auto__']['tried'] = ['prep:oldtried', 'prep:tried']
+        fb['__block__'] = ['CO BLOCKED']
+        for j in jobs:
+            if j['id'] == 'note':
+                j['prep_note'] = '抓不到 JD'
+            if j['id'] == 'blocked':
+                j['target'] = 'Role · Co blocked'
+        return fb, jobs
+
+    def test_each_card_has_exactly_one_reason(self):
+        fb, jobs = self.board()
+        got = {i: x['prep_why'] for i, x in steps(fb, jobs).items()}
+        self.assertEqual(got, {'auto': None, 'old': 'old', 'oldtried': 'tried', 'tried': 'tried', 'note': 'note',
+                               'blocked': None})   # 公司被封鎖的不在準備那一頁,不算哪一種原因
+
+    def test_only_the_old_reason_is_one_handing_over_makes_auto_take(self):
+        """「之前的 N 張也交給自動」只算交出去自動真的會接的:試過一次的、blocked 的交出去也照樣不接。"""
+        for card, takes in (('old', True), ('oldtried', False), ('blocked', False)):
+            with self.subTest(card=card):
+                fb, jobs = self.board()
+                fb['__auto__']['skip'].remove(card)
+                self.assertEqual(steps(fb, jobs)[card]['auto'] is not None, takes)
+
+    def test_no_reason_when_auto_prep_is_off(self):
+        fb, jobs = self.board()
+        got = {x['prep_why'] for x in steps(fb, jobs, flow=dict(FLOW, auto_prep=False)).values()}
+        self.assertEqual(got, {None})
+
+
 def custom_waiting(m):
     """這張要寄的履歷有一份客製版還在等你看。"""
     m.update(resume_id='general', custom_docs={'resume:general:zh': {'status': 'review', 'name': '履歷'}})
