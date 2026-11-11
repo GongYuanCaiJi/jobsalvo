@@ -21,7 +21,7 @@ Min(a, b) == IF a < b THEN a ELSE b
 
 VARIABLES
   ds,         \* 卡的投遞狀態(模型的 6 種,見 Table.tla)
-  approve,    \* 卡上的 approve:at(第幾秒)與 r(模型給每一次確認的編號,程式裡沒有,只拿來判規則)
+  approve,    \* 卡上的 approve:at(第幾秒)與 r(這一次確認的編號,程式的 approve.id)
   pageR,      \* 頁上最近一次確認的編號(取消後還留著:頁面還是那一頁)
   slips,      \* 取消確認後留在看板的復原單:每一張放回一份 approve
   timers,     \* board_server.QUEUED 的計時器:{[at, left(還差幾秒), r]}
@@ -127,12 +127,13 @@ YouReopenSent ==
 (* start_run 的單飛:同一種在跑、或別的工作在用 agent 的瀏覽器,回 409。 *)
 Busy == run.phase # "idle" \/ other
 
-(* 計時器到點(_send_confirmed):不拿鎖讀一次看板,還是「你已確認」而且 approve.at 對得上才 start_run。
-   409 就用同一個 at 再排一次(SEND_RETRY);其他原因開不起來就寫回報,卡留在你已確認。 *)
+(* 計時器到點(_send_confirmed):不拿鎖讀一次看板,還是「你已確認」而且 approve.at、approve.id 都對得上
+   才 start_run,把這次確認的編號帶進那一輪。409 就用同一次確認再排一次(SEND_RETRY);
+   其他原因開不起來就寫回報,卡留在你已確認。 *)
 TimerFires ==
   /\ \E t \in timers :
        /\ t.left = 0
-       /\ IF ds = "confirmed" /\ approve.at = t.at
+       /\ IF ds = "confirmed" /\ approve.at = t.at /\ approve.r = t.r
           THEN \/ /\ Busy
                   /\ timers' = (timers \ {t}) \cup {[t EXCEPT !.left = SendRetry]}
                   /\ UNCHANGED run
@@ -144,7 +145,7 @@ TimerFires ==
           ELSE /\ timers' = timers \ {t} /\ UNCHANGED run
   /\ UNCHANGED <<ds, approve, pageR, slips, other, clock, cancelled, clicked, lastSend>>
 
-(* 他按「▶ 送出」(/api/run apply submit):後台照 approval_problem 放行,start_run 單飛。
+(* 他按「▶ 送出」(/api/run apply submit):後台照 approval_problem 放行,記下當下那次確認的編號,start_run 單飛。
    看板在 8 秒內不顯示這顆按鈕(view.due),但後台不擋;這裡照後台。 *)
 YouPressSend ==
   /\ ds \in ApprovalOK /\ ~Busy
@@ -152,10 +153,10 @@ YouPressSend ==
   /\ UNCHANGED <<ds, approve, pageR, slips, timers, other, clock, cancelled, clicked, lastSend>>
 
 (* apply_run._run_one 送出那一輪:讀頁比對(慢,不拿鎖)之後,bd.set_fb 裡 form_record.start_submit
-   在同一把鎖內重跑 approval_problem 並送 submit_start。它不看 approve.at。 *)
+   在同一把鎖內重跑 approval_problem、比對派這一輪出來的那次確認的編號(#739),都過了才送 submit_start。 *)
 StartSubmit ==
   /\ run.phase = "launched"
-  /\ IF ds \in ApprovalOK /\ <<ds, "submit_start">> \in DOMAIN Cell
+  /\ IF ds \in ApprovalOK /\ approve.r = run.r /\ <<ds, "submit_start">> \in DOMAIN Cell
      THEN /\ Fire("submit_start")
           /\ run' = [run EXCEPT !.phase = "agent"]
           /\ clicked' = TRUE

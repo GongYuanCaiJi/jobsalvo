@@ -486,7 +486,7 @@ class SendQueue(unittest.TestCase):
         self.setUp0()
         self.sent, self.reply = [], [(200, {})]
         self.enterContext(mock.patch.object(self.bs, 'start_run',
-                                            lambda kind, args: self.sent.append((kind, args)) or self.reply.pop(0)))
+                                            lambda kind, args, approval_id=None: self.sent.append((kind, args, approval_id)) or self.reply.pop(0)))
         self.enterContext(mock.patch.object(self.bs, 'SERVING', [True]))
         self.timers = []
         self.enterContext(mock.patch.object(self.bs.threading, 'Timer',
@@ -505,9 +505,10 @@ class SendQueue(unittest.TestCase):
     def test_time_is_up_with_no_tab_open_it_is_sent(self):
         self.board('parked')
         self.confirm()
+        approval_id = read_fb(self.path)[CARD]['approve']['id']
         self.assertEqual(self.sent, [])
         self.time_is_up()
-        self.assertEqual(self.sent, [('apply', {'stage': 'submit', 'url': CARD})])
+        self.assertEqual(self.sent, [('apply', {'stage': 'submit', 'url': CARD}, approval_id)])
 
     def test_undo_within_the_wait_is_not_sent(self):
         self.board('parked')

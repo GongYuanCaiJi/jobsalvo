@@ -1253,12 +1253,15 @@ def settle(fb, busy):
 
 
 
-def _run_one(stage, url, board, dry=False, status=None, note='', attachment_download_dir=None):
+def _run_one(stage, url, board, dry=False, status=None, note='', attachment_download_dir=None,
+             approval_id=None):
     jobs, fb = load(board)
     rnd = evidence.active()       # 這一輪的證據(run_one 開的)
     approved_answers = None
     if stage == 'submit':
-        problem = fr.approval_problem(fb, url, fr.board_status(board))
+        if approval_id is None:
+            approval_id = ((fb.get(url) or {}).get('approve') or {}).get('id')
+        problem = fr.approval_problem(fb, url, fr.board_status(board), approval_id)
         if problem:
             return False, problem
         approved_answers = fr.snapshot(fb, url)
@@ -1401,7 +1404,7 @@ def _run_one(stage, url, board, dry=False, status=None, note='', attachment_down
 
         def start(d):
             # 你已確認 → 正在送出 那一刻再跑一次檢查清單;不過就留在你已確認
-            problem = fr.start_submit(d, url, fr.board_status(board))
+            problem = fr.start_submit(d, url, fr.board_status(board), approval_id)
             if problem:
                 why.append(problem)
         bd.set_fb(start, live=board, by='apply_run')
@@ -1684,10 +1687,10 @@ def _self_fixable(board, url, issues):
     return issues
 
 
-def run_one(stage, url, board, dry=False, status=None, note=''):
+def run_one(stage, url, board, dry=False, status=None, note='', approval_id=None):
     """跑一張卡的一輪。這一輪的證據(指示、動作紀錄、交件單、讀頁和截圖、比對結果)都記進那張卡的證據夾(evidence)。
     填表核對沒過、全是 agent 改得了的(apply_tab.correctable),接著叫同一隻 agent 在原頁照問題改一次(SELF_FIX)。"""
-    ok, msg = _run_one_round(stage, url, board, dry, status, note)
+    ok, msg = _run_one_round(stage, url, board, dry, status, note, approval_id)
     if dry or ok or stage != 'fill':
         return ok, msg
     issues = _self_fixable(board, url, getattr(msg, 'items', []))
@@ -1696,12 +1699,12 @@ def run_one(stage, url, board, dry=False, status=None, note=''):
     return _run_one_round('fix', url, board, False, status, SELF_FIX + '\n'.join('- ' + x for x in issues))
 
 
-def _run_one_round(stage, url, board, dry=False, status=None, note=''):
+def _run_one_round(stage, url, board, dry=False, status=None, note='', approval_id=None):
     if dry:
-        return _run_one_with_downloads(stage, url, board, dry, status, note)
+        return _run_one_with_downloads(stage, url, board, dry, status, note, approval_id=approval_id)
     with evidence.opened('apply', stage, [url], board) as rnd:
         try:
-            return _run_one_with_downloads(stage, url, board, dry, status, note)
+            return _run_one_with_downloads(stage, url, board, dry, status, note, approval_id=approval_id)
         except Exception as error:  # noqa: BLE001 — 一張卡出錯只算這張失敗:原因記在卡上,批次的下一張照跑
             msg = f'這一輪出錯停下:{type(error).__name__}:{str(error)[:200]}'
             rnd.note('round_error', error=msg)
@@ -1721,7 +1724,7 @@ def _run_one_round(stage, url, board, dry=False, status=None, note=''):
                 print(f'回報附不上這一輪的截圖:{e}', file=sys.stderr)
 
 
-def _run_one_with_downloads(stage, url, board, dry=False, status=None, note=''):
+def _run_one_with_downloads(stage, url, board, dry=False, status=None, note='', approval_id=None):
     jobs, fb = load(board)
     delivery = apply_of(fb, url).get('delivery') or {}
     needs_download_dir = not dry and (
@@ -1729,11 +1732,11 @@ def _run_one_with_downloads(stage, url, board, dry=False, status=None, note=''):
         or (stage == 'submit' and delivery.get('method') == 'platform_profile')
     )
     if not needs_download_dir:
-        return _run_one(stage, url, board, dry, status, note, None)
+        return _run_one(stage, url, board, dry, status, note, None, approval_id)
 
     downloads = tempfile.mkdtemp(prefix='jobsalvo-profile-attachments-')
     try:
-        result = _run_one(stage, url, board, dry, status, note, downloads)
+        result = _run_one(stage, url, board, dry, status, note, downloads, approval_id)
     finally:
         cleanup_problem = _clean_attachment_downloads(downloads)
     if cleanup_problem:
@@ -1750,6 +1753,7 @@ def main():
     ap.add_argument('--board', default=bd.LIVE)
     ap.add_argument('--dry', action='store_true')
     ap.add_argument('--limit', type=int, default=0, help='這一輪最多跑幾張(看板上的「跑幾張」)')
+    ap.add_argument('--approval-ids', help='派出這一輪時各卡的確認編號')
     a = ap.parse_args()
     board = os.path.abspath(a.board)
     st = os.path.join(SP, STATUS)
@@ -1759,9 +1763,14 @@ def main():
         print(f"另一輪正在跑({other.get('stage') or ''} {other.get('url') or ''}),等它跑完再開")
         return
     jobs, fb = load(board)
+    approval_ids = json.loads(a.approval_ids) if a.approval_ids else None
     todo = eligible(jobs, fb, a.stage, a.url, fr.board_status(board))
+    if approval_ids is not None:
+        todo = [u for u in todo if u in approval_ids]
     if a.limit:
         todo = todo[:a.limit]
+    if approval_ids is None and a.stage == 'submit':
+        approval_ids = {u: ((fb.get(u) or {}).get('approve') or {}).get('id') for u in todo}
     base = {'stage': a.stage, 'n': len(todo), 'done': 0, 't0': time.time(), 'pid': os.getpid()}
     if not todo:
         jobrun.write(st, dict(base, phase='nothing', msg='沒有要跑的卡'))
@@ -1770,7 +1779,8 @@ def main():
     results = []
     for i, u in enumerate(todo):
         jobrun.write(st, dict(base, phase='run', done=i, which=card.name(jobs[u]), url=u))
-        ok, msg = run_one(a.stage, u, board, a.dry, note=a.note)
+        expected_id = approval_ids[u] if a.stage == 'submit' else None
+        ok, msg = run_one(a.stage, u, board, a.dry, note=a.note, approval_id=expected_id)
         results.append({'url': u, 'ok': ok, 'msg': msg})
         print(('✅ ' if ok else '❌ ') + card.name(jobs[u]) + ' — ' + msg)
     if not a.dry:

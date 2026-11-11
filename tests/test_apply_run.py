@@ -115,6 +115,33 @@ class Approval(unittest.TestCase):
         fb['__ans__'][0]['v'] = 'ROC'                        # 核准之後他(或我)改了答案
         self.assertIn('要重新確認送出', fr.approval_problem(fb, U, OKST))
 
+    def test_cancel_and_reconfirm_invalidates_the_first_dispatched_submit(self):
+        fb = board()
+        confirm(fb)
+        fb[U]['approve'] = fr.approval(fb, U, T)
+        first_id = fb[U]['approve']['id']
+        ds.fire(fb, U, 'unconfirm')
+        ds.fire(fb, U, 'confirm', approve=fr.approval(fb, U, T))
+        second_id = fb[U]['approve']['id']
+        self.assertNotEqual(first_id, second_id)
+
+        self.assertIn('已作廢', fr.start_submit(fb, U, OKST, first_id))
+        self.assertEqual(ds.state(fb[U]), 'confirmed')
+        self.assertIsNone(fr.start_submit(fb, U, OKST, second_id))
+        self.assertEqual(ds.state(fb[U]), 'sending')
+
+    def test_undoing_unconfirm_restores_the_same_approval_id(self):
+        fb = board()
+        confirm(fb)
+        fb[U]['approve'] = fr.approval(fb, U, T)
+        approval_id = fb[U]['approve']['id']
+        before = copy.deepcopy(fb)
+        ds.fire(fb, U, 'unconfirm')
+        slip = next(slip for slip in ds.slips(before, fb) if slip['u'] == U)
+        ds.restore(fb, slip)
+        self.assertEqual(ds.state(fb[U]), 'confirmed')
+        self.assertEqual(fb[U]['approve']['id'], approval_id)
+
     def test_approval_binds_the_workspace_even_when_the_page_handle_is_unchanged(self):
         fb = board()
         confirm(fb)
@@ -333,6 +360,31 @@ class Checks(unittest.TestCase):
                 patch.object(sys, 'argv', ['apply_run.py', '--stage', 'fix', '--url', U]):
             run.main()                                         # 看板替這一輪記的就是它自己:照常跑
         load.assert_called_once()
+
+    def test_submit_cli_pins_each_approval_id_without_the_option(self):
+        second = 'https://jobs.lever.co/x/2'
+        jobs = {U: {'id': U, 'target': 'First'}, second: {'id': second, 'target': 'Second'}}
+        fb = {U: {'approve': {'id': 'first-id'}}, second: {'approve': {'id': 'second-id'}}}
+        seen = []
+
+        def run_card(stage, url, _board, _dry, note='', approval_id=None):
+            seen.append((url, approval_id))
+            if url == U:
+                fb[second]['approve']['id'] = 'second-id-replaced'
+            return True, 'ok'
+
+        with tempfile.TemporaryDirectory(prefix='apply-main-') as tmp, \
+                patch.object(run, 'SP', tmp), \
+                patch.object(run.jobrun, 'read', return_value={'running': False}), \
+                patch.object(run.jobrun, 'write'), \
+                patch.object(run, 'load', return_value=(jobs, fb)), \
+                patch.object(run, 'eligible', return_value=[U, second]), \
+                patch.object(run.fr, 'board_status', return_value=OKST), \
+                patch.object(run, 'run_one', side_effect=run_card), \
+                patch.object(sys, 'argv', ['apply_run.py', '--stage', 'submit', '--dry']):
+            run.main()
+
+        self.assertEqual(seen, [(U, 'first-id'), (second, 'second-id')])
 
     def test_the_resume_crop_from_the_employer_page_is_kept_as_evidence(self):
         import evidence
@@ -1488,7 +1540,7 @@ class SelfFix(unittest.TestCase):
 
     def test_a_correctable_fill_failure_gets_one_fix_round(self):
         rounds = []
-        def round_(stage, url, board, dry, status, note):
+        def round_(stage, url, board, dry, status, note, approval_id=None):
             rounds.append((stage, note))
             return (False, '頁面上找不到「Nationality」的答案') if stage == 'fill' else (True, '改好了')
         with patch.object(run, '_run_one_round', side_effect=round_), \

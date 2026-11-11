@@ -174,7 +174,8 @@ def next_steps(snap, only=None):
     fb=snap['fb']; data=snap['parts']['data']
     out=next_step.of(fb,data.get('jobs') or [],data.get('status'),flow=autopilot.flow(),real=is_real(),
                      build=build_state(),only=only)
-    for u,due in list(QUEUED.items()):    # 確認了、排在後台等著送的:看板寫「幾秒後開始送出」,不給「▶ 送出」
+    for u,entry in list(QUEUED.items()):    # 確認了、排在後台等著送的:看板寫「幾秒後開始送出」,不給「▶ 送出」
+        due=entry[0]
         if isinstance(out.get(u),dict) and due>time.time():
             out[u].setdefault('view',{})['due']=round(due-time.time(),1)
     out['__ans__']=next_step.answers(fb)     # 常用答案的:哪幾條按刪除是清掉(還沒送出的表單在用)、等不等你
@@ -338,7 +339,8 @@ def write_fb(cmds, out=None, client_id=None, save_seq=None):
             _SAVE_ORDER[client_id]=order
     for c,slip in zip(cmds,got['undo']):
         if slip is not None and c.get('ev')=='confirm':
-            queue_send(c['u'],((got['cards'].get(c['u']) or {}).get('approve') or {}).get('at'))
+            approved=(got['cards'].get(c['u']) or {}).get('approve') or {}
+            queue_send(c['u'],approved.get('at'),approved.get('id'))
     note_saved()
     if snapshot()['fb'].get('__browser_cleanup__'):   # 有排著要收的工作區才去收(收的那一支自己會整份重讀看板)
         import chrome_door
@@ -460,30 +462,33 @@ def _now():
 # 確認送出之後 8 秒才叫 agent 送(Gmail 的「復原傳送」):排在後台,分頁關掉照樣送;
 # 時間到時這張已經不是同一次確認(按了復原、取消確認、退回、換檔、移除)就不送
 SEND_AFTER=8
-QUEUED={}   # 卡 → 幾點送(time.time())
+QUEUED={}   # 卡 → (幾點送(time.time()),確認編號)
 SERVING=[False]   # 只有真的在服務的伺服器(main)排送出;單元測試直接呼叫 write_fb 不留計時器
 
 
-def queue_send(u, at, after=SEND_AFTER):
+def queue_send(u, at, approval_id, after=SEND_AFTER):
     if not SERVING[0]:
         return
-    QUEUED[u]=time.time()+after
-    t=threading.Timer(after,_send_confirmed,(u,at))
+    QUEUED[u]=(time.time()+after,approval_id)
+    t=threading.Timer(after,_send_confirmed,(u,at,approval_id))
     t.daemon=True
     t.start()
 
 
-def _send_confirmed(u, at):
+def _send_confirmed(u, at, approval_id):
     """時間到:還是同一次確認才送。另一輪代投、查應徵進度正在用 agent 的瀏覽器,就等它跑完再送(全自動,不叫他再按);
     其他原因送不出去(沒有 ego、確認後答案又改了…),照實寫進看板的回報,卡停在你已確認、給「▶ 送出」。"""
     import delivery_state as ds
-    QUEUED.pop(u,None)
+    queued=QUEUED.get(u)
+    if isinstance(queued,tuple) and queued[1]==approval_id:
+        QUEUED.pop(u,None)
     m=snapshot()['fb'].get(u) or {}
-    if ds.state(m)!='confirmed' or (m.get('approve') or {}).get('at')!=at:
+    if (ds.state(m)!='confirmed' or (m.get('approve') or {}).get('at')!=at
+            or (m.get('approve') or {}).get('id')!=approval_id):
         return
-    code,st=start_run('apply',{'stage':'submit','url':u})
+    code,st=start_run('apply',{'stage':'submit','url':u},approval_id=approval_id)
     if code==409 and (st.get('running') or st.get('other')):
-        queue_send(u,at,SEND_RETRY)
+        queue_send(u,at,approval_id,SEND_RETRY)
     elif code!=200:
         import agent_report
         agent_report.report('幫你填表',f'確認送出了,8 秒後卻沒送出去:{str(st.get("msg") or code)[:160]}',
@@ -870,7 +875,9 @@ def run_argv(kind,args):
         return [sys.executable,os.path.join(HERE,'reply_run.py'),'--board',STATE]+lim+(['--url',one] if one else [])
     if kind=='apply':
         return [sys.executable,os.path.join(HERE,'apply_run.py'),'--stage',args['stage'],'--board',STATE]+(
-            ['--url',args['url']] if args.get('url') else [])+(['--note',args['note']] if args.get('note') else [])+lim
+            ['--url',args['url']] if args.get('url') else [])+(['--note',args['note']] if args.get('note') else [])+(
+            ['--approval-ids',json.dumps(args['approval_ids'],ensure_ascii=False,separators=(',',':'))]
+            if args.get('approval_ids') is not None else [])+lim
     if kind=='prep':
         return [sys.executable,os.path.join(HERE,'cut_tailor.py'),'--board',STATE]+lim+(
             ['--jids',card.card_id_from_url(one)] if one else [])
@@ -909,7 +916,10 @@ def control_run(kind,act):
         st=run_status(kind)
     return (200 if ok else 409),dict(st,msg=msg) if not ok else st
 
-def start_run(kind,args):
+_APPROVAL_UNSET=object()
+
+
+def start_run(kind,args,approval_id=_APPROVAL_UNSET):
     """單飛:同一種正在跑就不再開第二個。cut_tailor 一啟動會先殺掉上一個 worker,
     按兩下等於把跑到一半的 agent 砍掉重來;找缺兩輪同時跑,兩隻 agent 會撈同一批。
     回 (HTTP 狀態碼, 內容)。"""
@@ -998,6 +1008,8 @@ def start_run(kind,args):
         # 最後一關一定是人:這裡先擋一次,apply_run 啟動時再擋一次。
         import form_record as fr
         stage=args.get('stage'); url=str(args.get('url') or '')
+        has_dispatched_id=approval_id is not _APPROVAL_UNSET
+        dispatched_approval_id=approval_id
         note=re.sub(r'\s+',' ',str(args.get('note') or '')).strip()[:500]
         if stage not in ('fill','fix','submit'): return 400,{'msg':'不知道要填表、修改還是送出'}
         s=snapshot(); doc=s['parts']; fb=s['fb']; status=doc['data'].get('status')
@@ -1006,6 +1018,9 @@ def start_run(kind,args):
             urls=[url] if url else [u for u,m in fb.items() if ds.app_of(m)=='ship']
             ok=[u for u in urls if fr.approval_problem(fb,u,status) is None]
             if not ok: return 400,{'msg':fr.approval_problem(fb,url,status) if url else '沒有核准有效的卡'}
+            # 固定派出這一輪時的確認編號。沒編號的舊確認以 None 傳遞，仍可正常送出。
+            approval_ids={u: (dispatched_approval_id if url and has_dispatched_id
+                              else (fb.get(u,{}).get('approve') or {}).get('id')) for u in ok}
         if stage=='fix':
             # 修改是叫回填這張的那一隻 agent 在原本那一頁上改:一次一張,那段對話要在
             m=fb.get(url) or {}
@@ -1017,6 +1032,7 @@ def start_run(kind,args):
             if not note and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
                 return 400,{'msg':'寫一下要 agent 改什麼'}
         args={'stage':stage,'url':url,'note':note,'limit':0 if url else limit}
+        if stage=='submit': args['approval_ids']=approval_ids
     if kind in ('prep','replies'):
         args={'limit':0 if one else limit,'url':one}
     if kind=='add':

@@ -36,7 +36,7 @@ form_record —— agent 填雇主表單時,把每一欄記進看板的唯一入
   fr.record(url, plat, fields)     # 寫入/覆蓋這張卡的 form;回傳這次新開的 k(英文答案要給 zh)
   fr.translate(k, en=..., zh=...)  # 照他改的中文重翻英文 / 替英文答案補中文
 """
-import os, sys, re, datetime, argparse, unicodedata, hashlib, json
+import os, sys, re, datetime, argparse, unicodedata, hashlib, json, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -523,7 +523,10 @@ def judged_closed(fb, job, status):
     return any('judged' in x for x in holding(fb, job, status))
 
 
-def approval_problem(fb, url, status=None):
+_APPROVAL_UNSET = object()
+
+
+def approval_problem(fb, url, status=None, approval_id=_APPROVAL_UNSET):
     """這張的確認還能不能拿去送出。None = 可以;不行就回原因(看板照下一步顯示同一句)。
     先看投遞狀態:只有「你已確認」能送;再看檢查清單(投遞前驗收、這次上傳方式、常用答案、重翻、重打、確認時的答案)。
     status:看板資料的 status(投遞前驗收的結果,board_status 讀);沒給就當成還沒驗收過,擋。"""
@@ -551,7 +554,10 @@ def approval_problem(fb, url, status=None):
         return '正在送出'
     if s != 'confirmed':
         return '還沒確認送出'
-    rnd = (m.get('approve') or {}).get('round')
+    approved = m.get('approve') or {}
+    if approval_id is not _APPROVAL_UNSET and approved.get('id') != approval_id:
+        return '這次確認已作廢,不會送出'
+    rnd = approved.get('round')
     if rnd is not None and rnd != apply.get('at'):
         return '確認的是上一輪填的頁,要重新確認送出'        # 確認綁在「哪一輪填表」:重填、重打過就作廢
     tab = (m.get('approve') or {}).get('tab')
@@ -577,10 +583,10 @@ def approval_problem(fb, url, status=None):
     return None
 
 
-def start_submit(fb, url, status=None):
+def start_submit(fb, url, status=None, approval_id=_APPROVAL_UNSET):
     """你已確認 → 正在送出:那一刻再跑一次檢查清單(從按確認到這裡,答案、驗收都可能變了;狀態表修正 5)。
     過了就送「開始送出」事件、回 None;不過就不動、回原因(卡留在你已確認)。apply_run 派 agent 送出前走這一支。"""
-    problem = approval_problem(fb, url, status)
+    problem = approval_problem(fb, url, status, approval_id)
     if problem:
         return problem
     try:
@@ -594,12 +600,17 @@ def approval(fb, url, at=None):
     """按確認送出存下的:當下每一題會送出去的值(快照),和確認的是哪一輪填表(那一輪的時間)、哪一頁(分頁)。
     後台收到確認事件時當下算(看板只送按下去的時間)。"""
     apply = (fb.get(url) or {}).get('apply') or {}
-    out = {'snap': snapshot(fb, url), 'round': apply.get('at'), 'tab': apply.get('tab_id')}
+    out = {'id': new_approval_id(), 'snap': snapshot(fb, url), 'round': apply.get('at'), 'tab': apply.get('tab_id')}
     if apply.get('workspace'):
         out['workspace'] = {k: apply['workspace'].get(k) for k in ('id', 'name', 'page')}
     if at:
         out['at'] = at
     return out
+
+
+def new_approval_id():
+    """產生一次確認的識別碼;獨立成函式,方便走訪測試固定亂數來源。"""
+    return uuid.uuid4().hex
 
 
 def confirm_problem(fb, url, status=None):

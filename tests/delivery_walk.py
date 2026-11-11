@@ -7,6 +7,7 @@ import copy
 import os
 import random
 import sys
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
@@ -63,7 +64,8 @@ class Walk:
     def cmd(self, *cmds):
         """看板送一包指令(跟看板同一個入口):收了的那幾道的復原單記下來給「復原」用。回傳每一道收了沒。"""
         before = copy.deepcopy(self.fb)
-        rejected, undo, _cards = bs.apply_cmds({'fb': self.fb, 'data': {'jobs': JOBS, 'status': STATUS}}, list(cmds))
+        with mock.patch.object(fr, 'new_approval_id', lambda: f'{self.rnd.getrandbits(128):032x}'):
+            rejected, undo, _cards = bs.apply_cmds({'fb': self.fb, 'data': {'jobs': JOBS, 'status': STATUS}}, list(cmds))
         self.ops.append({'op': 'cmd', 'cmds': copy.deepcopy(list(cmds)), 'rejected': [x['i'] for x in rejected]})
         got = [x for s in undo if s for x in s]
         if got:

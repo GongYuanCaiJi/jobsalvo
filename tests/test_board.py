@@ -444,6 +444,54 @@ class Http(HttpBase):
         self.assertEqual(result, {'msg': message})
         preflight.assert_called_once_with()
 
+    def test_confirm_timer_dispatches_the_same_approval_id(self):
+        url, approval_id = JOBS[0]['id'], 'confirm-second'
+        fb = {url: {'ds': 'confirmed', 'approve': {'at': 'same-second', 'id': approval_id}}}
+        with mock.patch.object(bs, 'snapshot', return_value={'fb': fb}), \
+                mock.patch.object(bs, 'start_run', return_value=(200, {})) as start:
+            bs._send_confirmed(url, 'same-second', approval_id)
+        start.assert_called_once_with('apply', {'stage': 'submit', 'url': url}, approval_id=approval_id)
+
+    def test_old_timer_cannot_clear_or_dispatch_over_a_new_confirmation(self):
+        url = JOBS[0]['id']
+        fb = {url: {'ds': 'confirmed', 'approve': {'at': 'same-second', 'id': 'new'}}}
+        bs.QUEUED[url] = (time.time() + 8, 'new')
+        try:
+            with mock.patch.object(bs, 'snapshot', return_value={'fb': fb}), \
+                    mock.patch.object(bs, 'start_run') as start:
+                bs._send_confirmed(url, 'same-second', 'old')
+            start.assert_not_called()
+            self.assertEqual(bs.QUEUED[url][1], 'new')
+        finally:
+            bs.QUEUED.pop(url, None)
+
+    def test_manual_submit_dispatch_pins_approval_ids_for_one_or_all_cards(self):
+        import form_record as fr
+        cards = {JOBS[0]['id']: {'app': 'ship', 'approve': {'id': 'confirm-one'}},
+                 JOBS[1]['id']: {'app': 'ship', 'approve': {'id': 'confirm-two'}}}
+        snap = {'fb': cards, 'parts': {'data': {'status': {}}}}
+        with tempfile.TemporaryDirectory(prefix='manual-submit-') as tmp:
+            def dispatch(args):
+                with mock.patch.object(bs, '_source_preflight', return_value=''), \
+                        mock.patch.object(bs, 'is_real', return_value=True), \
+                        mock.patch.object(bs, 'snapshot', return_value=snap), \
+                        mock.patch.object(fr, 'approval_problem', return_value=None), \
+                        mock.patch('chrome_door.configured', return_value=True), \
+                        mock.patch.object(bs, 'run_status', return_value={'running': False}), \
+                        mock.patch.object(bs, 'run_sp', return_value=tmp), \
+                        mock.patch.object(bs.subprocess, 'Popen', return_value=mock.Mock(pid=123)) as launch, \
+                        mock.patch.object(bs.jobrun, 'write'), \
+                        mock.patch.object(bs, 'PILOT', None):
+                    code, _ = bs.start_run('apply', args)
+                self.assertEqual(code, 200)
+                argv = launch.call_args.args[0]
+                return json.loads(argv[argv.index('--approval-ids') + 1])
+
+            self.assertEqual(dispatch({'stage': 'submit', 'url': JOBS[0]['id']}),
+                             {JOBS[0]['id']: 'confirm-one'})
+            self.assertEqual(dispatch({'stage': 'submit'}),
+                             {JOBS[0]['id']: 'confirm-one', JOBS[1]['id']: 'confirm-two'})
+
     def test_old_handled_report_does_not_start_an_unrequested_fix(self):
         url = JOBS[1]['id']
         fb = {url: {'app': 'ship', 'apply': {'session': 's1'}}, '__inbox__': [
