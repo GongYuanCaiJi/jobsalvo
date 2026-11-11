@@ -14,7 +14,7 @@ import delivery_state as ds  # noqa: E402  照程式自己的 _steps 算一格�
 MODELED = ('todo', 'running', 'parked', 'stuck', 'gone', 'stale', 'nopage')   # 其他狀態在模型裡都是 "left"
 EVENTS = ('fill_start', 'fill_ok', 'fill_bad', 'fill_nopage', 'page_lost')
 # 同步點上每條規則該看到的結果;違規的各有一張票和一條重演(replay.py)。修好就改成「通過」
-EXPECTED = {'OncePerMark': '違規', 'StopsAfterFailure': '違規', 'FreshVerdict': '通過'}   # #743、#742、#741
+EXPECTED = {'OncePerMark': '違規', 'StopsAfterFailure': '違規', 'FreshVerdict': '通過'}   # #743、#742(剩伺服器重開那條,#743)、#741
 RULES = tuple(EXPECTED)
 JAVA = 'java@temurin-25'
 TLC = ('http:tla2tools[url=https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar,'

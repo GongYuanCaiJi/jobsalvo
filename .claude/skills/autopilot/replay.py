@@ -19,7 +19,7 @@ import form_record as fr  # noqa: E402
 
 EXPECTED = {
     'R1 拿舊驗收推進': 'NOT REPRODUCED',  # FreshVerdict,#741
-    'R2 卡住的卡頁不見後被自動重填': 'REPRODUCED',   # StopsAfterFailure,#742
+    'R2 卡住的卡頁不見後被自動重填': 'NOT REPRODUCED',   # StopsAfterFailure,#742
     'R3 派出後伺服器重開又派一次': 'REPRODUCED',     # OncePerMark(要重開),#743
     'G1 驗收跑完前不推進': 'OK',
     'G2 推過退回的不再推': 'OK',

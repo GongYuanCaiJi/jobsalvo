@@ -11,7 +11,7 @@
     "running": {"label": "正在填或改", "held": false, "busy": "{agent} 正在做,等它做完", "swap": false, "leave": false, "filled": false, "working": true, "handback": false},
     "nopage": {"label": "沒填成", "held": false, "busy": false, "swap": true, "leave": true, "filled": false, "working": false, "handback": true},
     "parked": {"label": "停著等你", "held": true, "busy": false, "swap": true, "leave": true, "filled": true, "working": false, "handback": false},
-    "stuck": {"label": "填了卡住", "held": true, "busy": false, "swap": true, "leave": true, "filled": false, "working": false, "handback": true},
+    "stuck": {"label": "填了卡住", "held": true, "held_tab": true, "busy": false, "swap": true, "leave": true, "filled": false, "working": false, "handback": true},
     "stale": {"label": "上傳的是舊檔", "held": true, "busy": false, "swap": true, "leave": true, "filled": true, "working": false, "handback": true,
               "auto_fill": "{stale},{agent} 會自動照新的重填"},
     "gone": {"label": "頁面不見了", "held": false, "busy": false, "swap": true, "leave": true, "filled": false, "working": false, "handback": true,
@@ -112,7 +112,7 @@
       "check_failed": {"clear": ["apply.attachment_cache"], "merge": {"apply": "$apply"}, "to": "stuck"},
       "answers_changed": {"to": "stuck"},
       "files_changed": {"set": {"apply.stale": "$why"}, "to": "stale"},
-      "page_lost": {"set": {"apply.tab_id": "", "apply.issues": "$issues"}, "to": "gone"},
+      "page_lost": {"set": {"apply.tab_id": ""}, "to": "stuck"},
       "leave": {"to": "stuck"},
       "sent_manual": {"do": ["sent_elsewhere"], "to": "sent"},
       "platform_found": {"do": ["sent_elsewhere"], "set": {"sent_at": "$sent_at", "sent_rec": "$rec"}, "to": "sent"}

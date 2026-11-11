@@ -26,8 +26,8 @@ EXPECTED = {
     'nopage': {'fill_start': 'running'},
     'parked': {'confirm': 'confirmed', 'fix_start': 'running', 'files_changed': 'stale', 'page_lost': 'gone',
                'check_failed': 'stuck'},
-    'stuck': {'fix_start': 'running', 'fill_start': 'running', 'files_changed': 'stale', 'page_lost': 'gone',
-              'check_failed': 'stuck'},
+    'stuck': {'fix_start': 'running', 'fill_start': 'running', 'files_changed': 'stale',
+              'check_failed': 'stuck'},     # 頁不見了還是卡住,原因留著、等他處理好再交回自動重填(#742)
     'stale': {'fill_start': 'running', 'page_lost': 'gone'},
     'gone': {'fill_start': 'running'},
     'confirmed': {'submit_start': 'sending', 'unconfirm': 'parked', 'answers_changed': 'parked', 'files_changed': 'stale',

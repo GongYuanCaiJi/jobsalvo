@@ -149,7 +149,7 @@ Settle ==
   /\ failed' = (failed \/ dsv' \in {"stuck", "nopage"})
   /\ UNCHANGED <<now, app, entered, seen, tried, status, build, rc, job, pc, snap, pl, ok, restarts, launched, dup, advRec, refillFail>>
 
-(* 填好停著的頁不見了(ego 裡那個工作區或分頁不在了,或卡上記的那一家 agent 叫不回來):page_lost。 *)
+(* 頁面不見了:page_lost。填好停著的卡改成 gone、可以重填;失敗卡維持 stuck,保留原因,等他處理好了再交回來。 *)
 PageLost ==
   /\ app = "ship" /\ Go("page_lost")
   /\ UNCHANGED <<now, app, entered, at, seen, tried, status, build, rc, job, pc, snap, pl, ok, restarts, ghost>>
