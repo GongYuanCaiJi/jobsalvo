@@ -196,16 +196,17 @@ PilotLaunches ==
   /\ pc' = "launched"
   /\ UNCHANGED <<card, seen, tried, status, snap, pl, restarts, advRec, failed>>
 
-(* T3:bd.set_fb(mut),拿 live_lock 一次寫完。seen 只留還在待你決定的;試過的記號:推進的一定記,
-   填表只有 start_run 回 200 才記;推進只再看一次「還在待你決定」。 *)
+(* T3:bd.rewrite(mut),拿 live_lock 讀最新 data + fb 再一次寫完。seen 只留還在待你決定的;
+   推進以最新驗收再檢查,只有真的推進才記 adv 試過;填表只有 start_run 回 200 才記。 *)
 PilotWrites ==
   /\ pc = "launched"
   /\ seen' = IF app = "ready" THEN (IF pl.seenNew # None /\ seen = None THEN pl.seenNew ELSE seen) ELSE None
-  /\ tried' = tried \cup (IF pl.adv THEN {Adv} ELSE {}) \cup (IF pl.fill # NoMark /\ ok THEN {pl.fill} ELSE {})
-  /\ IF pl.adv /\ app = "ready"
+  /\ tried' = tried \cup (IF pl.adv /\ app = "ready" /\ ~Blocks(status) THEN {Adv} ELSE {})
+      \cup (IF pl.fill # NoMark /\ ok THEN {pl.fill} ELSE {})
+  /\ IF pl.adv /\ app = "ready" /\ ~Blocks(status)
      THEN /\ app' = "ship" /\ dsv' = "todo"
           /\ launched' = launched \cup {Adv} /\ dup' = (dup \/ Adv \in launched)
-          /\ advRec' = [on |-> TRUE, used |-> snap.status, cur |-> status, entered |-> entered]
+          /\ advRec' = [on |-> TRUE, used |-> status, cur |-> status, entered |-> entered]
      ELSE UNCHANGED <<app, dsv, launched, dup, advRec>>
   /\ pc' = "idle" /\ pl' = NoPlan /\ snap' = NoSnap /\ ok' = FALSE
   /\ UNCHANGED <<now, entered, at, status, build, rc, job, restarts, failed, refillFail>>

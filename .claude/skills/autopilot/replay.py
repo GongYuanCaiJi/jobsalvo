@@ -18,7 +18,7 @@ import demo  # noqa: E402
 import form_record as fr  # noqa: E402
 
 EXPECTED = {
-    'R1 拿舊驗收推進': 'REPRODUCED',      # FreshVerdict,#741
+    'R1 拿舊驗收推進': 'NOT REPRODUCED',  # FreshVerdict,#741
     'R2 卡住的卡頁不見後被自動重填': 'REPRODUCED',   # StopsAfterFailure,#742
     'R3 派出後伺服器重開又派一次': 'REPRODUCED',     # OncePerMark(要重開),#743
     'G1 驗收跑完前不推進': 'OK',
@@ -71,7 +71,8 @@ def pilot(path, start_run=None, run_status=None, build_state=None):
 
 
 def r1_stale_verdict():
-    """自動流程讀了看板檔(那時的驗收這張過),讀 build_state 之前新的一輪驗收寫進「這張不過」並跑完。"""
+    """自動流程讀看板時驗收這張過;build_state 階段新一輪驗收寫成不過並跑完;
+    最後的原子看板寫入必須重讀最新驗收,卡留在待你決定。"""
     with board() as (path, url):
         put(path, url, app='ready')
         status(path, OK_STATUS)

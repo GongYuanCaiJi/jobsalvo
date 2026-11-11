@@ -366,17 +366,25 @@ class Pilot:
         was_blocked = (fb.get(KEY) or {}).get('blocked')
         today = datetime.date.today().isoformat()
 
-        def mut(f):
+        def mut(parts):
+            f = parts['fb']
             a = f.get(KEY) if isinstance(f.get(KEY), dict) else None
             if a is None:
                 if pl['init']:
                     f[KEY] = pl['init']
                 return
+            # plan 使用 _step 開頭讀到的快照。驗收可能在那之後更新,所以推進前
+            # 必須在同一把看板鎖內以最新 data + fb 再檢查一次。
+            import form_record as fr
+            jobs = {j['id']: j for j in parts['data'].get('jobs') or [] if isinstance(j, dict) and j.get('id')}
+            advance = [i for i in pl['advance'] if (f.get(i) or {}).get('app') == 'ready'
+                       and i in jobs and not fr.ship_blocked(f, jobs[i], parts['data'].get('status'))]
             seen = dict(a.get('seen') or {})
             seen.update(pl['seen'])
             a['seen'] = {i: g for i, g in seen.items() if (f.get(i) or {}).get('app') == 'ready'}
             # 只有真的發動了才算「試過」;沒發動(Chrome 沒連、另一輪在跑)下一次再來
-            done = [k for k in pl['tried'] if k.startswith('adv:') or ok.get(k.split(':', 1)[0])]
+            done = [k for k in pl['tried'] if (k.startswith('adv:') and k[4:] in advance)
+                    or (not k.startswith('adv:') and ok.get(k.split(':', 1)[0]))]
             rf = dict(a.get('rf') or {})
             rf.update(pl['rf'])
             if ok.get('fix') and pl['fix'] in rf:          # 真的叫了才算:同一次改動不再叫第二次
@@ -394,14 +402,13 @@ class Pilot:
                 a['blocked'] = 'ego 沒準備好'
             elif ok.get('fill') or ok.get('fix') or ok.get('replies') or ok.get('unsure'):
                 a.pop('blocked', None)
-            for i in pl['advance']:
-                if (f.get(i) or {}).get('app') == 'ready':
-                    f[i]['app'] = 'ship'
+            for i in advance:
+                f[i]['app'] = 'ship'
             f[KEY] = a
         A = fb.get(KEY) if isinstance(fb.get(KEY), dict) else {}
         expire = any(not next_step.fix_sig(fb, i) for i in A.get('rf') or {})   # 有張卡的待重打清掉了,那一筆要跟著拿掉
         if pl['init'] or pl['seen'] or pl['advance'] or pl['rf'] or started or expire:
-            bd.set_fb(mut, live=self.state, by='autopilot')
+            bd.rewrite(mut, live=bd.target(self.state), by='autopilot')   # set_fb 也是先 target()
         if was_blocked and not need_browser and (ok.get('fill') or ok.get('fix') or ok.get('replies')):
             # 連上了、自動的步驟接著跑:之前「ego 沒準備好」那則回報收掉,不留著讓他以為還要處理
             import agent_report

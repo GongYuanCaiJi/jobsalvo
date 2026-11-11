@@ -429,6 +429,31 @@ class PilotStepTest(unittest.TestCase):
             p.step()
         self.assertEqual(self.fb()[url]['app'], 'ship')
 
+    def test_advance_rechecks_the_latest_verdict_when_writing(self):
+        jobs = _read(self.board)['data']['jobs']
+        url = jobs[0]['id']
+        seen = time.time() - 10
+        blocked = dict(OKST, issues=[{'jid': url, 't': 'x', 'stage': 'ready',
+                                     'kind': 'closed', 'msg': '職缺已下架'}])
+        bd.set_fb(lambda fb: fb.update({
+            '__auto__': {'since': '2026-01-01T00:00:00', 'skip': [j['id'] for j in jobs[1:]],
+                         'tried': [], 'seen': {url: seen}, 'flow': ap.flow_modes(CFG)},
+            url: {'app': 'ready'},
+        }), live=self.board)
+        bd.set_data(lambda d, fb: d.__setitem__('status', OKST), live=self.board)
+
+        def build_state():
+            # _step 已讀到通過的快照;在 plan 之前寫入這一輪的新失敗驗收。
+            bd.set_data(lambda d, fb: d.__setitem__('status', blocked), live=self.board)
+            return {'built': seen + 5, 'tried': seen + 5, 'running': False}
+
+        p = ap.Pilot(self.board, lambda kind, args: (200, {}), lambda k: {}, build_state, lambda: True)
+        with mock.patch.object(ap, 'flow', return_value=CFG):
+            p.step()
+        fb = self.fb()
+        self.assertEqual(fb[url]['app'], 'ready')
+        self.assertNotIn('adv:' + url, fb['__auto__']['tried'])
+
     def test_enabling_after_a_pause_skips_existing_pipeline_cards(self):
         enabled = {'value': True}
         off = {'auto_prep': False, 'auto_advance': False, 'auto_fill': False, 'replies_at': ''}

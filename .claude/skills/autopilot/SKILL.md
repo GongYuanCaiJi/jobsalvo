@@ -35,7 +35,7 @@ python3 .claude/skills/autopilot/check.py --out <暫存資料夾>
 
 約 15 秒。第一次會用 mise 裝 TLC 1.7.4 和 Java(要網路)。它做兩件事:從 `tools/delivery_state.json` 重產 `Table.tla`(自動會填的狀態、模型用到的事件)後每條規則各跑一次 TLC;再跑 `replay.py`,照模型的路徑呼叫真的 `Pilot`。
 
-**exit 0 = 跟同步點一樣**。現在該看到:三條規則都「違規」(#741、#742、#743),R1–R3 都 `REPRODUCED`,G1–G3 都 `OK`。跟同步點不一樣的那一行後面會標「← 同步點上是 …」,exit 1。
+**exit 0 = 跟同步點一樣**。同步點上該看到的結果只寫在 `check.py` 和 `replay.py` 的 `EXPECTED`(註解寫著對應的票)。跟同步點不一樣的那一行後面會標「← 同步點上是 …」,exit 1。
 
 ## 3. 讀結果
 
@@ -54,7 +54,7 @@ python3 .claude/skills/autopilot/check.py --out <暫存資料夾>
 | `Pilot._step` 開頭讀看板檔(`open` + `bd.parse`) | `PilotReads` | 手改 |
 | `build_state()`、`run_status()`、`autopilot.plan`、`next_step._move` / `_fill` | `PilotPlans` | 手改 |
 | `start_run`(`_RUN_LOCK`、`Popen(start_new_session=True)`、寫進度檔)、`plan` 要補建時 `self.build()` | `PilotLaunches` | 手改 |
-| `Pilot._step` 結尾 `bd.set_fb(mut)`:`seen`、`tried`(推進一定記、填表 200 才記)、推進只看 `app == 'ready'` | `PilotWrites` | 手改 |
+| `Pilot._step` 結尾 `bd.rewrite(mut)`:在 `live_lock` 內重讀最新 data + fb;記 `seen`、`tried`(真的推進才記、填表 200 才記),推進要最新 `app == 'ready'` 且 `ship_blocked` 不擋 | `PilotWrites` | 手改 |
 | `board_server.trigger_build`(單飛、`again`、`tried`/`built`) | `YouSave`、`BuildDone`、`BuildFails` | 手改 |
 | `reconcile` → `board_status --write`(只驗 ready / ship 的卡,`bd.set_data` 一次寫) | `ReconcileReads`、`ReconcileWrites` | 手改 |
 | `form_record.ship_blocked`(沒驗收擋;驗收沒驗到這張不擋) | `Blocks` | 手改 |
@@ -62,7 +62,7 @@ python3 .claude/skills/autopilot/check.py --out <暫存資料夾>
 | `chrome_door.sweep_gone`(`page_up`:`HELD_STATES` 且有 `tab_id`) | `PageLost` | 手改 |
 | 伺服器重開:`_build_state` 歸零、填表子行程照跑 | `ServerRestarts` | 手改 |
 
-模型裡一個動作 = 程式裡一段不會被別人插進來的事:一次 `set_fb` / `set_data`(拿 `live_lock`)、一次不拿鎖的讀、`start_run` 在 `_RUN_LOCK` 裡那一段。改動把一段拆開或合併時,動作也要跟著拆或合;重演也照新的切法改。
+模型裡一個動作 = 程式裡一段不會被別人插進來的事:一次 `set_fb` / `set_data` / `rewrite`(拿 `live_lock`)、一次不拿鎖的讀、`start_run` 在 `_RUN_LOCK` 裡那一段。推進的最後檢查和寫入同在 `rewrite` 的鎖內,重演也照這個切法改。
 
 改完模型,用一個故意弄壞的版本確認規則會違規(例:`MaxRestarts = 0` 時 `OncePerMark` 通過,把 `PilotWrites` 裡記填表記號那一項拿掉,它要違規),再改回來。改到程式的守門,用一個故意弄壞的程式確認 G 會 BROKEN(例:拿掉 `next_step._move` 的 `build['built'] <= float(seen[i])`,G1 要 BROKEN),再改回來。
 
