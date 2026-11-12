@@ -1060,12 +1060,12 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
             p=subprocess.Popen(run_argv(kind,args),cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,
                                start_new_session=True)
         _PROC[kind]=p
-        if PILOT:   # 這一輪跑完,自動流程接著看下一步(不另開輪詢)
-            threading.Thread(target=lambda: (p.wait(), PILOT.kick()),daemon=True).start()
-        # 那支自己寫第一筆進度之前,這一下就算開始了:再按一次要看得到「正在跑」
+        # 先落啟動證據再開等待執行緒;跟 Popen 同在 _RUN_LOCK 裡,重開後 run_status 仍看得到這次派工。
         jobrun.write(os.path.join(sp,RUNS[kind]['status']),
                      {'phase':'start','pid':p.pid,'t0':time.time(),'mode':args.get('mode',''),
                       'direction':args.get('text',''),'stage':args.get('stage',''),'url':args.get('url','')})
+        if PILOT:   # 這一輪跑完,自動流程接著看下一步(不另開輪詢)
+            threading.Thread(target=lambda: (p.wait(), PILOT.kick()),daemon=True).start()
         return 200,run_status(kind)
 
 

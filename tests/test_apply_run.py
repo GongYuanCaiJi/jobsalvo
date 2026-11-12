@@ -361,6 +361,19 @@ class Checks(unittest.TestCase):
             run.main()                                         # 看板替這一輪記的就是它自己:照常跑
         load.assert_called_once()
 
+    def test_nothing_progress_keeps_the_requested_url(self):
+        import jobrun
+        with patch.object(jobrun, 'read', return_value={'running': False}), \
+                patch.object(run, 'load', return_value=([{'id': U}], {})), \
+                patch.object(run, 'eligible', return_value=[]), \
+                patch.object(run.fr, 'board_status', return_value=OKST), \
+                patch.object(jobrun, 'write') as write, \
+                patch.object(sys, 'argv', ['apply_run.py', '--stage', 'fill', '--url', U]):
+            run.main()
+        progress = write.call_args.args[1]
+        self.assertEqual(progress['phase'], 'nothing')
+        self.assertEqual(progress['url'], U)
+
     def test_submit_cli_pins_each_approval_id_without_the_option(self):
         second = 'https://jobs.lever.co/x/2'
         jobs = {U: {'id': U, 'target': 'First'}, second: {'id': second, 'target': 'Second'}}

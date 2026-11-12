@@ -310,6 +310,60 @@ class Pilot:
             fb.update(copy.deepcopy(d))
         bd.set_fb(mut, live=self.state, by='autopilot')
 
+    def _resolve_fill_pending(self, fb):
+        """每輪 plan 前查上次留下的填表記號:有進度證據就保留 tried,否則放回可派狀態。"""
+        auto = fb.get(KEY)
+        pending = auto.get('pending') if isinstance(auto, dict) else None
+        if not isinstance(pending, dict) or not pending:
+            return False
+        status = self.run_status('apply') or {}
+        result_urls = {r.get('url') for r in status.get('results') or [] if isinstance(r, dict)}
+        resolved = []
+        def resolve(parts):
+            a = parts['fb'].get(KEY)
+            if not isinstance(a, dict):
+                return bd.SKIP
+            current = a.get('pending') if isinstance(a.get('pending'), dict) else {}
+            tried = list(a.get('tried') or [])
+            jobs = {j['id'] for j in parts['data'].get('jobs') or []
+                    if isinstance(j, dict) and isinstance(j.get('id'), str)}
+            for mark, since in list(current.items()):
+                url = next((i for i in sorted(jobs, key=len, reverse=True)
+                            if mark.startswith('fill:' + i + ':')), None)
+                if not url:
+                    launched = False
+                else:
+                    card = parts['fb'].get(url) if isinstance(parts['fb'].get(url), dict) else {}
+                    try:
+                        started_at, reserved_at = float(status.get('t0') or 0), float(since)
+                    except (TypeError, ValueError):
+                        started_at, reserved_at = 0, float('inf')
+                    run_evidence = (status.get('stage') == 'fill' and started_at >= reserved_at
+                                    and (status.get('url') == url or url in result_urls))
+                    apply = card.get('apply') if isinstance(card.get('apply'), dict) else {}
+                    tail = mark[len('fill:' + url + ':'):]
+                    current_at = str(apply.get('at') or 'new')
+                    if tail.startswith('handed:'):
+                        at_evidence = False
+                    elif tail.startswith('unmet:'):
+                        at_evidence = tail[len('unmet:'):] != current_at
+                    else:
+                        at_evidence = not (tail == current_at or tail.startswith(current_at + ':'))
+                    launched = bool(run_evidence or at_evidence)
+                resolved.append((mark, launched))
+            if not resolved:
+                return bd.SKIP
+            for mark, launched in resolved:
+                if mark not in current:
+                    continue
+                current.pop(mark, None)
+                if not launched and mark in tried:
+                    tried.remove(mark)
+            a['pending'] = current
+            a['tried'] = tried[-500:]
+        bd.rewrite(resolve, live=bd.target(self.state), by='autopilot')
+        return True
+
     def save_settings(self, saver):
         """設定儲存與流程切換共用鎖，避免開關之間的 timer 先派出舊卡。"""
         with self._step_lock:
@@ -328,6 +382,10 @@ class Pilot:
         with open(self.state, encoding='utf-8') as f:
             p = bd.parse(f.read())
         fb = json.loads(p['fb'])
+        if self._resolve_fill_pending(fb):
+            with open(self.state, encoding='utf-8') as f:
+                p = bd.parse(f.read())
+            fb = json.loads(p['fb'])
         self._sync_flow(p['data'], fb)
         bs = self.build_state()
         status = {k: self.run_status(k) or {} for k in ('prep', 'add', 'customize') + jobrun.BROWSER_JOBS}
@@ -340,12 +398,34 @@ class Pilot:
                   add_waiting=add_job.waiting() if self.is_real() else 0, add_last=status['add'])
         self.last = {'plan': {k: v for k, v in pl.items() if k != 'init'}, 't': time.time()}
         started = {}
+        reserved_fill = None
         if pl['prep']:
             started['prep'] = self.start_run('prep', {} if pl['prep'] == 'all' else {'url': pl['prep'][0]})
         if pl['fix']:
             started['fix'] = self.start_run('apply', {'stage': 'fix', 'url': pl['fix']})
         elif pl['fill']:
-            started['fill'] = self.start_run('apply', {'stage': 'fill', 'url': pl['fill']})
+            mark = next((k for k in pl['tried'] if k.startswith('fill:' + pl['fill'] + ':')), None)
+            # 先在同一次改寫記 tried 和 pending;派工結果交給進度檔或下一輪定案。
+            if mark is not None:
+                reserved = []
+
+                def reserve(parts):
+                    auto = parts['fb'].get(KEY)
+                    if not isinstance(auto, dict):
+                        return bd.SKIP
+                    tried = list(auto.get('tried') or [])
+                    if mark in tried:
+                        return bd.SKIP
+                    auto['tried'] = (tried + [mark])[-500:]
+                    pending = auto.get('pending') if isinstance(auto.get('pending'), dict) else {}
+                    pending[mark] = time.time()
+                    auto['pending'] = pending
+                    reserved.append(True)
+
+                bd.rewrite(reserve, live=bd.target(self.state), by='autopilot')
+                if reserved:
+                    reserved_fill = mark
+                    started['fill'] = self.start_run('apply', {'stage': 'fill', 'url': pl['fill']})
         if pl['unsure']:
             started['unsure'] = self.start_run('replies', {'url': pl['unsure']})
         elif pl['replies']:
@@ -383,8 +463,9 @@ class Pilot:
             seen.update(pl['seen'])
             a['seen'] = {i: g for i, g in seen.items() if (f.get(i) or {}).get('app') == 'ready'}
             # 只有真的發動了才算「試過」;沒發動(Chrome 沒連、另一輪在跑)下一次再來
-            done = [k for k in pl['tried'] if (k.startswith('adv:') and k[4:] in advance)
-                    or (not k.startswith('adv:') and ok.get(k.split(':', 1)[0]))]
+            done = [k for k in pl['tried'] if k != reserved_fill and
+                    ((k.startswith('adv:') and k[4:] in advance)
+                     or (not k.startswith('adv:') and ok.get(k.split(':', 1)[0])))]
             rf = dict(a.get('rf') or {})
             rf.update(pl['rf'])
             if ok.get('fix') and pl['fix'] in rf:          # 真的叫了才算:同一次改動不再叫第二次
@@ -392,6 +473,16 @@ class Pilot:
             # 這張沒有待重打的了(重打好了,或他自己按了改):那一筆拿掉。他之後把答案改回重打過的值,是新的一次改動
             a['rf'] = {i: v for i, v in rf.items() if (f.get(i) or {}).get('app') == 'ship' and next_step.fix_sig(f, i)}
             a['tried'] = (list(a.get('tried') or []) + done)[-500:]
+            pending = a.get('pending') if isinstance(a.get('pending'), dict) else {}
+            if reserved_fill and ok.get('fill'):
+                pending.pop(reserved_fill, None)
+            elif reserved_fill and started.get('fill', (None,))[0] != 200:
+                pending.pop(reserved_fill, None)
+                tried = list(a.get('tried') or [])
+                if reserved_fill in tried:
+                    tried.remove(reserved_fill)
+                a['tried'] = tried
+            a['pending'] = pending
             if ok.get('replies'):
                 a['replies_day'] = today
                 # 當天第幾次再試:看板那一列照這個寫「還會再試」或「今天不再試了」

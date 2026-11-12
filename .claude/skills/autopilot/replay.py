@@ -20,7 +20,9 @@ import form_record as fr  # noqa: E402
 EXPECTED = {
     'R1 拿舊驗收推進': 'NOT REPRODUCED',  # FreshVerdict,#741
     'R2 卡住的卡頁不見後被自動重填': 'NOT REPRODUCED',   # StopsAfterFailure,#742
-    'R3 派出後伺服器重開又派一次': 'REPRODUCED',     # OncePerMark(要重開),#743
+    'R3 派出後伺服器重開又派一次': 'NOT REPRODUCED', # OncePerMark(要重開),#743
+    'R4 寫記號後、派工前重開': 'NOT REPRODUCED',       # NoOrphanMark,#743
+    'R5 pending 後 page_lost 再重開': 'NOT REPRODUCED', # #743；狀態改變不算派工證據
     'G1 驗收跑完前不推進': 'OK',
     'G2 推過退回的不再推': 'OK',
     'G3 同一次填表不派第二次': 'OK',
@@ -108,16 +110,68 @@ def r3_restart_redispatch():
     with board() as (path, url):
         put(path, url, app='ship')
         calls = []
+        progress = {}
 
         def crashing(kind, args):
             calls.append((kind, args))
+            progress.update(phase='start', stage='fill', url=url, t0=time.time())
             raise Crash
         with contextlib.suppress(Crash):
             pilot(path, start_run=crashing).step()
         # 重開:新的 Pilot;那一輪還沒寫 fill_start 就結束了(run_status 不在跑),卡還是 todo
-        pilot(path, start_run=lambda kind, args: (calls.append((kind, args)), (200, {}))[1]).step()
+        p = ap.Pilot(path, lambda kind, args: (calls.append((kind, args)), (200, {}))[1],
+                     lambda k: progress if k == 'apply' else {}, lambda: IDLE, lambda: True, build=lambda: None)
+        p.step()
         fills = [c for c in calls if c == ('apply', {'stage': 'fill', 'url': url})]
-        return 'REPRODUCED' if len(fills) == 2 else 'NOT REPRODUCED'
+        return 'NOT REPRODUCED' if len(fills) == 1 else 'REPRODUCED' if len(fills) > 1 else 'BROKEN'
+
+
+def r4_restart_before_start_run():
+    """記號已寫入 __auto__.pending,start_run 尚未派出;重開先撤回孤立記號,再派一次。"""
+    with board() as (path, url):
+        put(path, url, app='ship')
+        launched = []
+
+        def crash_before_launch(kind, args):          # 還沒 Popen 就停掉
+            raise Crash
+        with contextlib.suppress(Crash):
+            pilot(path, start_run=crash_before_launch).step()
+        # 新 Pilot 的 run_status 沒有這張卡的啟動證據,因此清掉 pending/tried 後正常派一次。
+        p = ap.Pilot(path, lambda kind, args: (launched.append((kind, args)), (200, {}))[1],
+                     lambda k: {}, lambda: IDLE, lambda: True, build=lambda: None)
+        p.step()
+        fills = [c for c in launched if c == ('apply', {'stage': 'fill', 'url': url})]
+        return 'NOT REPRODUCED' if len(fills) == 1 else 'REPRODUCED'      # 0 次 = 永遠不填;2 次 = 重派
+
+
+def r5_page_lost_after_pending():
+    """pending 已持久化、start_run 前重開;停機期間 page_lost 讓 stale 變 gone,新 Pilot 仍須派一次。"""
+    with board() as (path, url):
+        at = '2026-01-05T10:05:00'
+
+        def stale(fb):
+            fb[url] = {'app': 'ship', 'ds': 'stale',
+                       'apply': {'stage': 'fill', 'at': at, 'tab_id': 't1', 'issues': ['舊檔']}}
+        bd.set_fb(stale, live=path)
+
+        def crash_before_start(kind, args):
+            raise Crash
+        with contextlib.suppress(Crash):
+            pilot(path, start_run=crash_before_start).step()
+
+        mark = 'fill:' + url + ':' + at
+        if mark not in doc(path)[1]['__auto__'].get('pending', {}):
+            return 'BROKEN'
+        bd.set_fb(lambda fb: ds.try_fire(fb, url, 'page_lost', issues=[ds.GONE]), live=path)
+        if card(path, url).get('apply', {}).get('at') != at or ds.state(card(path, url)) != 'gone':
+            return 'BROKEN'
+
+        launched = []
+        p = ap.Pilot(path, lambda kind, args: (launched.append((kind, args)), (200, {}))[1],
+                     lambda kind: {}, lambda: IDLE, lambda: True, build=lambda: None)
+        p.step()
+        fills = [c for c in launched if c == ('apply', {'stage': 'fill', 'url': url})]
+        return 'NOT REPRODUCED' if len(fills) == 1 else 'REPRODUCED' if not fills else 'BROKEN'
 
 
 def g1_waits_for_build():
@@ -162,7 +216,10 @@ def g3_fill_once():
 
 
 CASES = {'R1 拿舊驗收推進': r1_stale_verdict, 'R2 卡住的卡頁不見後被自動重填': r2_stuck_refilled,
-         'R3 派出後伺服器重開又派一次': r3_restart_redispatch, 'G1 驗收跑完前不推進': g1_waits_for_build,
+         'R3 派出後伺服器重開又派一次': r3_restart_redispatch,
+         'R4 寫記號後、派工前重開': r4_restart_before_start_run,
+         'R5 pending 後 page_lost 再重開': r5_page_lost_after_pending,
+         'G1 驗收跑完前不推進': g1_waits_for_build,
          'G2 推過退回的不再推': g2_no_readvance, 'G3 同一次填表不派第二次': g3_fill_once}
 
 

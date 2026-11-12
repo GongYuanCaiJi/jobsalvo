@@ -411,6 +411,201 @@ class PilotStepTest(unittest.TestCase):
         self.assertFalse([c for c in self.calls if c[1].get('stage') == 'submit'])
         self.assertEqual(self.sent(), before)          # 不會替他送出
 
+    def test_restart_after_fill_launch_does_not_dispatch_the_same_mark_again(self):
+        class ServerStopped(BaseException):
+            pass
+
+        cfg = dict(CFG, auto_prep=False, auto_advance=False, auto_fill=True, replies_at='')
+        with mock.patch.object(ap, 'flow', return_value=cfg):
+            self.pilot().step()                         # 建立自動流程記號
+            doc = _read(self.board)
+            url = doc['data']['jobs'][0]['id']
+            def make_eligible(fb):
+                if url in fb['__auto__']['skip']:
+                    fb['__auto__']['skip'].remove(url)
+                fb.setdefault(url, {}).update(app='ship')
+            bd.set_fb(make_eligible, live=self.board)
+
+            def launch_then_stop(kind, args):
+                self.calls.append((kind, args))          # 子行程已派出,伺服器在 end-of-step 寫入前重開
+                launch_status.update(phase='start', stage='fill', url=url, t0=time.time())
+                raise ServerStopped
+
+            launch_status = {}
+            with self.assertRaises(ServerStopped):
+                ap.Pilot(self.board, launch_then_stop, lambda k: {},
+                         lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+            ap.Pilot(self.board, lambda kind, args: (self.calls.append((kind, args)), (200, {}))[1],
+                     lambda k: launch_status if k == 'apply' else {},
+                     lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()  # 新伺服器讀進度檔
+
+        self.assertEqual(self.calls, [('apply', {'stage': 'fill', 'url': url})])
+
+    def test_nothing_progress_with_url_proves_that_this_fill_was_dispatched(self):
+        class ServerStopped(BaseException):
+            pass
+
+        cfg = dict(CFG, auto_prep=False, auto_advance=False, auto_fill=True, replies_at='')
+        with mock.patch.object(ap, 'flow', return_value=cfg):
+            self.pilot().step()
+            url = _read(self.board)['data']['jobs'][0]['id']
+
+            def make_eligible(fb):
+                if url in fb['__auto__']['skip']:
+                    fb['__auto__']['skip'].remove(url)
+                fb.setdefault(url, {}).update(app='ship')
+            bd.set_fb(make_eligible, live=self.board)
+            progress = {}
+
+            def child_finished_without_work(kind, args):
+                self.calls.append((kind, args))
+                progress.update(phase='nothing', stage='fill', url=url, t0=time.time())
+                raise ServerStopped  # 子行程已寫完進度,伺服器在結尾 mut 前重開
+
+            with self.assertRaises(ServerStopped):
+                ap.Pilot(self.board, child_finished_without_work, lambda k: {},
+                         lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+            ap.Pilot(self.board, lambda kind, args: (self.calls.append((kind, args)), (200, {}))[1],
+                     lambda k: progress if k == 'apply' else {},
+                     lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+
+        self.assertEqual(self.calls, [('apply', {'stage': 'fill', 'url': url})])
+        auto = self.fb()['__auto__']
+        mark = 'fill:' + url + ':new'
+        self.assertIn(mark, auto['tried'])
+        self.assertNotIn(mark, auto['pending'])
+
+    def test_page_lost_state_change_does_not_prove_a_pending_fill_was_dispatched(self):
+        class ServerStopped(BaseException):
+            pass
+
+        cfg = dict(CFG, auto_prep=False, auto_advance=False, auto_fill=True, replies_at='')
+        with mock.patch.object(ap, 'flow', return_value=cfg):
+            self.pilot().step()
+            url = _read(self.board)['data']['jobs'][0]['id']
+            at = '2026-01-05T10:05:00'
+
+            def make_stale(fb):
+                if url in fb['__auto__']['skip']:
+                    fb['__auto__']['skip'].remove(url)
+                fb[url] = {'app': 'ship', 'ds': 'stale',
+                           'apply': {'stage': 'fill', 'at': at, 'tab_id': 't1', 'issues': ['舊檔']}}
+            bd.set_fb(make_stale, live=self.board)
+
+            def crash_before_dispatch(kind, args):
+                raise ServerStopped
+            with self.assertRaises(ServerStopped):
+                ap.Pilot(self.board, crash_before_dispatch, lambda k: {},
+                         lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+
+            fb = self.fb()
+            mark = 'fill:' + url + ':' + at
+            self.assertIn(mark, fb['__auto__']['pending'])
+            self.assertNotIn('pending_state', fb['__auto__'])
+            bd.set_fb(lambda current: ds.try_fire(current, url, 'page_lost', issues=[ds.GONE]), live=self.board)
+            gone = self.fb()[url]
+            self.assertEqual(ds.state(gone), 'gone')
+            self.assertEqual(gone['apply']['at'], at)
+
+            p = ap.Pilot(self.board, lambda kind, args: (self.calls.append((kind, args)), (200, {}))[1],
+                         lambda k: {}, lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False)
+            p.step()
+
+        self.assertEqual(self.calls, [('apply', {'stage': 'fill', 'url': url})])
+        auto = self.fb()['__auto__']
+        self.assertIn(mark, auto['tried'])
+        self.assertNotIn(mark, auto['pending'])
+
+    def test_fill_launch_error_releases_the_mark(self):
+        cfg = dict(CFG, auto_prep=False, auto_advance=False, auto_fill=True, replies_at='')
+        with mock.patch.object(ap, 'flow', return_value=cfg):
+            self.pilot().step()
+            url = _read(self.board)['data']['jobs'][0]['id']
+            def make_eligible(fb):
+                if url in fb['__auto__']['skip']:
+                    fb['__auto__']['skip'].remove(url)
+                fb.setdefault(url, {}).update(app='ship')
+            bd.set_fb(make_eligible, live=self.board)
+
+            def broken(kind, args):
+                raise RuntimeError('派不出去')
+            with self.assertRaises(RuntimeError):
+                ap.Pilot(self.board, broken, lambda k: {},
+                         lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+            auto = json.loads(_read(self.board)['fb'])['__auto__']
+            mark = next(k for k in auto['tried'] if k.startswith('fill:' + url + ':'))
+            self.assertGreater(auto['pending'][mark], 0)  # 例外時先留待下輪查證
+            self.pilot().step()
+        self.assertEqual(self.calls, [('apply', {'stage': 'fill', 'url': url})])
+        auto = self.fb()['__auto__']
+        self.assertIn(mark, auto['tried'])
+        self.assertNotIn(mark, auto['pending'])
+
+    def test_fill_launch_progress_survives_start_run_error(self):
+        cfg = dict(CFG, auto_prep=False, auto_advance=False, auto_fill=True, replies_at='')
+        with mock.patch.object(ap, 'flow', return_value=cfg):
+            self.pilot().step()
+            url = _read(self.board)['data']['jobs'][0]['id']
+
+            def make_eligible(fb):
+                if url in fb['__auto__']['skip']:
+                    fb['__auto__']['skip'].remove(url)
+                fb.setdefault(url, {}).update(app='ship')
+            bd.set_fb(make_eligible, live=self.board)
+            progress = {}
+
+            def launched_then_error(kind, args):
+                self.calls.append((kind, args))  # Popen 和進度檔已完成,回傳路徑才丟例外
+                progress.update(phase='start', stage='fill', url=url, t0=time.time())
+                raise RuntimeError('進度回傳失敗')
+
+            with self.assertRaises(RuntimeError):
+                ap.Pilot(self.board, launched_then_error, lambda k: progress if k == 'apply' else {},
+                         lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+            auto = self.fb()['__auto__']
+            mark = next(k for k in auto['tried'] if k.startswith('fill:' + url + ':'))
+            self.assertIn(mark, auto['pending'])
+
+            ap.Pilot(self.board, lambda kind, args: (self.calls.append((kind, args)), (200, {}))[1],
+                     lambda k: progress if k == 'apply' else {},
+                     lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False).step()
+
+        self.assertEqual(self.calls, [('apply', {'stage': 'fill', 'url': url})])
+        auto = self.fb()['__auto__']
+        self.assertIn(mark, auto['tried'])
+        self.assertNotIn(mark, auto['pending'])
+
+    def test_fill_explicit_non_200_releases_the_mark(self):
+        cfg = dict(CFG, auto_prep=False, auto_advance=False, auto_fill=True, replies_at='')
+        with mock.patch.object(ap, 'flow', return_value=cfg):
+            self.pilot().step()
+            url = _read(self.board)['data']['jobs'][0]['id']
+
+            def make_eligible(fb):
+                if url in fb['__auto__']['skip']:
+                    fb['__auto__']['skip'].remove(url)
+                fb.setdefault(url, {}).update(app='ship')
+            bd.set_fb(make_eligible, live=self.board)
+            calls = []
+
+            def reject_once(kind, args):
+                calls.append((kind, args))
+                return (409, {}) if len(calls) == 1 else (200, {})
+
+            p = ap.Pilot(self.board, reject_once, lambda k: {},
+                         lambda: {'built': 0, 'tried': 0, 'running': False}, lambda: False)
+            p.step()
+            auto = self.fb()['__auto__']
+            mark = 'fill:' + url + ':new'
+            self.assertNotIn(mark, auto['tried'])
+            self.assertNotIn(mark, auto['pending'])
+            p.step()
+
+        self.assertEqual(calls, [('apply', {'stage': 'fill', 'url': url})] * 2)
+        auto = self.fb()['__auto__']
+        self.assertIn(mark, auto['tried'])
+        self.assertNotIn(mark, auto['pending'])
+
     def test_restart_rebuilds_before_advancing_a_ready_card(self):
         url = _read(self.board)['data']['jobs'][0]['id']
         skipped = [j['id'] for j in _read(self.board)['data']['jobs'] if j['id'] != url]

@@ -1773,7 +1773,7 @@ def main():
         approval_ids = {u: ((fb.get(u) or {}).get('approve') or {}).get('id') for u in todo}
     base = {'stage': a.stage, 'n': len(todo), 'done': 0, 't0': time.time(), 'pid': os.getpid()}
     if not todo:
-        jobrun.write(st, dict(base, phase='nothing', msg='沒有要跑的卡'))
+        jobrun.write(st, dict(base, phase='nothing', url=a.url, msg='沒有要跑的卡'))
         print('沒有要跑的卡')
         return
     results = []
