@@ -1205,6 +1205,15 @@ class H(BaseHTTPRequestHandler):
             finally:
                 with contextlib.suppress(FileNotFoundError):
                     os.remove(out)
+        elif self.path.startswith('/api/iv/fig?'):
+            # 題庫逐字稿裡的圖(![說明](fig:檔名)):放在資料夾的 figures/,只收單層檔名、只給圖檔
+            from urllib.parse import urlparse, parse_qs
+            name=(parse_qs(urlparse(self.path).query).get('f') or [''])[0]
+            types={'.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg'}
+            f=os.path.join(cf.HOME,'figures',name)
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',name) and os.path.splitext(name)[1].lower() in types and os.path.isfile(f):
+                with open(f,'rb') as fh: self._send(200,fh.read(),types[os.path.splitext(name)[1].lower()])
+            else: self._send(404,'沒有這張圖','text/plain; charset=utf-8')
         elif self.path.startswith('/api/evidence?'):
             # 要他確認或處理的事附的那張截圖(程式自己截的,在那張卡的證據夾,#315)。只收「<輪>/<檔名>」、只給圖檔
             from urllib.parse import urlparse, parse_qs
@@ -1271,14 +1280,15 @@ class H(BaseHTTPRequestHandler):
                 import mimetypes
                 with open(f,'rb') as fh: self._send(200,fh.read(),mimetypes.guess_type(f)[0] or 'application/octet-stream')
             else: self._send(404,'not found','text/plain; charset=utf-8')
-        elif self.path.startswith('/api/iv/sheet?'):
-            import iv_sheet, markdown_pdf
+        elif self.path.startswith('/api/iv/pack?'):
+            import iv_pack, markdown_pdf
+            snap=snapshot()
             try:
-                pdf=iv_sheet.pdf_bytes(snapshot()['parts']['data'],self._q('job'),cf.HOME)
+                pdf=iv_pack.pack_bytes(snap['parts']['data'],snap['fb'],self._q('job'),cf.HOME)
             except StopIteration:
                 return self._send(404,'沒有這一場','text/plain; charset=utf-8')
-            except markdown_pdf.RenderError as e:
-                return self._send(500,'面試備忘排不出來:%s'%e,'text/plain; charset=utf-8')
+            except (markdown_pdf.RenderError,ValueError) as e:
+                return self._send(500,'四份合不起來:%s'%e,'text/plain; charset=utf-8')
             self._send(200,pdf,'application/pdf')
         elif self.path.startswith('/api/preview/'):
             import pdf_preview

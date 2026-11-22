@@ -2221,6 +2221,23 @@
   function ivDurHTML(it,cls){var d=ivDurInfo(it);
     return d.t?'<span class="'+cls+(d.over?' over':'')+'" data-ivdur="1"'+(d.over?' title="照你的語速念會超過限時"':'')+'>'+d.t+'</span>':'';}
   // 逐字稿段落跨圍欄連續編號,PICK 的段落編號就是這個。
+  // 逐字稿段落裡 ![說明](fig:檔名) 顯示成資料夾 figures/ 裡的圖;「| a | b |」加一行「|---|---|」開頭的連續行畫成表格(格子裡的 `字` 顯示成 code),其餘照原樣。
+  function ivSegHTML(p){
+    var L=String(p).split('\n'), out=[], i=0, row=function(l){return l.trim().replace(/^\||\|$/g,'').split('|');};
+    var head=function(k){return /^\s*\|/.test(L[k])&&k+1<L.length&&/^\s*\|[\s:|-]+\|\s*$/.test(L[k+1]);};
+    var cell=function(c){return ivLinkify(esc(c.trim())).replace(/`([^`]+)`/g,'<code>$1</code>');};
+    var FIG=/^!\[([^\]\n]*)\]\(fig:([A-Za-z0-9][A-Za-z0-9_.-]*)\)\s*$/;
+    while(i<L.length){
+      var fm=FIG.exec(L[i]);
+      if(fm){var fu='/api/iv/fig?f='+encodeURIComponent(fm[2]); out.push('<a href="'+fu+'" target="_blank" rel="noopener"><img class="iv-fig" src="'+fu+'" alt="'+escA(fm[1])+'"></a>'); i++; continue;}
+      if(head(i)){
+        var j=i+2; while(j<L.length&&/^\s*\|/.test(L[j]))j++;
+        out.push('<table class="iv-tb"><thead><tr>'+row(L[i]).map(function(c){return '<th>'+cell(c)+'</th>';}).join('')+'</tr></thead><tbody>'+
+          L.slice(i+2,j).map(function(l){return '<tr>'+row(l).map(function(c){return '<td>'+cell(c)+'</td>';}).join('')+'</tr>';}).join('')+'</tbody></table>');
+        i=j; continue;}
+      var k=i; while(k<L.length&&!head(k)&&!FIG.test(L[k]))k++;
+      out.push(ivLinkify(esc(L.slice(i,k).join('\n')))); i=k;}
+    return out.join('');}
   function ivBodyHTML(it){
     var keep=ivPicked(it), ver=ivPicks(it).ver, multi=ivScripts(it).length>1&&!ver, n=0, h='', head='';
     (it.b||[]).forEach(function(b){
@@ -2230,7 +2247,7 @@
       head='';
       var len={c:0,w:0}, ps='';
       b[1].forEach(function(p){n++; var on=!keep||keep.indexOf(n)>=0; if(on)len=ivAdd(len,ivLen(p));
-        ps+='<p class="iv-seg'+(on?'':' off')+'" data-n="'+n+'">'+ivLinkify(esc(p))+'</p>';});
+        ps+='<p class="iv-seg'+(on?'':' off')+'" data-n="'+n+'">'+ivSegHTML(p)+'</p>';});
       h+='<div class="iv-script">'+(multi?'<div class="iv-bd">≈'+ivClock(ivSecs(len))+' · '+ivLenText(len)+'</div>':'')+ps+'</div>';
     });
     return h;}
@@ -2336,7 +2353,7 @@
         '<button type="button" class="iv-ghost" data-ivround="'+escA(id)+'" data-ivat="'+escA(r.at)+'" aria-label="改這一輪">'+ic('pencil')+'</button></div>';}).join('')
       :'<p class="iv-empty">還沒記面試時間。</p>')+
       '<div class="iv-round-acts"><button type="button" class="iv-ghost" data-ivround="'+escA(id)+'" data-ivat="">＋ 記一輪面試時間</button>'+
-      '<button type="button" class="iv-ghost" data-ivsheet="'+escA(id)+'">'+ic('file-text')+' 預覽、匯出面試備忘</button></div></div>';}
+      '<button type="button" class="iv-ghost" data-ivsheet="'+escA(id)+'">'+ic('file-text')+' 預覽、匯出面試資料</button></div></div>';}
   // 這一場在面什麼:職缺原頁、地點/門檻/薪資、agent 讀 JD 寫的摘要。不放改結果的按鈕(結果在已投出那張卡上記)。
   // 投遞日、記成面試中的日子不放:準備面試用不到(2026-10-20 他:「誰 care 它被遞進來的日期」)
   function ivJobHeadHTML(id){
@@ -5572,16 +5589,16 @@
       '<div class="cfg-row end">'+(r.at?'<button class="cfg-b warn" type="button" data-ivrdel="1">'+ic('trash-2')+' 刪掉這一輪</button>':'')+
       '<button class="cfg-b go" type="button" data-ivrsave="1">'+ic('save')+' 儲存</button></div></div>','');}
   // 面試備忘:先在這裡預覽排好的 PDF,滿意再下載(排版要幾秒,框裡先寫「排版中」)
-  function ivOpenSheet(job){var u='/api/iv/sheet?job='+encodeURIComponent(job), nm=ivName(job);
+  function ivOpenSheet(job){var u='/api/iv/pack?job='+encodeURIComponent(job), nm=ivName(job);
     // 手機的瀏覽器不能把 PDF 嵌在框裡看(只剩一片灰),直接給大按鈕,用手機自己的 PDF 檢視器開
     var phone=window.matchMedia&&window.matchMedia('(max-width:800px),(pointer:coarse)').matches;
-    var dl='<a class="cfg-b go" href="'+escA(u)+'" download="'+escA(nm)+'-面試備忘.pdf">'+ic('download')+' 下載 PDF</a>'+
+    var dl='<a class="cfg-b go" href="'+escA(u)+'" download="'+escA(nm)+'-面試資料.pdf">'+ic('download')+' 下載 PDF</a>'+
       '<a class="cfg-b'+(phone?' go':'')+'" href="'+escA(u)+'" target="_blank" rel="noopener">↗ 開啟 PDF</a>';
     modal('<div class="rzm-box iv-edit" style="width:min(1080px,96vw);max-width:none"><button class="rzm-x" type="button">'+ic('x')+' 關閉</button>'+
-      '<h3>「'+esc(nm)+'」的面試備忘</h3>'+
+      '<h3>「'+esc(nm)+'」的面試資料</h3><p class="iv-sharenote">依序:自己的履歷、平台履歷、附件、面試備忘。</p>'+
       (phone?'<p class="iv-empty">排版要幾秒鐘,按「開啟 PDF」,用手機自己的 PDF 檢視器看。</p><div class="cfg-row">'+dl+'</div>'
         :'<div class="cfg-row">'+dl+'<span class="iv-empty" id="ivsheet-wait">排版中,幾秒鐘…</span></div>'+
-          '<iframe onload="var w=document.getElementById(\'ivsheet-wait\');w&&w.remove()" src="'+escA(u)+'#toolbar=0&navpanes=0&view=FitH" title="面試備忘預覽" class="iv-sheet-frame"></iframe>')+
+          '<iframe onload="var w=document.getElementById(\'ivsheet-wait\');w&&w.remove()" src="'+escA(u)+'#toolbar=0&navpanes=0&view=FitH" title="面試資料預覽" class="iv-sheet-frame"></iframe>')+
       '</div>','');}
   document.addEventListener('click',function(e){
     // 點題目那一行的狀態:跳出四站讓他直接改(不用開編輯框)

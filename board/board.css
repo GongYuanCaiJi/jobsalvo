@@ -856,6 +856,13 @@ details.ivstage[open]>summary{margin-bottom:var(--space-8)}
 .iv-say p{font-size:var(--text-xl);line-height:var(--leading-loose);margin:0 0 var(--space-16);color:var(--ink)}
 .iv-seg{white-space:pre-line}   /* 段落裡的子項目(「- 」開頭)各自一行 */
 .iv-seg.off{display:none}
+.iv-say p:has(>.iv-tb){overflow-x:auto}
+.iv-fig{display:block;width:100%;max-width:960px;height:auto;margin:var(--space-8) 0 var(--space-16);border:1px solid var(--line);border-radius:var(--radius-md)}
+.iv-tb{border-collapse:collapse;font-size:var(--text-sm);line-height:var(--leading-snug);width:100%;min-width:640px;margin:0 0 var(--space-8);white-space:normal}
+.iv-tb th{text-align:left;font-weight:var(--weight-semibold);color:var(--ink-dim);padding:var(--space-6) var(--space-8);border-bottom:1px solid var(--line-strong);white-space:nowrap}
+.iv-tb td{text-align:left;vertical-align:top;padding:var(--space-6) var(--space-8);border-top:1px solid var(--line)}
+.iv-tb td:first-child{white-space:nowrap;font-weight:var(--weight-semibold)}
+.iv-tb code{font-family:var(--mono);font-size:var(--text-xs);background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:0 var(--space-4)}
 .iv-h{font-size:var(--text-sm);color:var(--ink-dim);margin:var(--space-16) 0 var(--space-6)}
 .iv-h p{margin:0 0 var(--space-4)}
 .iv-say .iv-h:first-child{margin-top:0}

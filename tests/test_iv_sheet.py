@@ -50,7 +50,7 @@ class IvSheetTest(unittest.TestCase):
         md, _ = iv_sheet.build(_data(), 'J')
         self.assertIn('| 什麼是 AOI | 一句話答案。 | ① 取像<br>② 判斷 |', md)
         self.assertIn('| ↳ 打光為什麼重要 | 短答案 |  |', md)
-        self.assertIn('| 自我介紹 | (見附錄) |  |', md)
+        self.assertIn('| 自我介紹 |  |  |', md)
         self.assertIn('**對方在看**　不要靠年資', md)
         self.assertNotIn('q1', md)
         self.assertIn('**90 版**', md)

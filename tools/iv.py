@@ -18,7 +18,16 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
                                      只改這場的逐字稿(和考點),共有版不動,不要複製題目;--clear 還原成共有版
   iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" [--note "…"] [--old-at 舊時間]
   iv.py round 萬蕙昇 --del 2026-10-23T15:00
-  iv.py check                        整份題庫不合規則的地方
+  iv.py check                        整份題庫不合規則的地方(含:磨合中、定案的題,面試備忘速查表上一句話是空的)
+
+面試備忘(印出來帶去面試的 PDF)就是從逐字稿排出來的,所以逐字稿要這樣寫,磨一題就是同時寫備忘:
+  第一段                一句話:面試時掃一眼要看的那句。速查表「一句話」那格
+  【要點】① … ② …      緊接在後,一段,用 ①②③ 寫幾個短句,每句單獨看得懂。速查表「要點」那格,一句一行
+  ──────               單獨一行的分界。以上是備忘,以下是完整回答
+  ## 小標 …            完整回答,印在備忘的附錄
+沒有分界、逐字稿又超過 90 字,速查表那格會是空的:stage 要設成 wip 或 ok 的題,iv.py 會擋下並說缺什麼。
+每次 put / variant 存完,會印出這題在速查表上的那一行,不用另外開 PDF 看。
+逐字稿裡可以放表格(| a | b | 加 |---|---|)和圖(![說明](fig:檔名.svg),檔放資料夾的 figures/)。
 
 卡片可以寫網址、網址的一段或公司名,對到唯一一張就好。
 題目 json 的欄位:t 題目、cat 大類、sub 小類、ask 題面(只放對方怎麼問)、focus 考點(含答壞的樣子)、
@@ -28,7 +37,7 @@ parent 追問哪一題:對方聽完回答接著問的另一題,一律另寫一�
 出處 --src:me 我被問過 / this 這家考過 / other 別家考過 / guess 預想的(要 --why)。
 this、other 要 --cite 那一篇的網址(點了直接開那一篇,不是公司頁)和 --quote 原文(那一篇怎麼寫就貼怎麼寫)。
 """
-import argparse, json, os, sys
+import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import board_doc as bd, interview_bank as ib, config as cf
@@ -75,7 +84,39 @@ def write(op, form=None, item_id=None, job=None, kind='prep'):
         folder_history.note_saved(cf.HOME)
     except Exception as e:  # noqa: BLE001 — 資料已經寫進去了,只是沒排上版本紀錄
         print(f'⚠ 資料夾版本紀錄沒排上:{e}')
+    _rerender_memos()
     return out['bank']
+
+
+def _rerender_memos():
+    """題庫一改,每一場面試的小抄(面試備忘 PDF)跟著重排:改題庫的所有路徑都經過 write,不靠記得另外排。
+    網頁存檔走看板自己的預排;這裡是命令列這一條。"""
+    import iv_sheet
+    data, fb = _load()
+    for u in iv_sheet.interviews(data, fb):
+        try:
+            iv_sheet.render(data, u, cf.HOME)
+        except Exception as e:  # noqa: BLE001 — 題庫已經寫進去了,小抄排不出來要照實說,按預覽時會再排一次
+            print(f'⚠ 面試備忘沒排好({u}):{e}')
+
+
+def memo_check(script, title):
+    """磨合中、定案的題,逐字稿要能排出速查表那一行。回要提示的話(空字串 = 沒問題)。"""
+    import iv_sheet
+    one, kw = iv_sheet.memo_row(script)
+    head = re.split(r'\n\s*──────\s*\n', '\n' + str(script or '').strip() + '\n', maxsplit=1)[0].strip()
+    first = head.split('\n', 1)[0]
+    if one and not first.startswith(('## ', iv_sheet.KEYS)):
+        return ''
+    return f'「{title}」逐字稿開頭沒有一句話:第一段寫面試時掃一眼要看的那句,接著【要點】① …,再單獨一行 ──────,之後才是完整回答'
+
+
+def memo_show(script):
+    import iv_sheet
+    one, kw = iv_sheet.memo_row(script)
+    print('面試備忘速查表上這題是:')
+    print('  一句話:' + (one or '(空)'))
+    print('  要點:' + (kw.replace('<br>', ' / ') or '(沒有)'))
 
 
 def link_form(a):
@@ -171,10 +212,21 @@ def main():
         return
     if a.cmd == 'check':
         bad = ib.problems(data.get('bank'))
+        nb = ib.normalize(data.get('bank'))
+        for it in nb['items']:
+            f = ib.to_form(it)
+            if f['stage'] in ('wip', 'ok') and (m := memo_check(f['script'], f['t'])):
+                bad.append(m)
+            for job, qs in nb['links'].items():     # 這場版:備忘用的是它,不是共有稿
+                ov = (qs.get(f['id']) or {}).get('ov')
+                if f['stage'] in ('wip', 'ok') and ov and (m := memo_check(ib.blocks_to_script(ov.get('b')), f['t'])):
+                    bad.append(f'{m}(這場版:{job})')
         print('\n'.join(bad) or '題庫沒有不合規則的地方')
         return sys.exit(1 if bad else 0)
     if a.cmd == 'put':
         form = json.load(sys.stdin if a.json == '-' else open(a.json, encoding='utf-8'))
+        if form.get('stage') in ('wip', 'ok') and (m := memo_check(form.get('script'), form.get('t') or '這題')):
+            raise SystemExit('沒寫進去:' + m)
         lf = link_form(a) if a.card else None
         job = card(a.card, data)['id'] if a.card else None
         before = {it.get('id') for it in (data.get('bank') or {}).get('items') or []}
@@ -183,6 +235,7 @@ def main():
         if job:
             write('link', lf, qid, job, 'asked' if a.src == 'me' else 'prep')
         print(f"寫好了:「{form.get('t') or qref(qid, {'bank': bank})['t']}」[{qid}]" + (f'(記進 {job})' if job else ''))
+        memo_show(form.get('script'))
         return
     if a.cmd in ('share', 'unshare'):
         it = qref(a.qid, data)
@@ -199,10 +252,13 @@ def main():
             if not a.script_file:
                 raise SystemExit('要 --script-file 這場的逐字稿(或 --clear 還原成共有版)')
             read = lambda p: open(p, encoding='utf-8').read() if p else ''
+            if ib.to_form(it)['stage'] in ('wip', 'ok') and (m := memo_check(read(a.script_file), it['t'])):
+                raise SystemExit('沒寫進去:' + m)
             old = ib.effective(ib.normalize(data.get('bank')), job, it['id'])
             write('variant', {'script': read(a.script_file), 'focus': read(a.focus_file) if a.focus_file else ib._plain(old.get('focus'))},
                   it['id'], job)
             print(f"這場版寫好了:「{it['t']}」→ {job}")
+            memo_show(read(a.script_file))
         return
     if a.cmd == 'link':
         it = qref(a.qid, data)

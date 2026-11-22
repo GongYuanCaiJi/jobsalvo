@@ -31,6 +31,7 @@ NOT_CHECKED = {
     '/usr/bin/log': 'macOS 內建;只有驗收工具查是不是使用者自己切了桌面',
     'gh': '只有開發時開 issue 用,使用者不需要',
     'tailscale': '選用:沒裝就只開在本機 127.0.0.1',
+    'rsvg-convert': '選用:面試備忘 PDF 要放逐字稿裡的 SVG 圖才用,沒裝就略過那張圖',
     'pdftoppm': '只在 Linux 的 CI 上代替 macOS 的 qlmanage',
     'google-chrome': '開發用(看板檢查、介面截圖);使用者的功能都走 ego', 'google-chrome-stable': '同上',
     'chromium': '同上', 'chromium-browser': '同上',

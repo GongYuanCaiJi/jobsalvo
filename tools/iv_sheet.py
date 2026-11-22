@@ -10,7 +10,7 @@
 一句話、要點與完整回答的分界是逐字稿裡單獨一行的 ──────;分界前以【要點】開頭的一段是要點,其餘是一句話。
 沒有分界的題,整份逐字稿就是回答。
 """
-import os, re, sys, threading
+import glob, os, re, sys, threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import interview_bank as ib
@@ -42,7 +42,13 @@ def _glance(oneline, kw, full):
     """速查表的一句話與要點兩格。都沒有的題,逐字稿夠短才整份放在一句話那格,否則請他翻附錄。"""
     cell = lambda t: re.sub(r'\*\*|\n', ' ', t or '').strip().replace('|', '/')
     points = '<br>'.join(x for x in re.split(r'\s*(?=[①-⑩])', cell(kw)) if x)  # 每個要點自己一行
-    return cell(oneline or (full if len(full) <= GLANCE else '')) or '(見附錄)', points
+    return cell(oneline or (full if len(full) <= GLANCE else '')), points
+
+
+def memo_row(script):
+    """一題逐字稿 → 它在面試備忘速查表上的 (一句話, 要點)。一句話是空字串,代表速查表那格是空的。"""
+    one, kw, full = _split(script)
+    return _glance(one, kw, full)
 
 
 def _question(it, level, kids_of):
@@ -118,6 +124,27 @@ def build(data, job_id):
 
 
 _RENDER = threading.RLock()
+_FIG = re.compile(r'!\[([^\]]*)\]\(fig:([A-Za-z0-9][A-Za-z0-9_.-]*\.svg)\)')
+
+
+def _figs(md, home, folder):
+    """題庫逐字稿的 ![](fig:x.svg) 圖:PDF 不收 SVG,轉成 PNG 放在備忘旁邊;轉不成就拿掉那一行。"""
+    import shutil, subprocess
+    def one(m):
+        svg = os.path.join(home, 'figures', m.group(2))
+        png = os.path.join(folder, 'fig', m.group(2)[:-4] + '.png')
+        try:
+            if not os.path.isfile(png) or os.stat(png).st_mtime_ns < os.stat(svg).st_mtime_ns:
+                os.makedirs(os.path.dirname(png), exist_ok=True)
+                tmp = png + '.tmp'      # 轉到一半失敗不留半張圖,下次才會重轉
+                subprocess.run([shutil.which('rsvg-convert') or 'rsvg-convert', '-f', 'png', '-w', '1600', '-o', tmp, svg],
+                               check=True, capture_output=True)
+                os.replace(tmp, png)
+        except (OSError, subprocess.CalledProcessError) as e:
+            print(f'⚠ 面試備忘的圖 {m.group(2)} 轉不成 PNG,PDF 先不放這張:{e}', file=sys.stderr)
+            return ''
+        return f'![{m.group(1)}](fig/{os.path.basename(png)})'
+    return _FIG.sub(one, md)
 
 
 def render(data, job_id, home):
@@ -130,6 +157,7 @@ def render(data, job_id, home):
     os.makedirs(folder, exist_ok=True)
     src = os.path.join(folder, f'{safe}-面試備忘.md')
     pdf = src[:-3] + '.pdf'
+    md = _figs(md, home, folder)
     with _RENDER:   # 一次排一份:同時來的那幾個等前一個排完,就拿得到現成的
         try:
             with open(src, encoding='utf-8') as fh:
@@ -156,8 +184,9 @@ def _fresh(pdf, src):
     """PDF 比原稿、版面(樣式、把原稿轉成網頁和印成 PDF 的那兩支)都新。"""
     try:
         made = os.stat(pdf).st_mtime_ns
+        figs = glob.glob(os.path.join(os.path.dirname(src), 'fig', '*.png'))   # 圖換了,PDF 也要重排
         return made >= max(os.stat(p).st_mtime_ns for p in (src, STYLE, os.path.join(HERE, 'markdown_html.py'),
-                                                            os.path.join(HERE, 'markdown_pdf.py')))
+                                                            os.path.join(HERE, 'markdown_pdf.py'), *figs))
     except OSError:
         return False
 

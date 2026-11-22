@@ -41,3 +41,5 @@ td:nth-child(3) { color: #345; }
 tr { break-inside: avoid; page-break-inside: avoid; }
 li { font-size: 13pt; margin: 6px 0; }
 a { color: #1155aa; text-decoration: none; }
+
+img { display: block; max-width: 100%; height: auto; break-inside: avoid; }
