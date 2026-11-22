@@ -16,33 +16,33 @@ sys.path.insert(0, HERE)
 import board_doc as bd
 import config as cf
 
+# 職缺頁放在虛構的求職網站(保留給範例用的 .example 網域):示範看板不連到任何真的網站
 COMPANIES = [
-    ('acme-cloud', 'Acme Cloud', 'lever', ['Backend Engineer', 'Site Reliability Engineer', 'Data Engineer']),
-    ('nimbus-data', 'Nimbus Data', 'greenhouse', ['Machine Learning Engineer', 'Data Analyst', 'Product Manager']),
-    ('orbit-pay', 'Orbit Pay', 'ashby', ['Risk Analyst', 'Platform Engineer', 'Operations Specialist']),
-    ('kite-labs', 'Kite Labs', 'lever', ['Frontend Engineer', 'Software Engineer Intern']),
-    ('harbor-health', 'Harbor Health', 'greenhouse', ['Security Engineer', 'Product Designer', 'Customer Success Manager']),
+    ('acme-cloud', 'Acme Cloud', 'board-a', ['Backend Engineer', 'Site Reliability Engineer', 'Data Engineer']),
+    ('nimbus-data', 'Nimbus Data', 'board-b', ['Machine Learning Engineer', 'Data Analyst', 'Product Manager']),
+    ('orbit-pay', 'Orbit Pay', 'board-c', ['Risk Analyst', 'Platform Engineer', 'Operations Specialist']),
+    ('kite-labs', 'Kite Labs', 'board-a', ['Frontend Engineer', 'Software Engineer Intern']),
+    ('harbor-health', 'Harbor Health', 'board-b', ['Security Engineer', 'Product Designer', 'Customer Success Manager']),
 ]
-HOSTS = {'lever': 'jobs.lever.co', 'greenhouse': 'job-boards.greenhouse.io', 'ashby': 'jobs.ashbyhq.com'}
 
 
 def jobs():
     today = datetime.date.today()
     out, n = [], 0
-    for slug, name, ats, titles in COMPANIES:
+    for slug, name, board, titles in COMPANIES:
         for t in titles:
             n += 1
-            url = f'https://{HOSTS[ats]}/{slug}/{1000 + n}'
+            url = f'https://jobs.{board}.example/{slug}/{1000 + n}'
             out.append({
-                'id': url, 'target': f'**{t} · {name}**（[{ats.title()}]({url})）', 'chan': '直投', 'ammo': '', 'note': '',
+                'id': url, 'target': f'**{t} · {name}**（[{board.title()}]({url})）', 'chan': '直投', 'ammo': '', 'note': '',
                 'bk': False, 'dead': False,
                 'sum': {'fit': f'{name} 的 {t}:工作內容跟履歷上的經驗相近(示範資料)。',
                         'co': f'{name} 是一家虛構公司,只用來示範。', 'loc': 'Taipei / Remote',
                         'salary': '面議', 'bar': f'{2 + n % 4} 年以上相關經驗;英文可溝通', 'deadline': ''},
                 'added': (today - datetime.timedelta(days=n % 9)).isoformat(),
                 'posted_at': (today - datetime.timedelta(days=3 + n * 2)).isoformat(),
-                'posted_src': ats,
-                'source_platform': '104.com.tw' if n == 10 else 'linkedin.com' if n == 11 else '',
+                'posted_src': board,
+                'source_platform': 'board-x.example' if n == 10 else 'board-y.example' if n == 11 else '',
             })
             crowd = {1: '兩週內 0~5 人', 4: '45 人', 6: '200 人以上', 8: '還沒幾人'}.get(n)
             if crowd:   # 職缺頁公開的應徵人數(示範資料)
@@ -123,8 +123,8 @@ def extra_jobs(n):
     out = []
     for i in range(n):
         co = f'示範公司 {i % 40 + 1:02d}'
-        url = f'https://jobs.lever.co/demo-{i % 40 + 1:02d}/{9000 + i}'
-        out.append({'id': url, 'target': f'**示範職缺 {i + 1} · {co}**([Lever]({url}))', 'chan': '直投', 'ammo': '', 'note': '',
+        url = f'https://jobs.board-a.example/demo-{i % 40 + 1:02d}/{9000 + i}'
+        out.append({'id': url, 'target': f'**示範職缺 {i + 1} · {co}**([Board-A]({url}))', 'chan': '直投', 'ammo': '', 'note': '',
                     'bk': False, 'dead': False,
                     'sum': {'fit': '示範資料', 'co': f'{co} 是虛構公司', 'loc': 'Taipei', 'salary': '面議',
                             'bar': '示範', 'deadline': ''},
@@ -142,7 +142,8 @@ def build(path, extra=0):
     marked = marks(js, resumes)
     js = js + extra_jobs(extra)
     # 投遞前驗收跑過、都過關:真的看板在卡進「可以投了」之前一定跑過(沒跑過連待你決定都推不過去)
-    status = {'schema_version': 2, 'at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'checked_links': True, 'issues': []}
+    import board_status
+    status = {'schema_version': board_status.SCHEMA_VERSION, 'at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'issues': []}
     data = {'jobs': js, 'status': status, 'research': [], 'bank': bank(js)}
     doc = bd.assemble(read('board.css'), bd.stat_first(read('header.html'), data), '', data,
                       json.dumps(marked, ensure_ascii=False), read('board.js'))

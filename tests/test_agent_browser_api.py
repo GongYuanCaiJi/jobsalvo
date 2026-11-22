@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401
-import apply_run, chrome_door, profile_sync  # noqa: E402
+import chrome_door, fill, profile_sync  # noqa: E402
 
 # ego-browser skill「Page operations」列的方法(加上 mouse / keyboard 物件)
 EGO_PAGE = {'label', 'spaceId', 'openedBy', 'targetId', 'url', 'title', 'info', 'snapshot', 'screenshot', 'goto', 'reload',
@@ -19,8 +19,8 @@ EGO_PAGE = {'label', 'spaceId', 'openedBy', 'targetId', 'url', 'title', 'info', 
 def texts():
     door = chrome_door.EgoDoor.__new__(chrome_door.EgoDoor)
     yield door.apply_rule()
-    yield door.fetch_rule()
-    for mod in (apply_run, profile_sync):
+    yield door.fetch_task_tools()
+    for mod in (fill, profile_sync):
         for v in vars(mod).values():
             if isinstance(v, str) and 'page.' in v:
                 yield v

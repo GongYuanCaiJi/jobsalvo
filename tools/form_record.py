@@ -12,19 +12,18 @@ form_record —— agent 填雇主表單時,把每一欄記進看板的唯一入
 記的時候:
   1. 給了 k:答案庫有那條就指過去。這次給的值跟庫裡不一樣就擋下來(要嘛不給值、直接用庫裡的,
      要嘛換一個 k 開新的一條),不能悄悄蓋掉他確認過的答案。庫裡沒有就用這次的值開一條。
-  2. 沒給 k:同一題(問法大小寫、標點不計)而且同一個值的「共用」答案,接到那一條;值不一樣就開新的一條,
+  2. 沒給 k:同一題(問法一字不差)而且同一個值的「共用」答案,接到那一條;值不一樣就開新的一條,
      在看板上跟同一題的其他答案排在一起。這張表單上次同一題指的那條如果只有這張在用,直接改那條。
   2.5 每條答案分「共用」和「這缺專用」(pj=1)。例如「為什麼我適合這個職位」很明顯是針對特定 JD 的。
      agent 先判斷,最後由使用者決定。記的時候 agent 判斷(pj、pjw 寫理由;沒給就照題型猜,
      短文與意見算這缺專用),他在看板上按一下切換。這缺專用的不會被自動接到別的職缺,看板上連到那個 JD。
      填新表單前先讀 --shared(他確認過的共用答案)。
-  3. 新開或被我改過值的一條標「我推論的」(inf),他在看板上確認一次才算數。他在對話裡親口講過的
-     才給 his=True(直接算確認)。
+  3. 新開或被我改過值的一條標「我推論的」(inf),他在看板上確認一次才算數。
   4. 已投遞(鎖住)的表單不能改,那是送出時的紀錄。
 
 送出的答案(v)跟他看得懂的語言(設定 resume.read_lang,預設中文)不是同一套文字,就一定附他看得懂的那份(zh 欄位,
-名字沿用舊資料):看板上他看、他改的是那一份,v 是送出用的。中文使用者就是「英文答案一定附中文」。validate 會擋沒翻譯的英文答案。他在看板上改了中文,那條標 tr:代投的 agent 在填表或修改那一輪照中文重翻英文(apply_run 把這幾條放進 prompt),
-一律用 translate(k, en=...) 記回來,不要手改。
+名字沿用舊資料):看板上他看、他改的是那一份,v 是送出用的。中文使用者就是「英文答案一定附中文」。validate 會擋沒翻譯的英文答案。他在看板上改了中文,那條標 tr:代投的 agent 在填表或修改那一輪照中文重翻英文(fill 把這幾條放進 prompt),
+    把新的英文寫在那一格的 value,fill 收件時記回答案庫(retranslate)。
 
 看板上他改了某條答案,還沒送出的表單裡用到它的欄位會標 refill:雇主網頁上還是舊字。
 送出前先把標 tr 的翻掉,再照答案庫重打網頁。
@@ -32,16 +31,13 @@ form_record —— agent 填雇主表單時,把每一欄記進看板的唯一入
 用法(agent 呼叫):
   uv run python tools/form_record.py --from-fill <out>/fill.json --url URL --board B
                                    # 代投:agent 只寫一份 fill.json,從它的 fields 記進看板(見 fields_from_fill)
-  import form_record as fr
-  fr.record(url, plat, fields)     # 寫入/覆蓋這張卡的 form;回傳這次新開的 k(英文答案要給 zh)
-  fr.translate(k, en=..., zh=...)  # 照他改的中文重翻英文 / 替英文答案補中文
 """
-import os, sys, re, datetime, argparse, unicodedata, hashlib, json, uuid
+import os, sys, re, datetime, hashlib, json, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd
-import delivery_state as ds
+import delivery_core as ds
 
 SRCS = ('rz', 'bank', 'skip')
 KINDS = ('txt', 'op', 'pick', 'val', 'ck')
@@ -75,7 +71,7 @@ def mark_refill(fb, k):
     """答案 k 改了值:頁面還在(停著的頁)的表單裡用到它的欄位標 refill(雇主網頁上還是舊字,送出前照答案庫重打)。
     還沒填過(或頁面不見了、要整張重填)的卡,雇主網頁上沒有舊答案可以重打,重填時照新的答案填就好。"""
     for url, f in _forms(fb):
-        if ds.page_up(fb[url]):
+        if ds.page_up(fb[url]) or ds.page_unknown(fb[url]):      # 不知道是哪一頁不等於頁不在
             for x in f.get('f', []):
                 if x.get('k') == k:
                     x['refill'] = 1
@@ -84,7 +80,7 @@ def mark_refill(fb, k):
 def redo(fb, k, today=None):
     """這一條答案作廢、改由 agent 重新代填(他在看板上清掉,或它過時了,見 stale.py)。
     還沒送出的表單在用的:題目留著、答案和依據清掉,標 redo(等 agent,不在要他處理的清單);
-    頁面還在的表單標 refill,agent 在那一頁上照規矩代填(apply_run 的指示寫明哪幾題);你已確認的,確認時的答案變了就作廢。
+    頁面還在的表單標 refill,agent 在那一頁上照規矩代填(fill 的指示寫明哪幾題);你已確認的,確認時的答案變了就作廢。
     只剩已送出的表單在用、或沒人用:整條拿掉(送出時的原字在流水帳)。在用的表單看整份看板,不只畫得出來的卡;
     看板的「清掉答案」送 {redo: k} 走這一支。"""
     e = _entry(fb, k)
@@ -111,16 +107,14 @@ def changed(fb, k):
 
 
 def _forms(fb):
-    for url, m in fb.items():
-        f = m.get('form') if isinstance(m, dict) else None
-        if f:
-            yield url, f
+    import form_record_state
+    yield from form_record_state.forms(fb)
 
 
 def users(fb, k):
     """哪幾張表單在用這條答案:{職缺網址: 是否已投遞}。"""
-    return {url: bool(f.get('lock')) for url, f in _forms(fb)
-            if any(x.get('k') == k for x in f.get('f', []))}
+    import form_record_state
+    return form_record_state.users(fb, k)
 
 
 _CJK = r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]'
@@ -155,25 +149,17 @@ def needs_translation(s, lang=None):
     return bool(re.search(_CJK, s))
 
 
-def _nq(s):
-    """問法的比對用寫法:全形半形、大小寫、標點空白都不算差別。"""
-    return re.sub(r'[\W_]+', '', unicodedata.normalize('NFKC', str(s or '')).lower())
-
-
 def _same_question(fb, *phrasings):
-    """同一題的共用答案。這缺專用(pj)的不算:針對某個 JD 寫的答案,不能被接到別的職缺。"""
-    ns = {_nq(p) for p in phrasings if _nq(p)}
-    return [e for e in _bank(fb) if not e.get('pj')
-            and ns & ({_nq(e.get('q'))} | {_nq(q) for q in e.get('qs', [])})]
+    """同一題的共用答案:問法一字不差(ADR-0011;差一個記號就是另一題,要接到舊的那條由 agent 給 k)。
+    這缺專用(pj)的不算:針對某個 JD 寫的答案,不能被接到別的職缺。"""
+    asked = {p for p in phrasings if p}
+    return [e for e in _bank(fb) if not e.get('pj') and asked & ({e.get('q')} | set(e.get('qs', [])))]
 
 
 def _mark(e, x, today):
     """這條的值是我這次給的:他親口講過的算確認,其餘標「我推論的」。等 agent 重新代填的(redo)這樣就填好了。"""
     e.pop('redo', None)
-    if x.get('his'):
-        e.pop('inf', None); e['at'] = today
-    else:
-        e.pop('at', None); e['inf'] = today
+    e.pop('at', None); e['inf'] = today
 
 
 def _absorb(e, x):
@@ -214,8 +200,9 @@ def _answer(fb, url, x, prev_k, today):
         if e is not None and set(users(fb, prev_k)) <= {url}:
             if v != e.get('v', ''):
                 e['v'] = v
-                for kk in ('zh', 'why'):
+                for kk in ('zh', 'why'):         # 舊的翻譯、依據講的是舊的答案,不留著
                     if kk in x: e[kk] = x[kk]
+                    else: e.pop(kk, None)
                 _mark(e, x, today)
             _absorb(e, x)
             return e
@@ -239,9 +226,16 @@ def _answer(fb, url, x, prev_k, today):
     return e
 
 
+def add_inferred(fb, q, v, why, today=None, **scope):
+    """agent 自己寫的答案(例如同步時平台放不下原字而改寫的)記成一條待你確認的代填答案;scope 是它屬於哪份平台履歷。"""
+    e = {'k': _new_k(fb, {'q': q, 'v': v}), 'q': q, 'v': v, 'why': why, **scope}
+    _mark(e, {}, today or _today())
+    fb.setdefault('__ans__', []).append(e)
+    return e
+
+
 def apply_record(fb, url, plat, fields, at=None, today=None):
     """純函式版(測試用):把一張表單記進 fb。回傳這次新開的 k 清單。"""
-    import apply_tab
     today = today or _today()
     cur = fb.setdefault(url, {})
     old = cur.get('form') or {}
@@ -249,7 +243,7 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         raise ValueError('這張表單已鎖(已投遞),是送出時的紀錄,不能改。')
     prev = {x.get('q'): x.get('k') for x in old.get('f', []) if x.get('k')}
     before = {e.get('k') for e in _bank(fb)}
-    out, unmapped = [], []
+    out = []
     for x in fields:
         src = x.get('src') or 'bank'
         if src in ('rz', 'skip'):
@@ -260,19 +254,10 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
         if src not in ('bank', 'new'):
             raise ValueError(f"src 要是 rz / skip / bank 其中之一:{x.get('q')!r}")
         e = _answer(fb, url, x, prev.get(x.get('q')), today)
-        shown = x.get('page_value')
-        # 頁面上的值不是答案庫原文、也不是原文裡完整的一段(apply_tab.matches,驗收用同一支):沒有 choice 就退回
-        if (x.get('k') and 'choice' not in x and str(shown or '').strip() not in ('', '<redacted>')
-                and not any(apply_tab.matches(e.get(kk), shown, 'box') for kk in ('v', 'zh'))):
-            unmapped.append(f"「{x['q'][:40]}」頁面上是 {shown!r},答案庫 {e['k']} 是 {e.get('v')!r}")
         y = {'q': x['q'], 'src': 'bank', 'k': e['k']}
         for kk in ('qz', 'opt', 'lim', 'choice'):
             if x.get(kk): y[kk] = x[kk]
         out.append(y)
-    if unmapped:
-        # 驗收只認答案庫原文;字不同又沒對應,填得再對也會在最後被擋。在交件這一步就退回,叫同一隻 agent 補(#358)
-        raise ValueError('這幾欄頁面上的值跟答案庫原文不同,卻沒有 choice:' + ';'.join(unmapped)
-                         + '。同義就照規則在該欄加 choice;不同義就把該欄拿掉、寫進 problems。')
     # 記到秒:代投核對「這一輪有沒有記表單」要跟這一輪開始的時間比,只有日期的話同一天第二輪沒記也會過
     cur['form'] = {'plat': plat, 'f': out, 'at': at or datetime.datetime.now().isoformat(timespec='seconds')}
     ds.try_fire(fb, url, 'answers_changed')   # 表單重記過,他確認的就不是這一份了,要重新確認
@@ -282,24 +267,12 @@ def apply_record(fb, url, plat, fields, at=None, today=None):
     return [e['k'] for e in _bank(fb) if e.get('k') not in before]
 
 
-def record(url, plat, fields, at=None, live=None, event=None):
-    """寫進看板(走 set_fb:在鎖裡讀現行看板、改、寫回,不蓋掉他手機上的標記)。
-    event:agent 呼叫時先送這個事件給狀態表;這張現在不准就丟 delivery_state.Forbidden(講原因),卡片不動。"""
-    made = []
-
-    def mut(fb):
-        if event:
-            ds.fire(fb, url, event)
-        made.extend(apply_record(fb, url, plat, fields, at))
-    bd.set_fb(mut, live=live)
-    return made
-
-
-def fields_from_fill(fill):
+def fields_from_fill(fill, known=None):
     """代投的 fill.json 的 fields → record 收的欄位。
     以前 agent 同一張表單要寫兩份:form_record 一份、fill.json 一份,每一輪多想一兩分鐘,兩份還可能對不上。
     現在只寫 fill.json:每欄照抄頁面上的值(value),再標來源(src、k;新答案多給 zh、why、kind、pj)。
-    答案庫現成的(有 k)不帶值,值以答案庫為準;其他沒另外給 v 的,送出的值就是頁面上的值。"""
+    答案庫現成的(有 k)只記來源鍵;交件單中的 value 是頁面觀察,不拿來改答案庫或判斷正誤。
+    known:答案庫現有的 k;給了而這個 k 不在裡面,就是庫裡沒有的 k,用這次的值開一條(記法第 1 條)。"""
     if not isinstance(fill, dict) or not isinstance(fill.get('fields', []), list):
         raise ValueError('fill.json 必須是物件，fields 必須是清單')
     out = []
@@ -313,28 +286,15 @@ def fields_from_fill(fill):
         y = {kk: vv for kk, vv in x.items() if kk != 'value' and not (kk == 'k' and not vv)}
         if isinstance(y.get('choice'), dict):
             y['choice'] = dict(y['choice'], value=x.get('value'))
-        elif y.get('k') and isinstance(x.get('value'), str):
-            y['page_value'] = x['value']   # 只給記錄時比對答案庫原文,不寫進看板
-        if not y.get('k') and 'v' not in y and x.get('value') is not None:
+        if (not y.get('k') or (known is not None and y['k'] not in known)) and 'v' not in y and x.get('value') is not None:
             y['v'] = str(x['value'])
         out.append(y)
     return out
 
 
-def record_fill(path, url, live=None):
-    """agent 這一輪的交件單(fill.json)裡的表單每一欄記進看板。交件單照樣經安檢門讀(gate.read);
-    記下來的每一欄,驗收時程式自己讀那一頁核對(gate「表單每一欄」)。"""
-    import gate
-    fill, missing = gate.read(os.path.dirname(os.path.abspath(path)), 'fill', where=path)
-    if fill is None:
-        raise ValueError(missing)
-    # agent 呼叫的入口:只在這張正在填或改時收(狀態表的 form_recorded),其他時候擋下、講原因(#307)
-    return record(url, fill.get('platform') or '', fields_from_fill(fill), live=live, event='form_recorded')
-
-
-def validate(fb, urls=None):
+def validate(fb, urls):
     """「答案只在答案庫」有沒有被破壞。回傳問題清單,空的就是沒事。
-    urls:只看這幾張表單(加上答案庫本身);None 是整個看板(--check)。記表單、翻譯只看自己動到的:
+    urls:只看這幾張表單(加上答案庫本身)。記表單只看自己動到的:
     以前一張壞掉(例如外部送出時還標著 refill),之後每一張都記不進去、每一次都翻不了。"""
     bad = []
     ks = [e.get('k') for e in _bank(fb)]
@@ -343,7 +303,7 @@ def validate(fb, urls=None):
         bad.append(f'答案庫有重複的 k:{dup}')
     have = set(ks)
     for url, f in _forms(fb):
-        if urls is not None and url not in urls:
+        if url not in urls:
             continue
         for x in f.get('f', []):
             src, q = x.get('src'), x.get('q')
@@ -369,34 +329,14 @@ def validate(fb, urls=None):
     return bad
 
 
-def apply_translate(fb, k, en=None, zh=None):
-    """寫回翻譯。en:照他改過的中文重翻的英文(清掉 tr;英文變了,還沒送出的表單標 refill)。
-    zh:替英文答案補中文。回傳那一條。"""
-    e = _entry(fb, k)
-    if e is None:
-        raise ValueError(f'答案庫裡沒有 {k}')
-    if zh is not None:
-        e['zh'] = zh
-    if en is not None:
-        changed = en != e.get('v', '')
-        e['v'] = en
-        e.pop('tr', None)
-        if changed:
-            mark_refill(fb, k)
-    bad = validate(fb, [])            # 只動到答案庫這一條和沒送出表單的 refill 標記
-    if bad:
-        raise ValueError('翻完不對:' + ';'.join(bad))
-    return e
-
-
-def translate(k, en=None, zh=None, live=None):
-    bd.set_fb(lambda fb: apply_translate(fb, k, en, zh), live=live)
-
-
-def find_refills(fb):
-    """答案改了、雇主網頁還沒跟著改的欄位:[(職缺網址, 問題)]。"""
-    return [(url, x.get('q')) for url, f in _forms(fb) if not f.get('lock')
-            for x in f.get('f', []) if x.get('refill')]
+def retranslate(fb, fields):
+    """他改了中文而標 tr 的答案:agent 這一輪照中文重翻、已經打在頁面上,交件單那一格的 value 就是新的英文。
+    記回答案庫、清掉 tr(頁面已經是新的,不標 refill)。沒有重翻(那一格沒寫 value)的 tr 照舊留著,確認送出會擋。"""
+    for x in fields:
+        e = _entry(fb, x.get('k')) if x.get('k') else None
+        if e is not None and e.get('tr') and isinstance(x.get('value'), str) and x['value']:
+            e['v'] = x['value']
+            e.pop('tr')
 
 
 def apply_clear_refill(fb, url, q=None):
@@ -408,14 +348,10 @@ def apply_clear_refill(fb, url, q=None):
     return n
 
 
-def _blank(s):
-    """空白也算空,跟看板的 trim() 一樣連 BOM(\\ufeff)一起去掉:Python 的 strip() 不去 BOM。"""
-    return not str(s or '').replace('\ufeff', '').strip()
-
-
 def empty_answer(e):
     """常用答案的中英文都空著。"""
-    return _blank(e.get('v')) and _blank(e.get('zh'))
+    import form_record_state
+    return form_record_state.empty_answer(e)
 
 
 NO_EVIDENCE = '有題目缺證據(沒有程式自己截的那一頁),先讓 agent 重填'
@@ -434,14 +370,14 @@ def platform_answers(fb, url):
     if delivery.get('method') != 'platform_profile':
         return []
     import profile_sync as ps
-    chosen = ps.identity(delivery.get('profile_url'))
+    chosen = delivery.get('profile_url') or ''
     if not chosen:
         return []
     custom = [answer for answer in _bank(fb)
-              if answer.get('profile_url') and ps.identity(answer.get('profile_url')) == chosen]
+              if answer.get('profile_url') and answer.get('profile_url') == chosen]
     if custom:
         return custom
-    slot = next(((p, f'{lang}/{v}') for p, lang, v, entry in ps.slots() if ps.identity(entry['read']) == chosen), None)
+    slot = next(((p, f'{lang}/{v}') for p, lang, v, entry in ps.slots() if entry['read'] == chosen), None)
     return [answer for answer in _bank(fb) if slot and (answer.get('platform'), answer.get('profile')) == slot
             and not answer.get('profile_url')]
 
@@ -454,14 +390,8 @@ def platform_answers_pending(fb, url):
 def waiting(fb):
     """答案庫裡還沒好的:我推論的(inf),或答案還空著、而且有還沒送出的表單在用(或沒有表單在用)。
     等 agent 重新代填的(redo)不算。"""
-    out = []
-    for e in _bank(fb):
-        if e.get('redo'):
-            continue                  # 等 agent 重新代填,不是他的事
-        us = users(fb, e['k'])
-        if e.get('inf') or (empty_answer(e) and (not us or not all(us.values()))):
-            out.append((e, sorted(us)))
-    return out
+    import form_record_state
+    return form_record_state.waiting(fb)
 
 
 def find_pending(fb):
@@ -500,27 +430,18 @@ def ship_blocked(fb, job, status):
     waiting = ship.customization_problem(job, fb)
     if waiting:
         return waiting
+    from board_status import SCHEMA_VERSION
     st = status or {}
     # 字跟看板一字不差:確認送出的檢查清單(approval_problem)也用這一支,卡上顯示的就是這句
-    if st.get('schema_version') != 2:
+    if st.get('schema_version') != SCHEMA_VERSION:
         return '投遞前驗收還沒跑完(背景會自己跑,好了這裡會自己更新)'
-    if st.get('checked_links') is False:
-        return '職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)'
-    bad = [x.get('msg') for x in holding(fb, job, st)]
+    bad = [x.get('msg') for x in holding(job, st)]
     return ('驗收未通過：' + '；'.join(bad)) if bad else ''
 
 
-def holding(fb, job, st):
-    """驗收裡還擋著這張的那幾條:soft 不擋;agent 判斷的(judged),你在卡上按了「不對,職缺還在」就當下不擋
-    (讀現在的卡,不等驗收重跑,#341)。"""
-    overruled = ((fb.get(job['id']) or {}).get('judged_no') or {}).get('closed')
-    return [x for x in (st or {}).get('issues') or []
-            if x.get('jid') == job['id'] and not x.get('soft') and not ('judged' in x and overruled)]
-
-
-def judged_closed(fb, job, status):
-    """擋住這張的是 agent 判斷職缺關了(卡上給「不對,職缺還在」那顆)。"""
-    return any('judged' in x for x in holding(fb, job, status))
+def holding(job, st):
+    """驗收裡還擋著這張的那幾條:soft 不擋。"""
+    return [x for x in (st or {}).get('issues') or [] if x.get('jid') == job['id'] and not x.get('soft')]
 
 
 _APPROVAL_UNSET = object()
@@ -539,7 +460,7 @@ def approval_problem(fb, url, status=None, approval_id=_APPROVAL_UNSET):
         return '已經送出了'
     if s == 'unsure':
         return '上次送出沒確認成功,先確認到底送出沒有'     # 不確定就重送,可能變成投兩次
-    # 投遞前驗收(職缺下架、要寄的檔案有問題、客製檔還沒處理完):確認之後才驗收失敗也要擋送出。
+    # 投遞前驗收(要寄的檔案有問題、客製檔還沒處理完):確認之後才驗收失敗也要擋送出。
     gate = ship_blocked(fb, {'id': url}, status)
     if gate:
         return gate
@@ -584,16 +505,12 @@ def approval_problem(fb, url, status=None, approval_id=_APPROVAL_UNSET):
 
 
 def start_submit(fb, url, status=None, approval_id=_APPROVAL_UNSET):
-    """你已確認 → 正在送出:那一刻再跑一次檢查清單(從按確認到這裡,答案、驗收都可能變了;狀態表修正 5)。
-    過了就送「開始送出」事件、回 None;不過就不動、回原因(卡留在你已確認)。apply_run 派 agent 送出前走這一支。"""
+    """你已確認 → 正在送出:同一次寫入裡再跑一次檢查清單(從派出到這裡,他可能取消又確認、改了答案)。
+    過了就送「開始送出」事件、回 None;不過就不動、回原因(卡留在你已確認)。fill 每張送出前走這一支。"""
     problem = approval_problem(fb, url, status, approval_id)
-    if problem:
-        return problem
-    try:
+    if not problem:
         ds.fire(fb, url, 'submit_start')
-    except ds.Forbidden as e:
-        return str(e)
-    return None
+    return problem
 
 
 def approval(fb, url, at=None):
@@ -637,8 +554,8 @@ def confirm_problem(fb, url, status=None):
 
 def find_shared(fb):
     """填新表單之前先讀這份:他確認過、共用、有答案的。這缺專用的不在裡面(不能接到別的職缺)。"""
-    return [e for e in _bank(fb) if not e.get('pj') and not e.get('platform')
-            and not e.get('inf') and not empty_answer(e)]
+    import form_record_state
+    return form_record_state.find_shared(fb)
 
 
 def shared_text(fb):
@@ -647,22 +564,8 @@ def shared_text(fb):
                      for e in find_shared(fb))
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--from-fill', metavar='FILL_JSON', required=True, help='代投:把 fill.json 的 fields 記成 --url 那張的表單')
-    ap.add_argument('--url', help='--from-fill 記到哪一張')
-    ap.add_argument('--board', help='哪一份看板(預設:派 agent 的程式指定的那一份,沒有就是現行看板;測試給副本)')
-    a = ap.parse_args()
-    if not a.url:
-        sys.exit('--from-fill 要給 --url')
-    try:
-        made = record_fill(a.from_fill, a.url, live=bd.target(a.board))
-    except ds.Forbidden as e:
-        sys.exit(f'沒記進去:{e}。這張現在不是交給你填或改的,不要再跑、也不要改看板檔;照實寫進 problems 停下。')
-    except (ValueError, OSError) as e:
-        sys.exit(f'沒記進去:{e}\n照訊息改 fill.json 的 fields,再跑一次同一個指令。')
-    print('記好了' + (f',新開的答案:{", ".join(made)}' if made else ''))
-
-
-if __name__ == '__main__':
-    main()
+def to_translate(fb, url):
+    """這張表單用到、使用者改了中文而英文還沒照著重翻的答案。"""
+    ks = {x.get('k') for x in ((fb.get(url) or {}).get('form') or {}).get('f', []) if x.get('src') == 'bank'}
+    return [{'k': e.get('k'), 'zh': e.get('zh') or '', 'old_en': e.get('v') or ''}
+            for e in fb.get('__ans__', []) if e.get('tr') and e.get('k') in ks]

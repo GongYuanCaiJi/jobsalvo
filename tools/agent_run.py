@@ -16,7 +16,8 @@ agent_run —— 派 agent + 等它完成的唯一入口。找職缺、判斷、
 """
 import subprocess,time,os,re,sys,signal,json,contextlib,contextvars,shlex
 from dataclasses import dataclass
-sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 import config as cf
 from agent_report import REPORT_FROM_ENV   # 回報來源的環境變數:名字由收回報的那一支定
 
@@ -67,16 +68,6 @@ class AgentRunError(RuntimeError):
         super().__init__('；'.join(result.message() for result in self.results))
 
 
-def require_success(results):
-    """阻止 caller 在 agent 失敗或超時後讀取部分輸出。"""
-    if results is None:
-        return results  # 舊的注入式測試 runner 以 None 表示已完成。
-    batch = results if isinstance(results, (list, tuple)) else [results]
-    failed = [r for r in batch if isinstance(r, AgentResult) and not r.ok]
-    if failed:
-        raise AgentRunError(failed)
-    return results
-
 # 不開瀏覽器的 agent(判斷、客製…)prompt 前面加這段;要開網頁的(幫你填表、找缺、加職缺、查應徵進度)拿的是 ego 的用法(apply_rule)。
 # 要讀網頁用網路搜尋工具,或叫程式的 page_fetch 抓(直接抓 → 閱讀代理 → ego);要登入的網站就回報。
 def page_fetch_cmd():
@@ -90,7 +81,7 @@ def browser_rule():
         '【抓網頁鐵律】這一輪你沒有、也不准操作任何瀏覽器(包括使用者本人的瀏覽器和 agent 的瀏覽器)。'
         '要讀網頁:用你手上的網路搜尋工具,或跑 '
         f'`{page_fetch_cmd()} <網址>`(程式抓好印出文字;抓不到會照實說每條路敗在哪)。'
-        '網頁要登入、要驗證碼(CAPTCHA)才看得到:停下照【回報】的規矩回報,不要嘗試繞過,也不要猜內容。\n\n'
+        '不嘗試繞過登入或驗證;沒有頁面材料時不要猜內容。\n\n'
     )
 
 
@@ -99,7 +90,7 @@ def browser_rule():
 
 
 def apply_rule(runtime):
-    """代投的瀏覽器鐵律:照那一家的門路給(chrome_door);不能開 Chrome 的回空字串。"""
+    """操作瀏覽器的 agent 拿的工具用法與界線:照那一家的門路給(chrome_door);不能開 Chrome 的回空字串。"""
     import chrome_door
     door = chrome_door.of(runtime)
     return door.apply_rule() if door else ''
@@ -107,19 +98,19 @@ def apply_rule(runtime):
 # 回報的來源由程式給(#316):派 agent 的那一段說這一輪是哪一個流程,agent 的回報照這個記,不讓它自己取名字。
 # 它自己取的(例如「(職缺名)核准送出」)程式認不得,重填成功時收不掉那一則。環境變數給 agent_report,指示裡也照抄同一個。
 _REPORT_FROM = contextvars.ContextVar('report_from', default=None)
+_WEBSITE_TASK_RULE = contextvars.ContextVar('website_task_rule', default=False)
 
 
 # 每個 agent 都要能回報給使用者:它做不到、需要本人處理的事,不能只寫在自己的紀錄檔裡。
 # 回報寫進看板最上面的「📣 回報」(agent_report.py)。
 def report_rule():
     src = _REPORT_FROM.get()
-    source = shlex.quote(src) if src else '<這一輪在做什麼>'
+    source = shlex.quote(src) if src else '<本輪來源代號>'
     return ('【回報】只回報非使用者本人不可的事:要他登入、要他給權限、要他本人點的驗證碼,而且你找不到別的路。'
-     '抓不到就換別的方法抓;判斷得出來就自己判斷,照這一輪的規矩寫進產出;'
-     '已經繞過去的不用報。要回報時:'
+     '已經解決的不用報。要回報時:'
      f'`python3 {cf.tool("agent_report.py")} --from {source} --job <職缺網址,沒有就不給> --need "<他要做什麼>" --url <他要去處理的那一頁網址> "<發生了什麼>"`'
      + ('(--from 照抄,是程式給的)' if src else '') + '。'
-     '--url 一定要給:他點開就能直接處理的那一頁(登入頁、設定頁、停住的那一頁)。用繁體中文、白話、一句講清楚。回報完照原本的規矩繼續做能做的部分。\n\n')
+     '--url 要給能直接處理的頁面。用繁體中文、白話、一句講清楚。\n\n')
 
 # 使用者在看板上撥的開關(__agentfree__):要不要放手讓 agent 自己決定派幾隻。
 # 放在這裡而不是各支 prompt 裡各接一次:這裡是派工的唯一入口,一處寫完,找缺、判斷、
@@ -203,10 +194,6 @@ def claude_lean(chrome=False):
     return ['--strict-mcp-config', '--settings', json.dumps(off, ensure_ascii=False)]
 
 
-def apply_overrides():
-    """代投透過終端機呼叫 ego,原生瀏覽器外掛也關掉。"""
-    return lean(True)
-
 def _events(text):
     """紀錄裡 CLI 自己吐的結構化事件(codex exec --json、claude -p stream-json 都是一行一個 JSON)。
     agent 讀到的網頁、檔案內容只會出現在事件的欄位裡面,不會變成一行事件,所以判斷只看事件本身。"""
@@ -241,19 +228,21 @@ def _runtime(model):
     agent = _agent_entry(model)
     return agent.get('runtime', 'codex'), agent.get('model') or ''
 
-def rules_for(model=None, browser=None, board=None, web=True):
+def rules_for(model=None, browser=None, board=None, web=True, *, website_task=None):
     """派出去的 prompt 前面固定加的規矩;預覽與實際派工共用。"""
     codex_tools = FREE_CODEX if _runtime(model)[0] == 'codex' else ''
     free = (FREE_RULE + codex_tools + '\n\n') if agent_free(board) else ''
-    return (apply_rule(_runtime(model)[0]) if browser else (browser_rule() if web else '')) + report_rule() + free
+    browser_tools = apply_rule(_runtime(model)[0]) if browser else (browser_rule() if web else '')
+    is_website_task = _WEBSITE_TASK_RULE.get() if website_task is None else bool(website_task)
+    return browser_tools + ('' if is_website_task else report_rule()) + free
 
 
-def prompt_stdin(model, prompt, browser=None, board=None, web=True, chrome=False):
+def prompt_stdin(model, prompt, browser=None, board=None, web=True, chrome=False, website_task=None):
     """要從 stdin 餵的完整 prompt(規矩 + 任務);prompt 放在指令參數裡的執行環境(command-code)回 None。"""
     agent = _agent_entry(model)
     if _runtime(agent)[0] not in ('claude-code', 'codex'):
         return None
-    return rules_for(agent, bool(chrome), board, web) + prompt
+    return rules_for(agent, bool(chrome), board, web, website_task=website_task) + prompt
 
 
 def argv_for(model, prompt, repo, effort=None, browser=None, resume=None, board=None, web=True,
@@ -339,7 +328,7 @@ def codex_bin(which=None, app_bins=CODEX_APP_BINS):
     return next((p for p in app_bins if os.path.isfile(p) and os.access(p, os.X_OK)), None)
 
 
-def agent_env(board, argv=(), *said):
+def agent_env(board, argv=(), *said, chrome=False):
     """派出去的 agent 的環境:不含看板檔的位置,只有代號(board_doc.BOARD_ID);它呼叫的小工具照代號找回這一份(#307)。
     指示或環境裡帶著看板檔的位置就不派:那等於讓 agent 能繞過狀態表直接改檔。"""
     import board_doc as bd
@@ -350,6 +339,29 @@ def agent_env(board, argv=(), *said):
     env.pop(REPORT_FROM_ENV, None)
     if _REPORT_FROM.get():
         env[REPORT_FROM_ENV] = _REPORT_FROM.get()   # 它回報時的來源由程式給(agent_report 照這個記)
+    for key in ('JOBSALVO_EGO_REAL_BIN', 'JOBSALVO_EGO_EVIDENCE_DIRS', 'JOBSALVO_EGO_WORKSPACE'):
+        env.pop(key, None)
+    if chrome:
+        # Codex runs commands through a login zsh; its user startup files can put
+        # ~/.local/bin ahead of this repo's screenshot-recording ego-browser wrapper.
+        # macOS 的 /etc/zprofile 又會把系統路徑排回最前面,python3 變成系統那支(版本不夠,jobsalvo-before 跑不起來):
+        # tools/.agent-shell/.zprofile 照 JOBSALVO_AGENT_PATH 排回來。
+        env['ZDOTDIR'] = os.path.join(HERE, '.agent-shell')
+        env['PATH'] = os.pathsep.join(part for part in (HERE, os.path.dirname(sys.executable), env.get('PATH', ''))
+                                      if part)
+        env['JOBSALVO_AGENT_PATH'] = env['PATH']
+        import chrome_door
+        if binary := chrome_door.ego_bin():
+            env['JOBSALVO_EGO_REAL_BIN'] = binary
+        import evidence
+        if rnd := evidence.active():
+            env['JOBSALVO_EGO_EVIDENCE_DIRS'] = json.dumps(rnd.dirs)
+        for text in said:
+            match = re.search(r'\btaskSpace\(\s*(\d+|"(?:\\.|[^"\\])*")\s*\)', str(text))
+            if match:
+                value = match.group(1)
+                env['JOBSALVO_EGO_WORKSPACE'] = json.dumps(json.loads(value) if value.startswith('"') else int(value))
+                break
     marks = {os.path.abspath(live), os.path.realpath(live)}
     said = [str(x) for x in argv] + [x or '' for x in said] + list(env.values())
     if any(m in s for m in marks for s in said):
@@ -374,7 +386,7 @@ def launch(prompt, outfile, repo, model='main', effort=None, browser=None, resum
         try:
             _attempt_line(log, agent)
             log.flush()
-            env = agent_env(board, argv, prompt, fed)
+            env = agent_env(board, argv, prompt, fed, chrome=chrome)
             return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True, env=env)
         except OSError as e:
@@ -467,7 +479,7 @@ def _failure_reason(runtime, returncode, output=''):
             return 'authentication'
         if any(x in text for x in ('hit your', 'usage limit', 'credit balance', 'billing')):
             return 'quota'
-        if status == 429 or 'rate limit' in text:
+        if status == 429 or re.search(r'\brate\s+limit\b', text):
             return 'rate_limit'
         if (isinstance(status, int) and status >= 500) or 'overloaded' in text:
             return 'service'
@@ -577,27 +589,30 @@ def _record(outfile, agent, index, started, result, prompt):
 def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
         browser_required=False, browser=None, resume=None, board=None, web=True,
         agent_id=None, on_start=None, launcher=None, waiter=None, report_from=None,
-        output_last_message=None):
+        output_last_message=None, website_task=False):
     """依序試用符合瀏覽器需求的 agent;只在 runtime 明確不可用時換手。
     report_from:這一輪 agent 回報時的來源(程式給的,例如「代投」);agent 自己寫別的也照這個記(#316)。
     output_last_message:交件單存到哪裡;兩家都是最後一則訊息交件,換手到哪一家 prompt 都一樣。
-    證據(#315):每一次派出去的指示、跑完的動作紀錄都記進現在開著的那一輪(evidence.opened);
+    證據(#315):每一次派出去的指示(agent 實際收到的整段,含前綴)、跑完的動作紀錄都記進現在開著的那一輪(evidence.opened);
     流程沒開輪就記進那個流程自己的夾,沒有一次派 agent 是沒留證據的。"""
     import evidence
     rnd = evidence.active() or evidence.Round(os.path.splitext(os.path.basename(sys.argv[0] or ''))[0] or 'agent',
                                               os.path.splitext(os.path.basename(outfile or ''))[0] or 'run', (), board)
 
     def noted(agent):
-        rnd.instruction(prompt, agent=agent.get('id'))
+        rnd.instruction(rules_for(agent, browser_required or chrome, board, web) + prompt, agent=agent.get('id'))
         return prompt
     token = _REPORT_FROM.set(report_from) if report_from else None
+    website_token = _WEBSITE_TASK_RULE.set(bool(website_task))
     try:
-        return _run(prompt, outfile, repo, timeout, browser_required=browser_required or chrome, browser=browser,
-                    resume=resume, board=board, web=web, agent_id=agent_id, on_start=on_start,
-                    launcher=launcher, waiter=waiter, prepare=noted, output_last_message=output_last_message)
+        with evidence.activated(rnd):
+            return _run(prompt, outfile, repo, timeout, browser_required=browser_required or chrome, browser=browser,
+                        resume=resume, board=board, web=web, agent_id=agent_id, on_start=on_start,
+                        launcher=launcher, waiter=waiter, prepare=noted, output_last_message=output_last_message)
     finally:
         if token is not None:
             _REPORT_FROM.reset(token)
+        _WEBSITE_TASK_RULE.reset(website_token)
         rnd.agent_log(outfile)
 
 

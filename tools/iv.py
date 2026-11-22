@@ -11,7 +11,7 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
                                      對使用者說話一律講題目,不講 id(他在看板上看不到 id)
   iv.py put  題目.json [--card 萬蕙昇 --src guess --why "…"]
                                      新增或改一題(json 帶 id 就是改,要帶 get 拿到的 rev);帶 --card 就順便記進那一場
-  iv.py link 萬蕙昇 WH3 --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞" [--why "…"]
+  iv.py link 萬蕙昇 WH3 --src this --cite "面試心得 2026-06-21 https://interview.example/…" --quote "怎麼評估一個模型的好壞" [--why "…"]
   iv.py unlink 萬蕙昇 WH3
   iv.py share 自我介紹               設成共有:每一場面試自動帶上,改一次全部更新(追問跟著原題);iv.py unshare 取消
   iv.py variant 萬蕙昇 自我介紹 --script-file 稿.txt [--focus-file 考點.txt]

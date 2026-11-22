@@ -6,17 +6,16 @@ from unittest.mock import patch
 
 import _env  # 載入就設好測試環境
 import realdata_check
+from board_status import SCHEMA_VERSION
 
 
 class TemporaryCopy(unittest.TestCase):
     def test_status_summary(self):
-        issues = [{'jid': 'https://ex.test/1', 't': 'Secret Title', 'kind': 'closed', 'msg': 'x'},
-                  {'jid': 'https://ex.test/2', 't': 'Other Title', 'kind': 'unverified', 'soft': True, 'msg': 'x'},
-                  {'jid': 'https://ex.test/3', 't': 'Third Title', 'kind': 'files', 'msg': 'x'}]
+        issues = [{'jid': 'https://ex.test/3', 't': 'Secret Title', 'kind': 'files', 'msg': 'x'}]
         for status, has, hasnt in (
-                ({'schema_version': 2, 'issues': issues}, ['已下架 1', '還沒確認 1', '檔案 1'], ['Secret']),   # 只數種類,不帶卡名
+                ({'schema_version': SCHEMA_VERSION, 'issues': issues}, ['檔案 1'], ['Secret']),   # 只數種類,不帶卡名
                 (None, ['沒有驗收結果'], []),                                                        # 沒驗收不能說成通過
-                ({'schema_version': 2, 'checked_links': False, 'issues': []}, ['連結尚未檢查'], [])):
+                ({'schema_version': SCHEMA_VERSION, 'issues': []}, ['看板驗收:全過'], [])):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
                 path = os.path.join(directory, 'board.html')
                 _env.make_board(path, data={'jobs': [], **({'status': status} if status else {})})

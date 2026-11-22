@@ -1,6 +1,6 @@
 """副本上的假流程(job_fake)要跟真的一樣照「跑幾張」「只跑這張」,填表要留下表單紀錄與交履歷方式。
 不然副本上走介面時,選了 1 張卻整頁都被填掉,新卡也永遠走不到核准。"""
-import json, os, tempfile, unittest
+import datetime, json, os, tempfile, unittest
 from unittest import mock
 import _env  # noqa: F401
 import board_doc as bd
@@ -32,10 +32,10 @@ class _FakeBoard(unittest.TestCase):
 
 class JobFakeLimitTest(_FakeBoard):
     def test_board_copy_reports_nothing_when_no_profile_is_behind(self):
-        import sync_profiles as sp
-        slots = [('platform.example', 'zh', 'one', {'read': 'https://platform.example/r/one'})]
-        with mock.patch.object(sp, 'slots', return_value=slots), \
-                mock.patch.object(sp, 'behind', return_value=False):
+        import sync
+        slot = sync.Slot('platform.example', 'zh', 'one', 'https://platform.example/r/one')
+        with mock.patch.object(sync, 'slots', return_value=[slot]), \
+                mock.patch.object(sync, 'standing', return_value=mock.Mock(code='STANDING_OK')):
             job_fake.sync(self.board, self.dir, 0)
         with open(os.path.join(self.dir, 'sync_status.json'), encoding='utf-8') as status_file:
             status = json.load(status_file)
@@ -43,13 +43,12 @@ class JobFakeLimitTest(_FakeBoard):
         self.assertEqual(status['results'], [])
 
     def test_board_copy_only_shows_sync_status_and_never_touches_profile_registry(self):
-        import sync_profiles as sp
+        import sync
         from _env import read_fb
-        slots = [('platform.example', 'zh', 'one', {'read': 'https://platform.example/r/one'})]
-        with mock.patch.object(sp, 'slots', return_value=slots), \
-             mock.patch.object(sp, 'pending_count', return_value=1), \
-             mock.patch.object(sp, 'behind', return_value=True), \
-             mock.patch.object(sp, 'sync_all') as actual:
+        slot = sync.Slot('platform.example', 'zh', 'one', 'https://platform.example/r/one')
+        with mock.patch.object(sync, 'slots', return_value=[slot]), \
+             mock.patch.object(sync, 'standing', return_value=mock.Mock(code='STANDING_BEHIND')), \
+             mock.patch.object(sync, 'one_round') as actual:
             before = list(read_fb(self.board).get('__inbox__') or [])
             job_fake.sync(self.board, self.dir, 0)
             actual.assert_not_called()
@@ -83,8 +82,8 @@ class JobFakeLimitTest(_FakeBoard):
         self.assertEqual(sum(1 for i in self.ids if fb[i]['app'] == 'ready'), 2)
 
 
-class JobFakeMatchesApplyRun(_FakeBoard):
-    """副本上的假代投要寫出跟真的 apply_run 同一個形狀,並且過得了真的核准規則(form_record)。
+class JobFakeMatchesFill(_FakeBoard):
+    """副本上的假代投要寫出跟真的 fill 同一個形狀,並且過得了真的核准規則(form_record)。
     這一輪已經漂移三次(少 apply.delivery、沒留表單、不照張數),每次都是副本上走不完才發現。"""
 
     def test_fake_fill_then_approve_then_submit_passes_real_rules(self):
@@ -93,7 +92,7 @@ class JobFakeMatchesApplyRun(_FakeBoard):
         u = self.ids[0]
         job_fake.apply(self.board, self.dir, 0, 'fill', u)
         fb = self._fb()
-        self.assertEqual(fr.validate(fb), [])
+        self.assertEqual(fr.validate(fb, list(fb)), [])
         self.assertEqual(fr.approval_problem(fb, u, fr.board_status(self.board)), '還沒確認送出')
         import delivery_state as ds
         bd.set_fb(lambda f: ds.fire(f, u, 'confirm', approve={'snap': fr.snapshot(f, u)}), live=self.board)
@@ -114,8 +113,7 @@ class JobFakeMatchesApplyRun(_FakeBoard):
         job_fake.apply(self.board, self.dir, 0, 'fill', u)
         m = self._fb()[u]
         self.assertNotIn('approve', m)
-        import apply_run
-        self.assertEqual(m['form']['at'], apply_run.today())
+        self.assertEqual(m['form']['at'], datetime.date.today().isoformat())
 
 
 if __name__ == '__main__':

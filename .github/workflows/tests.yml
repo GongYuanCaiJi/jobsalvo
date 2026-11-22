@@ -18,7 +18,13 @@ jobs:
   tests:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ github.event.repository.private && 'x99' || 'ubuntu-latest' }}
-    timeout-minutes: 40
+    # 單元測試本身 16–33 分鐘,頁面變形驗收(test_accept_noise)把四份驗收再整份重跑約 10–25 分鐘,
+    # 加看板檢查約 9 分鐘;40 分鐘時單元測試還沒跑完就被取消。上限只防卡死,不是預期時間。
+    timeout-minutes: 90
+    # 沒指定時 uv 用 runner 內建的 Python 3.12;3.12 帶分岔覆蓋率只能逐行追蹤,同一段驗收比 3.14 慢約 10 倍。
+    # 3.14 起覆蓋率改用 sys.monitoring,幾乎不拖慢;跟 Mac 上開發用的同一版。
+    env:
+      UV_PYTHON: '3.14'
     permissions:
       contents: read
       pull-requests: read   # paths-filter 讀這個 PR 改了哪些檔

@@ -1143,7 +1143,7 @@
    "confirm": "「你已確認」時不能確認送出"
   },
   {
-   "name": "job closed after approval (acceptance failed later)",
+   "name": "files problem found after approval (acceptance failed later)",
    "url": "https://rules.example/closed-later",
    "fb": {
     "https://rules.example/closed-later": {
@@ -1172,15 +1172,14 @@
      "ds": "confirmed"
     }
    },
-   "problem": "驗收未通過：職缺已下架",
-   "confirm": "驗收未通過：職缺已下架",
+   "problem": "驗收未通過：可投遞夾尚未由本模組建置驗收",
+   "confirm": "驗收未通過：可投遞夾尚未由本模組建置驗收",
    "status": {
-    "schema_version": 2,
-    "checked_links": true,
     "issues": [
      {
       "jid": "https://rules.example/closed-later",
-      "msg": "職缺已下架"
+      "msg": "可投遞夾尚未由本模組建置驗收",
+      "kind": "files"
      }
     ]
    }
@@ -1224,8 +1223,6 @@
    "problem": "客製履歷 的客製版等你看，收下或退回後才能送出",
    "confirm": "客製履歷 的客製版等你看，收下或退回後才能送出",
    "status": {
-    "schema_version": 2,
-    "checked_links": true,
     "issues": []
    }
   },
@@ -1264,44 +1261,6 @@
    "status": null
   },
   {
-   "name": "links not checked yet",
-   "url": "https://rules.example/links-unchecked",
-   "fb": {
-    "https://rules.example/links-unchecked": {
-     "form": {
-      "f": [
-       {
-        "q": "Role",
-        "src": "resume",
-        "v": "Engineer"
-       }
-      ]
-     },
-     "apply": {
-      "stage": "fill",
-      "issues": [],
-      "delivery": {
-       "method": "direct_upload"
-      }
-     },
-     "approve": {
-      "snap": {
-       "Role": "Engineer"
-      }
-     },
-     "app": "ship",
-     "ds": "confirmed"
-    }
-   },
-   "problem": "職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)",
-   "confirm": "職缺連結還沒檢查(背景會自己檢查,好了這裡會自己更新)",
-   "status": {
-    "schema_version": 2,
-    "checked_links": false,
-    "issues": []
-   }
-  },
-  {
    "name": "an unconfirmed link does not block",
    "url": "https://rules.example/soft-link",
    "fb": {
@@ -1335,8 +1294,6 @@
    "problem": null,
    "confirm": "「你已確認」時不能確認送出",
    "status": {
-    "schema_version": 2,
-    "checked_links": true,
     "issues": [
      {
       "jid": "https://rules.example/soft-link",
@@ -1460,8 +1417,6 @@
    "problem": "還沒確認送出",
    "confirm": "Agent 還沒填這張,先讓它填好、你看過頁面再確認送出",
    "status": {
-    "schema_version": 2,
-    "checked_links": true,
     "issues": []
    }
   },

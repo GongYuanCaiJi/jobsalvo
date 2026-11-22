@@ -1,0 +1,28 @@
+# 任務檔與同層入口的規則(ADR-0012 第 5 點);paths.include 帶上同名範例檔,semgrep --test 才跑得到
+rules:
+  - id: page-text-key-in-task
+    languages: [python]
+    severity: ERROR
+    message: >-
+      看板格式裡裝頁上原文的鍵只准 web/listing.py 寫。任務檔把核心給的結果交給 listing,
+      不自己讀寫頁上原文(ADR-0012)
+    patterns:
+      - pattern: '"$K"'
+      - metavariable-regex:
+          metavariable: $K
+          regex: ^(before_parts|after_parts|before_text|after_text|page_excerpt|quote|risk_quote|needs_user_quote|subject)$
+    paths:
+      include: [/tools/sync.py, /tools/fill.py, /tools/progress.py, /tools/find.py, /tools/add_job.py,
+                /tools/form_plan.py, /tools/page_fetch.py,
+                /.semgrep/page-content-tasks.py]
+
+  - id: getattr-in-task
+    languages: [python]
+    severity: ERROR
+    message: >-
+      任務檔不用 getattr 拆物件:頁面內容只能整個交給 web/ 核心,判斷欄與核心回的是或否照名字取(ADR-0012 第 4 點)
+    pattern: getattr(...)
+    paths:
+      include: [/tools/sync.py, /tools/fill.py, /tools/progress.py, /tools/find.py, /tools/add_job.py,
+                /tools/form_plan.py, /tools/page_fetch.py,
+                /.semgrep/page-content-tasks.py]

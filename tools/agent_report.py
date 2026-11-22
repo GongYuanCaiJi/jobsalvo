@@ -6,7 +6,7 @@ agent_report —— agent 回報給使用者的唯一管道:做不到、需要�
 找新職缺、跑準備區、代投都交給 agent 之後,它碰到做不到的事(例如某些權限、要本人登入)不能只寫在
 自己的紀錄檔裡,使用者看不到。兩條路都寫進同一個地方(看板資料的 __inbox__):
   · agent 自己回報:agent_run 在每一個 agent 的 prompt 前面都放了回報規矩,叫它跑這支。
-  · 程式替它回報:跑完之後程式自己驗出的問題(apply_run 的填表檢查、送出沒確認成功…)直接呼叫 report(),
+  · 程式替它回報:任務程式自己記下的交件問題直接呼叫 report(),
     不靠 agent 記得。
 同一件事(誰回報、哪張職缺、同一句話)還沒處理之前再回報一次,只把次數加一、時間更新,不會洗版。
 
@@ -48,8 +48,8 @@ def page_of(fb, job):
 def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, url='', info=False, ev=None):
     """純函式版(測試用)。回傳那一筆。
     url:要他處理的那一頁(看板上點得開);沒給、又跟某張卡有關,就照 page_of 附上,回報一定帶得到去處。
-    by_agent:agent 自己寫的(不是程式驗出來的):標 agent;還沒附程式自己截的那一頁就標 noev(缺證據),
-    不叫他照做(todo 不列),等程式附上截圖(apply_attach)才算數(#315)。
+    by_agent:agent 自己寫的(不是程式驗出來的):標 agent;沒附程式自己截的那一頁(ev)就標 noev(缺證據),
+    不叫他照做(todo 不列,#315)。
     """
     now = now or _now()
     msg, need, job, src = (msg or '').strip(), (need or '').strip(), (job or '').strip(), (src or 'agent').strip()
@@ -108,6 +108,15 @@ def report(src, msg, need='', job='', live=None, by_agent=False, url='', info=Fa
     return out[0]
 
 
+def tell(src, msg, need='', **kwargs):
+    """report,寫不進看板就印進這一輪的紀錄(看板上「看紀錄」看得到),不讓一輪因為回報寫不進去而中斷。"""
+    try:
+        return report(src, msg, need, **kwargs)
+    except Exception as error:  # noqa: BLE001 — 回報寫不進看板:印進這一輪的紀錄
+        print(f'⚠ 這則回報寫不進看板({str(error)[:120]}):{msg} → {need}')
+        return None
+
+
 def apply_resolve(fb, job, why, day=None, src=None, before=None, only=None):
     """收掉還開著的回報(收進「已處理」,寫上為什麼;看板照舊可以改回還沒處理)。回收了幾則。
     job:哪一張卡的(None 是不分卡;'' 是沒掛在卡上的)。src:只收這個流程開的(來源開頭一樣)。
@@ -131,22 +140,6 @@ def resolve(job, why, live=None, src=None, before=None, only=None):
     bd.set_fb(lambda fb: out.append(apply_resolve(fb, job, why, src=src, before=before, only=only)), live=bd.target(live),
               by='agent_report')
     return out[0]
-
-
-def apply_attach(fb, job, since, ev):
-    """這一輪(since 之後)留給他的、這張卡的回報,附上程式自己截的那一頁(ev:證據夾裡的 <輪>/<檔名>,#315)。
-    這一輪沒有截圖就照實標出來(noev),不假裝有。回附了幾則。"""
-    n = 0
-    for it in fb.get(KEY, []):
-        if it.get('done') or it.get('job') != job or str(it.get('at') or '') < since or it.get('ev'):
-            continue
-        if ev:
-            it['ev'] = ev
-            it.pop('noev', None)
-        else:
-            it['noev'] = NO_SHOT
-        n += 1
-    return n
 
 
 def open_items(fb):

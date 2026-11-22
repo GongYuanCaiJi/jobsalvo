@@ -1,0 +1,1 @@
+_PLACEHOLDER = re.compile(r'^(無|未明載|未公開|不公開|未提供|未列|查無|n/a|none|-)([（(].*)?$', re.I)

@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""包住設定的 ego-browser，並把工作區分頁截圖記入證據夾。
+
+非 Node 指令原樣轉交；Node 指令先轉交腳本（有 -e 就不讀 stdin）或 stdin，再讀取腳本提到的
+taskSpace（或 JOBSALVO_EGO_WORKSPACE）並把截圖存到
+JOBSALVO_EGO_EVIDENCE_DIRS。截圖失敗只記證據，不改寫原指令的結束狀態。
+"""
+import contextlib
+import datetime
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+
+
+def _workspace_ids(source):
+    values = []
+    pattern = re.compile(r"\btaskSpace\(\s*(?:(\d+)|([\"'])(.*?)\2)\s*\)")
+    for match in pattern.finditer(source):
+        value = int(match.group(1)) if match.group(1) else match.group(3)
+        if value not in values:
+            values.append(value)
+    if values:
+        return values
+    try:
+        value = json.loads(os.environ.get('JOBSALVO_EGO_WORKSPACE', 'null'))
+    except ValueError:
+        value = None
+    return [value] if value is not None else []
+
+
+def _action_summary(source):
+    actions = []
+    if re.search(r'\.(?:fill|type|insertText|setInputFiles)\s*\(', source):
+        actions.append('填寫欄位')
+    if re.search(r'\.(?:click|dblclick|tap)\s*\(', source):
+        save_target = re.search(
+            r'''(?:querySelector|locator)\s*\(\s*["'][^"']*(?:#(?:save|submit)\b|'''
+            r'''(?:儲存|保存|送出))[^"']*["']\s*\)\s*\.\s*(?:click|dblclick|tap)\s*\('''
+            r'''|(?:getByRole|getByText)\s*\([^\n)]*["'](?:save|submit|儲存|保存|送出)["'][^\n)]*\)'''
+            r'''\s*\.\s*(?:click|dblclick|tap)\s*\(''', source, re.IGNORECASE)
+        actions.append('按下儲存' if save_target else '點擊頁面')
+    if re.search(r'\.(?:goto|navigate|reload)\s*\(', source):
+        actions.append('開啟或重新載入頁面')
+    if re.search(r'\.(?:selectOption|check|uncheck)\s*\(', source):
+        actions.append('選擇或勾選欄位')
+    if re.search(r'\.press\s*\(', source):
+        actions.append('按下按鍵')
+    return '、'.join(actions) or '瀏覽器指令'
+
+
+def _record(directories, kind, **data):
+    with contextlib.suppress(ImportError, OSError, TypeError, ValueError):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import evidence
+        evidence.record_external(directories, kind, **data)
+
+
+def _capture(workspaces, directories, command_id, action):
+    started = time.monotonic()
+    if not directories:
+        return
+    available, failures = [], []
+    for directory in directories:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as error:
+            failures.append(f'{directory}: {error}')
+            print(f'證據記不下來({directory}):{error}', file=sys.stderr)
+        else:
+            available.append(directory)
+    directories = available
+    if not directories:
+        return
+    if failures:
+        _record(directories, 'note', what='ego_screenshot_failed', workspaces=workspaces,
+                command_id=command_id, action=action, step='create_evidence_directory',
+                reason='；'.join(failures)[-500:], capture_ms=0)
+    prefix = os.path.join(
+        directories[0],
+        'ego-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '-' + secrets.token_hex(3))
+    source = (
+        f'const workspaces={json.dumps(workspaces, ensure_ascii=False)};\n'
+        f'const prefix={json.dumps(prefix)};\n'
+        'const results=[];\n'
+        'for(const workspace of workspaces){\n'
+        '  let task;\n'
+        '  try{task=await taskSpace(workspace);}catch(e){results.push({ok:false,workspace,reason:String(e)});continue;}\n'
+        '  const tabs=await task.tabs();\n'
+        '  if(!tabs.length){results.push({ok:false,workspace,reason:"工作區沒有開啟的分頁"});continue;}\n'
+        '  for(let i=0;i<tabs.length;i++){\n'
+        '    const tab=tabs[i];\n'
+        '    let page;\n'
+        '    try{\n'
+        '      page=tab.label?task.page(tab.label):await task.adopt(tab.page);\n'
+        '      const file=prefix+"-"+String(results.length+1).padStart(2,"0")+".png";\n'
+        '      const started=Date.now();\n'
+        '      await page.screenshot({path:file});\n'
+        '      results.push({ok:true,workspace,page:page.label,url:await page.url(),title:await page.title(),file,screenshot_ms:Date.now()-started});\n'
+        '    }catch(e){results.push({ok:false,workspace,page:page&&page.label,url:tab.url,reason:String(e)});}\n'
+        '  }\n'
+        '}\n'
+        'console.log("@@jobsalvo-ego-shot@@"+JSON.stringify(results));\n')
+    try:
+        result = subprocess.run(
+            [os.environ['JOBSALVO_EGO_REAL_BIN'], 'nodejs'], input=source, text=True,
+            capture_output=True, timeout=15, check=False)
+        elapsed = round((time.monotonic() - started) * 1000)
+        if result.returncode:
+            _record(directories, 'note', what='ego_screenshot_failed', workspaces=workspaces,
+                    command_id=command_id, action=action,
+                    reason=(result.stderr or result.stdout or f'ego-browser exited {result.returncode}')[-500:],
+                    capture_ms=elapsed)
+            return
+        marker = '@@jobsalvo-ego-shot@@'
+        output = result.stdout + '\n' + result.stderr
+        line = next((line for line in reversed(output.splitlines()) if marker in line), None)
+        if line is None:
+            raise RuntimeError(f'截圖指令沒有回傳資料:{output[-500:]}')
+        rows = json.loads(line.split(marker, 1)[1])
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError('截圖指令回傳格式錯誤')
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
+        elapsed = round((time.monotonic() - started) * 1000)
+        _record(directories, 'note', what='ego_screenshot_failed', workspaces=workspaces,
+                command_id=command_id, action=action, reason=str(error)[-500:], capture_ms=elapsed)
+        return
+    for row in rows:
+        if not row.get('ok'):
+            _record(directories, 'note', what='ego_screenshot_failed', workspace=row.get('workspace'),
+                    command_id=command_id, action=action,
+                    page=row.get('page'), url=row.get('url'), reason=str(row.get('reason') or '截圖失敗')[:500],
+                    capture_ms=elapsed)
+            continue
+        try:
+            filename = os.path.basename(row['file'])
+            for directory in directories[1:]:
+                shutil.copyfile(row['file'], os.path.join(directory, filename))
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            _record(directories, 'note', what='ego_screenshot_failed', workspace=row.get('workspace'),
+                    command_id=command_id, action=action,
+                    page=row.get('page'), url=row.get('url'), reason=str(error)[:500], capture_ms=elapsed)
+            continue
+        _record(directories, 'shot', file=filename, why='agent ego command finished',
+                command_id=command_id, action=action,
+                workspace=row.get('workspace'), page=row.get('page'), url=row.get('url'),
+                title=row.get('title'), screenshot_ms=row.get('screenshot_ms'), capture_ms=elapsed)
+
+
+def main(argv):
+    real = os.environ.get('JOBSALVO_EGO_REAL_BIN')
+    if not real:
+        print('ego-browser 轉接器:沒有 JOBSALVO_EGO_REAL_BIN,找不到真正的 ego-browser', file=sys.stderr)
+        return 127
+    if os.path.realpath(real) == os.path.realpath(__file__):
+        print(f'ego-browser 轉接器:JOBSALVO_EGO_REAL_BIN 指向轉接器自己({real}),不是真正的 ego-browser',
+              file=sys.stderr)
+        return 127
+    if not argv or argv[0] != 'nodejs':
+        os.execv(real, [real, *argv])
+    if '-e' in argv[1:-1]:
+        source, run = argv[argv.index('-e', 1) + 1], {'stdin': subprocess.DEVNULL}
+    elif sys.stdin.isatty():
+        source, run = '', {}
+    else:
+        stdin_data = sys.stdin.buffer.read()
+        source, run = stdin_data.decode('utf-8', 'replace'), {'input': stdin_data}
+    result = subprocess.run([real, *argv], check=False, **run)
+    # 每一次 nodejs 指令都留一步,腳本是空的也算:測試台跟使用者看到的步數要一對一。
+    directories = json.loads(os.environ.get('JOBSALVO_EGO_EVIDENCE_DIRS', '[]'))
+    workspaces = _workspace_ids(source)
+    command_id = secrets.token_hex(8)
+    action = _action_summary(source)
+    if workspaces:
+        _capture(workspaces, directories, command_id, action)
+    else:
+        _record(directories, 'note', what='ego_screenshot_failed', command_id=command_id,
+                action=action, reason='指令沒有可辨識的工作區', capture_ms=0)
+    return result.returncode
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

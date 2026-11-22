@@ -21,12 +21,17 @@ M4='</script><script id="data-fb" type="application/json">'
 M5='</script><script id="app-src">'
 SUF='</script></body></html>'
 
+class BoardError(ValueError):
+    """看板檔讀不了(不是看板、或被繞過正常寫入改過)。是 ValueError:呼叫端本來就接 (OSError, ValueError),
+    檔案不在是 OSError,三種壞法都接得住;不用 sys.exit(它會穿過所有 except,任務就無聲結束)。"""
+
+
 def inner(h,start,end):
     """start 之後、第一個 end 之前的那一段(跟非貪婪的 start(.*?)end 一樣)。
     看板檔有十幾 MB:以前用 re.S 的 .*? 一格一格試,解析一次光找區塊就要 50ms。"""
     i=h.find(start)
     j=h.find(end,i+len(start)) if i>=0 else -1
-    if j<0: sys.exit("找不到區塊 "+start[:40])
+    if j<0: raise BoardError("找不到區塊 "+start[:40])
     return h[i+len(start):j]
 
 def parse(html):
@@ -43,7 +48,14 @@ def parse(html):
 def stat_first(thdr, data):
     """t-hdr 裡 stat-first 數字 = 非 bk 的職缺數。"""
     nonbk=sum(1 for j in data['jobs'] if not j.get('bk'))
-    return re.sub(r'(<b id="stat-first">)\d+(</b>)', r'\g<1>%d\g<2>'%nonbk, thdr, count=1)
+    opening, closing = '<b id="stat-first">', '</b>'
+    before, found, rest = thdr.partition(opening)
+    if not found:
+        return thdr
+    old, found, after = rest.partition(closing)
+    if not found or not old.isdigit():
+        return thdr
+    return before + opening + str(nonbk) + closing + after
 
 def assemble(sty, thdr, tail, data, fb_str, app):
     """組回可發布的完整 doc。app 不得含字面 </script>。"""
@@ -88,7 +100,7 @@ def is_live(path, live=None):
 import hashlib as _hl
 
 
-class Tampered(RuntimeError):
+class Tampered(BoardError):
     """看板檔被不經正常寫入改過了。"""
 
 

@@ -12,6 +12,24 @@ import os
 import _env  # noqa: F401
 import chrome_door as cd
 
+REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def hand_off_test_workspace(door):
+    calls = []
+
+    def run(command, *args, **kwargs):
+        if command == ['open', '-a', 'ego lite']:
+            calls.append((command, kwargs))
+            return Mock(returncode=0, stdout='', stderr='')
+        return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+
+    with patch.object(cd.subprocess, 'run', side_effect=run):
+        receipt = door.hand_off()
+    assert calls == [(['open', '-a', 'ego lite'], {'check': True, 'timeout': 15, 'capture_output': True})]
+    return receipt
+
+
 PAGE = {'url': 'https://jobs.test/apply', 'title': 'Apply',
         'fields': [{'label': 'Email', 'type': 'email', 'value': 'a@jobs.test'}],
         'shownFiles': ['resume.pdf'], 'lines': ['Apply', 'resume.pdf']}
@@ -26,10 +44,6 @@ def response(value):
     return Mock(returncode=0, stderr='', stdout='@@jobsalvo-ego@@' + json.dumps({'ok': True, 'value': value}))
 
 
-def failed_response(message):
-    return Mock(returncode=0, stderr='', stdout='@@jobsalvo-ego@@' + json.dumps({'ok': False, 'error': message}))
-
-
 class SharedBrowser(unittest.TestCase):
     def setUp(self):
         self.tmp = self.enterContext(tempfile.TemporaryDirectory())
@@ -40,13 +54,33 @@ class SharedBrowser(unittest.TestCase):
         skill = Path(self.tmp) / 'SKILL.md'          # 不靠這台電腦有沒有裝 ego-browser skill(CI 上沒有)
         skill.write_text('ego-browser')
         self.enterContext(patch.object(cd, 'EGO_SKILL', str(skill)))
-        self.ensure_window = self.enterContext(patch.object(cd, '_ensure_ego_window'))
 
     def test_agents_are_told_not_to_send_native_keystrokes(self):
         # keyboard.paste 在 Mac 送真的 ⌘V,ego 當成使用者接手(2026-10-06 Cake 實測):規則要叫它改用 insertText
         rule = cd.EgoDoor().apply_rule()
         self.assertIn('keyboard.insertText', rule)
         self.assertIn('不用 keyboard.paste', rule)
+
+    def test_new_workspace_starts_with_one_blank_page_without_reading_it(self):
+        opened = {'workspace': dict(WORKSPACE), 'tab_id': '42:p1'}
+        with patch.object(cd, '_workspace_name', return_value='jobsalvo-test-blank'), \
+                patch.object(cd, '_ego', return_value=opened) as ego:
+            door = cd.EgoDoor()
+            self.assertEqual(door.new_workspace(blank=True), opened)
+        script = ego.call_args.args[0]
+        self.assertIn('taskSpace("jobsalvo-test-blank")', script)
+        self.assertIn('task.page("p1")', script)
+        self.assertNotIn('goto(', script)
+        self.assertNotIn('evaluate(', script)
+        self.assertEqual(door.workspace, WORKSPACE)
+
+    def test_new_workspace_rejects_nonblank_or_reused_doors(self):
+        with self.assertRaises(ValueError):
+            cd.EgoDoor().new_workspace(blank=False)
+        door = cd.EgoDoor()
+        door.workspace = dict(WORKSPACE)
+        with self.assertRaises(cd.NotNow):
+            door.new_workspace(blank=True)
 
     def test_the_card_follows_its_form_into_another_page_of_its_own_workspace_only(self):
         door = cd.EgoDoor()
@@ -79,20 +113,6 @@ class SharedBrowser(unittest.TestCase):
         self.assertEqual(output.read_bytes(), content)
         release.assert_called_once_with('42:p1')
 
-    def test_local_clip_uses_cdp_document_box_and_egos_png_bytes(self):
-        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aY3sAAAAASUVORK5CYII=')
-        output = Path(self.tmp) / 'clip.png'
-        clip = {'x': 10, 'y': 20, 'width': 80, 'height': 40}
-        door = cd.EgoDoor()
-        with patch.object(door, '_task', return_value=''), \
-                patch.object(cd, '_ego', return_value={'data': base64.b64encode(png).decode()}) as ego:
-            self.assertEqual(door.shot_clip('42:p1', str(output), clip), str(output))
-        self.assertEqual(output.read_bytes(), png)
-        script = ego.call_args.args[0]
-        self.assertIn('Page.captureScreenshot', script)
-        self.assertIn('captureBeyondViewport', script)
-        self.assertIn('"x": 10', script)
-
     def test_failed_pdf_keeps_the_previous_file_and_releases_its_own_workspace(self):
         source, output = Path(self.tmp, 'resume.html'), Path(self.tmp, 'resume.pdf')
         source.write_text('<p>PDF fixture</p>')
@@ -110,7 +130,7 @@ class SharedBrowser(unittest.TestCase):
         codex, claude = cd.of('codex'), cd.of('claude-code')
         self.assertEqual(codex.apply_rule(), claude.apply_rule())
         self.assertIn('ego-browser nodejs', codex.apply_rule())
-        self.assertEqual(codex.fetch_rule(), claude.fetch_rule())
+        self.assertEqual(codex.fetch_task_tools(), claude.fetch_task_tools())
 
     def test_missing_browser_names_the_required_installation(self):
         with patch.object(cd, 'ego_bin', return_value=None, create=True):
@@ -154,6 +174,9 @@ class SharedBrowser(unittest.TestCase):
         self.assertEqual(record.note.call_args.args[0], 'browser_result')
         self.assertTrue(record.note.call_args.kwargs['ok'])
         self.assertGreaterEqual(record.note.call_args.kwargs['seconds'], 0)
+
+    def test_profile_attachment_download_is_not_a_browser_door_operation(self):
+        self.assertFalse(hasattr(cd.EgoDoor(), 'download_attachments'))
 
     def test_opening_a_card_returns_its_workspace_and_the_program_read_page(self):
         with patch('subprocess.run', return_value=response({'workspace': WORKSPACE, 'tab_id': '42:p1', 'page': PAGE})):
@@ -208,46 +231,6 @@ class SharedBrowser(unittest.TestCase):
             saved = door.shot(opened['tab_id'], str(path))
         self.assertEqual(Path(saved).read_bytes()[:8], b'\x89PNG\r\n\x1a\n')
 
-    def test_cold_page_screenshot_retries_until_success_and_records_each_attempt(self):
-        import evidence
-        door = cd.of('codex')
-        door.workspace = dict(WORKSPACE)
-        path = Path(self.tmp) / 'warm.png'
-        record, calls = Mock(), []
-        def capture(*args, **kwargs):
-            calls.append(True)
-            if len(calls) < 4:
-                return failed_response('CDP request timed out: Page.captureScreenshot')
-            path.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
-            return response(str(path))
-        with patch('subprocess.run', side_effect=capture), patch.object(evidence, 'active', return_value=record):
-            self.assertEqual(door.shot('42:p1', str(path)), str(path))
-        attempts = [call.kwargs for call in record.note.call_args_list if call.args[0] == 'shot_attempt']
-        self.assertEqual([a['attempt'] for a in attempts], [1, 2, 3, 4])
-        self.assertEqual([a['ok'] for a in attempts], [False, False, False, True])
-        self.assertTrue(all(a['workspace'] == WORKSPACE and a['seconds'] >= 0 for a in attempts))
-        self.assertEqual(attempts[-1]['retry_count'], 3)
-        self.assertGreaterEqual(attempts[-1]['elapsed_seconds'], attempts[-1]['seconds'])
-
-    def test_cold_screenshot_retry_limit_preserves_failure_without_an_old_image(self):
-        door = cd.of('claude-code')
-        door.workspace = dict(WORKSPACE)
-        path = Path(self.tmp) / 'failed.png'
-        path.write_bytes(b'\x89PNG\r\n\x1a\nold image')
-        with patch('subprocess.run', return_value=failed_response('CDP request timed out: Page.captureScreenshot')) as command:
-            with self.assertRaisesRegex(cd.NotNow, '6 次'):
-                door.shot('42:p1', str(path))
-        self.assertEqual(command.call_count, 6)
-        self.assertFalse(path.exists())
-
-    def test_screenshot_errors_other_than_the_cold_capture_timeout_are_not_retried(self):
-        door = cd.of('codex')
-        door.workspace = dict(WORKSPACE)
-        with patch('subprocess.run', return_value=failed_response('connection unavailable')) as command:
-            with self.assertRaisesRegex(cd.NotNow, 'connection unavailable'):
-                door.shot('42:p1', str(Path(self.tmp) / 'offline.png'))
-        self.assertEqual(command.call_count, 1)
-
     def test_failed_screenshot_does_not_leave_a_file_that_could_be_mistaken_for_evidence(self):
         door = cd.of('codex')
         door.workspace = dict(WORKSPACE)
@@ -260,7 +243,7 @@ class SharedBrowser(unittest.TestCase):
                 door.shot('42:p1', str(path))
         self.assertFalse(path.exists())
 
-    def test_profile_reader_keeps_fields_links_and_readiness_in_the_cards_workspace(self):
+    def test_read_profile_keeps_fields_and_links_in_the_cards_workspace(self):
         url = 'https://profile.test/preview?id=3'
         profile = {'url': url, 'title': '履歷', 'text': '已存的履歷內容 ' * 150,
                    'fields': [{'label': '求職條件', 'section': '工作', 'role': 'textbox', 'value': '全職'}],
@@ -272,19 +255,9 @@ class SharedBrowser(unittest.TestCase):
         ]):
             door = cd.of('claude-code')
             door.open_for_agent(PAGE['url'])
-            read = door.profile_reader()(url)
+            read = door.read_profile(url)
         self.assertEqual(read['fields'][0]['value'], '全職')
         self.assertEqual(read['links'], ['https://profile.test/file/cv.pdf'])
-        self.assertTrue(read['_ready'])
-
-    def test_a_short_complete_profile_is_ready_for_attachment_verification(self):
-        url = 'http://127.0.0.1/profile?resumeId=fixed'
-        profile = {'url': url, 'title': '履歷', 'text': '履歷與求職條件\n' * 40,
-                   'fields': [], 'links': [], 'readyState': 'complete'}
-        door = cd.of('codex')
-        door.workspace = dict(WORKSPACE)
-        with patch('subprocess.run', return_value=response({'pages': {url: profile}, 'reader': 'p2'})):
-            self.assertTrue(door.read_profile(url)['_ready'])
 
     def test_a_card_workspace_survives_switching_the_enabled_agent_family(self):
         import config as cf
@@ -294,30 +267,6 @@ class SharedBrowser(unittest.TestCase):
                                 'workspace': WORKSPACE, 'tab_id': '42:p1'})
             self.assertEqual(door.read_page('42:p1'), PAGE)
         self.assertEqual(door.agent_id, 'cc')
-
-    def test_downloaded_attachment_hash_is_computed_from_the_saved_remote_bytes(self):
-        url = 'https://profile.test/preview?id=3'
-        path = Path(self.tmp) / 'attachment.bin'
-        profile = {'url': url, 'text': '履歷內容' * 300, 'fields': [], 'links': [], 'readyState': 'complete'}
-        def downloaded(*args, **kwargs):
-            path.write_bytes(b'abc')
-            return response({'files': [{'name': 'cv.pdf', 'path': str(path), 'sha256': 'untrusted'}], 'problems': []})
-        replies = iter([
-            response({'workspace': WORKSPACE, 'tab_id': '42:p1'}),
-            response({'workspace': WORKSPACE, 'tab_id': '42:p1', 'page': PAGE}),
-            response({'pages': {url: profile}, 'reader': 'p2'}), downloaded,
-        ])
-        def command(*args, **kwargs):
-            reply = next(replies)
-            return reply(*args, **kwargs) if callable(reply) and not isinstance(reply, Mock) else reply
-        with patch('subprocess.run', side_effect=command):
-            door = cd.of('claude-code')
-            door.open_for_agent(PAGE['url'])
-            result = door.download_attachments(url, self.tmp)
-        self.assertEqual(result['files'][0]['sha256'],
-                         'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
-        self.assertEqual(result['files'][0]['size'], 3)
-        self.assertEqual(Path(result['files'][0]['path']).read_bytes(), b'abc')
 
     def test_completed_card_finishes_only_its_bound_workspace(self):
         with patch('subprocess.run', side_effect=[
@@ -358,6 +307,14 @@ class SharedBrowser(unittest.TestCase):
         self.assertIn('takeOverTaskSpace', script)
         self.assertNotIn('正由使用者接手', script)
 
+    def test_handoff_says_the_page_is_unknown_when_the_card_has_none(self):
+        door = cd.of('codex')
+        door.workspace = {key: value for key, value in WORKSPACE.items() if key != 'page'}
+        with patch('subprocess.run') as run:
+            with self.assertRaisesRegex(cd.NotNow, '程式不知道是哪一頁'):
+                door.hand_off()
+        run.assert_not_called()
+
     def test_handoff_says_so_when_ego_cannot_be_brought_up(self):
         door = cd.of('codex')
         door.workspace = dict(WORKSPACE)
@@ -373,6 +330,51 @@ class SharedBrowser(unittest.TestCase):
             door.hand_off()             # 中間那次是把 ego 叫到前面(他按了 👀 才做)
             door.resume()
         self.assertEqual(door.workspace, WORKSPACE)
+
+
+
+# 照 ego 的 API 形狀做的假工作區:p1 是 agent 開的個人頁,另一個是 ego 關掉最後一頁後留下、沒有標籤的空白分頁。
+# 讀 p1 之後它就被關掉(讀完到截圖之間頁被關)。ego 拒絕不合規的標籤,錯誤字照 ego 的原字。
+FAKE_EGO_WORKSPACE = """
+const fs = await import('node:fs');
+const closed = `${process.env.FAKE_EGO_DIR}/p1-closed`;  // 每次 ego 指令是新的 node,關掉的頁記在檔案
+const tabs = [{label: 'p1', url: 'http://site.test/profile', title: 'Profile'}, {url: 'about:blank', title: ''}]
+  .filter(tab => tab.label !== 'p1' || !fs.existsSync(closed));
+globalThis.listTaskSpaces = async () => [{id: 620, name: 'jobsalvo-exam', ownership: 'agent'}];
+globalThis.taskSpace = async id => ({spaceId: id, tabs: async () => tabs.slice(), page: label => {
+  if (typeof label !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(label))
+    throw new Error('page label must start with a letter and contain only letters, numbers, _ or -');
+  return {
+    evaluate: async () => { fs.writeFileSync(closed, '');
+                            return {url: 'http://site.test/profile', title: 'Profile', text: 'Profile content'}; },
+    screenshot: async ({path}) => { fs.writeFileSync(path, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+                                    return path; }};
+}});
+"""
+
+
+class SnapshotThroughEgo(unittest.TestCase):
+    def test_a_page_no_one_can_name_or_one_closed_before_its_screenshot_keeps_egos_own_reason(self):
+        # 答案來源:假工作區自己(沒有標籤的分頁、讀完就關掉的 p1)。真 agent 考試第三輪 sync empty-workspace:
+        # 沒有標籤的分頁被編成 620:undefined,截圖原因寫成填表卡的「要重填」(.audit/exam-r3-diagnosis.md 第二類)
+        from web import snap
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        ego = tmp / 'fake-ego'
+        ego.write_text('#!/bin/sh\n{ cat "$(dirname "$0")/workspace.js"; cat; } | FAKE_EGO_DIR="$(dirname "$0")" node -\n')
+        ego.chmod(0o755)
+        (tmp / 'workspace.js').write_text(FAKE_EGO_WORKSPACE)
+        evidence_dir = tmp / 'evidence'
+        evidence_dir.mkdir()
+        self.enterContext(patch.object(cd, 'ego_bin', return_value=str(ego)))
+        self.enterContext(patch.dict(os.environ, {'JOBSALVO_EGO_WORKSPACE': '620',
+                                                  'JOBSALVO_EGO_EVIDENCE_DIRS': json.dumps([str(evidence_dir)])}))
+        with patch('sys.stdout', new_callable=__import__('io').StringIO) as out:
+            self.assertEqual(0, snap.main(['jobsalvo-after']))
+        printed = out.getvalue()
+        self.assertNotIn(cd.GONE, printed)
+        self.assertNotIn('undefined', printed)
+        self.assertIn(f'截圖沒取得：{cd.NO_TAB_LABEL}', printed)
+        self.assertIn('截圖沒取得：頁面不見了', printed)
 
 
 class BrowserPolicy(unittest.TestCase):
@@ -455,110 +457,30 @@ class BrowserPolicy(unittest.TestCase):
         self.assertEqual(bad, [])
 
 
+LOGIN_PAGES = {path: '<!doctype html><title>Sign in</title><p>Sign in to continue</p>' for path in ('/login', '/linkedin', '/google')}
+
+
 @unittest.skipUnless(os.environ.get('JOBSALVO_EGO_INTEGRATION') == '1', '真 ego 接手需明確啟用')
 class NativeLoginHandoff(unittest.TestCase):
-    def test_sibling_question_headings_bind_custom_menu_selection_without_borrowing_hidden_options(self):
-        import apply_tab
-        from urllib.parse import quote
-        # 104 現場 DOM:兩題標題與控制項是同一個容器的兄弟節點。
-        html = ('<div role=dialog><div class=apply-popup__body>'
-                '<div class="h3 mb-2">選擇履歷</div><div class=d-flex>'
-                '<div class=select-resume><div tabindex=0>'
-                '<div class="form-control form-control--category-menu">'
-                '<span class=text-region>Known fixed profile</span></div>'
-                '<ul style="display:none"><li>Known fixed profile</li></ul></div></div>'
-                '<a href="/profile/preview?vno=fixture">預覽履歷</a></div>'
-                '<div class="h3 mt-6 mb-2">自我推薦信</div><div class=apply-msg>'
-                '<div class="form-control form-control--category-menu">'
-                '<span class=text-region>Saved cover</span></div></div>'
-                '<div><textarea>Known recommendation</textarea><span>20/2000</span></div>'
-                '<label><input type=checkbox style="display:none">儲存此次修改</label></div></div>')
-        fb = {'__ans__': [{'k': 'recommend', 'q': '自我推薦信', 'v': 'Known recommendation'}],
-              PAGE['url']: {'form': {'f': [
-                  {'q': '選擇履歷', 'src': 'rz', 'v': 'Known fixed profile'},
-                  {'q': '自我推薦信', 'src': 'bank', 'k': 'recommend'}]}}}
-        with patch.object(cd, 'ego_bin', _env.REAL_EGO_BIN), cd.test_workspaces() as counts:
-            door = cd.EgoDoor()
-            opened = door.open_for_agent('data:text/html;charset=utf-8,' + quote(html))
-            self.assertEqual(apply_tab.page_problems(opened['page'], fb, PAGE['url']), [])
-            script = (f'const task=await taskSpace({opened["workspace"]["id"]});'
-                      'await task.page("p1").evaluate(()=>{'
-                      'document.querySelector(".select-resume .text-region").innerText="Wrong profile";'
-                      'document.querySelector("textarea").value="Known fixed profile";});')
-            subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            page = door.read_page(opened['tab_id'])
-            problems = apply_tab.page_problems(page, fb, PAGE['url'])
-            self.assertTrue(any('選擇履歷' in problem for problem in problems), problems)
-            self.assertTrue(any('自我推薦信' in problem for problem in problems), problems)
-        self.assertTrue(counts['returned_to_baseline'], counts)
-
-    def test_custom_dropdown_readback_binds_the_selection_and_saved_answer_to_their_own_questions(self):
-        import apply_tab
-        from urllib.parse import quote
-        html = ('<div role=dialog><div><div class=h3>選擇履歷</div>'
-                '<div class=multiselect><span class=multiselect__single>Known fixed profile</span>'
-                '<input type=text hidden></div></div>'
-                '<div><div class=h3>自我推薦信</div><div class=multiselect>'
-                '<span class=multiselect__single>Saved cover</span></div>'
-                '<div><textarea>Known recommendation</textarea></div></div></div>')
-        fb = {'__ans__': [{'k': 'recommend', 'q': '自我推薦信', 'v': 'Known recommendation'}],
-              PAGE['url']: {'form': {'f': [
-                  {'q': '選擇履歷', 'src': 'rz', 'v': 'Known fixed profile'},
-                  {'q': '自我推薦信', 'src': 'bank', 'k': 'recommend'}]}}}
-        with patch.object(cd, 'ego_bin', _env.REAL_EGO_BIN), cd.test_workspaces() as counts:
-            door = cd.EgoDoor()
-            opened = door.open_for_agent('data:text/html;charset=utf-8,' + quote(html))
-            self.assertEqual(apply_tab.page_problems(opened['page'], fb, PAGE['url']), [])
-            script = (f'const task=await taskSpace({opened["workspace"]["id"]});'
-                      'await task.page("p1").evaluate(()=>{'
-                      'document.querySelector(".multiselect__single").innerText="Wrong profile";'
-                      'document.querySelector("textarea").value="Known fixed profile";});')
-            subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            page = door.read_page(opened['tab_id'])
-            problems = apply_tab.page_problems(page, fb, PAGE['url'])
-            self.assertTrue(any('選擇履歷' in problem for problem in problems), problems)
-            self.assertTrue(any('自我推薦信' in problem for problem in problems), problems)
-        self.assertTrue(counts['returned_to_baseline'], counts)
-
     def test_sso_personal_verification_is_handed_off_instead_of_its_waiting_login_opener(self):
-        from apply_fakeform import FakeForm
+        from website_testbench import FakeWebsiteServer
         with patch.object(cd, 'ego_bin', _env.REAL_EGO_BIN), cd.test_workspaces() as counts:
-            server = FakeForm(requires_login=True).start()
+            server = FakeWebsiteServer(pages=LOGIN_PAGES).start()
             self.addCleanup(server.stop)
             door = cd.EgoDoor()
             door.open_for_agent('data:text/html,<h1>Application</h1>')
-            door.read_pages([server.url('linkedin')])
+            door.read_pages([server.url('/linkedin')])
+            quote = 'Enter the one-time code shown in your authenticator.'
             script = (f'const task=await taskSpace({door.workspace["id"]});'
-                      f'const provider=await task.newPage();await provider.goto({json.dumps(server.url("google"))});'
-                      'await provider.evaluate(()=>{document.title="使用您的密碼金鑰確認登入者是您本人";'
-                      'document.getElementById("login-gate").innerHTML='
-                      '"<h1>使用您的密碼金鑰確認登入者是您本人</h1>"'
-                      '+"<p>裝置將要求您使用指紋、臉孔或螢幕鎖定功能驗證身分</p>";});')
+                      f'const provider=await task.newPage();await provider.goto({json.dumps(server.url("/google"))});'
+                      f'await provider.evaluate(()=>{{document.title="Continue";document.body.innerHTML="<p>{quote}</p>";}});')
             subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            action = door.human_action()
+            action = door.human_action(f'{door.workspace["id"]}:p3', quote, '請在這頁輸入一次性代碼')
             self.assertEqual(action['page'], 'p3')
-            self.assertIn('本人驗證', action['need'])
+            self.assertEqual(action['quote'], quote)
+            self.assertEqual(action['need'], '請在這頁輸入一次性代碼')
             door.workspace['handoff_page'] = action['page']
-            self.assertEqual(door.hand_off()['page'], 'p3')
-        self.assertTrue(counts['returned_to_baseline'], counts)
-
-    def test_hidden_controls_do_not_disconnect_a_visible_answer_from_its_question(self):
-        import apply_tab
-        from urllib.parse import quote
-        html = ('<form><section><h2>自我推薦信</h2><input type=text hidden>'
-                '<div><textarea>Known recommendation</textarea><span>20/2000</span></div></section>'
-                '<section><h2>其他備註</h2><textarea>Known recommendation</textarea></section></form>')
-        fb = {'__ans__': [{'k': 'recommend', 'q': '自我推薦信', 'v': 'Known recommendation'}],
-              PAGE['url']: {'form': {'f': [{'q': '自我推薦信', 'src': 'bank', 'k': 'recommend'}]}}}
-        with patch.object(cd, 'ego_bin', _env.REAL_EGO_BIN), cd.test_workspaces() as counts:
-            door = cd.EgoDoor()
-            opened = door.open_for_agent('data:text/html;charset=utf-8,' + quote(html))
-            self.assertEqual(apply_tab.page_problems(opened['page'], fb, PAGE['url']), [])
-            script = (f'const task=await taskSpace({opened["workspace"]["id"]});'
-                      'await task.page("p1").fill("css=section:first-child textarea","Wrong recommendation");')
-            subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
-            page = door.read_page(opened['tab_id'])
-            self.assertTrue(apply_tab.page_problems(page, fb, PAGE['url']))
+            self.assertEqual(hand_off_test_workspace(door)['page'], 'p3')
         self.assertTrue(counts['returned_to_baseline'], counts)
 
     def test_eye_button_brings_ego_itself_to_the_front_only_when_pressed(self):
@@ -566,21 +488,25 @@ class NativeLoginHandoff(unittest.TestCase):
         with patch.object(door, '_hand_off_page', return_value={'page': 'p2'}), \
              patch.object(cd.subprocess, 'run') as run:
             self.assertEqual(door.hand_off(), {'page': 'p2'})
-        run.assert_called_once_with(['open', '-a', 'ego lite'], check=False, timeout=15)
+        run.assert_called_once_with(['open', '-a', 'ego lite'], check=True, timeout=15, capture_output=True)
 
     def test_a_login_in_another_managed_page_is_handed_off_without_rebinding_the_application(self):
-        from apply_fakeform import FakeForm
+        from website_testbench import FakeWebsiteServer
         with patch.object(cd, 'ego_bin', _env.REAL_EGO_BIN), cd.test_workspaces() as counts:
-            server = FakeForm(requires_login=True).start()
+            server = FakeWebsiteServer(pages=LOGIN_PAGES).start()
             self.addCleanup(server.stop)
             door = cd.EgoDoor()
             application = door.open_for_agent('data:text/html,<h1>Application</h1>')
-            door.read_pages([server.url('login')])
-            action = door.human_action()
+            door.read_pages([server.url('/login')])
+            quote = 'Complete the organization check before continuing.'
+            script = (f'const task=await taskSpace({door.workspace["id"]});'
+                      f'await task.page("p2").evaluate(()=>{{document.body.innerHTML="<p>{quote}</p>";}});')
+            subprocess.run([cd.ego_bin(), 'nodejs', '-e', script], check=True, capture_output=True, timeout=60)
+            action = door.human_action(f'{door.workspace["id"]}:p2', quote, '請完成頁面上的要求')
             self.assertEqual(action['page'], 'p2')
-            self.assertEqual(action['site'], '127.0.0.1')
+            self.assertEqual(action['quote'], quote)
             door.workspace['handoff_page'] = action['page']
-            receipt = door.hand_off()
+            receipt = hand_off_test_workspace(door)
             self.assertEqual(receipt['page'], 'p2')
             self.assertEqual(door.workspace['page'], 'p1')
             door.resume()
@@ -588,89 +514,27 @@ class NativeLoginHandoff(unittest.TestCase):
         self.assertTrue(counts['returned_to_baseline'], counts)
 
 
-class MissingEgoWindow(unittest.TestCase):
-    def setUp(self):
-        self.tmp = self.enterContext(tempfile.TemporaryDirectory())
-        self.ensure_window = self.enterContext(patch.object(cd, '_ensure_ego_window'))
-
-    def test_screenshot_timeout_reopens_a_missing_ego_window_once(self):
-        calls = iter(['CDP request timed out: Page.captureScreenshot'] * 2)
-        out = Path(self.tmp) / 'shot.png'
-
-        def fake(*_args, **_kwargs):
-            message = next(calls, None)
-            if message is None:
-                out.write_bytes(b'\x89PNG\r\n\x1a\nrest')
-                return Mock(returncode=0, stdout=json.dumps({'ok': True, 'result': str(out)}), stderr='')
-            raise cd.NotNow(message)
-
-        with patch.object(cd, '_ego', side_effect=fake):
-            door = cd.EgoDoor.__new__(cd.EgoDoor)
-            door.workspace = {'id': 1, 'page': 'p1'}
-            door._task = lambda _tab: ''
-            self.assertEqual(door.shot('1:p1', str(out)), os.path.abspath(out))
-        self.ensure_window.assert_called_once()
-
-class ProfileReadTimeout(unittest.TestCase):
-    def test_a_timed_out_profile_read_is_read_again_once(self):
-        replies = [cd.NotNow('ego 指令連不上或逾時:timed out'), {'url': 'https://example.test'}]
-
-        def fake(*_args, **_kwargs):
-            reply = replies.pop(0)
-            if isinstance(reply, Exception):
-                raise reply
-            return reply
-
-        door = cd.EgoDoor.__new__(cd.EgoDoor)
-        door._task = lambda _tab: ''
-        with patch.object(cd, '_ego', side_effect=fake):
-            self.assertEqual(door.read_profile_page('1:p1'), {'url': 'https://example.test'})
-        self.assertEqual(replies, [])
-
-
 if __name__ == '__main__':
     unittest.main()
 
 
-class EveryReadWaitsForTheSamePageToSettle(unittest.TestCase):
-    """每個讀頁、判斷「要本人登入」的入口都先跑同一段 settle:不在載入中、有 body、網址和內容連續不變。
-    以前每個入口出事各補一種等法(只等 body、自己一圈迴圈、給 agent 的一句話),別的入口照樣出事。"""
-
-    def scripts(self):
+class ReadsCurrentPageWithoutStabilityWindow(unittest.TestCase):
+    def test_page_reads_do_not_wait_for_repeated_page_state(self):
         door = cd.EgoDoor()
         door.workspace = dict(WORKSPACE)
         seen = []
-        with patch.object(cd, '_ego', side_effect=lambda script, timeout=None: seen.append(script) or {
-                'pages': {'https://jobs.test/p': {'text': ''}}, 'reader': 'p2'}):
-            door.read_page('42:p1')
+
+        def read(script, timeout=None):
+            seen.append(script)
+            if 'const urls =' in script:
+                return {'pages': {'https://jobs.test/p': {'text': ''}}, 'reader': 'p2'}
+            return {'url': 'https://jobs.test/p', 'reading': 'current page'}
+
+        with patch.object(cd, '_ego', side_effect=read):
             door.read_profile_page('42:p1')
-            door.read_shown_page('https://jobs.test/p')
-            door.open_for_agent('https://jobs.test/apply', '42:p1')
-            door.human_action()
             door.read_pages(['https://jobs.test/p'])
-        return seen
 
-    def test_each_entry_settles_before_it_reads(self):
-        for script in self.scripts():
-            self.assertIn('await settle(', script)
-            self.assertLess(script.index('await settle('), max(script.find('READ_FORM'), script.rfind('evaluate(')))
-
-    def run_settle(self, signatures):
-        script = cd.SETTLE + """
-const SIGS = %s; let n = 0;
-const p = {evaluate: async () => { const s = SIGS[Math.min(n++, SIGS.length - 1)]; if (s === null) throw new Error('navigating'); return s; },
-           waitForTimeout: async () => null};
-settle(p).then(ok => console.log(JSON.stringify({ok, n})));
-""" % json.dumps(signatures)
-        out = subprocess.run(['node', '-'], input=script, text=True, capture_output=True)
-        self.assertEqual(out.returncode, 0, out.stderr)
-        return json.loads(out.stdout)
-
-    def test_a_page_replaced_after_load_is_read_once_it_stops_changing(self):
-        # 載完又換掉整份文件(LinkedIn)、授權頁先閃登入頁(Lever):中途讀不到、沒 body、網址在換,都不算穩
-        got = self.run_settle([None, '', 'https://x/login|10|50', 'https://x/allow|300|90', 'https://x/allow|300|90'])
-        self.assertEqual(got, {'ok': True, 'n': 5})
-
-    def test_a_page_that_never_settles_is_still_read_after_the_limit(self):
-        got = self.run_settle(['a', 'b'] * 40)
-        self.assertEqual(got['ok'], False)
+        self.assertEqual(len(seen), 2)
+        for script in seen:
+            self.assertNotIn('await settle(', script)
+            self.assertNotIn('waitForTimeout(300)', script)

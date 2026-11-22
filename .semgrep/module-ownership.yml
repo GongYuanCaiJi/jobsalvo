@@ -63,3 +63,16 @@ rules:
           function cardName(...) { ... }
     paths:
       include: [board/]
+
+  - id: expected-failure-hides-a-known-bug
+    languages: [python]
+    severity: ERROR
+    message: 抓到的程式錯在同一個改動裡照根因修好,測試照實紅著直到修好;不准用 expectedFailure 掛著讓它算過(#601 窮舉 G1–G7 曾這樣掛了一輪)
+    pattern-either:
+      - pattern: |
+          @unittest.expectedFailure
+          def $F(...): ...
+      - pattern: |
+          @expectedFailure
+          def $F(...): ...
+      - pattern: unittest.expectedFailure(...)

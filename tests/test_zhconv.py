@@ -54,7 +54,8 @@ class ServedPage(unittest.TestCase):
         job = {'id': 'https://ex.test/j/1', 'target': '軟體工程師（資料夾）', 'cat': '其他'}
         doc = bd.assemble(':root{}', '<b id="stat-first">0</b>', '', {'jobs': [job]}, '{}', '/*app*/')
         for lang, want in (('zh', False), ('zh-CN', True)):
-            with unittest.mock.patch.object(bs, 'page_cfg', return_value={'read_lang': lang}):
+            with unittest.mock.patch.object(bs, 'page_cfg', return_value={'read_lang': lang}), \
+                    unittest.mock.patch.object(bs, 'is_real', return_value=False):
                 d = bd.parse(bs.serve_doc(bs.snap_of(doc)))['data']
             self.assertEqual('zh_tables' in d['cfg'], want, lang)
             self.assertEqual(d['jobs'][0]['target'], '軟體工程師（資料夾）')   # 資料原封不動

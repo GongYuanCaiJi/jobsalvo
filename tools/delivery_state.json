@@ -80,7 +80,7 @@
       "fill_bad": {"do": ["run_done"], "to": "stuck", "when": [{"if": "apply.stale", "to": "stale"}]},
       "fill_nopage": {"set": {"apply": "$apply"}, "to": "nopage"},
       "fill_submitted": {"set": {"apply.sent": "$evidence", "ev": "$ev", "apply.tab_id": ""}, "do": ["mark_sent"], "to": "sent"},
-      "fill_unsure": {"set": {"apply.submit_fail": "$evidence"}, "to": "unsure"},
+      "fill_unsure": {"set": {"apply": "$apply", "apply.submit_fail": "$evidence"}, "to": "unsure"},
       "answers_changed": {"to": "running"},
       "files_changed": {"set": {"apply.stale": "$why"}, "to": "running"},
       "page_lost": {"to": "running"},

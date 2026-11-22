@@ -1,0 +1,15 @@
+def _verify_agent_stop_page(stopped, door):
+    if not stopped:
+        return
+    tab_id = stopped.get('page_tab_id') or ''
+    if not tab_id:
+        stopped['read_status'] = 'unreadable'
+        stopped['verification'] = '程式核對不了'
+        return
+    try:
+        page = door.read_profile_page(tab_id)
+    except Exception as error:
+        stopped['read_status'] = 'unreadable'
+        stopped['read_error'] = str(error)[:300]
+        stopped['verification'] = '程式核對不了'
+        return

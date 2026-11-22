@@ -552,14 +552,14 @@ class JobPageUnreadable(RuntimeError):
 
 
 def _job_page_text(url):
-    """程式抓職缺頁的文字(page_fetch:直接抓 → 閱讀代理 → ego)。抓不到就不派 agent,照實講。"""
-    import page_fetch
-    page = page_fetch.fetch(url)
-    if page.readable:
-        return page.text
-    why = '職缺已下架' if page.status == 'closed' else '可能要登入,或網站擋程式讀取'
-    raise JobPageUnreadable(f'程式讀不到這個職缺頁的 JD({why}),沒有派 agent 客製:'
-                            + ('; '.join(page.errors)[:160] or page.status))
+    """程式抓職缺頁的文字(直接抓 → 閱讀代理 → ego,走讀頁邊界)。抓不到就不派 agent,照實講。"""
+    from web import listing, seen
+    from web.outside import Real
+    page = listing.job_page(seen.fetch(Real(), url))
+    if page['readable']:
+        return page['text'] + (f'\n\n頁面讀取邊界：{page["partial"]}' if page['partial'] else '')
+    raise JobPageUnreadable('程式讀不到這個職缺頁的 JD(可能要登入,或網站擋程式讀取),沒有派 agent 客製:'
+                            + (page['why'][:160] or '沒有可讀文字'))
 
 
 def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None):

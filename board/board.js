@@ -249,11 +249,6 @@
     try{localStorage.setItem(VIEW_KEY,JSON.stringify({a:active,c:activeCat,f:activeFacet,q:searchQuery,
       y:Math.round(window.pageYOffset||document.documentElement.scrollTop||0)}));}catch(e){}
   }
-  try{
-    var _v=JSON.parse(localStorage.getItem(VIEW_KEY)||'{}');
-    if(_v.a)active=_v.a; if(_v.c)activeCat=_v.c; if(_v.f)activeFacet=_v.f; if(_v.q)searchQuery=_v.q;
-    _restoreY=_v.y||0;
-  }catch(e){}
   // 進板時間範圍:0=全部,其餘是「最近 N 天」。記在 localStorage,下次打開還在。
   var rangeDays=0; try{rangeDays=parseInt(localStorage.getItem('sts_range')||'0',10)||0;}catch(e){}
   var RANGES=[[1,'今天'],[3,'3 天內'],[7,'7 天內'],[30,'30 天內'],[-3,'躺超過兩週'],[0,'全部']];
@@ -314,19 +309,51 @@
     // 找法的名字(更深、更廣)是找新職缺那幾顆鈕的字:卡上同時寫它是怎麼找的,不用回去對按鈕
     return '<div class="srcline">'+ic('target')+' 對味 '+s.fit+'/5 · '+(FIND_HOW[s.mode]?'用「'+esc(FIND_MODE[s.mode])+'」找到('+esc(FIND_HOW[s.mode])+')':esc(FIND_MODE[s.mode]||s.mode))+esc(s.direction?'「'+s.direction+'」':'')+
       (s.why?'<span class="srcwhy">'+esc(s.why)+'</span>':'')+'</div>';}
-  // 判斷那一段看出來的幽靈職缺(掛著但看起來沒在真的招人):照樣進看板,標出來讓他自己決定。詐騙的不會進看板。
-  function riskHTML(j){
-    var r=j.src&&j.src.risk; if(!r||r.kind!=='ghost')return '';
-    return '<div class="repost-note"><strong>'+ic('ghost')+' 可能是幽靈職缺</strong><div>'+esc(r.why||'')+'</div></div>';
-  }
-  function repostHTML(j){
-    var hits=(j.src&&j.src.reposts)||[];
-    if(!hits.length)return '';
-    return '<div class="repost-note"><strong>↻ 可能是重貼</strong>'+hits.map(function(x){
-      var title=x.title||'舊卡', link=x.url?'<a href="'+escA(safeUrl(x.url))+'" target="_blank" rel="noopener">'+esc(title)+'</a>':esc(title);
-      return '<div>'+link+' · 當時表態：'+esc(x.mark||'未表態')+
-        (x.note?' · 原話：「'+esc(x.note)+'」':'')+'</div>';
-    }).join('')+'</div>';
+  // 找缺卡上 agent 交回的每一個值都是一筆紀錄 {claim, raw, state, marks}(tools/find.py _record;舊卡是單一的 mark)。
+  // 程式一字不差核對過的照事實畫,其他一律標明是 agent 說的;卡上只有這幾支決定這件事。
+  var CLAIM_LABEL={title:'職稱',company:'公司',posted_at:'刊登日期',applicants:'應徵人數',status:'招募狀態',
+    fit:'為什麼適合你',co:'公司在做什麼',loc:'地點',salary:'薪資',deadline:'截止日',bar:'門檻',ammo:'彈藥'};
+  function claimOf(j,key){var v=j.src&&j.src.verification||{};
+    return (v.fields||{})[key]||(v.summary&&v.summary.fields||{})[key]||null;}
+  function claimFact(r){return !!r&&r.state==='程式核對過';}
+  function claimTag(r){return claimFact(r)?'':'<small class="fact-unverified">agent 說的・沒核對到</small>';}
+  function claimSaid(r){
+    var marks=(r.marks||[r.mark]).filter(Boolean).map(function(m){return m.text;}).filter(Boolean);
+    return claimFact(r)&&r.claim?[r.claim]:marks.length?marks:r.claim?['agent 說：'+r.claim]:[];}
+  function claimBody(r){
+    var said=claimSaid(r); if(!said.length)said=['agent 沒有提供主張'];
+    return said.map(function(t){return '<div>'+esc(t)+'</div>';}).join('')+'<div>程式讀到：'+esc(r.raw||'沒有讀到可核對的頁面原文')+'</div>';}
+  function claimsHTML(j){
+    var s=j.src||{}, v=s.verification, out='';
+    if(v){
+      var keys=Object.keys(CLAIM_LABEL);
+      var facts=v.state==='verified'&&keys.every(function(k){var r=claimOf(j,k);
+        return !r||!r.claim||_EMPTY.test(String(r.claim).trim())||claimFact(r);});
+      var st=claimOf(j,'status')||{};
+      out+=facts?(st.claim?'<div class="srcwhy">🤖 頁面招募狀態：'+esc(st.claim)+(st.raw?' · 原文「'+esc(st.raw)+'」':'')+'</div>':''):
+        '<div class="repost-note verification-note"><strong>⚠ '+esc(v.label||'待確認：agent 判斷尚未全部核實')+'</strong>'+
+        keys.map(function(k){var r=claimOf(j,k)||{};
+          return '<div><strong>'+CLAIM_LABEL[k]+' · '+esc(r.state||'未核實')+'</strong>'+claimBody(r)+'</div>';}).join('')+
+        (v.page_excerpt?fold('vpage:'+j.id,'程式讀取的頁面原文（前 1,200 字）','<pre>'+esc(v.page_excerpt)+'</pre>'):
+          '<div>程式讀取狀態：'+esc(v.page_status||'unknown')+'</div>')+
+        (v.missing?'<div>agent 說明：'+esc(v.missing)+'</div>':'')+
+        (v.report_issue&&v.report_issue.text?'<div>'+esc(v.report_issue.text)+'</div>':'')+
+        (v.page_file?evLink(j.id,v.page_file,'完整程式讀頁證據'):'')+
+        (v.screenshot_file?evLink(j.id,v.screenshot_file,'頁面截圖'):'')+
+        (v.screenshot_error?'<div>截圖失敗：'+esc(v.screenshot_error)+'</div>':'')+'</div>';
+      out+=(v.marks||[]).map(markHTML).join('');   // 讀頁狀態、條件沒核對到(tools/web/listing.py fetched、find.py card_of)
+    }
+    var hint=s.repost_hint;   // 公司與職稱跟舊卡一字不差:程式只比字,是不是同一個缺他自己看
+    if(hint&&hint.text)out+='<div class="repost-note"><strong>↻ '+esc(hint.text)+'</strong>'+(hint.cards||[]).map(function(id){
+      var o=jobs.filter(function(x){return x.id===id;})[0]; return '<div>'+esc(o?o.target||id:id)+'</div>';}).join('')+'</div>';
+    // 重貼、幽靈/詐騙都是 agent 的判斷:照樣進看板,附它引的那一段,讓他自己決定。
+    var reposts=(s.reposts||[]).filter(function(r){return r&&(claimSaid(r).length||r.raw);});
+    if(reposts.length)out+='<div class="repost-note"><strong>↻ agent 判斷：可能是重貼</strong>'+reposts.map(claimBody).join('')+'</div>';
+    var risk=s.risk;
+    if(risk&&['ghost','scam'].indexOf(risk.kind)>=0)
+      out+='<div class="repost-note"><strong>'+ic('ghost')+' agent 判斷：'+(risk.kind==='scam'?'可能是詐騙職缺':'可能是幽靈職缺')+'</strong>'+
+        claimBody(Object.assign({claim:risk.why},risk))+'</div>';
+    return out;
   }
   function sortJobs(l){
     var f={
@@ -449,14 +476,14 @@
     if(rangeDays===-3)return isStale(j);
     return n!==null&&n<rangeDays;   // 今天=0 天前,所以「今天」用 <1
   }
-  // 這個缺在站台上開多久了(上架日由 posted_age.py 從站台官方端點抓,不是模型猜的)。
+  // 這個缺在站台上開多久了(刊登日由 find 保存 agent 引用的頁面原文與日期)。
   // 開太久常常是長期掛著的常設缺,值得他一眼看到。
   function openedBadge(j){
     var n=daysSince(j.posted_at);
     if(n===null)return '';
-    var cls=n>180?'opened old':'opened';
+    var cls=n>riskDays()?'opened old':'opened';
     // 橘點的意思直接寫出來(手機沒有滑鼠提示):開超過半年的常是長期掛著的常設缺
-    return '<span class="'+cls+'" title="'+esc(j.posted_at)+' 上架（'+esc(j.posted_src||'')+'）">開了 '+n+' 天'+(n>180?' · 超過半年':'')+'</span>';
+    return '<span class="'+cls+'" title="'+esc(j.posted_at)+' 上架（'+esc(j.posted_src||'')+'）">開了 '+n+' 天'+(n>riskDays()?' · 超過 '+riskDays()+' 天':'')+'</span>';
   }
   // 職缺頁公開的應徵人數;人數天天在變,滑過去看是哪天抓的
   function crowdBadge(j){
@@ -470,7 +497,7 @@
   // 找缺時設了條件、但職缺頁沒寫的那幾項(例如薪資面議):留著讓他自己看,卡上講清楚
   function termsBadge(j){
     var u=j.terms_unknown||[]; if(!u.length)return '';
-    return '<span class="opened" title="找這張時設了這幾項條件,但職缺頁上沒寫,沒辦法比">'+esc(u.join('、'))+'查不到</span>';
+    return '<span class="opened" title="agent 說這張頁面查不到這幾項條件；程式沒有核對這項判斷">agent 說查不到：'+esc(u.join('、'))+'</span>';
   }
   // 104 顯示「企業最後處理履歷時間」、Indeed 自動標 Response seems unlikely。我們沒有雇主端資料,
   // 但手上三個訊號合起來能講同一件事:掛超過半年、死線已過、連結檢查沒過。
@@ -478,8 +505,8 @@
   // 是 UTC 零點,台灣早上 8 點就顯示「死線已過」
   function deadlinePassed(j){return !!j.dl&&today()>j.dl;}
   function riskBadge(j){
-    var r=[],n=daysSince(j.posted_at);
-    if(n!==null&&n>180)r.push('掛超過半年');
+    var r=[];
+    if(postedTooLong(j))r.push('掛超過 '+riskDays()+' 天');
     if(deadlinePassed(j))r.push('死線已過');
     // 連結失效在標題旁已經有一顆「原頁失效(本卡內容已留存)」,這裡不再重複講
 
@@ -761,7 +788,7 @@
   // 還要他動手的答案:我推論的等他確認,或答案還空著等他寫(空的不給 ✓,不然一按就變成「都確認過了」)。
   function ansEmpty(e){return !String((e&&e.v)||'').trim()&&!String((e&&e.zh)||'').trim();}
   // 英文表單的答案:他看、他改的是中文(zh),英文(v)是送出用的。他改了中文,那條標 tr,
-  // 我送出前照中文重翻英文(form_record.translate),雇主網頁也跟著重打。英文答案一定要附中文。
+  // 我送出前照中文重翻英文(fill 收件時 form_record.retranslate),雇主網頁也跟著重打。英文答案一定要附中文。
   // 他看得懂的語言(設定 resume.read_lang):送出的答案跟它不是同一套文字,才附一份他看得懂的(zh 欄位)。
   // 跟 form_record.needs_translation 同一條。中文使用者:有英文字母、沒有中文字的答案。
   var READ=String(CFG.read_lang||'zh'), READ_CJK=/^(zh|ja|ko)(-|$)/i.test(READ),
@@ -787,7 +814,7 @@
   // 答案改了值:用到它的停著的頁標重打(雇主網頁上還是舊字)、你已確認的確認作廢,後台照整份看板做(form_record.changed);
   // 這裡只排一個 {refill: 鍵} 跟著存檔送,存好的表單和卡回來才畫(#308、#343)
   function ansRefill(k){if(!EVENTS.some(function(x){return x.refill===k;}))EVENTS.push({refill:k}); refreshBar();}
-  // ---- 代投:agent 填表單 → 他核准 → agent 送出(tools/apply_run.py) ----
+  // ---- 填表:agent 填表單 → 使用者確認 → agent 送出(tools/fill.py) ----
   // 確認時記下的答案由後台算(form_record.approval),之後答案一改確認就作廢(後台照整份看板做)
   var APPLY={};   // 幫你填表那一輪的進度(伺服器 /api/rev 帶回來)
   function applyBusy(id){return !!(APPLY.running&&(!APPLY.url||APPLY.url===id));}
@@ -859,7 +886,8 @@
     // 還沒有表單時 applyLineHTML 那一行(「Agent 還沒填這張」)已經說了,不再多一行「表單還沒填」
     if(!fm)return ap==='ship'?applyLineHTML(j):'';
     var fields=fm.f||[], head=esc(fm.plat||'表單')+' · '+fields.length+' 欄';
-    if(fm.lock)return '<div class="fm-line">'+ic('lock')+' '+head+' · '+esc(mdOf(fm.at))+' 送出</div>';
+    if(fm.lock){var sent=((FB[j.id]||{}).apply||{}).sent||{};
+      return '<div class="fm-line">'+ic('lock')+' '+head+' · '+esc(mdOf(fm.at))+' 送出</div>'+fillChangesHTML(sent.changes_since_fill);}
     var td=nextOf(j.id).ask||[], rf=fields.filter(function(x){return x.refill;}).length;
     // 先看有沒有待確認的答案;0 欄只照實說沒有欄位紀錄,不猜原因(一鍵應徵、讀過了真的沒欄位,都會是 0 欄)
     // 答案確認完也不等於可以投:最後那一步永遠是我把要上傳的 PDF 傳給他、等他說「可以投遞」。
@@ -867,6 +895,31 @@
       :!fields.length?'沒有欄位紀錄':ic('circle-check')+' 答案都確認過了';
     return '<div class="fm-line '+(td.length?'need':'ok')+'">'+ic('clipboard-list')+' '+head+' · '+answerStatus+
       (rf?'<span class="fm-rf">'+ic('pencil')+' '+rf+' 欄雇主網頁待重打</span>':'')+'</div>'+formListHTML(j,fm)+applyLineHTML(j);
+  }
+  // 改前那頁、改後那頁的一種關係叫什麼:不同分頁就寫兩個分頁,網址不同就寫兩個網址(sync.page_row、fill._change_report)
+  function pairTitle(page){
+    var bt=page.before_tab_id||'', at=page.after_tab_id||'', b=page.before_url||'', a=page.after_url||'';
+    if(bt&&at&&bt!==at)return '分頁 '+bt+' → 分頁 '+at+' · '+(a||b);
+    if(b&&a&&b!==a)return b+' → '+a;
+    return page.page_url||a||b||(page.page_tab_id?'分頁 '+page.page_tab_id:'整個工作區');
+  }
+  // 清單上的一個標記:誰說的(程式讀到/程式沒比到/agent 說的)加那句話;同步清單、填表紀錄共用這一個畫法
+  function markHTML(m){
+    return m&&m.text?'<div class="cfg-help">'+esc((m.source?m.source+'：':'')+m.text)+'</div>':'';
+  }
+  function fillChangesHTML(report){
+    if(!report||typeof report!=='object')return '';
+    var marks=(report.marks||[]).map(markHTML).join('');
+    var pages=(report.pages||[]).map(function(page){
+      var title=pairTitle(page);
+      var details=page.compared?(page.changes||[]).map(function(change){
+        return '<div class="cfg-sync-pair"><div><b>改前</b><pre>'+esc((change.before_parts||[]).join('\n')||'（沒有原文）')+
+          '</pre></div><div><b>改後</b><pre>'+esc((change.after_parts||[]).join('\n')||'（沒有新原文）')+'</pre></div></div>';
+      }).join(''):'<div class="cfg-help">'+esc(page.reason||'程式沒比到')+'</div>';
+      return '<div class="cfg-sync-change"><b>'+esc(title)+'</b>'+details+'</div>';
+    }).join('');
+    if(!marks&&!pages)return '';
+    return '<div class="cfg-sync-list"><b>'+esc(report.heading||'填好後到送出前的頁面紀錄')+'</b>'+marks+pages+'</div>';
   }
   // 表單逐欄對照(他看得懂的語言,設定 resume.read_lang):題目用 agent 交件時給的翻譯(qz),答案用答案庫的翻譯(zh);對著右邊的頁面截圖看
   function formListHTML(j,fm){
@@ -1011,6 +1064,15 @@
   function preparedTo(n){return FLOW.auto_advance?(n+' 張準備好了,驗收過就自動進「可以投了」'):(n+' 張送去「待你決定」');}
   var TABS=[['none','sparkles','新職缺'],['like','thumbs-up','喜歡'],['meh','meh','普通'],['dislike','thumbs-down','不喜歡'],['grow','trending-up','差一點'],['all','list','全部'],['prep','file-pen-line','準備履歷'],['ready','scale','待你決定'],['ship','rocket','可以投了'],['sent','send','已投出'],['iv','mic','面試準備'],['techerr','wrench','出錯了'],['rm','trash-2','已移除'],['cfg','settings','設定']];
   var STAGES=['prep','ready','ship','sent'];
+  // 還原上次的位置。存的名稱現在已不存在(舊版的分頁、改名或刪掉的類別、標籤)就當沒存過,不開成空白頁
+  try{
+    var _v=JSON.parse(localStorage.getItem(VIEW_KEY)||'{}');
+    if(TABS.some(function(t){return t[0]===_v.a;}))active=_v.a;
+    if(catOrder.indexOf(_v.c)>=0)activeCat=_v.c;
+    if(TAGS.some(function(t){return t.name===_v.f;}))activeFacet=_v.f;
+    if(_v.q)searchQuery=_v.q;
+    _restoreY=_v.y||0;
+  }catch(e){}
   // 手機上非目前分頁只剩圖示加數字時,圖示下面那一行短名(寬度不超過圖示加數字;全名照樣在 title、aria-label)
   var TAB_SHORT={none:'新職缺',like:'喜歡',meh:'普通',dislike:'不喜歡',grow:'差一點',all:'全部',prep:'準備',ready:'待決定',ship:'可投',
     sent:'已投出',iv:'面試',techerr:'出錯了',rm:'已移除',cfg:'設定'};
@@ -1049,7 +1111,8 @@
   function replied(f){return reachedIv(f)||!!(f.oc_at||{}).rej||f.oc==='rej';}   // 沒錄取也是一種回音
   function mmdd(d){return d?String(d).slice(5).replace('-','/'):'';}
   function counts(){var c={};
-    TABS.forEach(function(t){c[t[0]]=onPage(t[0]).length;});
+    // 面試頁也畫出已結束但仍留有題目的場次。
+    TABS.forEach(function(t){c[t[0]]=onPage(t[0]).length+(t[0]==='iv'?ivEndedIds().length:0);});
     return c;}
   // 規矩檢查(tools/board_check.py)用:每張卡該在哪一頁、數字怎麼算,跟畫面用同一套。只讀。
   window.__jobsalvoFlow={counts:counts,
@@ -1152,36 +1215,41 @@
     if(m)return m[0];
     return x;
   }
+  function summaryMark(j,key,value){
+    return value&&!_EMPTY.test(String(value).trim())?claimTag(claimOf(j,key)):'';
+  }
   function factsLine(j){
     var s=j.sum||{},b=[];
     function ok(x){return x&&!_EMPTY.test(String(x).trim());}
     function cut(x,n){x=String(x);return x.length>n?x.slice(0,n)+'…':x;}
-    if(ok(s.loc))b.push('<span class="fact">'+ic('map-pin')+'<span class="fact-t">'+esc(shortLoc(s.loc))+'</span></span>');
-    var ch=barChips(s.bar); if(ch)b.push(ch);
-    if(ok(s.salary))b.push('<span class="fact">'+ic('banknote')+'<span class="fact-t">'+esc(s.salary)+'</span></span>');
-    if(ok(s.deadline))b.push('<span class="fact dl">'+ic('hourglass')+esc(cut(s.deadline,24))+'</span>');
+    function fact(key,html){return '<span class="fact">'+html+summaryMark(j,key,s[key])+'</span>';}
+    if(ok(s.loc))b.push(fact('loc',ic('map-pin')+'<span class="fact-t">'+esc(shortLoc(s.loc))+'</span>'));
+    if(ok(s.bar)){var ch=claimFact(claimOf(j,'bar'))?barChips(s.bar):'';
+      b.push(fact('bar',ch||'<span class="fact-t">'+esc(s.bar)+'</span>'));}
+    if(ok(s.salary))b.push(fact('salary',ic('banknote')+'<span class="fact-t">'+esc(s.salary)+'</span>'));
+    if(ok(s.deadline))b.push(fact('deadline',ic('hourglass')+esc(cut(s.deadline,24))));
     var rk=riskBadge(j); if(rk)b.push(rk);
     return b.length?'<div class="facts">'+b.join('')+'</div>':'';
   }
   // 待你決定、正在準備:「為什麼適合你」是這一階做決定的依據,攤在標題下面(兩行,點一下看全文)。
   function fitLineHTML(j){var s=j.sum||{};
     if(!s.fit||_EMPTY.test(String(s.fit).trim()))return '';
-    return '<div class="fitline"><span class="fitline-k">為什麼適合你'+(s.by?'('+esc(s.by)+')':'')+'</span><span class="srv clamp c2" title="點一下看全文">'+esc(s.fit)+'</span></div>';}
+    return '<div class="fitline"><span class="fitline-k">為什麼適合你'+(s.by?'('+esc(s.by)+')':'')+summaryMark(j,'fit',s.fit)+'</span><span class="srv clamp c2" title="點一下看全文">'+esc(s.fit)+'</span></div>';}
   function _sumHTML(j,noFit){var s=j.sum;
     if(!s){return '<div class="ammo"><span class="k">彈藥</span>'+inl(j.ammo)+'</div><p class="note">'+inl(j.note)+'</p>';}
     function nil(x){return x==null||!String(x).trim()||_EMPTY.test(String(x).trim());}
     // 沒資料的欄位照樣留著(每張卡同一個位置),值淡成灰字;整段都沒有就只寫一行,不要連印四次「無」
     if([noFit?'':s.fit,s.co,s.bar,s.ammo].every(nil))return '<div class="sum"><div class="sr nil">這張還沒有摘要</div></div>';
-    function val(x,cls){return nil(x)?'<span class="srv nil">'+esc(x==null||!String(x).trim()?'無':x)+'</span>'
-      :'<span class="srv '+cls+'" title="點一下看全文">'+esc(x)+'</span>';}
+    function val(x,cls,key){return nil(x)?'<span class="srv nil">'+esc(x==null||!String(x).trim()?'無':x)+'</span>'
+      :'<span class="srv '+cls+'" title="點一下看全文">'+esc(x)+'</span>'+summaryMark(j,key,x);}
     // 每一段都先收兩三行:一張卡攤開五段全文,手機上一張就是一整屏。點一下看全文。
-    function rowc(l,x){return '<div class="sr"><span class="srk">'+l+'</span>'+val(x,'clamp c2')+'</div>';}
+    function rowc(l,x,key){return '<div class="sr"><span class="srk">'+l+'</span>'+val(x,'clamp c2',key)+'</div>';}
     // 摘要是 agent 讀 JD 寫的(找缺的判斷):標明是 agent 判斷,不是程式核對過的事實
     return '<div class="sum">'+(s.by?'<div class="sr"><span class="srk">'+ic('bot')+'</span><span class="srv">以下是 agent 讀 JD 寫的摘要('+esc(s.by)+')</span></div>':'')+
-      (noFit?'':'<div class="sr fitrow"><span class="srk">為什麼適合你</span>'+val(s.fit,'clamp')+'</div>')+
-      rowc('公司在做什麼',s.co)+
+      (noFit?'':'<div class="sr fitrow"><span class="srk">為什麼適合你</span>'+val(s.fit,'clamp','fit')+'</div>')+
+      rowc('公司在做什麼',s.co,'co')+
       // 地點/薪/死線已經在上面那行事實講過(factsLine),這裡不再重複一次。
-      rowc('門檻',s.bar)+rowc('彈藥',s.ammo)+
+      rowc('門檻',s.bar,'bar')+rowc('彈藥',s.ammo,'ammo')+
     '</div>';}
   // 履歷用文字顯示(不是頁圖):多份履歷只差動機這一行,存多張全頁圖是浪費——
   // 30 缺會變 28MB,他手機載不動。文字四份共 17KB,而且在手機上可選取、會換行。
@@ -1376,9 +1444,7 @@
   }
   function shipGateHTML(j){
     var why=shipBlocked(j);
-    // agent 判斷職缺關了(程式核對不了):可以一鍵說它判錯了
-    if(why)return '<span class="stage-blocked">'+ic('octagon-x')+' '+esc(why)+'</span>'+(judgedClosed(j)?
-      '<button class="ap-undo" type="button" data-judgedno="'+escA(j.id)+'">不對,職缺還在</button>':'');
+    if(why)return '<span class="stage-blocked">'+ic('octagon-x')+' '+esc(why)+'</span>';
     // 自動推過一次、你又退回來的(或開自動之前就在這一階的),自動流程不會再推它:照實講,不要掛著「會自動進」
     return (autoDo(j.id)==='advance'?'<span class="stage-wait">'+ic('hourglass')+' '+esc(nextOf(j.id).auto.line)+'</span>'
                 :(FLOW.auto_advance?'<span class="stage-wait">這張不會自動往下走(你退回來過,或開自動之前就在這),要投就按「可以投了」</span>':''))+
@@ -1398,10 +1464,15 @@
     if(ap==='ship')return actRow(sentBtnHTML(j,'程式不會替你送出;這是你自己在外部送出後的紀錄')+
       '<button class="stage-b back" data-back="ready" type="button">'+ic('arrow-left')+' 退回「待你決定」</button>',{sub:triesHTML(FB[_curId])+custPartHTML(j),one:'apply|'+_curId});
     if(ap==='sent'){var sf=FB[_curId]||{}, at=sf.sent_at||'';
+      var submitted=((sf.apply||{}).sent)||{};
+      // 確認頁在另一個主機:送出狀態採 agent 的判讀,卡片要把這個來源顯示出來(#591 US16)。
+      var submittedByAgent=submitted.host_note
+        ?'<span class="ev-weak">'+ic('triangle-alert')+' agent 說已送出,程式沒證實：'+esc(submitted.host_note)+'</span>':'';
       // 證據只有一種的要標出來:已投遞不等於「外面也對得上」。ev 是查證後留下的說明,
-      // 有值就代表這張只有送出頁的證據(沒有確認信、104 紀錄之類的第二個來源)。
+        // 有值就代表這張只有送出頁的證據(沒有確認信或應徵紀錄之類的第二個來源)。
       var ev=sf.ev||'';
       return actRow('<span class="stage-done">'+ic('send')+' 已投出'+(at?'　'+esc(mmdd(String(at).slice(0,10))):'')+ocStatusHTML(sf)+'</span>'+
+        submittedByAgent+
         (ev?'<span class="ev-weak" title="'+esc(ev)+'">'+ic('triangle-alert')+' 只有送出頁證據</span>':'')+
         // 在面試、或題庫裡有這家的專屬題:給一顆直接去準備那一家
         (onTab(_curId,'iv')?'<button class="stage-b adv" data-ivgo="'+escA(_curId)+'" type="button">'+ic('mic')+' 準備面試('+ivQsOf(_curId).length+' 題) '+ic('arrow-right')+'</button>':'')+
@@ -1471,7 +1542,7 @@
   // _EMPTY:卡上已經存的舊摘要裡 agent 寫的佔位字(research.blank 同一組);新的摘要沒值就是空的
   var _EMPTY=/^(無|未明載|未公開|不公開|未提供|未列|查無|n\/a|none|-)([（(].*)?$/i;
   // 這張能不能進可投遞:不能就回原因,能就回空字串(後台的投遞前把關,下一步的 gate:客製還沒處理完、驗收還沒跑完、
-  // 驗收沒過;你按「不對,職缺還在」當下就不擋)。單張那顆按鈕和「全部變成可投遞」共用同一份,不要一邊擋一邊放行
+  // 驗收沒過)。單張那顆按鈕和「全部變成可投遞」共用同一份,不要一邊擋一邊放行
   function shipBlocked(j){return nextOf(j.id).gate||'';}
   // 這張卡現在會寄的那幾份檔的客製紀錄 id(後台算的要寄的檔案)。
   // 換了履歷、語言或附件設定之後,舊的那筆紀錄留著(換回來還在),但它不會寄出去:不擋、也不能收下。
@@ -1480,10 +1551,8 @@
     var r=shipOf(j); if(!r||!r.resume_id||!(r.files||[]).length)return null;
     return r.files.map(function(f){return f.id;});
   }
-  // 驗收的這一條還擋不擋(後台的下一步 holds:soft 不擋;agent 判的關閉,他按過「不對,職缺還在」就不擋)
+  // 驗收的這一條還擋不擋(後台的下一步 holds:soft 不擋)
   function issueHolds(x){var k=JSON.stringify(x); return (nextOf(x.jid).holds||[]).some(function(h){return JSON.stringify(h)===k;});}
-  // 擋住這張的是 agent 判的職缺關了:給「不對,職缺還在」
-  function judgedClosed(j){return !!nextOf(j.id).closed;}
   // 還沒確認職缺還在不在:不擋,只在卡上提示一行。
   function linkNoteHTML(j){
     var st=D.status, n=((st&&st.issues)||[]).filter(function(x){return x.jid===j.id&&x.soft;});
@@ -1494,7 +1563,7 @@
   function readyPassList(){
     return onPage('ready').filter(function(j){return !shipBlocked(j)&&!isRisky(j);});
   }
-  // 主數字是可以送的張數;其餘的合成一個開合(收在清單最後),只用「已下架／可能已關」兩個詞(驗收擋下的別種原因照原因寫),一張一行
+  // 主數字是可以送的張數;其餘的合成一個開合(收在清單最後):可能已關、沒過驗收(照驗收的原句寫),一張一行
   function readyBarHTML(){
     var all=onPage('ready');
     if(!all.length)return '';
@@ -1509,28 +1578,26 @@
   }
   // 先不送的那幾張和原因計數:清單末端「先不送」那段和主按鈕旁那一句共用這一份
   function readyHeld(){
-    var all=onPage('ready'), pass=readyPassList(), cl=closedIn('ready'), st=D.status||{};
+    var all=onPage('ready'), pass=readyPassList(), st=D.status||{};
     var held=all.filter(function(j){return pass.indexOf(j)<0;});
-    var why=function(j){if(cl.indexOf(j.id)>=0)return '已下架';
+    var why=function(j){
       if(shipBlocked(j)){var x=(st.issues||[]).filter(function(x){return x.jid===j.id&&issueHolds(x);})[0]; return x?x.msg:'沒過驗收';}
       return '可能已關('+riskWhy(j)+')';};
-    var nCl=held.filter(function(j){return why(j)==='已下架';}).length, nRisk=held.filter(function(j){return /^可能已關/.test(why(j));}).length,
-      nBlk=held.length-nCl-nRisk;
+    var nRisk=held.filter(function(j){return /^可能已關/.test(why(j));}).length, nBlk=held.length-nRisk;
     var soft=(st.issues||[]).filter(function(x){return x.stage==='ready'&&placeOf(x.jid)==='ready'&&x.soft;}).length;
-    var parts=[nCl?nCl+' 張已下架':'',nRisk?nRisk+' 張可能已關':'',nBlk?nBlk+' 張沒過驗收':''].filter(Boolean);
-    return {held:held,why:why,cl:cl,soft:soft,parts:parts};
+    var parts=[nRisk?nRisk+' 張可能已關':'',nBlk?nBlk+' 張沒過驗收':''].filter(Boolean);
+    return {held:held,why:why,soft:soft,parts:parts};
   }
   function readyHeldHTML(){
-    var R=readyHeld(), held=R.held, why=R.why, cl=R.cl, soft=R.soft, parts=R.parts;
-    // 打開分三段:已下架(投不了,一顆移除)、可能已關(只是推測:點卡名跳到那張卡,還開著就在卡上按「可以投了」照送)、驗收擋下的別種原因
+    var R=readyHeld(), held=R.held, why=R.why, soft=R.soft, parts=R.parts;
+    // 打開分兩段:可能已關(只是推測:點卡名跳到那張卡,還開著就在卡上按「可以投了」照送)、驗收擋下的
     var li=function(j,em){return '<li><button class="todo-go" type="button" data-todogo="'+escA(j.id)+'">'+esc(cardName(j))+'</button>'+(em?'<em>'+esc(em)+'</em>':'')+'</li>';};
     var sec=function(t,list,extra,lead,em){return list.length?'<div class="held-sec"><div class="held-h"><span class="held-t">'+t+' <span class="n">'+list.length+'</span></span>'+(extra||'')+'</div>'+
       (lead?'<p class="held-d">'+lead+'</p>':'')+'<ul>'+list.map(function(j){return li(j,em?why(j).replace(/^可能已關\(|\)$/g,''):'');}).join('')+'</ul></div>':'';};
-    var gone=held.filter(function(j){return why(j)==='已下架';}), risky=held.filter(function(j){return /^可能已關/.test(why(j));}),
-      other=held.filter(function(j){return gone.indexOf(j)<0&&risky.indexOf(j)<0;});
+    var risky=held.filter(function(j){return /^可能已關/.test(why(j));}),
+      other=held.filter(function(j){return risky.indexOf(j)<0;});
     return (held.length?fold('st:ready','<span><span class="sthd">'+held.length+' 張先不送</span>:'+parts.join('、')+
           (soft?'<span class="n">&nbsp;· 另有 '+soft+' 張還沒查,不影響</span>':'')+'</span>',
-        sec('已下架',gone,cl.length?'<button class="stage-b" type="button" data-closedrm="ready">移除這 '+cl.length+' 張</button>':'')+
         sec('可能已關',risky,'','只是推測。還開著的,點名字到那張卡按「可以投了」照送。',true)+
         sec('沒過驗收',other,'','',true),
         {cls:'stbar stfold'}):'');
@@ -1600,7 +1667,7 @@
         // 待你決定:兩個出口(可以投了／先客製)緊接在「為什麼適合你」後面,要寄哪份履歷、附件排在下面。
         // 以前排在履歷、語言和一長串附件之後,手機上要捲 600px 才看得到要按的那顆。
         // 可投遞的主線是代投那一塊(apply),本來就排第一。
-        headHTML(false)+factsLine(j)+repostHTML(j)+riskHTML(j)+fitTop+
+        headHTML(false)+factsLine(j)+claimsHTML(j)+fitTop+
         (ap==='ship'?apply+vdb:ap==='ready'?'<div class="stage-top">'+stageRowHTML(ap,j)+'</div>'+vdb+apply:vdb+apply)+
         // 兩格筆記:「這份履歷哪裡不對」是準備區重跑時 agent 要讀的,只在正在準備、待你決定攤開;
         // 「原因」是當初表態的理由,跟改標記放在一起收進詳細。
@@ -1610,7 +1677,7 @@
         save+'</div></article>');
     }
     return lockLeaving(j.id,'<article class="card'+(j.bk?' bk':'')+'" data-fid="'+esc(j.id)+'">'+
-      headHTML(true)+factsLine(j)+srcLineHTML(j)+repostHTML(j)+riskHTML(j)+'<div class="chrow">'+_tagHTML(j)+chan+'</div>'+_sumHTML(j)+verdictBlockHTML(j)+
+      headHTML(true)+factsLine(j)+srcLineHTML(j)+claimsHTML(j)+'<div class="chrow">'+_tagHTML(j)+chan+'</div>'+_sumHTML(j)+verdictBlockHTML(j)+
       '<div class="fb">'+sentBtnsHTML(sent,j.id)+(removed(j.id)?'':stageRowHTML(ap,j)+(ap?'':sentFoldHTML(j)))+note_t+save+'</div></article>');
   }
   // 卡歸在哪一家:後台算好跟著職缺送來的(card.label_jobs:別名、職稱字、法律字尾、同一家只有一個寫法)
@@ -1738,17 +1805,12 @@
     var listed=function(id){if(kind!=='ship')return false; var j=jobOf(id); if(!j)return false; var S=cardState(j); return !S.locked&&!S.busy&&!!S.todo;};
     var mine=(st.issues||[]).filter(function(x){return here(x)&&issueHolds(x)&&!listed(x.jid);});
     var soft=(st.issues||[]).filter(function(x){return here(x)&&!issueHolds(x);});
-    var what='履歷頁數、附件檔案與頁數'+(st.checked_links?'、連結':'');
+    var what='履歷頁數、附件檔案與頁數';
     var note=soft.length?'<div class="stbar ok">'+soft.length+' 張還沒確認職缺還在不在(不擋)</div>':'';
     // 全過關是「沒事」,佔一整塊等於把好消息當成通知在推。縮成一行小字,細節 title 裡有。
     // 驗收報告沒列問題,不代表這一階的卡都能往下走(例如驗收還沒跑完):照卡上實際擋住的張數講,
     // 不然上面寫「2 張沒過驗收」、下面寫「都過關」,兩句打架
     var held=(kind==='ready'||kind==='ship')?onPage(kind).filter(function(j){return shipBlocked(j)&&!listed(j.id);}).length:0;
-    // 驗收查到已下架的,是沒過驗收那幾張裡的一部分:收進同一個總表(標題講明「其中」),不另起一組張數讓他分不清
-    var cl=(kind==='ship'||kind==='ready')?closedIn(kind).filter(function(id){return !listed(id);}):[];
-    var clBar=cl.length?'<div class="rvbar"><span class="rvbar-t">沒過驗收的裡面,有 <b>'+cl.length+'</b> 張職缺已經下架,投不了了</span>'+
-      '<button class="stage-b rv-risk" type="button" data-closedrm="'+kind+'" title="移到「已移除」(可以復原):'+
-      escA(cl.map(function(id){return cardName(jobOf(id)||id);}).join('、'))+'">移除這 '+cl.length+' 張已下架的</button></div>':'';
     if(!mine.length&&held)return '<div class="stbar bad"><span class="sthd">'+held+' 張還不能往下走</span>,原因寫在各張卡上</div>'+note;
     // 準備履歷:驗收只查履歷頁數、附件這些,還沒產履歷的卡不算「過關」。先講還有幾張沒開始、要按哪一顆
     var wait=kind==='prep'?onPage('prep').filter(function(j){return !rzBuilt(j);}).length:0;
@@ -1767,14 +1829,14 @@
     // 收成一行:每張卡上本來就寫了自己的原因,這裡是總表。攤開的話手機上一整塊擋在卡片前面。
     // 「·」用不斷行空白黏在前一段後面:折行時新的一行不會以「·」開頭
     // 標題一句講結論(擋住的是哪種);不擋的(還沒查職缺在不在)放進打開後的內容,「驗收」查什麼也寫在打開的第一行
-    var sum=mine.length+' 張沒過驗收'+(cl.length===mine.length?':職缺已下架,投不了':cl.length?',其中 '+cl.length+' 張職缺已下架':'');
+    var sum=mine.length+' 張沒過驗收';
     return fold('st:'+kind,'<span class="sthd">'+sum+'</span>',
-      '<div class="stwhen">驗收是送出前的機械檢查,查'+what+'('+esc(st.at)+')</div>'+clBar+'<ul>'+li+'</ul>'+
+      '<div class="stwhen">驗收是送出前的機械檢查,查'+what+'('+esc(st.at)+')</div><ul>'+li+'</ul>'+
       (soft.length?'<div class="stwhen">另外 '+soft.length+' 張還沒查職缺在不在,照常可以投</div>':''),{cls:'stbar bad stfold'});
   }
   // 「正在準備」「待你決定」各自獨立分頁,點哪個只看哪塊。
   // ---- 🌱 指名要找的:他在卡片/公司列上點「找類似的」「找這家更多」,先累積成一張清單 ----
-  // 不是第四種找法:就是「更深」,範圍由他指定(converge 那邊統一走 deep)。
+  // 不是第四種找法:就是「更深」,範圍由他指定(find 那邊統一處理)。
   // 為什麼累積不是點了就跑:找缺那隻 agent 的固定成本是十幾分鐘,而且一次只開一隻;
   // 分開點本來就會排隊,與其隱形排隊,不如給他一張看得見、可以刪的清單,按一次一起跑。
   // 找缺那隻 agent 要不要放手自己派幾隻。預設關著(他原本的規則:一輪一隻,平行吃不到 cache
@@ -1941,7 +2003,7 @@
     return '<div class="todo"><div class="todo-top"><b class="todo-h">要你處理:'+head+'</b>'+aq+rmAll+'</div>'+
       (rows.length?'<ul>'+(more?rows.slice(0,3):rows).join('')+'</ul>':'')+more+'</div>';
   }
-  // 📬 查應徵進度(tools/reply_run.py):查設定的信箱和登記過應徵紀錄頁的平台,程式照回音改狀態,送出太久沒回音記沒下文(天數在設定)。
+  // 📬 查應徵進度(tools/progress.py):agent 查設定的信箱和適用的應徵紀錄頁,程式讀分頁、核對引用後改狀態,送出太久沒回音記沒下文。
   var REPLIES={};
   // 每條「跑」的那一列:自動流程開著就標出來;開啟之前就在這一階的舊卡要不要也交給它,一顆按鈕
   // 開啟自動流程那一刻就在這一階的舊卡裡,按「開自動前就在的 N 張也交給自動」會交出去的那幾張。按鈕的張數跟按下去交的是同一份:
@@ -1991,12 +2053,13 @@
     return '<div id="replybar" class="prepbar'+(p.running?' run':'')+'">'+
       (p.running?'':runNHTML('replies',n))+
       '<button class="stage-b adv" data-replyrun="1" type="button"'+((p.running||!n)?' disabled':'')+
-      ' title="查你設定的信箱和登記過應徵紀錄頁的平台,照回音改狀態(可以復原);送出後太久沒回音的記成沒下文">'+
+      ' title="查你設定的信箱和適用的應徵紀錄頁,照回音改狀態(可以復原);送出後太久沒回音的記成沒下文">'+
       (p.running?AGENT+' 查應徵進度中…':ic('mail')+' 查應徵進度('+runNOf('replies',n)+' 張)')+'</button>'+skipN+st+autoBarHTML('sent')+runCtlHTML('replies',p)+pvBtn('replies')+'</div>';
   }
   function refreshRepliesUI(){var b=$('replybar'); if(b){var x=document.createElement('div'); x.innerHTML=repliesBarHTML(); b.replaceWith(x.firstElementChild);}}
   // 卡上的回音:agent 自動改了狀態就講依據、可以復原;回音一則一行,點開看原文連結。
-  var RP_KIND={confirm:'已收到申請',reject:'沒錄取',interview:'面試/測驗邀請',offer:'錄取',needinfo:'其他',other:'其他'};
+  // 跟 tools/progress.py KIND_WORD 同一張表(GLOSSARY 回音四種);表外的是 agent 原字,照原字顯示
+  var RP_KIND={confirm:'確認信',reject:'拒絕',interview:'面試或測驗邀請',offer:'錄取'};
   // 結案了(沒錄取、沒下文、我不去了)對方要的事也不用做了,不再掛「要你做」;按復原回到等回音、面試,待辦跟著回來
   function rpMaybe(f){return ((f.replies||{}).items||[]).filter(function(x){return x.maybe&&x.maybe.length&&!x.maybe_ok;});}
   function rpTodos(f){if(OC_END[f.oc])return []; return ((f.replies||{}).items||[]).filter(function(x){return x.todo&&!x.done;});}
@@ -2005,6 +2068,14 @@
     var checkedAt=r.at;
     if(checkedAt)h+='<div class="fm-line rp-checked">'+ic('calendar')+' '+esc(mdOf(checkedAt))+' 查過'+
       (items.length?'':'，沒有回音')+'</div>';
+    function sourceLine(x,what){
+      var name=esc(x.source||'未標記來源'), url=safeUrl(x.url||'');
+      if(url)name='<a href="'+escA(url)+'" target="_blank" rel="noopener">'+name+'</a>';
+      return '<div class="fm-line"><span class="ap-bad">⚠ '+what+'：</span>'+name+(x.reason?' · '+esc(x.reason):'')+'</div>';
+    }
+    // 程式自己讀不到的照實講;只有 agent 這樣說的標明是 agent 的說法(#591 US16)
+    (r.unchecked_sources||[]).forEach(function(x){h+=sourceLine(x,(x.by==='program'?'':'agent 說')+'這張卡本輪沒查過來源');});
+    (r.unshot_sources||[]).forEach(function(x){h+=sourceLine(x,'程式讀到了這個來源,但沒截到那一頁');});
     var oa=f.oc_auto, by=oa&&(r.items||[]).filter(function(x){return x.id===oa.by;})[0];
     // 信算哪一種是 agent 判斷(程式核對不了):標明、附它抄的那一句原文(程式核對過在信裡);
     // 程式沒讀到原文的(agent 補查的來源)照實講。程式自己記的沒下文不是 agent 判斷
@@ -2022,7 +2093,7 @@
     var td=rpTodos(f);
     if(td.length)h+='<div class="fm-line"><span class="ap-bad">'+ic('hand')+' 要你做:'+esc(td.map(function(x){return x.todo;}).join(';'))+'</span>'+
       '<button class="ap-undo" type="button" data-rpdone="'+escA(id)+'">做好了</button></div>';
-    if(items.length)h+=fold('rp:'+id,ic('mail')+' 回音 '+items.length+' 則　最新:'+esc(RP_KIND[items[0].kind]||'')+' '+esc(mmdd(items[0].date))+
+    if(items.length)h+=fold('rp:'+id,ic('mail')+' 回音 '+items.length+' 則　最新:'+esc(RP_KIND[items[0].kind]||items[0].kind||'')+' '+esc(mmdd(items[0].date))+
       (r.at?'<span class="n">　'+esc(mmdd(r.at))+' 查的</span>':''),
       '<ul class="rp-list">'+items.map(function(x){return '<li><span class="rp-k">'+esc(RP_KIND[x.kind]||x.kind||'')+'</span>'+
         esc(mmdd(x.date))+' · '+esc(x.src||'')+' · '+(x.link?'<a href="'+escA(safeUrl(x.link))+'" target="_blank" rel="noopener">'+esc(x.subject||'打開')+'</a>':esc(x.subject||''))+
@@ -2359,8 +2430,8 @@
   function ivJobHeadHTML(id){
     var j=jobOf(id), s=(j&&j.sum)||{};
     var ok=function(x){return x&&!_EMPTY.test(String(x).trim());};
-    var rows=[['這個缺要什麼',s.bar],['公司在做什麼',s.co]].filter(function(r){return ok(r[1]);});
-    var sum=rows.length?'<div class="sum">'+rows.map(function(r){return '<div class="sr"><span class="srk">'+r[0]+'</span><span class="srv clamp c2" title="點一下看全文">'+esc(r[1])+'</span></div>';}).join('')+'</div>'
+    var rows=[['這個缺要什麼','bar'],['公司在做什麼','co']].filter(function(r){return ok(s[r[1]]);});
+    var sum=rows.length?'<div class="sum">'+rows.map(function(r){return '<div class="sr"><span class="srk">'+r[0]+'</span><span class="srv clamp c2" title="點一下看全文">'+esc(s[r[1]])+'</span>'+summaryMark(j,r[1],s[r[1]])+'</div>';}).join('')+'</div>'
       :'<p class="iv-empty">這張卡還沒有 JD 摘要。</p>';
     var link=/^https?:/.test(id)?'<a class="jd-link" href="'+escA(id)+'" target="_blank" rel="noopener">看職缺原頁<span class="jd-go">↗</span></a>':'';
     var off=(FB[id]||{}).oc==='offer'?'<span>'+ic('party-popper')+' Offer</span>':'';
@@ -2440,7 +2511,7 @@
     var items=BANK.items||[], q=ivQuery, live=ivJobIds(), ended=ivEndedIds(), h='';
     // 兩個頁籤:面試(一場一行,點進那一場)、題庫(全部題目照走到哪一站)
     var shList=items.filter(function(it){return ivIsShared(it.id);});
-    h+='<div class="iv-tabs"><button type="button" class="rchip'+(IVVIEW!=='bank'&&IVVIEW!=='share'?' on':'')+'" data-ivview="iv">面試 <b>'+live.length+'</b></button>'+
+    h+='<div class="iv-tabs"><button type="button" class="rchip'+(IVVIEW!=='bank'&&IVVIEW!=='share'?' on':'')+'" data-ivview="iv">面試 <b>'+(live.length+ended.length)+'</b></button>'+
       '<button type="button" class="rchip'+(IVVIEW==='share'?' on':'')+'" data-ivview="share" title="共有題:每一場面試都會帶上的題(自我介紹、期望待遇…)">每場都帶的共有題 <b>'+shList.filter(function(it){return !it.parent;}).length+'</b></button>'+
       '<button type="button" class="rchip'+(IVVIEW==='bank'?' on':'')+'" data-ivview="bank">題庫 <b>'+items.length+'</b></button></div>';
     if(q){
@@ -2460,6 +2531,7 @@
     } else if(IVVIEW!=='bank'){
       if(IVOPEN&&(live.indexOf(IVOPEN)>=0||ended.indexOf(IVOPEN)>=0))h+=ivJobPageHTML(IVOPEN);   // 打開過的那一場已經不在這一頁的清單(面試中、已結束的面試都不是):回清單,不然籤上 0 張、頁面還開著它
       else{
+        if(IVOPEN)ivSetView(IVVIEW,'');
         // 面完了、還沒記結果的排到最後,一場下面一排結果鈕(跟已投出卡上同一套,點了就記);題目和紀錄照樣點那一列進去
         var isDone=function(id){return !ivNext(id)&&ivRounds(id).length>0;}, up=live.filter(function(id){return !isDone(id);}), dn=live.filter(isDone);
         h+=live.length?(up.length?'<div class="ivlist">'+up.map(ivJobRowHTML).join('')+'</div>':'')+
@@ -2633,14 +2705,27 @@
   // 桌機有鍵盤(1-4 表態、P 加入準備、←→ 上下一張)。卡片是同一個 cardHTML,按鈕走同一套處理器,存法完全一樣。
   // 順序在按下去那一刻定下來:標完的卡會離開這一頁,清單不能跟著重排。
   var REVIEW=null, _rvTimer=null, LASTLIST=[];
-  // 可能已經關了的缺:原頁打不開、掛超過半年、死線已過(卡上 ⚠ 那幾個訊號)。一張一張看時排到最後,也可以一次收掉。
-  function isRisky(j){if(isDead(j))return true; var n=daysSince(j.posted_at); if(n!==null&&n>180)return true;
-    return deadlinePassed(j);}
+  // 可能已經關了的缺:原頁打不開、刊登超過他設的天數、死線已過(卡上 ⚠ 那幾個訊號)。一張一張看時排到最後,也可以一次收掉。
+  function isRisky(j){return isDead(j)||postedTooLong(j)||deadlinePassed(j);}
+  // 刊登超過幾天算可能已關:存在 jobsalvo.json,每台裝置從伺服器讀同一個設定,預設照舊 180 天。
+  function riskDays(){var n=parseInt(CFG.risk_days,10); return n>0?n:180;}
+  // 升級時先把這台瀏覽器舊的自訂值搬進共用設定;完成後所有裝置都只讀 jobsalvo.json。
+  function migrateRiskDaysSetting(){if(CFG.risk_days_configured)return;
+    var n=180; try{var old=parseInt(localStorage.getItem('sts_risk_days')||'',10); if(old>0)n=Math.min(old,3650);}catch(e){}
+    fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({set:{'board.risk_days':n}})}).then(function(r){return r.json().then(function(d){
+        if(!r.ok||!d.ok)throw Error(d.msg||'儲存失敗'); return d;});}).then(function(){
+          CFG.risk_days=n; CFG.risk_days_configured=true;
+          try{localStorage.removeItem('sts_risk_days');}catch(e){}
+          renderApp();
+        }).catch(function(err){snack('可能已關天數搬進共用設定時沒存成：'+err.message);});}
+  migrateRiskDaysSetting();
+  function postedTooLong(j){var n=daysSince(j.posted_at); return n!==null&&n>riskDays();}
   function rvList(list){var g=_coOrder(list,'browse'), ids=[], late=[];
     g.cos.forEach(function(co){sortJobs(g.byCo[co]).forEach(function(j){if(!justMarked[j.id])(isRisky(j)?late:ids).push(j.id);});});
     return ids.concat(late);}
   function riskList(list){return list.filter(function(j){return !justMarked[j.id]&&isRisky(j)&&!(FB[j.id]||{}).app;});}
-  function riskWhy(j){var r=[],n=daysSince(j.posted_at); if(isDead(j))r.push('原頁打不開'); if(n!==null&&n>180)r.push('掛超過半年'); if(deadlinePassed(j))r.push('死線已過');
+  function riskWhy(j){var r=[]; if(isDead(j))r.push('原頁打不開'); if(postedTooLong(j))r.push('掛超過 '+riskDays()+' 天'); if(deadlinePassed(j))r.push('死線已過');
     return r.join('、');}
   function rvBarHTML(list){
     var n=rvList(list).length; if(!n)return '';
@@ -2651,7 +2736,9 @@
       (meh.length?'<button class="stage-b rv-risk" type="button" data-mehrm="1">移除 <b class="bulk-n" data-bulkn="meh">'+bulkN('meh',meh)+'</b> 張放超過一個月的</button>':'')+
       // 出錯了那一頁進去是檢查(放回原處或移除),不是表態
       '<button class="stage-b adv rv-start" type="button" data-rvstart="1">'+ic('play')+(active==='techerr'?' 一張一張檢查':' 一張一張看')+'<span class="rv-n">'+n+'</span></button>'+
-      (risk.length?bulkPvHTML('risk',risk,'原頁打不開、掛超過半年或死線已過的。'+rmHint,function(j){return esc(riskWhy(j));}):'')+
+      (risk.length?bulkPvHTML('risk',risk,'原頁打不開、掛超過 '+riskDays()+' 天或死線已過的。'+rmHint,function(j){return esc(riskWhy(j));},'',
+        '<label class="bulk-hint">刊登超過 <input type="number" min="1" max="3650" inputmode="numeric" data-riskdays value="'+
+        riskDays()+'" style="width:5em"> 天算可能已關</label>'):'')+
       (meh.length?bulkPvHTML('meh',meh,'標「普通」、進板超過一個月還沒往下走的(表態照樣留著給找缺學你的口味)。'+rmHint,function(j){return esc(addedText(j));}):'')+'</div>';}
   // 批次動作(可能已關、放太久的普通一次移除,待你決定一次送去可以投了)按之前看得到是哪幾張:按鈕後面一個開合,一張一行打勾。
   // 取消勾的這次不動(只記在這一頁,重新整理就恢復全勾);按鈕上的張數跟著勾選變,按下去動的就是勾著的那幾張
@@ -2665,11 +2752,18 @@
   function bulkSumHTML(key,list){var off=list.length-bulkN(key,list);
     return '看是哪 '+list.length+' 張'+(off?',取消勾了 '+off+' 張':',可取消勾選');}
   // lead:開合標題前面先寫的(待你決定:是哪幾家),不用打開就掃得到
-  function bulkPvHTML(key,list,hint,sub,lead){var x=BULKX[key]||{};
+  function bulkPvHTML(key,list,hint,sub,lead,extra){var x=BULKX[key]||{};
     return fold('bulk:'+key,(lead?'<span class="bulk-lead">'+lead+'</span>':'')+'<span class="bulk-k" data-bulksum="'+escA(key)+'">'+bulkSumHTML(key,list)+'</span>',
-      '<p class="bulk-hint">'+esc(hint)+'</p><div class="bulk-list">'+list.map(function(j){
+      '<p class="bulk-hint">'+esc(hint)+'</p>'+(extra||'')+'<div class="bulk-list">'+list.map(function(j){
         return '<label class="bulk-row"><input type="checkbox" data-bulkx="'+escA(key)+'" value="'+escA(j.id)+'"'+(x[j.id]?'':' checked')+'>'+
           '<span class="bulk-t">'+esc(cardName(j))+(sub?'<span class="bulk-sub">'+sub(j)+'</span>':'')+'</span></label>';}).join('')+'</div>',{cls:'bulkpv'});}
+  document.addEventListener('change',function(e){var t=e.target; if(!t.matches||!t.matches('[data-riskdays]'))return;
+    var old=riskDays(), parsed=parseInt(t.value,10), n=parsed>0?Math.min(parsed,3650):180;
+    t.value=String(n);
+    fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({set:{'board.risk_days':n}})}).then(function(r){return r.json().then(function(d){
+        if(!r.ok||!d.ok)throw Error(d.msg||'儲存失敗'); return d;});}).then(function(){CFG.risk_days=n; renderApp();})
+      .catch(function(err){t.value=String(old); snack('可能已關天數沒存成(已改回原本的天數),請再改一次：'+err.message);});});
   document.addEventListener('change',function(e){var t=e.target; if(!t.matches||!t.matches('[data-bulkx]'))return;
     var k=t.getAttribute('data-bulkx'), x=BULKX[k]=BULKX[k]||{}; if(t.checked)delete x[t.value]; else x[t.value]=1;
     var box=[].slice.call(document.querySelectorAll('[data-bulkx="'+CSS.escape(k)+'"]')), on=box.filter(function(c){return c.checked;}).length;
@@ -2685,10 +2779,6 @@
   function riskRemove(){
     bulkRemove(bulkPick('risk',riskList(LASTLIST).map(function(j){return j.id;})),'可能已關的缺');
   }
-  // 流程裡(還不能投、可投遞)驗收確定下架的:投不了了
-  function closedIn(stage){var st=D.status||{};
-    return (st.issues||[]).filter(function(x){return issueHolds(x)&&(x.kind==='closed'||(!x.kind&&/已下架/.test(x.msg||'')))&&placeOf(x.jid)===stage;})
-      .map(function(x){return x.jid;}).filter(function(v,i,a){return a.indexOf(v)===i;});}
   function rvStart(){
     var ids=rvList(LASTLIST); if(!ids.length){snack('這一頁沒有卡可以看');return;}
     REVIEW={ids:ids,i:0,tab:active,marked:0,noreason:false}; justMarked={}; rvSave();
@@ -3079,6 +3169,8 @@
         if(!r.ok)throw new Error('http'+r.status);
         return r.json();})
       .then(function(res){delete savePending[seq]; saving=Object.keys(savePending).length>0; saveEpoch++; saveErr=''; if(sentAns.length)INFLIGHT=[];
+        // 自己剛寫過伺服器,手上的版本號就不準了:版本號是內容指紋,別處改回原樣會跟存之前同號,比了以為沒變就永遠拿不回來
+        srvRev=null;
         if(res.building)watchBuild();
         var cards=res.cards||{}, undos=res.undo||[], rej={}, mine={}, replyOrder=res.save_order==null?'':String(res.save_order);
         (res.rejected||[]).forEach(function(x){rej[x.i]=x.msg;});
@@ -3130,7 +3222,7 @@
   // 兩者都不用他重整。規則:他自己還沒存的那幾筆永遠不覆蓋,其餘跟伺服器對齊。
   // ---- 看板上的「跑」:跑準備區、找新職缺 ----
   // 按鈕叫本機伺服器啟動:準備區是 cut_tailor(agent 判版本與語言、產履歷、建可投遞包,跑完自己把卡
-  // 送去「待你決定」),找缺是 converge(更深/更廣/指定方向,找到的放進「🆕 待評估」)。
+  // 送去「待你決定」),找缺是 find(更深/更廣/指定方向,找到的放進「🆕 待評估」)。
   // 進度跟著 /api/rev 那個小包回來,不另開一條輪詢;有東西在跑的時候改成 4 秒問一次。
   var PREP_PH={start:'準備開跑',fetching_pages:'抓取職缺頁文字',checking_links:'抓取職缺頁文字',agent:AGENT+' 判版本與語言',reconcile:'整理要寄的檔案'};
   var FIND_PH={start:'準備開跑',agent:'agent 在找',fold:'清洗:去重、硬排除、抓 JD',judge:'逐張對照你的原話判斷'};
@@ -3311,7 +3403,7 @@
     if(p.running)return '<span class="prep-st run">'+ic('hourglass')+' 正在找（'+esc(findWhat(p))+'）：'+esc(p.step||FIND_PH[p.phase]||p.phase)+'　· 已 '+minsOf(p)+' 分鐘'+
       (p.minutes?' / 最多找 '+p.minutes+' 分鐘':'')+'</span>'+runCtlHTML('research',p);
     if(p.phase==='done')return '<span class="prep-st ok">'+ic('circle-check')+' 上一輪（'+esc(findWhat(p))+'）'+hhmm(p.finished_at)+' '+
-      (p.timeup?'時間到':'找完')+'：'+findTally(p)+'</span>';
+      (p.timeup?'時間到':'找完')+'：'+findTally(p)+(p.msg?' · '+esc(p.msg):'')+'</span>';
     if(p.phase==='stopped')return '<span class="prep-st">'+ic('square')+' 上一輪你按了停止'+(p.graceful?':新增 '+(p.added||0)+' 筆'+
       (p.pending?',還有 '+p.pending+' 張找到沒判,下一輪先判':''):'')+'。要找再按一次。</span>';
     return phaseSt(p,'research');
@@ -3442,7 +3534,7 @@
         var s=getSelection(); s.removeAllRanges(); s.addRange(r); try{document.execCommand('copy'); done();}catch(_e){}}
     }
   });
-  // 三種找法是他自己歸納的:更深、更廣、指定方向(converge.py 的 --mode)。一次只跑一輪。
+  // 三種找法是他自己歸納的:更深、更廣、指定方向(find.py 的 --mode)。一次只跑一輪。
   // 版面跟「跑準備區」「代投」同一個元件(.prepbar):按鈕 → 狀態 → 📝 prompt,三處長一樣、排一樣、
   // 說明一律放 title。以前這裡是另一套(摺疊面板、每個選項一行、說明文字掛旁邊),他要統一。
   // 這一條在每一頁都看得到(找缺跟哪一個分頁都沒關係),所以預設收成一行,
@@ -3459,35 +3551,30 @@
       ' title="找的那一段最多跑幾分鐘;空著是不限時(AI 自己決定)。時間到就停止找新的,找到的照樣判完進看板"'+
       ' aria-label="找幾分鐘,空著是不限時" value="'+(FINDMIN||'')+'"><span class="runn-u">分鐘</span>';
   }
-  // 這輪條件(tools/find_terms.py):直接填數字,空著是不限。改了就存進設定(跨重整、跨裝置都一樣),按找缺時也一起帶上。
-  // 頁面查不到那一項的職缺預設留著、卡上標出來;勾「查不到就排除」才丟。
+  // 這輪條件(tools/find_terms.py):直接填數字,空著是不限。只在頁面欄位有引用核對後比較。
   var FINDTERMS=CFG.find_terms||{};
   var TERMS=[['posted_days','上架','天內','number',1],['applicants_max','應徵','人以下','number',0],
              ['salary_min','月薪','元以上','number',1],['exp_max','經驗要求','年以下','number',0],['location','地點','','text']];
   function findTermsHTML(){
-    var strict=FINDTERMS.strict||[];
-    return '<div class="findterms" title="這輪條件:空著是不限;頁面查不到的預設留著、卡上標出來">'+
+    return '<div class="findterms" title="條件欄位引用核對後才比較；頁面缺欄位會留在待確認">'+
       TERMS.map(function(t){var v=FINDTERMS[t[0]]; v=(v===undefined||v===null)?'':v;
         return '<label class="fterm"><span class="fterm-k">'+t[1]+'</span>'+
           (t[3]==='text'
             ?'<input class="runn fterm-in" type="text" maxlength="80" data-fterm="'+t[0]+'" placeholder="不限,例如 台北 遠端" value="'+escA(String(v))+'">'
             :'<input class="runn fterm-in" type="number" inputmode="numeric" min="'+t[4]+'" data-fterm="'+t[0]+'" placeholder="不限" value="'+escA(String(v))+'">'+
              '<span class="runn-u">'+t[2]+'</span>')+
-          '<span class="fterm-x"><input type="checkbox" data-fstrict="'+t[0]+'"'+(strict.indexOf(t[0])>=0?' checked':'')+'>查不到就排除</span>'+
           '</label>';}).join('')+'</div>';
   }
   // 讀面板上現在填的條件;有一格不合理回 null(並說哪一格)
   function readFindTerms(){
-    var out={}, strict=[], bad='';
+    var out={}, bad='';
     TERMS.forEach(function(t){
       var inp=document.querySelector('#findrow [data-fterm="'+t[0]+'"]'); if(!inp)return;
       var raw=String(inp.value).trim(); if(raw==='')return;
       if(t[3]==='text'){out[t[0]]=raw.slice(0,80);}
       else{var n=Number(raw); if(!Number.isInteger(n)||n<t[4]){bad=bad||(t[1]+'要寫 '+t[4]+' 以上的整數,空著是不限'); return;} out[t[0]]=n;}
-      var cb=document.querySelector('#findrow [data-fstrict="'+t[0]+'"]'); if(cb&&cb.checked)strict.push(t[0]);
     });
     if(bad){snack(bad); return null;}
-    if(strict.length)out.strict=strict;
     return out;
   }
   function findPanelHTML(){
@@ -3529,7 +3616,7 @@
   // 這輪條件擋掉幾張、各是哪一項(research.py 記的 terms_missed)
   function missedTerms(r){var m=r.terms_missed||{}, ks=Object.keys(m); if(!ks.length)return '';
     var n=0; ks.forEach(function(k){n+=m[k];});
-    return '、不符條件 '+n+' 張('+ks.map(function(k){return k+' '+m[k];}).join('、')+')';}
+    return '、agent 回報不符條件 '+n+' 張('+ks.map(function(k){return k+' '+m[k];}).join('、')+')';}
   function findRoundsHTML(){
     var rs=(D.research||[]).slice(-5).reverse(); if(!rs.length)return '';
     var mute=((FB['__research__']||{}).mute)||[];
@@ -3882,7 +3969,6 @@
     var rmb=e.target.closest('[data-rmback]'); if(rmb){rmBack(rmb.getAttribute('data-rmback')); return;}
     if(e.target.closest('[data-riskrm]')){riskRemove(); return;}
     if(e.target.closest('[data-mehrm]')){bulkRemove(bulkPick('meh',mehOld(LASTLIST).filter(function(j){return !justMarked[j.id];}).map(function(j){return j.id;})),'放太久的「普通」'); return;}
-    var clr=e.target.closest('[data-closedrm]'); if(clr){bulkRemove(closedIn(clr.getAttribute('data-closedrm')),'已下架的缺'); return;}
     if(e.target.closest('[data-rvexit]')){rvExit(); return;}
     if(e.target.closest('[data-rvlast]')){rvBackToLast(); return;}
     var rva=e.target.closest('[data-rvat]'); if(rva){rvAt(+rva.getAttribute('data-rvat')); return;}
@@ -3933,7 +4019,7 @@
     var _co=e.target.closest('summary.cohead');
     if(_co&&!_co.parentNode.open)fillCo(_co.parentNode);
     // 代投:讓 agent 填表單 / 核准送出 / 取消核准 / 送出。最後一關一定是他按「✅ 核准送出」:
-    // 核准存下當下每一題的答案快照,之後答案一改核准就作廢(伺服器和 apply_run 也各擋一次)。
+    // 確認存下當下每一題的答案快照,之後答案一改確認就作廢(伺服器也會檢查)。
     var arun=e.target.closest('[data-applyrun]');
     if(arun){var ast=arun.getAttribute('data-applyrun'); startRun('apply',{stage:ast,limit:ast==='fill'?runN('apply'):0},arun); return;}
     var afo=e.target.closest('[data-applyfixopen]');
@@ -4003,10 +4089,6 @@
     var rmb=e.target.closest('[data-rpmaybe]');
     if(rmb){var mu=rmb.getAttribute('data-rpmaybe'), mt=rpMaybe(FB[mu]||{}); if(!mt.length)return;
       mt.forEach(function(x){x.maybe_ok=1;}); edit([mu],'收掉了'); return;}
-    // agent 判斷職缺關了,他說判錯了:這張不再因為這個判斷擋(board_status 之後也照這個記號不擋);可以復原
-    var jno=e.target.closest('[data-judgedno]');
-    if(jno){var ju=jno.getAttribute('data-judgedno'), jf=FB[ju]; if(!jf)return;
-      jf.judged_no=Object.assign({},jf.judged_no||{},{closed:today()}); edit([ju],'記下了:職缺還在,不再因為 agent 判斷關了而擋'); return;}
     var rdn=e.target.closest('[data-rpdone]');
     if(rdn){var ru=rdn.getAttribute('data-rpdone'), rt=rpTodos(FB[ru]||{}); if(!rt.length)return;
       rt.forEach(function(x){x.done=1;}); edit([ru],'收掉了'); return;}
@@ -4113,7 +4195,7 @@
       FB[eid]=FB[eid]||{};
       if(dsBusyWhy(eid)){snack(dsBusyWhy(eid)); return;}
       delete justMarked[eid];
-      // 出錯了:確認送出一起作廢。跟程式的閘門(cut_tailor._techerr)同一組:原本的心情、階段另存 s0、app0,「出錯了」頁可以放回原處
+      // 出錯了:確認送出一起作廢。原本的心情、階段另存 s0、app0,「出錯了」頁可以放回原處
       var ef=FB[eid], eset={s:'techerr',app:null,live_ok:null};
       if(ef.s&&ef.s!=='techerr')eset.s0=ef.s;
       if(ef.app)eset.app0=ef.app;
@@ -4226,7 +4308,7 @@
   document.addEventListener('visibilitychange',function(){if(document.hidden)flushSave(true);});
   // 找缺條件那幾格:打完(離開格子、按 Enter、勾選)就存進設定
   document.addEventListener('change',function(e){
-    if(!(e.target.closest&&e.target.closest('#findrow [data-fterm],#findrow [data-fstrict]')))return;
+    if(!(e.target.closest&&e.target.closest('#findrow [data-fterm]')))return;
     var terms=readFindTerms(); if(!terms)return;
     fetch('/api/settings/find_terms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({terms:terms})})
       .then(function(r){return r.json();}).then(function(d){
@@ -4619,6 +4701,7 @@
     var id=escA(it.id), j=it.job?jobOf(it.job):null, when=String(it.at||'').replace('T',' ').slice(5,16), todo=inboxTodo(it), nv=!todo&&!it.info;
     var msg=ibText(it.msg), chars=Array.from(msg), preview=chars.length>120?chars.slice(0,119).join('')+'…':msg;
     var go=/^https?:\/\//.test(String(it.url||''))?it.url:'';   // 後台一律附好(agent_report.page_of)
+    var host=''; try{if(go)host=new URL(go).hostname;}catch(_e){}
     // 收著時摘要最多 120 字;打開後全文放在開合的內容裡(標題列不能選字、點一下就收起來),摘要用 CSS 讓位,同一段字只看得到一份。分組時來源寫在組名,不再每則寫一次
     var full='<div class="ib-full">'+esc(msg)+'</div>';
     var doIt=!!(it.need&&!it.done&&todo);
@@ -4627,7 +4710,7 @@
         (doIt?'<span class="ib-do">'+esc(ibText(it.need))+'</span>':'')+
         '<span class="ib-metarow"><span class="ib-meta">'+esc(meta)+'</span>'+(it.n>1?'<span class="ans-use">×'+it.n+'</span>':'')+'</span>'+
         '<span class="ib-links">'+
-        (go&&!it.done?'<a class="ap-shot'+(nv?' ib-sub':'')+'" href="'+escA(go)+'" target="_blank" rel="noopener">打開'+(nv?'那一頁':'要處理的那一頁')+' ↗</a>':'')+
+        (go&&!it.done?'<a class="ap-shot'+(nv?' ib-sub':'')+'" href="'+escA(go)+'" target="_blank" rel="noopener">打開'+(host?' '+esc(host):nv?'那一頁':'要處理的那一頁')+' ↗</a>':'')+
         (it.ev?evLink(it.ev.u||it.job,it.ev.f||it.ev,'那一頁的截圖'):it.noev&&!nv?'<span class="ans-use">'+esc(it.noev)+'</span>':'')+
         '</span></span>';
     var goto=j?'<div class="ib-job">'+jdTitleHTML(j)+'<button class="ap-undo" type="button" data-inboxgo="'+escA(it.job)+'">去看那張卡</button></div>'
@@ -4822,14 +4905,17 @@
   // ---- ⚙ 設定:使用者只碰網頁就能把 jobsalvo 設定好(履歷、硬規則、填表做法、分類、agent、ego) ----
   // 資料在伺服器的 /api/settings;這裡改的是一份工作副本(CFGW 設定、CFGT 三份文字),按「💾 儲存設定」才寫回。
   // 上傳檔案例外:檔一傳上去就連同設定一起存,不用再按儲存(不然使用者以為傳好了,其實沒記進設定)。
-  var CFGD=null, CFGW=null, CFGT=null, CFGDIRTY=false, CFGAWAY=false, CFG0='';
-  // 全部同步:設定頁那顆和回報裡「沒附截圖」那幾則的重跑入口共用。設定有沒存的改動就先存
-  function cfgStartSync(){
-    var go=function(){fetch('/api/run/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+  var CFGD=null, CFGW=null, CFGT=null, CFGDIRTY=false, CFGAWAY=false, CFG0='', CFGWNOTE=null, CFGWNOTE_LOADING=false, CFGWNOTE_ERROR='';
+  // 同步:設定頁的「全部同步」、每份的「同步這份履歷」和回報裡「沒附截圖」那幾則的重跑入口共用;
+  // 帶 platform、lang、variant 只同步那一份,不帶就是全部同步。設定有沒存的改動就先存
+  function cfgStartSync(args){
+    args=args&&typeof args==='object'?args:{};
+    var label=args.platform&&args.lang&&args.variant?'這份平台履歷同步':'全部同步';
+    var go=function(){fetch('/api/run/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(args)})
       .then(function(r){return r.json().then(function(d){if(!r.ok)throw Error(d.msg||'同步沒開始'); return d;});})
-      .then(function(d){MISC.sync=d; renderCfg(); snack('全部同步已在背景開始'); setTimeout(syncFromServer,1000);})
-      .catch(function(err){snack('全部同步沒開始：'+err.message);});};
-    if(CFGDIRTY)cfgSave(false).then(go).catch(function(err){snack('設定沒存成：'+err.message+'。改好設定後再按「全部同步」');}); else go();}
+      .then(function(d){MISC.sync=d; renderCfg(); snack(label+'已在背景開始'); setTimeout(syncFromServer,1000);})
+      .catch(function(err){snack(label+'沒開始：'+err.message);});};
+    if(CFGDIRTY)cfgSave(false).then(go).catch(function(err){snack('設定沒存成：'+err.message+'。改好設定後再按「'+label+'」');}); else go();}
   // 有沒有改動 = 工作副本跟讀進來(或剛存好)那一刻比:改了又改回去、刪掉再按復原,都算沒有改動
   function cfgSnap(){return JSON.stringify([CFGW,CFGT]);}
   function _clone(o){return JSON.parse(JSON.stringify(o===undefined?null:o));}
@@ -4964,7 +5050,7 @@
   }
   // 平台履歷卡住、要你處理的:這一次全部同步沒過的,加上回報裡全部同步還掛著要你做的(多半卡在登入、驗證)。一份平台履歷 = 平台|語言|履歷
   function cfgSyncKey(p,l,v){return p+'|'+l+'|'+v;}
-  // states:狀態已同步(ok)的那一份不看上一輪的失敗結果(之後被別的流程同步成功就是這樣)
+  // states:狀態已跟上(ok)的那一份不看上一輪的失敗結果(之後被別的流程同步成功就是這樣)
   function cfgSyncStuck(states){var progress=MISC.sync||{}, out={}, done={};
     (states||[]).forEach(function(r){if(r.state==='ok')done[cfgSyncKey(r.platform,r.lang,r.variant)]=1;});
     (progress.results||[]).forEach(function(x){var k=cfgSyncKey(x.platform,x.lang,x.variant); if(!x.ok&&!done[k])out[k]={msg:x.msg||'請看回報',who:x.platform};});
@@ -4973,20 +5059,128 @@
       if(!out[k]||!out[k].ib)out[k]={msg:ibText(x.need||'看回報'),ib:x.id,who:(/^\S+/.exec(x.msg||'')||[''])[0]};});
     return out;}
   function cfgStuckHTML(x){return '<div class="cfg-help">卡住：'+esc(x.msg)+(x.ib?' <button class="cfg-b" type="button" data-openinbox="'+escA(x.ib)+'">看回報</button>':'')+'</div>';}
-  function cfgSyncHTML(){
+  function cfgSyncHTML(part){
     var progress=MISC.sync||{}, states=CFGD.profile_status||[], stuck=cfgSyncStuck(states);
-    var label={ok:'已同步','master-changed':'落後',unchecked:'還沒同步'};
+    var label={ok:'已跟上最新原稿','master-changed':'落後',unchecked:'還沒同步'};
+    function shot(round,file,title){
+      if(!round||!file||!/\.(png|jpe?g)$/i.test(file))return '';
+      var src='/api/sync-evidence?r='+encodeURIComponent(round)+'&f='+encodeURIComponent(file);
+      return '<figure class="cfg-sync-shot"><figcaption>'+esc(title)+'</figcaption><img loading="lazy" src="'+escA(src)+'" alt="'+escA(title)+'"></figure>';
+    }
+    // 沒字不等於沒讀到(next_step._change_text 同一條)
+    function changeText(c,side){return c[side+'_text']||(!c.reason?'（沒有文字）':c[side+'_status']==='readable'?'（這筆沒列文字）':'（沒有讀到）');}
+    function changeHTML(round,item,c,meta,index,pageKey){
+      var select=c.restorable&&c.change_id?'<label class="cfg-sync-select"><input type="checkbox" data-cfsync-change="'+
+        escA(JSON.stringify(meta))+'" value="'+escA(c.change_id)+'"> 選取恢復</label>':'';
+      var detail=fold(['cfg-sync-change',round,meta.platform,meta.lang,meta.variant,meta.version,pageKey,index].join(':'),
+        esc(item||'頁面變動')+' · '+esc((c.verdicts||[]).join('、')),
+        '<div class="cfg-sync-pair"><div><b>改前</b><pre>'+esc(changeText(c,'before'))+'</pre></div>'+
+        '<div><b>改後</b><pre>'+esc(changeText(c,'after'))+'</pre></div></div>'+
+        '<div class="cfg-sync-shots">'+shot(round,c.before_shot,'改前截圖')+shot(round,c.after_shot,'改後截圖')+'</div>',
+        {hcls:'cfg-sync-title'});
+      return '<div class="cfg-sync-change">'+select+detail+'</div>';
+    }
+    function visualHTML(v,r,review){
+      var changes=Array.isArray(v.page_changes)?v.page_changes:[], pages=Array.isArray(v.pages_compared)?v.pages_compared.slice():[];
+      var visibleChangeCount=changes.filter(function(c){
+        return !!c.change_id||(!c.reason&&(c.before_text||c.after_text));
+      }).length;
+      if(!pages.length){
+        var seen={}; changes.forEach(function(c){var key=String(c.page_tab_id||c.page_url||'');
+          if(key&&!seen[key]){seen[key]=1;pages.push({page_tab_id:key,page_url:c.page_url||''});}});
+      }
+      var defaultTab=pages.length?String(pages[0].page_tab_id||pages[0].page_url||''):'';
+      var grouped={}; changes.forEach(function(c){var key=String(c.page_tab_id||c.page_url||defaultTab); (grouped[key]||(grouped[key]=[])).push(c);});
+      var intended=(Array.isArray(v.intended_changes)?v.intended_changes:[]).map(function(x){
+        var fact=('before_read' in x||'after_read' in x)?
+          '改前讀得到：'+(x.before_read?'是':'否')+'；改後讀得到：'+(x.after_read?'是':'否'):
+          (x.marker||'沒比到');
+        return '<div class="cfg-sync-intent"><b>'+esc(x.item||v.item||'本機原稿')+'</b>'+
+          '<div class="cfg-help">頁面標記：'+esc(fact)+'</div><div class="cfg-sync-pair">'+
+          '<div><b>改前</b><pre>'+esc(x.before||'（沒有原文）')+'</pre></div>'+
+          '<div><b>改後</b><pre>'+esc(x.after||'（沒有新原文）')+'</pre></div></div></div>';
+      }).join('');
+      var captureStatus=v.capture_status||{}, captureHTML=(captureStatus.before||captureStatus.after)?
+        '<div class="cfg-help">拍改前：'+esc(captureStatus.before||'狀態不明')+'；拍改後：'+
+        esc(captureStatus.after||'狀態不明')+'。改後是 agent 叫拍改後那一刻頁上看到的，不代表平台已存好。</div>':'';
+      var listMarksHTML=(v.list_marks||[]).map(markHTML).join('');
+      var agentSteps=Array.isArray(v.agent_steps)?v.agent_steps:[];
+      var renderAgentSteps=function(steps){return steps.map(function(step,index){
+        var heading='第 '+(index+1)+' 次瀏覽器操作 · '+(step.phase||'時間不明');
+        var detail=step.action||'操作內容未記錄';
+        var compare=step.compared?'這次操作位於拍改前與拍改後之間':'這段期間的改動程式沒比到';
+        var screenshots=Array.isArray(step.screenshots)&&step.screenshots.length?step.screenshots:[step];
+        var screenshotsHTML=screenshots.map(function(page){
+          var pageLabel=[page.page_tab_id,page.page_url,page.title].filter(Boolean).join(' · ')||'頁面不明';
+          return '<div class="cfg-help">'+esc(pageLabel)+
+            (page.screenshot_error?'<br>截圖失敗：'+esc(page.screenshot_error):'')+'</div>'+
+            (page.shot?'<div class="cfg-sync-shots">'+shot(v.evidence,page.shot,'這次操作後的截圖')+'</div>':'');
+        }).join('');
+        return fold(['cfg-sync-step',v.evidence,r.platform,r.lang,r.variant,review.version,step.command_id||index].join(':'),
+          esc(heading+' · '+detail),
+          '<div class="cfg-help">'+esc(compare)+'</div>'+screenshotsHTML,
+          {cls:'cfg-sync-page'});
+      }).join('');};
+      var preCaptureSteps=agentSteps.filter(function(step){return step.phase==='拍改前之前';});
+      var otherAgentSteps=agentSteps.filter(function(step){return step.phase!=='拍改前之前';});
+      var preCaptureHTML=preCaptureSteps.length?'<div><b>拍改前之前的操作與截圖</b>'+renderAgentSteps(preCaptureSteps)+'</div>':'';
+      var agentStepsHTML=otherAgentSteps.length?'<div><b>其他 agent 操作與截圖</b>'+renderAgentSteps(otherAgentSteps)+'</div>':'';
+      // 沒逐處比的一種關係兩邊各存一列(pages_compared),畫一次就好
+      var drawn={};
+      pages=pages.filter(function(page){
+        if(page.compared!==false)return true;
+        var id=[page.before_tab_id,page.before_url,page.after_tab_id,page.after_url,page.reason_code||page.reason].join('\u0001');
+        if(drawn[id])return false; drawn[id]=1; return true;});
+      var pageHTML=pages.map(function(page,pageIndex){
+        var key=String(page.page_tab_id||page.page_url||''), rows=grouped[key]||[];
+        var title=pairTitle(page);
+        var details=rows.length?rows.map(function(c,index){return changeHTML(v.evidence,v.item,c,
+          {platform:r.platform,lang:r.lang,variant:r.variant,version:review.version},index,key);}).join(''):
+          '<div class="cfg-help">'+esc(page.compared===false?(page.reason||'程式沒比到'):'這一頁沒有可見文字變動')+'</div>';
+        details+=(page.marks||[]).map(markHTML).join('');
+        return fold(['cfg-sync-page',v.evidence,r.platform,r.lang,r.variant,review.version,pageIndex].join(':'),
+          esc(title)+' · '+rows.length+' 處',details,{cls:'cfg-sync-page'});
+      }).join('');
+      var comparedCount=pages.filter(function(page){return page.compared!==false;}).length;
+      return '<div class="cfg-sync-list">'+preCaptureHTML+
+        (intended?'<div><b>'+({restore:'這次要恢復的段落',fill:'這一輪填表代填的答案'}[v.task]||'這次本機原稿要改')+'</b>'+intended+'</div>':'')+
+        captureHTML+listMarksHTML+agentStepsHTML+
+        '<div class="cfg-help">程式比對 '+comparedCount+' 頁；共 '+visibleChangeCount+' 處可見變動</div>'+pageHTML+'</div>';
+    }
+    var lists=[];
     var rows=states.map(function(r){
       var x=stuck[cfgSyncKey(r.platform,r.lang,r.variant)];
       // 回報說卡住的:狀態那一格直接寫「卡住」加「看回報」(原因在回報裡,不另起一行,不然會把下面的履歷推到好幾屏外);
       // 這一次全部同步沒過、回報不在要你處理裡的(只是告知),照舊下一行寫原因
       var blocked=x&&!x.ib?cfgStuckHTML(x):'', stk=x&&x.ib;
       // 一份一列、名字跟狀態同一行(.cfg-sync):手機上 .cfg-k 撐滿一行的規則用在這裡,名字、狀態各一行又沒有分隔,十幾行看不出哪個狀態是哪一份
+      var review=r.sync_review||{}, changeRows=[], changesHTML=[];
+      (r.sync_visuals||[]).forEach(function(v){
+        var parts=Array.isArray(v.page_changes)?v.page_changes:[];
+        parts.forEach(function(c){changeRows.push(c);});
+        changesHTML.push(visualHTML(v,r,review));
+      });
+      var reviewHTML=review.version?'<div class="cfg-row"><span class="cfg-file">'+
+        esc(review.reviewed?'已看過最新同步清單':'最新同步清單尚未看過')+'</span>'+
+        (review.reviewed?'':'<button class="cfg-b go" type="button" data-cfsyncreview="'+
+          escA(JSON.stringify({platform:r.platform,lang:r.lang,variant:r.variant,version:review.version}))+'">看過這一版</button>')+'</div>':'';
+      var restoreHTML=changeRows.some(function(c){return c.restorable&&c.change_id;})?
+        '<div class="cfg-row"><button class="cfg-b" type="button" data-cfsyncrestore="'+
+        escA(JSON.stringify({platform:r.platform,lang:r.lang,variant:r.variant,version:review.version}))+'"'+
+        (progress.running?' disabled':'')+'>恢復選取段落</button><span class="cfg-file">只恢復勾選的頁面段落</span></div>':'';
       return '<div class="cfg-row cfg-sync"><span class="cfg-k">'+esc(r.platform)+' · '+esc(langName(r.lang))+' · '+esc(resumeName(r.variant))+'</span>'+
-        '<span class="cfg-file'+(r.confirmation_pending||stk?' pending':'')+'">'+
-        (r.confirmation_pending?ic('triangle-alert')+' 等你確認代填內容':stk?'卡住 · <button class="todo-go cfg-ib" type="button" data-openinbox="'+escA(x.ib)+'">看回報</button>':esc(label[r.state]||r.state))+'</span>'+
-        blocked+'</div>';}).join('');
-    return '<div class="cfg-row"><button class="cfg-b go" type="button" data-cfsync="1"'+(progress.running?' disabled':'')+'>'+
+        '<span class="cfg-file'+(r.board_error||r.confirmation_pending||stk?' pending':'')+'">'+
+        (r.board_error?ic('triangle-alert')+' '+esc(r.board_error):r.confirmation_pending?ic('triangle-alert')+' 等你確認代填內容':stk?'卡住 · <button class="todo-go cfg-ib" type="button" data-openinbox="'+escA(x.ib)+'">看回報</button>':esc(label[r.state]||r.state))+'</span>'+
+        '<button class="cfg-b" type="button" data-cfsync="'+
+        escA(JSON.stringify({platform:r.platform,lang:r.lang,variant:r.variant}))+'"'+
+        (progress.running?' disabled':'')+'>同步這份履歷</button>'+blocked+'</div>'+(lists.push(changesHTML.length?
+          // 一份一個預設收起的開合,「看過這一版」也在裡面:打開看過才按得到
+          fold('cfg:sync-list:'+cfgSyncKey(r.platform,r.lang,r.variant),'同步清單 · '+esc(r.platform)+' · '+esc(langName(r.lang))+' · '+
+            esc(resumeName(r.variant))+' · '+changeRows.length+' 處可見變動'+(review.version&&!review.reviewed?' · <span class="cfg-file pending">還沒看過</span>':''),
+            reviewHTML+restoreHTML+changesHTML.join(''),{cls:'cfg-sync-fold'}):reviewHTML),'');}).join('');
+    // 同步清單另外交出去,排在履歷清單後面:最上面只放「全部同步」和每一份的狀態,清單攤開不把履歷推出第一屏
+    if(part==='lists')return lists.join('');
+    return '<div class="cfg-row"><button class="cfg-b go" type="button" data-cfsync="{}"'+(progress.running?' disabled':'')+'>'+
       (progress.running?ic('hourglass')+' 全部同步中…':'全部同步')+'</button><span class="cfg-file" id="cfg-sync-status">'+
       esc(progress.msg||'只同步原始履歷與常用答案這次改到的地方')+'</span></div>'+
       (rows||'<p class="cfg-help">還沒有登記的平台履歷</p>')+
@@ -5114,14 +5308,65 @@
       fields.forEach(function(el){el.setAttribute('aria-label',title+((el.placeholder||'').trim()?':'+el.placeholder.trim():''));});
     });
   }
+  function cfgWebsiteNotesLoad(){
+    if(CFGWNOTE_LOADING)return;
+    CFGWNOTE_LOADING=true; CFGWNOTE_ERROR='';
+    return fetch('/api/settings/website_notes').then(function(r){if(!r.ok)throw Error('讀取失敗'); return r.json();})
+      .then(function(d){CFGWNOTE=Array.isArray(d.notes)?d.notes:[];},function(){CFGWNOTE=[]; CFGWNOTE_ERROR='網站筆記讀取失敗';})
+      .then(function(){CFGWNOTE_LOADING=false;
+        // 只換網站筆記那一塊:整頁重畫會換掉他正在打字的輸入框、正在看的開合
+        var old=active==='cfg'&&document.querySelector('#app details[data-fold="cfg:website-notes"]'); if(!old)return;
+        var x=document.createElement('div'); x.innerHTML=cfgWebsiteNotesHTML(); var now=x.firstElementChild;
+        old.replaceWith(now); autogrowAll(now);});
+  }
+  function cfgWebsiteNotesHTML(){
+    var body='<p class="cfg-help">筆記依主機名分組；agent 下次造訪同一個網站時可當參考，不是指示。新增網址只用來指定主機。</p>';
+    if(CFGWNOTE_LOADING)body+='<p class="cfg-file">讀取網站筆記中…</p>';
+    else if(CFGWNOTE_ERROR)body+='<p class="cfg-file">'+esc(CFGWNOTE_ERROR)+' <button class="cfg-b" type="button" data-wn-reload="1">重新讀取</button></p>';
+    else if(!CFGWNOTE||!CFGWNOTE.length)body+='<p class="cfg-file">還沒有網站筆記</p>';
+    else{
+      var groups={};
+      CFGWNOTE.forEach(function(n){var host=n.host||''; (groups[host]||(groups[host]=[])).push(n);});
+      body+=Object.keys(groups).sort().map(function(host){
+        var rows=groups[host].map(function(n){
+          var id=String(n.id||''), author=n.legacy?'舊筆記':(n.author==='user'?'使用者自訂':'Agent');
+          var evidence=n.card_id&&n.round_id?'<a class="cfg-b" data-wn-source="'+escA(id)+'" href="/api/evidence-folder?c='+
+            encodeURIComponent(n.card_id)+'&amp;r='+encodeURIComponent(n.round_id)+'" target="_blank" rel="noopener">開啟這輪證據</a>':'';
+          return '<div class="cfg-card" data-wn-id="'+escA(id)+'"><div class="cfg-row"><span class="cfg-file">'+author+
+            (n.date?' · '+esc(n.date):'')+'</span>'+evidence+'</div>'+
+            (n.url?'<div class="cfg-row"><span class="cfg-file">來源：'+esc(n.url)+'</span></div>':'')+
+            '<textarea class="cfg-in big" rows="3" aria-label="網站筆記 · '+escA(host)+'" data-wn-text="'+escA(id)+'">'+esc(n.text||'')+'</textarea>'+
+            '<div class="cfg-row"><button class="cfg-b" type="button" data-wn-save="'+escA(id)+'">儲存筆記</button>'+
+            '<button class="cfg-b warn" type="button" data-wn-delete="'+escA(id)+'">刪除</button></div></div>';
+        }).join('');
+        return '<h4 class="cfg-k">'+esc(host)+'</h4>'+rows;
+      }).join('');
+    }
+    body+='<div class="cfg-card"><div class="cfg-row"><label class="cfg-k">網址</label><input class="cfg-in" type="url" data-wn-url placeholder="https://example.com/職缺"></div>'+
+      '<div class="cfg-row"><label class="cfg-k">筆記</label><textarea class="cfg-in big" rows="3" data-wn-new-text placeholder="這個網站要留意什麼"></textarea></div>'+
+      '<div class="cfg-row"><button class="cfg-b" type="button" data-wn-add="1"'+(CFGWNOTE_LOADING?' disabled':'')+'>＋ 新增網站筆記</button></div></div>';
+    return fold('cfg:website-notes','🌐 網站筆記 <span class="n">'+(CFGWNOTE||[]).length+'</span>',body,{cls:'cfg-d'});
+  }
+  function cfgWebsiteNotesPost(data){
+    return fetch('/api/settings/website_notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+      .then(function(r){return r.json().then(function(d){if(!r.ok||!d.ok)throw Error(d.msg||('http '+r.status)); return d;});})
+      .then(function(d){CFGWNOTE=null; cfgWebsiteNotesLoad();
+        if(data.action==='undo')snack('網站筆記已復原');
+        else snack('網站筆記已存好',d.undo?function(){cfgWebsiteNotesPost({action:'undo',undo:d.undo});}:null);})
+      .catch(function(err){snack('網站筆記沒存成：'+err.message+'；請檢查內容後再試');});
+  }
   function renderCfg(){
     if(active!=='cfg')return;   // 讀設定是非同步的:讀好時他已經切到別頁,就不畫(不然設定頁蓋掉他正在看的那一頁)
     inApplyView=true;
     if(!CFGD){CFGAWAY=false; $('app').innerHTML='<div class="emptytab">讀取設定中…</div>'; cfgLoad(renderCfg); return;}   // 第一次讀就是最新的,讀好不用再讀
     // 從別的分頁回來、這頁沒有沒存的改動:背景重讀一次。別處剛存的(找缺那一列的分鐘數、另一個分頁)才看得到,
     // 他接著改、存也不會被擋成「設定在別的地方改過了」。先照舊的畫,讀好再重畫(他已經開始改就不重畫,免得搶走游標)
-    if(CFGAWAY&&!CFGDIRTY)cfgLoad(function(){if(!CFGDIRTY)renderCfg();});
+    if(CFGAWAY&&!CFGDIRTY){
+      cfgLoad(function(){if(!CFGDIRTY)renderCfg();});
+      CFGWNOTE=null; cfgWebsiteNotesLoad();
+    }
     CFGAWAY=false;
+    if(CFGWNOTE===null&&!CFGWNOTE_LOADING)cfgWebsiteNotesLoad();
     var resumes=CFGW.resume.resumes||[], attachments=CFGW.resume.attachments||[];
     var a=CFGW.agent||{}, agents=a.agents||[], b=CFGW.browser||{}, s=CFGW.search||{};
     var h=cfgChecklist();
@@ -5131,7 +5376,7 @@
       (cfgSyncSum()?cfgSyncHTML():'')+
       resumes.map(function(r,i){return cfgResumeHTML(r,i);}).join('')+
       '<div class="cfg-row"><input class="cfg-in" id="cfg-rnew" placeholder="新履歷名稱,例:工程版"><button class="cfg-b" type="button" data-cfresadd="1">＋ 新增履歷</button></div>'+
-      (cfgSyncSum()?'':cfgSyncHTML())+
+      (cfgSyncSum()?'':cfgSyncHTML())+cfgSyncHTML('lists')+
       '<div class="cfg-row"><label class="cfg-k">合併檔名稱</label><input class="cfg-in" data-cf="resume.merged_name" value="'+escA(CFGW.resume.merged_name||'')+'" placeholder="空白就叫 merged.pdf;例:{resume}+{n}"></div>'+
       '<p class="cfg-help">表單只收一個檔時,'+esc(AGENT)+' 上傳履歷接附件的合併檔。{resume} 換成履歷的送出檔名(不含 .pdf),{n} 換成附件數。內容不同的檔不能同名:你在公司申請頁上看檔名,就分得出送的是哪一份。</p>'+
       '<div class="cfg-row"><label class="cfg-k">履歷有哪些語言</label>'+cfgLangChecks(CFGW.resume.langs||[])+'</div>'+
@@ -5161,6 +5406,7 @@
       '<div class="cfg-row"><label class="cfg-k">Agent 假設</label><textarea class="cfg-in big" rows="8" data-cft="preferences_agent" placeholder="目前還沒有 agent 假設">'+esc(CFGT.preferences_agent||'')+'</textarea></div>',{cls:'cfg-d'});
     var APL=fold('cfg:apply','填表做法'+sumN(lines(CFGT.apply_rules)?lines(CFGT.apply_rules)+' 行':'還沒寫'),'<p class="cfg-help">幫你填表時原文交給 '+esc(AGENT)+':連結欄填什麼、哪些勾選框要勾、地址怎麼寫…</p>'+
       '<textarea class="cfg-in big" rows="8" data-cft="apply_rules" placeholder="例:連結欄填 GitHub:https://github.com/你的帳號">'+esc(CFGT.apply_rules||'')+'</textarea>',{cls:'cfg-d'});
+    var WNS=cfgWebsiteNotesHTML();
     var CAT=fold('cfg:cats','分類'+sumN((cfgGet('board.categories')||[]).length+' 類 · '+(cfgGet('board.tags')||[]).length+' 個標籤'),'<p class="cfg-help">類別是一張職缺在做什麼(一張只屬一類,從上往下比,都沒中就是最後一類);標籤是額外的特徵(一張可以有好幾個)。'+
       '卡片分錯了,在卡上 ⋯ 的「改類別」直接改。</p>'+cfgSuggestHTML()+
       '<div class="cfg-k">類別</div>'+cfgListHTML('categories',true)+'<div class="cfg-k">標籤</div>'+cfgListHTML('tags',false),{cls:'cfg-d'});
@@ -5173,10 +5419,10 @@
     var SRC=fold('cfg:search','找缺'+sumN('一定不要 '+(s.exclude_words||[]).length+' · 要小心 '+(s.flag_words||[]).length),'<p class="cfg-help">職稱一出現就不送的字(不花 '+esc(AGENT)+');容易誤中、要交給判斷那一段看的字。一行一個。</p>'+
       '<div class="cfg-row"><label class="cfg-k">一定不要</label><textarea class="cfg-in" rows="4" data-cfl="search.exclude_words" placeholder="例:業務">'+esc((s.exclude_words||[]).join('\n'))+'</textarea></div>'+
       '<div class="cfg-row"><label class="cfg-k">要小心</label><textarea class="cfg-in" rows="3" data-cfl="search.flag_words" placeholder="例:community">'+esc((s.flag_words||[]).join('\n'))+'</textarea></div>',{cls:'cfg-d'});
-    var RPL=fold('cfg:replies','查應徵進度'+sumN('沒下文 '+esc(CFGW.replies.ghost_days)+' 天'),'<p class="cfg-help">投出去之後,'+esc(AGENT)+' 去信箱和平台看有沒有回音;超過這麼多天都沒消息就標成沒下文。</p>'+
+    var RPL=fold('cfg:replies','查應徵進度'+sumN('沒下文 '+esc(CFGW.replies.ghost_days)+' 天'),'<p class="cfg-help">投出去之後,'+esc(AGENT)+' 去信箱和適用的應徵紀錄頁看有沒有回音;超過這麼多天都沒消息就標成沒下文。</p>'+
       '<div class="cfg-row"><label class="cfg-k">沒下文天數</label><input class="cfg-in num" type="number" min="7" max="120" data-cfn="replies.ghost_days" value="'+escA(CFGW.replies.ghost_days)+'"></div>'+   // 照實顯示:存成 0 的舊值要看得到才改得了
-      '<p class="cfg-help">查應徵進度的信箱。Gmail 的第二個帳號是 …/mail/u/1/;不是 Gmail(Outlook、公司信箱)也行,'+esc(AGENT)+' 會用 ego 打開這個網址查,記得先在 ego 登入。</p>'+
-      '<div class="cfg-row"><label class="cfg-k">信箱網址</label><input class="cfg-in" data-cf="replies.mail_url" value="'+escA((CFGW.replies||{}).mail_url||'')+'" placeholder="https://mail.google.com/mail/u/0/"></div>',{cls:'cfg-d'});
+      '<p class="cfg-help">填投遞後收信的信箱首頁網址。'+esc(AGENT)+' 會在自己的 ego 工作區搜尋;請先登入正確帳號,程式不會代輸密碼。</p>'+
+      '<div class="cfg-row"><label class="cfg-k">信箱網址</label><input class="cfg-in" data-cf="replies.mail_url" value="'+escA((CFGW.replies||{}).mail_url||'')+'" placeholder="https://mail.example/"></div>',{cls:'cfg-d'});
     var RT_NAME={'codex':'Codex','command-code':'Command Code','claude-code':'Claude Code'};
     var agentRows=agents.map(function(x,i){var runtime=['command-code','claude-code'].indexOf(x.runtime)>=0?x.runtime:'codex';
       return '<div class="cfg-card"><div class="cfg-row"><strong class="cfg-k">第 '+(i+1)+' 個 agent</strong>'+
@@ -5204,7 +5450,7 @@
       '<div class="cfg-row"><label class="cfg-k">開機自動啟動</label><span class="cfg-file">'+(CFGD.service?ic('circle-check')+' 已開':ic('circle')+' 沒開')+'</span>'+
       '<button class="cfg-b" type="button" data-cfservice="'+(CFGD.service?'remove':'install')+'">'+(CFGD.service?'關掉':'打開')+'</button></div>'+
       '<div class="cfg-row" id="cfg-update"><label class="cfg-k">版本</label><span class="cfg-file">查詢中…</span></div>'+cfgHistoryHTML(),{cls:'cfg-d'});
-    // 十一塊照「在做哪件事」分四組,不再一字排開;頁頂一排跳到各組(長頁一路捲下去找「投遞」太遠)
+    // 十二塊照「在做哪件事」分四組,不再一字排開;頁頂一排跳到各組(長頁一路捲下去找「投遞」太遠)
     function grp(g){return '<h3 class="cfg-grp" id="cfg-g-'+g[0]+'">'+g[1]+'</h3>'+g[2].join('');}
     // 字包一層 .cfg-ck:不包的話長的那一句整段當一個項目,放不下就整段換到下一行,勾選框自己留在上一行
     var fl=CFGW.flow||{}, chk=function(k,t,d){return '<label class="cfg-row"><input type="checkbox" data-cfcheck="flow.'+k+'"'+(fl[k]?' checked':'')+'><span class="cfg-ck">'+t+
@@ -5215,6 +5461,8 @@
       chk('auto_fill','進「可以投了」就讓 '+esc(AGENT)+' 填表,答案改過就照新的重打;都停在送出前')+
       '<div class="cfg-row"><label class="cfg-k">最多停幾張等你確認送出</label><input class="cfg-in num" data-cf="flow.fill_max" value="'+escA(fl.fill_max)+'" placeholder="5(0=不限,空的照 5)"></div>'+
       '<p class="cfg-help">每一張填好的都開著一個分頁等你看。停滿了就先不填新的,你確認送出或退掉一張它就接著填;手動按的不受這個限制。</p>'+
+      '<div class="cfg-row"><label class="cfg-k">同時填幾張</label><input class="cfg-in num" data-cf="flow.fill_parallel" value="'+escA(fl.fill_parallel)+'" placeholder="3(1 到 10,空的照 3)"></div>'+
+      '<p class="cfg-help">一次選好幾張要填時,同時跑幾張,每張各開一個自己的分頁。電腦或 '+esc(AGENT)+' 吃不消就調小,調成 1 就是一張填完再下一張。</p>'+
       '<label class="cfg-row"><input type="checkbox" data-cfreplies="1"'+(fl.replies_at?' checked':'')+'> 每天自動查應徵進度'+
         (fl.replies_at?'<input class="cfg-in num" data-cf="flow.replies_at" value="'+escA(fl.replies_at)+'" placeholder="09:00" aria-label="每天幾點查">':'')+'</label>'+
       '<p class="cfg-help">打開某一項之前就已經在那一步的卡不會自動處理;到那一頁按「開自動前就在的 N 張也交給自動」。</p>',{cls:'cfg-d'});
@@ -5222,7 +5470,7 @@
     // 以前排在最上面,攤開時把「你的履歷」整段往下推,同一個畫面這次一屏內、下次要捲 280px。收起來的各段只佔一行,它照樣在第一屏
     // 「新增履歷」捷徑疊在「你的履歷」那一列右邊(不放進 summary:裡面不准有按鈕),按了打開那一塊、跳到新增那一格
     RES='<div class="cfg-dw">'+RES+'<button type="button" class="cfg-add" data-cfresgo="1">＋ 新增履歷</button></div>';
-    var G=[['data','你的資料',[RES,ATT,SKL,cfgDoctorHTML()]],['find','找缺與判斷',[SRC,RSK,PRF,CAT,ALS]],['apply','投遞',[FLW,APL,RPL]],['sys','Agent 與系統',[AGT,SYS]]];
+    var G=[['data','你的資料',[RES,ATT,SKL,cfgDoctorHTML()]],['find','找缺與判斷',[SRC,RSK,PRF,CAT,ALS]],['apply','投遞',[FLW,APL,WNS,RPL]],['sys','Agent 與系統',[AGT,SYS]]];
     h='<nav class="cfg-jump" aria-label="跳到">'+G.map(function(g){return '<button type="button" class="cfg-jb" data-cfjump="'+g[0]+'">'+g[1]+'</button>';}).join('')+'</nav>'+
       h+G.map(grp).join('');
     // 一直黏在畫面底下,存檔狀態隨時看得到;有改動才亮起來(儲存鈕變實心),沒改動是次要按鈕加「沒有改動」
@@ -5377,8 +5625,44 @@
     var t=e.target.closest('button'); if(!t)return;
     var g;
     if((g=t.getAttribute('data-cfgo'))){cfgGo(g); return;}
+    if(t.hasAttribute('data-wn-add')){
+      var url=document.querySelector('[data-wn-url]'), note=document.querySelector('[data-wn-new-text]');
+      if(!url||!note)return;
+      cfgWebsiteNotesPost({action:'add',url:url.value,text:note.value}); return;}
+    if((g=t.getAttribute('data-wn-save'))){
+      var note=document.querySelector('[data-wn-text="'+g+'"]');
+      if(note)cfgWebsiteNotesPost({action:'edit',id:g,text:note.value}); return;}
+    if((g=t.getAttribute('data-wn-delete'))){cfgWebsiteNotesPost({action:'delete',id:g}); return;}
+    if(t.hasAttribute('data-wn-reload')){CFGWNOTE=null; cfgWebsiteNotesLoad(); return;}
     if(t.hasAttribute('data-cfsave')){cfgSave(true).catch(function(err){snack('沒存成('+err.message+'),照上面說的改好再按一次「儲存設定」');}); return;}
-    if(t.hasAttribute('data-cfsync')){cfgStartSync(); return;}
+    if(t.hasAttribute('data-cfsync')){
+      var syncArgs;
+      try{syncArgs=JSON.parse(t.getAttribute('data-cfsync')||'{}');}catch(_e){snack('同步資料讀不到，請重整設定');return;}
+      cfgStartSync(syncArgs); return;}
+    if((g=t.getAttribute('data-cfsyncreview'))){
+      var review;
+      try{review=JSON.parse(g);}catch(_e){snack('同步清單資料讀不到,請重整設定');return;}
+      fetch('/api/settings/profile_sync_review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(review)})
+        .then(function(r){return r.json().then(function(d){if(!r.ok)throw Error(d.msg||'清單版本已更新');return d;});})
+        .then(function(){return fetch('/api/settings').then(function(r){return r.json();});})
+        .then(function(d){if(CFGD)CFGD.profile_status=d.profile_status||[]; renderCfg(); snack('已記下你看過這一版同步清單');})
+        .catch(function(err){snack('沒有記下：'+err.message);});
+      return;}
+    if((g=t.getAttribute('data-cfsyncrestore'))){
+      var restore;
+      try{restore=JSON.parse(g);}catch(_e){snack('恢復清單資料讀不到,請重整設定');return;}
+      var ids=[].slice.call(document.querySelectorAll('[data-cfsync-change]:checked')).filter(function(box){
+        try{var row=JSON.parse(box.getAttribute('data-cfsync-change'));return row.platform===restore.platform&&
+          row.lang===restore.lang&&row.variant===restore.variant&&row.version===restore.version;}
+        catch(_e){return false;}}).map(function(box){return box.value;});
+      if(!ids.length){snack('先勾選要恢復的頁面段落');return;}
+      fetch('/api/run/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+        action:'restore',platform:restore.platform,lang:restore.lang,variant:restore.variant,
+        version:restore.version,change_ids:ids})})
+        .then(function(r){return r.json().then(function(d){if(!r.ok)throw Error(d.msg||'恢復沒有開始');return d;});})
+        .then(function(d){MISC.sync=d;renderCfg();snack('恢復已在背景開始');setTimeout(syncFromServer,1000);})
+        .catch(function(err){snack('恢復沒有開始：'+err.message);});
+      return;}
     if(t.hasAttribute('data-cfreload')){CFGDIRTY=false; cfgLoad(renderCfg); return;}
     if(t.hasAttribute('data-cfresgo')){var rd=document.querySelector('#app details[data-fold="cfg:resumes"]'); if(rd&&!rd.open)rd.open=true;
       var rn=$('cfg-rnew'); if(rn){rn.scrollIntoView({block:'center'}); rn.focus({preventScroll:true});} return;}
@@ -5516,7 +5800,7 @@
   function ivSrcFields(ln){ln=ln||{src:'guess',cite:'',quote:'',why:''};
     return ivRow('出處','<select class="cfg-in" id="ive-src">'+IV_SRC.map(function(s){
         return '<option value="'+s[0]+'"'+(s[0]===ln.src?' selected':'')+'>'+esc(s[1]+' · '+s[2])+'</option>';}).join('')+'</select>')+
-      ivRow('出處連結','<input class="cfg-in" id="ive-cite" value="'+escA(ln.cite)+'" placeholder="面試趣 2026-06-21 https://interview.tw/i/…">',
+      ivRow('出處連結','<input class="cfg-in" id="ive-cite" value="'+escA(ln.cite)+'" placeholder="面試心得 2026-06-21 https://interview.example/…">',
         '「這家考過」「別家考過」一定要附那一篇的網址,沒有出處就選「預想的」。')+
       ivRow('原文','<textarea class="cfg-in big" rows="2" id="ive-quote" placeholder="那一篇怎麼寫就貼怎麼寫">'+esc(ln.quote)+'</textarea>','人家原文怎麼問。付費牆後面看不到的,貼看得到的那段。')+
       ivRow('為什麼準備','<textarea class="cfg-in big" rows="2" id="ive-why">'+esc(ln.why)+'</textarea>','例:職缺寫了模型微調;你說這場想練溝通。');}

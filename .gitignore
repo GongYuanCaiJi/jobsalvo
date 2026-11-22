@@ -10,6 +10,7 @@ coverage.json
 # 資料夾(JOBSALVO_HOME)不該放在 repo 裡;萬一放了也別 commit
 /board.html
 /*-marks.jsonl
+/evidence/
 /card-summaries/
 /company-cache/
 /prepare/
@@ -22,3 +23,6 @@ coverage.json
 /prefs.md
 /apply-rules.md
 /resume.md
+mutants/
+src
+tools/.agent-shell/.zcompdump*

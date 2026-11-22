@@ -27,7 +27,8 @@ BUCKETS=[('like','★ 喜歡(要多找這種)'),
          ('grow','💪 可努力(方向對、他願意搆)'),
          ('meh','😐 還好(不夠好玩,別再送這種)'),
          ('dislike','✗ 不喜歡(絕對不要再送這種,含同型同公司)'),
-         ('techerr','🔧 技術錯誤(連結壞了,不是不喜歡;要重找同一個缺)')]
+         ('techerr','🔧 技術錯誤(連結壞了,不是不喜歡;要重找同一個缺)'),
+         ('app','📋 加進準備區(沒標喜好,但要投這個缺)')]
 
 def _cardsum(url):
     """那份缺真實長怎樣(對著真 JD 生成的摘要)。看他的反應「對著什麼樣的缺」才學得到他的邏輯。"""
@@ -36,12 +37,17 @@ def _cardsum(url):
     except (OSError,ValueError): return {}   # 這張還沒有摘要(或寫壞了):只給他的反應
 
 def build(live=None, only_ids=None, heading=True):
+    return _build(live, only_ids, heading)[0]
+
+
+def _build(live=None, only_ids=None, heading=True):
+    """回 (整理文字, 文字裡列出的卡片代號)。"""
     with open(live or bd.LIVE, encoding='utf-8') as f:
         p = bd.parse(f.read())
     fb = json.loads(p['fb']); jobs = p['data']['jobs']
     byid = {j['id']: j for j in jobs}
     only_ids = set(only_ids) if only_ids is not None else None
-    bkt = {k: [] for k, _ in BUCKETS}; rm = []
+    bkt = {k: [] for k, _ in BUCKETS}; rm = []; listed = []
     for k, v in fb.items():
         if k.startswith('__') or not isinstance(v, dict):
             continue
@@ -49,30 +55,33 @@ def build(live=None, only_ids=None, heading=True):
             continue
         n = prefs.his_words(v.get('n'))    # 「原因」格裡 agent 接著寫的投遞紀錄不是他的話,切掉
         j = byid.get(k, {})
-        summary = _cardsum(k) or (j.get('sum') if isinstance(j.get('sum'), dict) else {})
-        if v.get('rm'):
-            rm.append((k, j, card.name(j), n, summary)); continue
-        s = v.get('s')
-        if s not in bkt: continue
-        bkt[s].append((k, j, card.name(j), n, summary))
+        summary = card.claims(j or {'sum': _cardsum(k)})
+        s = v.get('s') if v.get('s') in bkt else 'app' if v.get('app') else None
+        if not v.get('rm') and s is None:
+            continue
+        (rm if v.get('rm') else bkt[s]).append((k, j, card.name(j), n, summary))
+        listed.append(k)
 
     L = (['# 使用者逐張表態', ''] if heading else []) + [
          '每筆保留使用者標記、原話與職缺上下文。判斷時以原話為證據,不要把它改寫成規則。', '']
 
     def add_entry(card_id, job, title, words, summary):
         jd = _full_jd(job)
-        L.append(f'- **{title or "(無題)"}**｜卡片代號={card_id}｜標記={_feedback_mark(job, fb)}'
-                 + (f'｜使用者原話「{words}」' if words else ''))
+        L.append(f'- **{title or "(無題)"}**')
+        L.append(f'    - 卡片代號={card_id}')
+        L.append(f'    - 標記={_feedback_mark(job, fb)}')
+        if words:
+            L.extend(prefs.field_lines('使用者原話', [words], '    '))
         if jd:
             L.append('    - JD 全文:')
             L.extend('      ' + line for line in jd.splitlines())
         elif card_id:
             L.append('    - 職缺網址=' + card_id)
-        bits = []
-        if summary.get('co'): bits.append('公司在做什麼=' + summary['co'])
-        if summary.get('bar'): bits.append('門檻=' + summary['bar'])
-        if summary.get('fit'): bits.append('工作內容/對位=' + summary['fit'])
-        if bits: L.append('    - 卡片摘要=' + '；'.join(bits))
+        bits = [prefs.field_lines(label, card.said_each(summary.get(key)), '      ') for key, label in
+                (('co', '公司在做什麼'), ('bar', '門檻'), ('fit', '工作內容/對位')) if card.said_each(summary.get(key))]
+        if bits:
+            L.append('    - 卡片摘要:')
+            L.extend(line for field in bits for line in field)
 
     for status, label in BUCKETS:
         L.append(f'## {label}（{len(bkt[status])}）')
@@ -92,7 +101,7 @@ def build(live=None, only_ids=None, heading=True):
         for note in notes:
             L.append('- ' + note.replace('\n', '\n  '))
         L.append('')
-    return '\n'.join(L)
+    return '\n'.join(L), listed
 
 
 def _feedback_mark(job, fb):
@@ -118,7 +127,7 @@ def feedback_state_path(note_path=None):
 
 
 def feedback_delta(live=None, note_path=None):
-    """回傳上次整理後有表態的卡,以及本次讀到的流水帳行數。"""
+    """回傳上次整理後有表態的卡(整理文字、卡片代號),以及本次讀到的流水帳行數。"""
     journal = bd.journal_path(live or bd.LIVE)
     try:
         with open(journal, encoding='utf-8') as f:
@@ -140,7 +149,8 @@ def feedback_delta(live=None, note_path=None):
             except ValueError:
                 continue
             ids.update(k for k in (rec.get('d') or {}) if not k.startswith('__'))
-    return build(live, only_ids=ids), len(rows)
+    text, listed = _build(live, only_ids=ids)
+    return text, listed, len(rows)
 
 
 def save_feedback_checkpoint(journal_lines, note_path=None, organized_at=None):

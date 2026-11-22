@@ -21,12 +21,14 @@ target-version = "py311"
 # 每一處三選一:只抓預期的那種;影響他資料或結果的讓他看得到(看板回報、狀態訊息);真的無害的在同一行
 # `# noqa: <規則> — <理由>`(tests/test_no_silent_failures.py 檢查理由有寫)。
 # 另外:沒用到的 import / 變數(F401、F841)、用到沒定義的名字(F821)
-select = ["BLE001", "S110", "S112", "SIM105", "E722", "F401", "F821", "F841"]
+select = ["BLE001", "S110", "S112", "SIM105", "E722", "F401", "F821", "F823", "F841"]
 
 [dependency-groups]
 dev = [
     "playwright==1.63.0",        # 開發用:CI 的 Linux 沒有 ego,看板檢查、截圖、副本 PDF 在那裡用它開 Chrome(dev_browser、dev_pdf);本機跟使用者的功能一樣走 ego
     "coverage==7.16.2",          # 測試的分岔覆蓋率:哪些 if/except 的路從來沒被測到(CI 單元測試那一步)
+    "hypothesis==6.170.13",      # 測試用:隨機產生假網站,考程式列的改動清單等於測試台看到的改前改後差異(ADR-0011)
+    "mutmut==3.8.1",             # 突變測試:改掉程式一處看測試抓不抓得到(四件網站任務與共用核心,x99 手動跑)
 ]
 
 # 本機跟 CI 同一組指令:
@@ -45,3 +47,16 @@ show_missing = true
 skip_covered = true
 # 直接執行指令才會走的那一行(if __name__ == '__main__':)不算:入口本身在 main() 裡,有測就是測 main()
 exclude_also = ["if __name__ == .__main__.:"]
+
+# 突變測試(x99 手動跑):先 `ln -s tools src`(測試照 `import sync` 載入,mutmut 只把 src/ 底下的檔名當成模組名),
+# 再 `chrt --idle 0 uv run mutmut run --max-children 4`。只改四件網站任務與共用核心,只跑從任務入口考行為的驗收測試;
+# 活下來的突變:使用者看不出差別就刪程式,看得出就從入口補斷言
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = ["*src/sync.py", "*src/fill.py", "*src/progress.py", "*src/find.py", "*src/add_job.py",
+               "*src/page_fetch.py", "*src/form_plan.py", "*src/web/*.py"]
+also_copy = ["tests", "defaults", "examples", "board", "docs"]
+pytest_add_cli_args = ["-p", "no:cacheprovider", "-q"]
+pytest_add_cli_args_test_selection = ["tests/test_accept_sync.py", "tests/test_accept_fill.py",
+                                      "tests/test_accept_progress.py", "tests/test_accept_find.py",
+                                      "tests/test_fake_browser.py"]

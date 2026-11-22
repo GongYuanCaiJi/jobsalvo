@@ -48,6 +48,7 @@ DEFAULTS = {
         # 自己領域的職稱字(一般文字,一行一個):內建清單(card.TITLE_WORDS)認不出的職稱加在這裡,
         # 不然「公司 · 職稱」的職稱那段會被當成公司名。
         'title_words': [],
+        'risk_days': 180,                # 刊登超過幾天列為可能已關(看板設定,跨裝置共用)
         # 跟類別正交的標籤(一張卡可以有好幾個),比對職稱＋內文。
         'tags': [
             {'name': '實習／計畫', 'match': r'intern|實習|儲備|management trainee|fellowship|graduate program'},
@@ -101,8 +102,8 @@ DEFAULTS = {
     },
     'replies': {
         'ghost_days': 30,               # 送出後幾天沒有任何回音,記成沒下文
-        # 查回音的信箱網址。Gmail 任一個帳號(…/mail/u/1/)程式自己搜尋;其他信箱交給 agent 用它的 Chrome 打開查。
-        'mail_url': 'https://mail.google.com/mail/u/0/',
+        # 查回音的信箱網址;agent 用自己的瀏覽器開啟並搜尋,空白代表尚未設定。
+        'mail_url': '',
     },
     # 流程自動往下跑(tools/autopilot.py):他只在要做決定的地方被叫到(表態、核准)。
     # 任何一條都不會自動送出:送出永遠要他在卡上按「✅ 核准送出」。
@@ -112,10 +113,11 @@ DEFAULTS = {
         'auto_advance': True,           # 準備好、驗收過的卡自動進可投遞(被擋的留在「還不能投」並寫原因)
         'auto_fill': True,              # 進可投遞就讓 agent 填表、答案改過就重打,停在送出前等他核准
         'fill_max': 5,                  # 自動填表最多先填幾張停著等他核准(每張佔一個開著的分頁);0 = 不限,空的照預設 5
+        'fill_parallel': 3,             # 一次選好幾張填表時同時跑幾張(每張各佔一個開著的分頁);空的照預設 3,範圍 1 到 10
         'replies_at': '09:00',          # 每天幾點自動查回音;空字串 = 不自動查
     },
     'accept': {
-        'facts': {},                    # 代投驗收(apply_accept)用來確認「照母稿填」的事實,例:{"name": ["Your Name"]}
+        'facts': {'name': [], 'email': []},                    # progress.py 用來辨認回音寄件人的使用者事實,例:{"name": ["Alex Example"]}
     },
 }
 

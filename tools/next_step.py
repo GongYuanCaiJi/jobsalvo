@@ -130,7 +130,7 @@ def _fill(fb, job, flow, tried, full):
 
 
 def _requirement(fb, job, flow, tried):
-    """要寄的檔跟職缺要求不符、程式接手處理的那幾步(#449,apply_run.take_unmet 排好的):自動客製 → 自動收下 →
+    """要寄的檔跟職缺要求不符、程式接手處理的那幾步(#449,ship.take_unmet 排好的):自動客製 → 自動收下 →
     可投遞夾重建 → 重填停在送出前。開自動流程前就在的舊卡也接(是程式自己卡住的,不是他交代的事)。
     客製沒通過(有 error)就停,原因已經在回報和卡上。回 {do, mark, line, items} 或 None。"""
     i = job['id']
@@ -171,9 +171,8 @@ QUIET = {True: 60, False: 3}
 
 def _refix(fb, i):
     """這張等著照新答案重打的:表單上標 refill 的欄位、要重翻的答案(tr)。"""
-    import apply_run                                 # 要重翻的判斷只有一份,在 apply_run
     f = ((fb.get(i) or {}).get('form') or {}).get('f') or []
-    return [x for x in f if x.get('refill')], apply_run.to_translate(fb, i)
+    return [x for x in f if x.get('refill')], fr.to_translate(fb, i)
 
 
 def fix_sig(fb, i):
@@ -260,15 +259,13 @@ def card(fb, url, status=None, auto=None, stop=None, ctx=None, job=None):
     這張不能換檔、不能離開流程的原因;auto:agent 會自己接手做什麼({do, mark, line}),不會就是 None;
     stop:自動流程本來會接、這次不接的原因(要你處理);ask:這張表單在等你的常用答案;
     send:確認過的這張現在能不能送出(None = 可以);view:卡上幫你填表那一塊畫什麼(見 view);
-    gate:投遞前把關擋住的原因(空字串 = 不擋),closed:擋的是 agent 判的職缺關了(給「不對,職缺還在」),
-    holds:驗收裡還擋著這張的那幾條;
+    gate:投遞前把關擋住的原因(空字串 = 不擋),holds:驗收裡還擋著這張的那幾條;
     fillable:整批填表會不會填這張;blocked:落在封鎖名單的哪一條(沒被封鎖是 None);back:已送出的卡給哪一顆退回(undo_sent = 沒送成、back = 退回、None = 都不給)。"""
     job = job or {'id': url}
     m = fb.get(url) if isinstance(fb.get(url), dict) else {}
     out = {'confirm': fr.confirm_problem(fb, url, status), 'busy': busy(m), 'auto': auto, 'stop': stop,
            'ask': ask(fb, url, ctx), 'send': fr.approval_problem(fb, url, status),
-           'gate': fr.ship_blocked(fb, job, status), 'closed': fr.judged_closed(fb, job, status),
-           'holds': fr.holding(fb, job, status),
+           'gate': fr.ship_blocked(fb, job, status), 'holds': fr.holding(job, status),
            'fillable': ds.allowed(m, 'fill_start'), 'blocked': ds.company_block(fb, job),
            'back': 'undo_sent' if ds.allowed(m, 'undo_sent') else 'back' if ds.allowed(m, 'back') else None}
     out['view'] = view(fb, url, status, out)
@@ -276,57 +273,78 @@ def card(fb, url, status=None, auto=None, stop=None, ctx=None, job=None):
         import profile_sync as ps
         delivery = ((m.get('apply') or {}).get('delivery') or {})
         if delivery.get('method') == 'platform_profile':
-            chosen = ps.identity(delivery.get('profile_url'))
+            notice = ps.sync_notice_for_url(fb, url, job)
+            if notice:
+                out['view'].setdefault('line', []).append(['idle', '⚠ ' + notice])
+            try:
+                decision = ps.decided(job, fb, url)
+            except (KeyError, TypeError, ValueError):
+                decision = {}
+            selected = (decision.get('platform'), decision.get('lang'), decision.get('variant'))
             for _platform, lang, variant, entry in ps.slots():
-                if ps.identity(entry.get('read')) != chosen:
+                if (_platform, lang, variant) != selected:
+                    continue
+                if entry.get('read') != delivery.get('profile_url'):
                     continue
                 slot = f'{lang}/{variant}'
                 rows = [row for row in entry.get('sync_visuals') or []
                         if (row.get('card') or entry.get('sync_visuals_card')) == url]
-                # 同一處每輪都留紀錄;平台上現在是最後一輪的結果,只列最後一筆(前幾輪留在證據夾與報告)
-                latest = {str(row.get('item') or slot): row for row in rows
-                          if isinstance(row.get('verdicts'), list)}
+                # 同一處每輪都留紀錄;卡片只顯示最新一份改動清單。
+                latest = {str(row.get('item') or slot): row for row in rows}
                 modern = list(latest.values())
-                from sync_report import PENDING
-                modern.sort(key=lambda row: not bool(PENDING.intersection(row['verdicts'])))
                 for row in modern:
                     item = str(row.get('item') or slot)
-                    verdict = '、'.join(row['verdicts']) or '未判定'
-                    style = 'bad' if PENDING.intersection(row['verdicts']) or row.get('platform_result') == '沒做成' else 'ok'
                     lines = out['view'].setdefault('line', [])
-                    lines.append([style, item + '：' + verdict, {'sync': True}])
-                    result = str(row.get('platform_result') or '沒做成')
-                    if row.get('reason'):
-                        result += '（停在' + str(row.get('step') or '未知步驟') + '：' + str(row['reason']) + '）'
-                    lines.append(['idle', '平台實際結果：' + result, {'sync': True}])
-                    before_text, after_text = str(row.get('before_text') or ''), str(row.get('after_text') or '')
-                    full = '改前：' + (before_text or '（沒有讀到）') + '\n改後：' + (after_text or '（沒有讀到）')
-                    short = full.replace('\n', ' ⏎ ')
-                    if len(short) > 180:
-                        short = short[:177] + '…'
-                    lines.append(['idle', short, {'sync': True, 'full': full} if short != full else {'sync': True}])
-                    if row.get('outside_losses'):
-                        losses = '\n'.join(row['outside_losses'])
-                        label = '範圍外消失：' + losses.replace('\n', ' ⏎ ')
-                        if len(label) > 180:
-                            label = label[:177] + '…'
-                        lines.append(['bad', label, {'sync': True, 'full': '範圍外消失：' + losses}])
-                    if row.get('answer_question'):
-                        lines.append(['idle', '用到的常用答案：' + str(row['answer_question']), {'sync': True}])
-                    shot_start = len(out['view'].setdefault('shots', []))
-                    missing = []
-                    for phase, label in (('before', '改前'), ('after', '改後')):
-                        if row.get(phase + '_shot'):
-                            out['view'].setdefault('shots', []).append(
-                                ['ev', row[phase + '_shot'], '平台履歷「' + item + '」' + label])
-                        else:
-                            missing.append(label)
-                    shot_end = len(out['view']['shots'])
-                    if shot_end > shot_start:
-                        lines.append(['idle', '', {'sync': True,
-                                                   'shot_indices': list(range(shot_start, shot_end))}])
-                    if missing:
-                        lines.append(['idle', '這輪沒有' + '、'.join(missing) + '局部截圖', {'sync': True}])
+                    # 填表那一輪發來的清單,代填答案的標記卡上已經列了(field_observations,同一份清單)
+                    intended = [] if row.get('task') == 'fill' else row.get('intended_changes') or []
+                    for change in intended:
+                        marker = str(change.get('marker') or '')
+                        reads = 'before_read' in change or 'after_read' in change
+                        label = str(change.get('item') or item) + '：' + (marker or ('' if reads else '沒比到'))
+                        if reads:
+                            label += ('；' if marker else '') + '改前讀得到：' + (
+                                '是' if change.get('before_read') else '否') + '；改後讀得到：' + (
+                                '是' if change.get('after_read') else '否')
+                        lines.append(['idle', label, {'sync': True}])
+                    if not intended and isinstance(row.get('verdicts'), list):
+                        lines.append(['idle', item + '：' + ('、'.join(row['verdicts']) or '沒比到'),
+                                      {'sync': True}])
+                    for reason in dict.fromkeys(
+                            shot['screenshot_error'] for step in row.get('agent_steps') or []
+                            for shot in step.get('screenshots') or [] if shot.get('screenshot_error')):
+                        lines.append(['idle', '瀏覽器操作沒截到圖：' + reason, {'sync': True}])
+                    changes = row.get('page_changes') or []
+                    for change in changes:
+                        verdict = '、'.join(change.get('verdicts') or []) or '沒比到'
+                        page_label = str(change.get('page_url') or item) + '：' + verdict
+                        lines.append(['idle', page_label, {'sync': True}])
+                        before_text = _change_text(change, 'before')
+                        after_text = _change_text(change, 'after')
+                        full = '改前：' + before_text + '\n改後：' + after_text
+                        short = full.replace('\n', ' ⏎ ')
+                        if len(short) > 180:
+                            short = short[:177] + '…'
+                        lines.append(['idle', short,
+                                      {'sync': True, 'full': full} if short != full else {'sync': True}])
+                        shot_start = len(out['view'].setdefault('shots', []))
+                        for phase, label in (('before', '改前'), ('after', '改後')):
+                            if change.get(phase + '_shot'):
+                                out['view']['shots'].append(
+                                    ['ev', change[phase + '_shot'], '平台履歷「' + item + '」' + label])
+                        shot_end = len(out['view']['shots'])
+                        if shot_end > shot_start:
+                            lines.append(['idle', '', {'sync': True,
+                                                       'shot_indices': list(range(shot_start, shot_end))}])
+                    if not changes:
+                        shot_start = len(out['view'].setdefault('shots', []))
+                        for phase, label in (('before', '改前'), ('after', '改後')):
+                            if row.get(phase + '_shot'):
+                                out['view']['shots'].append(
+                                    ['ev', row[phase + '_shot'], '平台履歷「' + item + '」' + label])
+                        shot_end = len(out['view']['shots'])
+                        if shot_end > shot_start:
+                            lines.append(['idle', '', {'sync': True,
+                                                       'shot_indices': list(range(shot_start, shot_end))}])
                 legacy = [row for row in rows if row not in modern]
                 changed = []
                 for row in legacy:
@@ -337,11 +355,19 @@ def card(fb, url, status=None, auto=None, stop=None, ctx=None, job=None):
                             '改前' if str(row.get('page') or '').startswith('before') else '改後')
                         out['view'].setdefault('shots', []).append(['ev', row['shot'], label])
                 if changed:
-                    out['view'].setdefault('line', []).append(['ok', '平台履歷已同步：' + '、'.join(changed)])
+                    out['view'].setdefault('line', []).append(
+                        ['idle', '平台履歷改動清單：' + '、'.join(changed), {'sync': True}])
     return out
 
 
 GONE_SHORT = '填好的那一頁不見了,要重填'
+
+
+def _change_text(change, side):
+    """清單上改前、改後那一格:沒字不等於沒讀到(看板 changeText 同一條)。"""
+    return str(change.get(side + '_text') or (
+        '（沒有文字）' if not change.get('reason') else
+        '（這筆沒列文字）' if change.get(side + '_status') == 'readable' else '（沒有讀到）'))
 
 
 def _month_day(d):
@@ -364,7 +390,7 @@ def requirement_changes(m):
 
 
 def blocked(m):
-    """擋住這張的職缺或網站事實(apply_run.blocking 記的那一句);卡在還要重填的狀態才算,填好了就不算。"""
+    """填表交件單記下的待處理狀況只在卡仍需填表時顯示。"""
     b = ((m.get('apply') or {}).get('block') or {}) if ds.state(m) in ds.HANDBACK else {}
     return str(b.get('text') or '')
 
@@ -400,7 +426,7 @@ def view(fb, url, status, nx):
         line.append(['run', '⏳ {} {}…'.format(agent, {'submit': '正在送出', 'fix': '正在改'}.get(stage, '正在填'))])
     elif s == 'unsure':
         line.append(['bad', f'📤 {agent} {_month_day((a.get("submit_fail") or {}).get("at") or a.get("at"))} 按了送出,沒看到已收到申請頁'
-                     + ('' if a.get('tab_id') else ';那一頁已經不在了')])
+                     + ('' if ds.page_up(m) else ';程式不知道是哪一頁' if ds.page_unknown(m) else ';那一頁已經不在了')])
         line.append(['run', '⏳ ' + UNSURE_LINE.format(agent=agent)])
     elif s == 'stale':
         # 要寄的檔換過了:頁面上是舊的,不能寫「填好了」(他會以為可以送)
@@ -444,7 +470,7 @@ def view(fb, url, status, nx):
         main = [{'b': 'clear', 'label': '確認沒送出,可以重送', 'main': True, 'adv': False}]
         if ds.allowed(m, 'actually_sent'):
             main.append({'b': 'actsent', 'label': '其實送出了', 'main': False, 'adv': False})
-        # 不算要你處理:查應徵進度會去信箱和平台應徵紀錄查,查到就改;核實不了才回報給你(reply_run.apply_unsure)
+        # 不算要你處理:查應徵進度會去信箱和平台應徵紀錄查,查到就改;核實不了才回報給你(progress.apply_unsure)
     elif not done and auto_do == 'fill':
         line.append(autoline)
         main, auto = [fill('▶ 現在就填', adv=False)], True
@@ -525,10 +551,14 @@ def view(fb, url, status, nx):
     if block and not working and not auto_do:
         # 職缺或網站的事實擋著:卡上先講它,頁面不見、換檔這些後來順帶發生的事不蓋掉它
         # 他要做的決定直接給按鈕:職缺關了或換了 → 不投就移除、其實沒變就重填;要他登入 → 登入好了再重填
-        line, why, todo = [['bad', '🚧 ' + block]], '', block
+        human_handoff = (a.get('block') or {}).get('kind') == 'human' and eye
+        handoff = '；按 👀 接手這一頁,處理完按「修改」接著填' if human_handoff else ''
+        line, why, todo = [['bad', '🚧 ' + block + handoff]], '', block
         if (a.get('block') or {}).get('kind') == 'posting':
             main = [{'b': 'rm', 'label': '🗑 不投了,移除這張', 'main': True, 'adv': False},
                     fill(f'職缺其實沒變,讓 {agent} 重填', adv=False)]
+        elif human_handoff and can_fix:
+            main = [{'b': 'fix', 'label': f'✏️ 修改,讓 {agent} 接著填', 'main': True, 'adv': True}]
         else:
             # 那一頁還開著:登入完叫 agent 在原頁接著做;頁已經不在了(沒開到頁、工作區收掉):叫不出來,
             # 唯一的路是讓 agent 重開那一頁,它停在登入那一步時 👀 就叫得出來
@@ -538,6 +568,40 @@ def view(fb, url, status, nx):
     elif s in ('gone', 'nopage') and not auto_do:
         # 只是頁面沒了或那一輪沒跑完:重填是程式的事,不算要你處理;填表進度算在還沒填
         todo, fill_cell = '', {'kind': 'todo'}
+    if done:
+        for observation in a.get('field_observations') or []:
+            if isinstance(observation, dict):
+                line.append(['idle', str(observation.get('q') or '欄位') + '：'
+                             + str(observation.get('marker') or '沒比到')])
+        for page in a.get('unreadable_pages') or []:
+            if isinstance(page, dict):
+                label = str(page.get('url') or '工作區分頁') + (
+                    '：截圖沒取得' if page.get('kind') == 'screenshot' else '：讀不到')
+                if page.get('reason'):
+                    label += '（' + str(page['reason']) + '）'
+                line.append(['idle', label])
+        report = (a.get('fill_changes') or a.get('page_changes_since_fill') or
+                  (a.get('submit_fail') or {}).get('changes_since_fill') or
+                  (a.get('sent') or {}).get('changes_since_fill'))
+        if isinstance(report, dict):
+            for mark in report.get('marks') or []:
+                if isinstance(mark, dict) and mark.get('text'):
+                    line.append(['idle', str(mark['text'])])
+            for page in report.get('pages') or []:
+                if not isinstance(page, dict):
+                    continue
+                label = str(page.get('page_url') or page.get('page_tab_id') or '工作區分頁')
+                if page.get('compared'):
+                    for change in page.get('changes') or []:
+                        before = '\n'.join(str(x) for x in change.get('before_parts') or []) or '（沒有原文）'
+                        after = '\n'.join(str(x) for x in change.get('after_parts') or []) or '（沒有新原文）'
+                        full = '改前：' + before + '\n改後：' + after
+                        short = full.replace('\n', ' ⏎ ')
+                        if len(short) > 180:
+                            short = short[:177] + '…'
+                        line.append(['idle', label + '：' + short, {'sync': True, 'full': full}])
+                else:
+                    line.append(['idle', label + '：' + str(page.get('reason') or '程式沒比到')])
     return _icons({'locked': False, 'busy': working, 'stage': stage, 'line': line, 'shots': shots, 'why': why,
                    'buttons': [b for b in main + side if b], 'todo': todo, 'fill': fill_cell, 'up': up, 'eye': eye, 'rf': rf,
                    'soon': s == 'confirmed' and not prob, 'review': s == 'parked' and bool(a.get('session'))})

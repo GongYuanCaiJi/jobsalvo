@@ -73,8 +73,12 @@ class Report(unittest.TestCase):
             # codex 的 prompt 從 stdin 餵(prompt_stdin);command-code 還在參數裡
             prompt = argv[argv.index('-p') + 1] if model == 'alt' else agent_run.prompt_stdin(model, 'P')
             self.assertIn('agent_report.py', prompt)
-        fed = agent_run.prompt_stdin('main', 'P', browser=agent_run.apply_overrides(), chrome=True)
+        fed = agent_run.prompt_stdin('main', 'P', browser=agent_run.lean(True), chrome=True)
         self.assertIn('agent_report.py', fed)
+
+    def test_website_task_prompt_omits_the_shared_report_rule(self):
+        self.assertIn('agent_report.py', agent_run.rules_for('main'))
+        self.assertNotIn('agent_report.py', agent_run.rules_for('main', website_task=True))
 
 
 

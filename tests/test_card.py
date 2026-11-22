@@ -26,10 +26,13 @@ class CardName(unittest.TestCase):
         for case in cases['companies']:
             with self.subTest(target=case['target'], alias=case.get('alias')):
                 job = {'id': case.get('id', ''), 'target': case['target']}
-                self.assertEqual(card.company(job, case.get('alias') or {}), case['expected'])
+                expected = '其他' if case.get('id') else case['expected']
+                self.assertEqual(card.company(job, case.get('alias') or {}), expected)
         for case in cases['company_same']:
             with self.subTest(a=case['a'], b=case['b']):
-                self.assertEqual(card.same_company(case['a'], case['b']), case['same'])
+                self.assertEqual(card.legacy_same_company(case['a'], case['b']), case['same'], '升級前的舊卡照舊')
+                self.assertEqual(card.same_company(case['a'], case['b']), bool(case['a']) and case['a'] == case['b'],
+                                 '有 agent 引的公司的卡:一字不差才算同一家')
 
     def test_own_title_words_from_settings(self):
         """內建清單認不出的職稱(咖啡師 Barista),使用者在設定加了就認得,那一段不會被當成公司。"""
@@ -42,9 +45,8 @@ class CardName(unittest.TestCase):
         self.assertEqual(card.name('Engineer', 'Acme'), 'Engineer · Acme')
         self.assertEqual(card.name('Engineer · Acme', 'Acme'), 'Engineer · Acme')
 
-    def test_name_key_and_replacement_preserve_source_suffix(self):
+    def test_name_replacement_preserves_source_suffix(self):
         target = 'Engineer · Acme（[LinkedIn](https://example.test/job)）'
-        self.assertEqual(card.name_key(target), card.name_key('Engineer, Acme'))
         self.assertEqual(card.with_name(target, 'Senior Engineer · Acme'),
                          'Senior Engineer · Acme（[LinkedIn](https://example.test/job)）')
 
@@ -70,7 +72,8 @@ class CardName(unittest.TestCase):
         jobs = [{'id': 'https://www.104.com.tw/job/8bbbb'}, {'id': 'https://jobs.lever.co/northwind/1'},
                 {'id': 'https://job-boards.greenhouse.io/northwind/jobs/1'}, {'id': 'old-card-id'},
                 {'id': 'x', 'src': {'site': 'www.linkedin.com'}}]
-        self.assertEqual([j['src_plat'] for j in card.label_jobs(jobs)], ['104', 'Lever', 'Greenhouse', '不明', 'LinkedIn'])
+        self.assertEqual([j['src_plat'] for j in card.label_jobs(jobs)],
+                         ['104.com.tw', 'jobs.lever.co', 'job-boards.greenhouse.io', '不明', 'linkedin.com'])
 
     def test_url_identifier_is_shared_twelve_character_prefix(self):
         url = 'https://example.test/jobs/123'

@@ -176,12 +176,12 @@ def plan(data, fb, *, running, build=None, now=None, cfg=None, real=True, replie
     if not chrome_busy and not out['fill'] and not out['fix'] and not retry_left:
         # 送出結果不明的卡:按下送出過了 UNSURE_WAIT(確認信來得及到),就叫查應徵進度去信箱和平台應徵紀錄查這一張。
         # 每一次送出只查一次(記號帶送出時間);沒查出結果的,每天那一輪查應徵進度會再一起查
-        import reply_run
-        for i in reply_run.unsure_cards(fb):
-            tried_at = reply_run.submit_tried_at(fb[i])
+        import progress
+        for i in progress.unsure_cards(fb):
+            tried_at = progress.submit_tried_at(fb[i])
             mark = 'unsure:' + i + ':' + tried_at
-            t = reply_run._local_time(tried_at)
-            due = t is None or (now - t).total_seconds() >= reply_run.UNSURE_WAIT
+            t = progress._local_time(tried_at)
+            due = t is None or (now - t).total_seconds() >= progress.UNSURE_WAIT
             if due and mark not in tried and i in jobs:
                 out['unsure'] = i
                 out['tried'].append(mark)
@@ -297,15 +297,15 @@ class Pilot:
         return list(got)
 
     def _settle(self, fb):
-        """卡停在正在填、正在送出,那一輪卻已經不在跑(被停止、當掉):照狀態表收尾(apply_run.settle)。
+        """卡停在正在填、正在送出,那一輪卻已經不在跑(被停止、當掉):照狀態表收尾(delivery_core.settle)。
         在看板鎖裡再看一次有沒有在跑:剛開跑的那一輪先寫了進度才動卡,不會被當成停掉的。"""
-        import apply_run
+        import delivery_core
         if not any(ds.state(m) in ds.WORKING for k, m in fb.items() if isinstance(m, dict) and not k.startswith('__')):
             return
 
         def mut(d):
             st = self.run_status('apply') or {}
-            apply_run.settle(d, (st.get('url') or '*') if st.get('running') else None)
+            delivery_core.settle(d, (st.get('url') or '*') if st.get('running') else None)
             fb.clear()
             fb.update(copy.deepcopy(d))
         bd.set_fb(mut, live=self.state, by='autopilot')

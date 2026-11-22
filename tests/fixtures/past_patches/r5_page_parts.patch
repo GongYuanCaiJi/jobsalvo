@@ -1,0 +1,2 @@
+def fill(page):
+    return page.parts

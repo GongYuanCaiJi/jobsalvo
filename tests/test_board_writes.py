@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,11 @@ import _env  # noqa: E402,F401  測試跑在暫存資料夾
 from _env import read_fb, read_board  # noqa: E402
 
 import board_doc as bd  # noqa: E402
+import board_status  # noqa: E402
+import board_server  # noqa: E402
+import config as cf  # noqa: E402
+import evidence  # noqa: E402
+import website_notes  # noqa: E402
 
 JOBS = [{'id': 'https://ex.test/job/%d' % i, 'target': 'Job %d' % i} for i in range(1, 4)]
 U = JOBS[0]['id']
@@ -66,7 +72,6 @@ TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 MAKES_A_NEW_DOC = {
     ('board_server.py', 'serve_doc'),                      # 送頁面(不寫檔)
     ('init.py', 'empty_board'), ('demo.py', 'build'),      # 第一次建看板、示範資料
-    ('apply_profile_accept.py', '_acceptance_board_document'),
     ('board_check.py', 'check_bank_export_and_history'),   # 看板檢查在暫存資料夾生全新的看板
 }
 
@@ -90,13 +95,14 @@ class SameLockSameWrite(Tmp):
                     walk(c, inner)
             walk(tree, '')
         self.assertEqual(found - MAKES_A_NEW_DOC, set(), '這些地方自己組看板文件寫檔:改走 board_doc.rewrite / set_fb / set_data')
+        self.assertEqual(MAKES_A_NEW_DOC - found, set(), '放行表指到已刪或改名的程式:刪掉那一列')
 
 
     def test_irreversible_conversions_go_through_the_restore_point_entry(self):
         """伺服器起來時的轉換(清過時的回報與答案)回不了頭:只准在 board_server.migrate_marks 裡做,
         而且它寫回看板只准透過 folder_history.convert(先留退回點,沒有就不轉)。新增的轉換照樣要掛進 migrate_marks。"""
         import ast
-        conversions = {'sweep'}
+        conversions = {'sweep', 'migrate_legacy_profile_answer_urls'}
         found = set()
         for name in sorted(os.listdir(TOOLS)):
             if not name.endswith('.py') or name == 'board_check.py':
@@ -200,7 +206,7 @@ class TwoDevices(unittest.TestCase):
         return read_fb(self.path).get(CARD) or {}
 
     def backend(self, event, **data):
-        """後台(agent 回報、程式偵測)送一個事件:跟 apply_run、chrome_door 同一條路。"""
+        """後台(agent 回報、程式偵測)送一個事件:跟 fill、chrome_door 同一條路。"""
         import delivery_state as ds
         d = dict(copy.deepcopy(FIX['data'].get(event) or {}), **data)
         bd.set_fb(lambda fb: ds.try_fire(fb, CARD, event, **d), live=self.path, by='test')
@@ -245,7 +251,7 @@ class TwoDevices(unittest.TestCase):
         self.board('confirmed')
         self.phone('leave', {'app': 'ready'})
         why = []
-        bd.set_fb(lambda fb: why.append(fr.start_submit(fb, CARD)), live=self.path, by='test')
+        bd.set_fb(lambda fb: why.append(fr.approval_problem(fb, CARD)), live=self.path, by='test')
         self.assertTrue(why[0], '退回之後不能再開始送出')
         m = self.assertAllowed('parked')
         self.assertEqual(m.get('app'), 'ready')
@@ -299,7 +305,7 @@ class TwoDevices(unittest.TestCase):
         self.board('confirmed')
         self.phone('unconfirm')
         why = []
-        bd.set_fb(lambda fb: why.append(fr.start_submit(fb, CARD)), live=self.path, by='test')
+        bd.set_fb(lambda fb: why.append(fr.approval_problem(fb, CARD)), live=self.path, by='test')
         self.assertTrue(why[0])
         self.assertAllowed('parked')
 
@@ -480,7 +486,7 @@ class SendQueue(unittest.TestCase):
             x.pop('refill', None)                            # 網頁照現在的答案填的:可以確認送出
         _env.make_board(self.path, {CARD: m, '__ans__': copy.deepcopy(FIX['ans'])},
                         data={'jobs': [{'id': CARD, 'target': 'x'}],
-                              'status': {'schema_version': 2, 'checked_links': True, 'issues': []}}, sty=CSS)
+                              'status': {'schema_version': board_status.SCHEMA_VERSION, 'issues': []}}, sty=CSS)
 
     def setUp(self):
         self.setUp0()
@@ -550,6 +556,117 @@ class SendQueue(unittest.TestCase):
         self.assertAllowed('confirmed')
 
 
+class WebsiteNotesBoard(unittest.TestCase):
+    def setUp(self):
+        _env.use_home(self)
+        self.board_path = os.path.join(self.home, 'board.html')
+        make_board(self.board_path, {})
+        self.enterContext(mock.patch.object(board_server, 'STATE', self.board_path))
+
+    def get(self, path, include_type=False):
+        from urllib.parse import parse_qs, urlparse
+        responses = []
+        content_types = []
+        query = parse_qs(urlparse(path).query)
+
+        def send(code, body, ctype='text/html; charset=utf-8'):
+            responses.append((code, body))
+            content_types.append(ctype)
+
+        handler = SimpleNamespace(
+            path=path,
+            _foreign=lambda _write: False,
+            _q=lambda key: (query.get(key) or [''])[0],
+            _json=lambda code, obj: responses.append((code, obj)),
+            _send=send,
+            send_error=lambda code: responses.append((code, '')),
+        )
+        board_server.H._do_GET(handler)
+        return (*responses[-1], content_types[-1]) if include_type else responses[-1]
+
+    def post(self, body):
+        responses = []
+        handler = SimpleNamespace(
+            path='/api/settings/website_notes',
+            _json_body=lambda: body,
+            _json=lambda code, obj: responses.append((code, obj)),
+        )
+        board_server.H.do_POST_settings(handler)
+        return responses[-1]
+
+    def test_settings_api_adds_edits_and_deletes_website_notes(self):
+        code, result = self.post({'action': 'add', 'url': 'https://notes.example/jobs/1', 'text': '先選地區'})
+        self.assertEqual(200, code)
+        self.assertIn('note', result)
+        self.assertIn('undo', result)
+        note_id = result['note']['id']
+        self.assertEqual('user', result['note']['author'])
+        self.assertTrue(os.path.isfile(cf.path('website-notes.json')))
+        self.assertEqual(['先選地區'], [note['text'] for note in website_notes.for_url('https://notes.example/jobs/1')])
+
+        code, result = self.get('/api/settings/website_notes')
+        self.assertEqual(200, code)
+        self.assertEqual(['先選地區'], [note['text'] for note in result['notes']])
+
+        code, result = self.post({'action': 'edit', 'id': note_id, 'text': '先選縣市'})
+        self.assertEqual(200, code)
+        self.assertIn('undo', result)
+        self.assertEqual('user', result['note']['author'])
+        self.assertEqual(['先選縣市'], [note['text'] for note in self.get('/api/settings/website_notes')[1]['notes']])
+        self.assertEqual(200, self.post({'action': 'undo', 'undo': result['undo']})[0])
+        self.assertEqual(['先選地區'], [note['text'] for note in self.get('/api/settings/website_notes')[1]['notes']])
+
+        code, result = self.post({'action': 'delete', 'id': note_id})
+        self.assertEqual(200, code)
+        self.assertIn('undo', result)
+        self.assertEqual([], self.get('/api/settings/website_notes')[1]['notes'])
+        self.assertEqual(200, self.post({'action': 'undo', 'undo': result['undo']})[0])
+        self.assertEqual(['先選地區'], [note['text'] for note in self.get('/api/settings/website_notes')[1]['notes']])
+
+    def test_website_note_undo_keeps_unrelated_changes_and_rejects_a_stale_note(self):
+        _, first = self.post({'action': 'add', 'url': 'https://notes.example/jobs/1', 'text': '第一則'})
+        _, second = self.post({'action': 'add', 'url': 'https://notes.example/jobs/2', 'text': '第二則'})
+
+        self.assertEqual(200, self.post({'action': 'undo', 'undo': first['undo']})[0])
+        self.assertEqual(['第二則'], [note['text'] for note in self.get('/api/settings/website_notes')[1]['notes']])
+
+        self.assertEqual(200, self.post({'action': 'edit', 'id': second['note']['id'], 'text': '更新後'})[0])
+        code, conflict = self.post({'action': 'undo', 'undo': second['undo']})
+        self.assertEqual(409, code)
+        self.assertFalse(conflict['ok'])
+        self.assertEqual(['更新後'], [note['text'] for note in self.get('/api/settings/website_notes')[1]['notes']])
+
+    def test_evidence_folder_links_open_images_and_json_but_reject_files_outside_the_round(self):
+        root = self.enterContext(tempfile.TemporaryDirectory(prefix='website-note-evidence-'))
+        folder = os.path.join(root, 'round')
+        os.mkdir(folder)
+        image = b'\x89PNG\r\n\x1a\nscreenshot'
+        note = b'{"ok": true}\n'
+        outside = os.path.join(root, 'outside.txt')
+        with open(os.path.join(folder, 'shot.png'), 'wb') as f:
+            f.write(image)
+        with open(os.path.join(folder, 'handoff.json'), 'wb') as f:
+            f.write(note)
+        with open(outside, 'wb') as f:
+            f.write(b'secret')
+        os.symlink(outside, os.path.join(folder, 'outside-link.txt'))
+        card_id, round_id = '0123456789ab', '20261026-120000-123456-fill-abcdef'
+        self.enterContext(mock.patch.object(evidence, 'round_dir', return_value=os.path.realpath(folder), create=True))
+        code, page = self.get(f'/api/evidence-folder?c={card_id}&r={round_id}')
+        self.assertEqual(200, code)
+        self.assertIn(f'href="/api/evidence-file?c={card_id}&amp;r={round_id}&amp;f=shot.png">shot.png</a>', page)
+        self.assertIn(f'href="/api/evidence-file?c={card_id}&amp;r={round_id}&amp;f=handoff.json">handoff.json</a>', page)
+
+        from urllib.parse import urlencode
+        query = urlencode({'c': card_id, 'r': round_id})
+        image_response = self.get(f'/api/evidence-file?{query}&f=shot.png', include_type=True)
+        self.assertEqual((200, image, 'image/png'), image_response)
+        note_response = self.get(f'/api/evidence-file?{query}&f=handoff.json', include_type=True)
+        self.assertEqual((200, note, 'text/plain; charset=utf-8'), note_response)
+        self.assertEqual(404, self.get(f'/api/evidence-file?{query}&f=..%2Foutside.txt')[0])
+        self.assertEqual(404, self.get(f'/api/evidence-file?{query}&f=outside-link.txt')[0])
+
+
 class ServedVersion(TwoDevices):
     """首頁帶的版本(sig)跟輪詢的 /api/rev 同一種算法:沒人改就對得上(載入後不再重抓大包),改了就對不上(#606)。
     伺服器記著的那份看板(snapshot)在別的程式寫檔之後也要跟著換。"""
@@ -565,9 +682,10 @@ class ServedVersion(TwoDevices):
 
     def test_poll_version_moves_when_only_the_profile_registry_changes(self):
         # 每張卡的下一步也照平台履歷登記表算:看板檔沒變、登記表換了,頁面也要重拿下一步
+        import profile_registry
         import profile_sync as ps
         self.board('confirmed')
-        with mock.patch.object(ps, 'REG', os.path.join(self.dir, 'profiles.json')):
+        with mock.patch.object(profile_registry, 'path', return_value=os.path.join(self.dir, 'profiles.json')):
             before = self.bs.content_sig()[0]
             ps._save_registry({'104.com.tw': {}})
             self.assertNotEqual(self.bs.content_sig()[0], before)

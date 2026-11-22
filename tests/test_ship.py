@@ -21,9 +21,13 @@ import reconcile  # noqa: E402
 import markdown_pdf  # noqa: E402
 import ship  # noqa: E402
 import source_sync  # noqa: E402
-import pdf_tools  # noqa: E402
+import pypdf  # noqa: E402
 import settings_api  # noqa: E402
 import chrome_door  # noqa: E402
+
+
+def page_texts(*paths):
+    return [page.extract_text() for path in paths for page in pypdf.PdfReader(path).pages]
 
 
 def _snapshot(url, name=None):
@@ -158,8 +162,8 @@ class PackageReconcile(unittest.TestCase):
         info = ship.info(self.url)
         self.assertEqual(info['files'], ['base.pdf', 'letter.pdf'])
         merged = os.path.join(ship.folder(self.url), info['merged'])
-        self.assertTrue(pdf_tools.same_pages(merged, [self.source, attachment]))
-        self.assertFalse(pdf_tools.same_pages(merged, [attachment, self.source]))
+        self.assertEqual(page_texts(merged), page_texts(self.source, attachment))
+        self.assertNotEqual(page_texts(merged), page_texts(attachment, self.source))
         with open(merged, 'rb') as f:
             old_hash = hashlib.sha256(f.read()).hexdigest()
 
@@ -171,7 +175,7 @@ class PackageReconcile(unittest.TestCase):
             with open(merged, 'rb') as f:
                 new_hash = hashlib.sha256(f.read()).hexdigest()
             self.assertNotEqual(new_hash, old_hash)
-            self.assertTrue(pdf_tools.same_pages(merged, [self.source, attachment]))
+            self.assertEqual(page_texts(merged), page_texts(self.source, attachment))
 
     def test_send_names_name_the_uploaded_files_and_a_rename_rebuilds_the_folder(self):
         attachment = os.path.join(self.home, 'resume', 'letter.pdf')
@@ -190,8 +194,8 @@ class PackageReconcile(unittest.TestCase):
         info = ship.info(self.url)
         self.assertEqual(info['files'], ['王小明 履歷 通用版.pdf', '王小明 求職信.pdf'])
         self.assertEqual(info['merged'], '王小明 履歷 通用版+1.pdf')
-        self.assertTrue(pdf_tools.same_pages(os.path.join(ship.folder(self.url), info['merged']),
-                                             [self.source, attachment]))
+        self.assertEqual(page_texts(os.path.join(ship.folder(self.url), info['merged'])),
+                         page_texts(self.source, attachment))
 
     def _set_mark(self, **kw):
         bd.set_fb(lambda fb: fb[self.url].update(kw), live=self.board)
@@ -365,11 +369,11 @@ class PackageReconcile(unittest.TestCase):
                 self.assertEqual(f.read(5), b'%PDF-')
             self.assertIn('markdown marker', settings_api.pdf_text(output))
             self.assertIn('attachment markdown marker', settings_api.pdf_text(attachment_output))
-            reader = pdf_tools.pypdf.PdfReader(output)
+            reader = pypdf.PdfReader(output)
             size = (round(float(reader.pages[0].mediabox.width)),
                     round(float(reader.pages[0].mediabox.height)))
             self.assertEqual(size, (595, 842))
-            attachment_reader = pdf_tools.pypdf.PdfReader(attachment_output)
+            attachment_reader = pypdf.PdfReader(attachment_output)
             attachment_size = (round(float(attachment_reader.pages[0].mediabox.width)),
                                round(float(attachment_reader.pages[0].mediabox.height)))
             self.assertNotEqual(attachment_size, (595, 842))
@@ -385,7 +389,7 @@ class PackageReconcile(unittest.TestCase):
 
             pathlib.Path(style).write_text('@page { size: A5; margin: 0; }', encoding='utf-8')
             self.assertEqual(self._run(), 0)
-            reader = pdf_tools.pypdf.PdfReader(generated_resume)
+            reader = pypdf.PdfReader(generated_resume)
             changed_size = (round(float(reader.pages[0].mediabox.width)),
                             round(float(reader.pages[0].mediabox.height)))
             self.assertEqual(changed_size, (420, 595))
@@ -460,7 +464,7 @@ class PackageReconcile(unittest.TestCase):
 
         self.assertEqual(problems, [])
         info = ship.info(self.url)
-        self.assertTrue(pdf_tools.same_pages(os.path.join(directory, info['merged']), [custom, attachment]))
+        self.assertEqual(page_texts(os.path.join(directory, info['merged'])), page_texts(custom, attachment))
 
     def test_unchecked_card_resume_is_not_replaced_by_agent_pick(self):
         _env.tiny_pdf(os.path.join(self.home, 'resume', 'paused.pdf'), 'paused')
@@ -742,11 +746,10 @@ class PackageReconcile(unittest.TestCase):
     def test_card_leaving_the_flow_keeps_the_fill_screenshots(self):
         # 可以投了、填過的卡按 😐/👎 退出流程:可重生的要寄的檔案整夾清掉,按復原回到流程後「填表時的截圖」還在。
         # 以前截圖放在可投遞夾的 .apply 裡,跟著夾子一起刪;現在填表的工作資料夾在進度目錄、截圖在證據夾
-        import apply_run
         import evidence
         self.assertEqual(self._run(), 0)
         package = ship.folder(self.url, name=card.name(self.job))
-        self.assertFalse(apply_run.out_dir(self.url, self.board).startswith(cf.SHIP_DIR))
+        self.assertFalse(evidence.card_dir(self.url, self.board).startswith(cf.SHIP_DIR))
         src = os.path.join(cf.TMP, 'fill.png')
         pathlib.Path(src).write_bytes(b'png')
         rnd = evidence.Round('apply', 'fill', [self.url], self.board)
@@ -1120,7 +1123,7 @@ if __name__ == '__main__':
 
 
 class MergedPdf(unittest.TestCase):
-    """合併版 PDF(驗收工具 apply_accept 也直接叫這一支):缺檔、沒檔都照實說,不生半份;重建沿用上次的檔名。"""
+    """合併版 PDF:缺檔、沒檔都照實說,不生半份;重建沿用上次的檔名。"""
 
     def setUp(self):
         self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='merged-'))

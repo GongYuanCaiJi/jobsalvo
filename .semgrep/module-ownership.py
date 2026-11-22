@@ -2,6 +2,7 @@ import glob
 import hashlib
 import os
 import re
+import unittest
 
 import card
 import cf
@@ -33,3 +34,14 @@ def allowed(url, job):
     d = ship.folder(url)
     # ok: card-name-cleanup-outside-card
     return card.name(job), d
+
+
+class KnownBugs(unittest.TestCase):
+    # ruleid: expected-failure-hides-a-known-bug
+    @unittest.expectedFailure
+    def test_known(self):
+        self.fail()
+
+    # ok: expected-failure-hides-a-known-bug
+    def test_fixed(self):
+        self.assertTrue(True)

@@ -67,14 +67,17 @@ def free_port():
 class Sandbox:
     """把看板複製一份,用同一支 board_server 起在隨機埠。點按鈕只會改到副本。"""
 
-    def __init__(self, board):
+    def __init__(self, board, home=None):
         self.dir = tempfile.mkdtemp(prefix='shot-board-')
         self.copy = os.path.join(self.dir, 'board.html')
         shutil.copyfile(board, self.copy)
         self.port = free_port()
+        server = [sys.executable, os.path.join(HERE, 'board_server.py'),
+                  '--port', str(self.port), '--host', '127.0.0.1', '--state', self.copy]
+        if home:
+            server.extend(['--sandbox-home', os.path.abspath(home)])
         self.proc = subprocess.Popen(
-            [sys.executable, os.path.join(HERE, 'board_server.py'),
-             '--port', str(self.port), '--host', '127.0.0.1', '--state', self.copy],
+            server,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             # 副本產 PDF:有 ego 跟產品一樣走 ego;沒有 ego 的地方(CI 的 Linux)用開發用的 Chrome(dev_pdf)
             env=dict(os.environ, AGENT_BOARD=self.copy, **({} if chrome_door.ego_bin() else {'JOBSALVO_DEV_PDF': '1'})))

@@ -3,7 +3,7 @@
 """
 job_fake —— 看板副本上按「跑準備區」「找新職缺」時跑的假流程(沙箱、測試、board_check 都是副本)。
 
-真的那兩支(cut_tailor、converge)會派 agent、寫 repo 裡的檔、改現行看板。副本上按一下就跑真的,
+真的那兩支(cut_tailor、find)會派 agent、寫 repo 裡的檔、改現行看板。副本上按一下就跑真的,
 等於在測試時動到真的東西、花掉 agent。所以 board_server 只在服務真的看板時才跑真的,
 其餘一律跑這支。
 
@@ -16,7 +16,7 @@ job_fake —— 看板副本上按「跑準備區」「找新職缺」時跑的�
   suggest  分類建議:寫一份假的建議(兩個類別、一個標籤)
 介面整條路走得完,但不花 agent、不碰任何真的檔案。每一步停多久看環境變數 JOB_FAKE_STEP(秒,預設 1)。
 """
-import os, sys, json, time, argparse
+import os, sys, json, time, argparse, datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -27,16 +27,17 @@ import config as cf         # noqa: E402
 
 def sync(board, sp, step):
     """看板副本只演練背景狀態；不接瀏覽器、不改平台履歷登記。"""
-    import sync_profiles
+    import sync
     path = os.path.join(sp, 'sync_status.json')
-    slots = [slot for slot in sync_profiles.slots() if sync_profiles.behind(*slot, board)]
-    needed = sync_profiles.pending_count(board)
     started = time.time()
-    sync_profiles.write_status(path, started, len(slots), needed)
+    slots = [slot for slot in sync.slots() if sync.standing(slot, board).code != 'STANDING_OK']
     time.sleep(step)
-    results = {(platform, lang, variant): (False, ['副本只演練畫面，未實際同步'])
-               for platform, lang, variant, _entry in slots}
-    sync_profiles.write_status(path, started, len(slots), needed, results, finished=True)
+    results = [{'platform': slot.platform, 'lang': slot.lang, 'variant': slot.variant,
+                'ok': False, 'msg': '副本只演練畫面，未實際同步'} for slot in slots]
+    phase = 'nothing' if not slots else 'incomplete'
+    jobrun.write(path, {'phase': phase, 'pid': os.getpid(), 't0': started, 'n': len(slots),
+                        'done': 0, 'msg': '沒有要同步的' if not slots else '副本未實際同步',
+                        'results': results, 'finished_at': time.time()})
 
 
 def prep(board, sp, step, limit=0, url=''):
@@ -80,8 +81,7 @@ def research(board, sp, step, mode, direction, minutes=0):
     jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, finished_at=time.time()))
 
 
-# 假的 agent 回報(fill.json 的形狀):真的填表檢查一定回報這次怎麼交履歷(delivery),
-# 少了這欄副本上核准鈕永遠按不下去。紀錄本身用 apply_run.fill_record 組,跟真的同一支。
+# 假的 agent 回報:副本上的狀態只用來演練看板流程,不讀或改任何網站。
 def _fake_runtime():
     """假的「開這一頁的那一家」:副本設定裡用 Chrome 的那一家(副本的卡也跟真的一樣記著,沒記到的卡算接不回來)。"""
     import chrome_door
@@ -89,25 +89,24 @@ def _fake_runtime():
     return door.runtime if door else None
 
 
-FAKE_FILL = {'delivery': {'method': 'direct_upload'}, 'tab_id': '1', 'tab_url': '', 'blank_for_him': [],
-             'uploaded': [], 'notes': [], 'fixed': []}
+FAKE_FILL = {'delivery': {'method': 'direct_upload'}}
 
 
 def apply(board, sp, step, stage, url, limit=0):
+    import fill
     import form_record as fr
-    import apply_run as ar
     path = os.path.join(sp, 'apply_status.json')
     t0, me = time.time(), os.getpid()
     base = {'pid': me, 't0': t0, 'stage': stage, 'url': url}
     jobrun.write(path, dict(base, phase='run')); time.sleep(step)
-    today = ar.today()
+    today = datetime.date.today().isoformat()
     done = []
     status = fr.board_status(board)          # 核准規則也看投遞前驗收,跟真的一樣
 
     import delivery_state as ds
 
     def mut(fb):
-        # 跟真的 apply_run 一樣只送狀態表的事件:開始 → 填好 / 看到已收到申請頁
+        # 跟真的 fill 一樣只送狀態表的事件:開始 → 填好 / 看到已收到申請頁
         for u, m in list(fb.items()):
             if ds.app_of(m) != 'ship' or (url and u != url):
                 continue
@@ -119,17 +118,22 @@ def apply(board, sp, step, stage, url, limit=0):
                 # 沒有表單紀錄的話副本上新進可投遞的卡永遠走不到確認。
                 old = m.get('form') or {}
                 m['form'] = {'plat': old.get('plat') or '沙箱', 'f': old.get('f') or [], 'at': today}
-                ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fill', m.get('apply'), FAKE_FILL, [], 'sandbox-' + str(me), 'sandbox',
-                                                               runtime=_fake_runtime()))
+                ds.fire(fb, u, 'fill_ok', apply=fill.round_apply(
+                    'fill', session='sandbox-' + str(me), agent_id='sandbox', runtime=_fake_runtime(), profile='',
+                    delivery=FAKE_FILL['delivery'], uploaded=[], workspace={'id': 1, 'name': 'sandbox', 'page': 'p1'},
+                    tab_id='1:p1'))
                 done.append(u)
             elif stage == 'fix':
                 if (m.get('apply') or {}).get('session') and ds.allowed(m, 'fix_start'):
                     ds.fire(fb, u, 'fix_start', apply={'stage': 'fix', 'at': today, 'issues': []})
-                    ds.fire(fb, u, 'fill_ok', apply=ar.fill_record('fix', m['apply'], FAKE_FILL, [], m['apply']['session'], 'sandbox'))
+                    ds.fire(fb, u, 'fill_ok', apply=fill.round_apply(
+                        'fix', session=m['apply']['session'], agent_id='sandbox', runtime=_fake_runtime(),
+                        delivery=FAKE_FILL['delivery'], workspace=m['apply'].get('workspace'),
+                        tab_id=m['apply'].get('tab_id')))
                     fr.apply_clear_refill(fb, u)
                     done.append(u)
             elif fr.approval_problem(fb, u, status) is None:
-                ev = ar.submit_evidence({'confirm_text': '(沙箱假確認頁)', 'confirm_url': ''})
+                ev = {'at': today, 'said': 'true', 'evidence': '(沙箱假確認頁)'}
                 ds.fire(fb, u, 'submit_start')
                 ds.fire(fb, u, 'submit_ok', by='agent', sent_at=today, evidence=ev)
                 import ship
@@ -185,9 +189,17 @@ def customize(board, sp, step, url, items):
                         't0': t0, 'finished_at': time.time(), 'url': url})
 
 
+def replies(sp):
+    """副本不連外查回音:只寫一份「沒查」的進度,卡不動。"""
+    os.makedirs(sp, exist_ok=True)
+    jobrun.write(os.path.join(sp, 'reply_status.json'), {'phase': 'done', 'n': 0, 'done': 0, 'msg': '副本未執行查應徵進度',
+                                                         't0': time.time(), 'finished_at': time.time()})
+    print('副本未執行查應徵進度')
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--kind', choices=['prep', 'customize', 'research', 'apply', 'add', 'suggest', 'sync'], required=True)
+    ap.add_argument('--kind', choices=['prep', 'customize', 'research', 'apply', 'add', 'suggest', 'sync', 'replies'], required=True)
     ap.add_argument('--board', required=True)
     ap.add_argument('--mode', default='')
     ap.add_argument('--direction', default='')
@@ -199,9 +211,11 @@ def main():
     a = ap.parse_args()
     step = float(os.environ.get('JOB_FAKE_STEP', '1'))
     sp = os.environ.get({'prep': 'CUT_TAILOR_TMP', 'customize': 'CUSTOMIZE_TMP', 'research': 'CONVERGE_TMP', 'apply': 'APPLY_TMP',
-                         'add': 'ADD_TMP', 'suggest': 'SUGGEST_TMP', 'sync': 'SYNC_TMP'}[a.kind]) or cf.TMP
+                         'add': 'ADD_TMP', 'suggest': 'SUGGEST_TMP', 'sync': 'SYNC_TMP', 'replies': 'REPLY_TMP'}[a.kind]) or cf.TMP
     if a.kind == 'sync':
         return sync(a.board, sp, step)
+    if a.kind == 'replies':
+        return replies(sp)
     if a.kind == 'customize':
         return customize(a.board, sp, step, a.url[-1] if a.url else '', a.item)
     if a.kind == 'apply':

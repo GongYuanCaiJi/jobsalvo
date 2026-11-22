@@ -52,9 +52,6 @@ FAKE_AGENT = textwrap.dedent('''
     with open(fill, 'w', encoding='utf-8') as f:
         json.dump({'platform': 'Lever', 'fields': [{'q': 'Name', 'value': 'Ann', 'src': 'rz'}]}, f)
     runs = [
-        [sys.executable, os.path.join(tools, 'form_record.py'), '--from-fill', fill, '--url', sys.argv[3]],
-        [sys.executable, '-c', 'import sys; sys.path.insert(0, %r); import form_record as fr; '
-                               'fr.translate(%r, en="New answer.")' % (tools, sys.argv[4])],
         [sys.executable, os.path.join(tools, 'agent_report.py'), '--from', '代投', '--job', sys.argv[3],
          '這家要你本人登入'],
     ]
@@ -107,9 +104,6 @@ class AgentHasNoBoardLocation(unittest.TestCase):
                  if self.copy in v or os.path.realpath(self.copy) in v or v.endswith('board.html')}
         self.assertEqual(leaks, {})
         fb = _env.read_fb(self.copy)
-        self.assertEqual(fb[U]['form']['plat'], 'Lever')                         # 記表單
-        self.assertEqual(fb['__ans__'][0]['v'], 'New answer.')                   # 翻譯寫回答案庫
-        self.assertNotIn('tr', fb['__ans__'][0])
         self.assertEqual([x['msg'] for x in fb['__inbox__']], ['這家要你本人登入'])   # 回報
         with open(cf.LIVE, encoding='utf-8') as f:
             self.assertEqual(f.read(), self.live_before)                          # 現行看板沒被碰
@@ -119,49 +113,14 @@ class AgentHasNoBoardLocation(unittest.TestCase):
             self.launch(prompt=f'改完寫回 {self.copy}')
 
     def test_fill_and_fix_prompts_do_not_name_the_board_file(self):
-        import apply_run
-        import chrome_door
+        import fill
         fb = filling_fb()
         fb[U]['form'] = {'plat': 'Lever', 'f': [{'q': 'Why us?', 'src': 'bank', 'k': K}], 'at': '2026-09-30'}
-        with mock.patch.object(apply_run.ship, 'folder', return_value=''), \
-                mock.patch.object(apply_run.ship, 'read_info', return_value={}), \
-                mock.patch.object(apply_run.fr, 'shared_text', return_value=''):
-            for runtime in ('codex', 'claude-code'):
-                for stage in ('fill', 'fix'):
-                    prompt, _out, _n = apply_run.prompt_for(stage, U, {'id': U}, fb, self.copy, door=chrome_door.of(runtime))
-                    self.assertIn('最後直接回傳一個完整交件 JSON', prompt)        # 兩家同一種交件寫法
-                    self.assertNotIn(self.copy, prompt)
-                    self.assertNotIn('--board', prompt)
-
-
-class ToolsOnlyTakeAllowedEvents(unittest.TestCase):
-    """agent 呼叫的小工具只收狀態表允許的事件:不准的擋下、講原因,卡片不動。"""
-
-    def setUp(self):
-        self.d = self.enterContext(tempfile.TemporaryDirectory(prefix='board-guard-ev-'))
-        self.fill = os.path.join(self.d, 'fill.json')
-        with open(self.fill, 'w', encoding='utf-8') as f:
-            json.dump({'platform': 'Lever', 'fields': [{'q': 'Name', 'value': 'Ann', 'src': 'rz'}]}, f)
-
-    def record(self, card):
-        board = make_board(os.path.join(self.d, 'board.html'), {U: card})
-        before = _env.read_fb(board)
-        r = subprocess.run([sys.executable, os.path.join(TOOLS, 'form_record.py'), '--from-fill', self.fill,
-                            '--url', U], env=ar.agent_env(board), capture_output=True, text=True)
-        return r, before, _env.read_fb(board)
-
-    def test_recording_a_form_on_a_card_nobody_is_filling_is_refused_with_the_reason(self):
-        r, before, after = self.record({'app': 'ship', 'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '1'},
-                                         'form': {'plat': 'Old', 'f': [], 'at': '2026-09-01'}})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('停著等你', r.stderr)                 # 講原因:這張現在是什麼狀態
-        self.assertEqual(after, before)                    # 卡片沒被動到
-
-    def test_recording_a_form_while_the_agent_is_filling_is_accepted(self):
-        r, _before, after = self.record({'app': 'ship', 'ds': 'running', 'apply': {'stage': 'fix'}})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(after[U]['form']['plat'], 'Lever')
-        self.assertEqual(after[U]['ds'], 'running')
+        for stage in ('fill', 'fix'):
+            prompt = fill.brief(stage, U, {'id': U}, fb, '').render(workspace=1)
+            self.assertIn('交件單格式(fill)', prompt)
+            self.assertNotIn(self.copy, prompt)
+            self.assertNotIn('--board', prompt)
 
 
 def sneak(path, mutate):
@@ -199,19 +158,10 @@ class SneakedEditsAreCaught(unittest.TestCase):
         with self.assertRaises(bd.Tampered):
             bd.set_data(lambda data, fb: None, live=self.board)
 
-    def test_the_dispatcher_does_not_act_on_a_sneaked_board(self):
-        import apply_run
-        sneak(self.board, confirm_behind_the_back)
-        with self.assertRaises(bd.Tampered):
-            apply_run.load(self.board)
-
     def test_the_agent_tool_reports_it_and_changes_nothing(self):
         sneak(self.board, lambda fb: fb[U].__setitem__('n', '偷寫的'))
-        fill = os.path.join(self.d, 'fill.json')
-        with open(fill, 'w', encoding='utf-8') as f:
-            json.dump({'platform': 'Lever', 'fields': [{'q': 'Name', 'value': 'Ann', 'src': 'rz'}]}, f)
-        r = subprocess.run([sys.executable, os.path.join(TOOLS, 'form_record.py'), '--from-fill', fill, '--url', U],
-                           env=ar.agent_env(self.board), capture_output=True, text=True)
+        r = subprocess.run([sys.executable, os.path.join(TOOLS, 'fill.py'), '--stage', 'fill', '--url', U,
+                            '--board', self.board], env=ar.agent_env(self.board), capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('繞過', r.stderr)
         self.assertNotIn(self.d, r.stdout + r.stderr)

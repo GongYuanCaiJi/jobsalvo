@@ -3,13 +3,11 @@
 """
 gate_cells —— 安檢門(gate)用的共用型別:交件單上的一格(Cell)、程式自己看到的真相(Truth)、核對結果(Verdict、Row)。
 
-各流程登記的格子放在 gate_apply(幫你填表)、gate_flows(其他 7 種流程);入口只有 gate(read、inspect)。
+交件單格子的核對方式由 gate_flows 登記;入口只有 gate(read、inspect)。
 """
 import json
 import os
-import re
 import sys
-import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import profile_sync as ps  # noqa: E402
@@ -41,26 +39,27 @@ class Truth:
 
     幫你填表(開了 agent 的瀏覽器):
       page:程式自己讀到的那一頁(讀不到是 None,page_why 是原因);tab_id:程式讀的是哪一個分頁;form_url:填好的申請表網址。
-      job、fb:這張卡和看板;download_dir:申請表收到的檔下載到哪(profile_sync.check_attachments 比)。
+      job、fb:這張卡和看板。
       decision:這張卡該用哪一份平台履歷(profile_sync.decided);不給就照 job、fb 算。
-    其他 7 種流程(沒開 agent 的瀏覽器,真相是程式自己知道的事;交給 agent 的材料不放這裡,只經 gate.inspect 傳到 pick):
+    其他任務流程(沒開 agent 的瀏覽器,真相是程式自己知道的事;交給 agent 的材料不放這裡,只經 gate.inspect 傳到 pick):
       下面這幾樣照「那一列是誰」分開放的,一列一列核對時也只給那一列自己的:
         fetched_on 程式抓那一頁的日期(「3 天前」照它算)、cites 程式附給它的舊卡代號。
-      feedback:{回饋代號: 回饋};cards:這一輪查的卡;source_types:{來源代號: 哪一種};resumes:勾選的履歷(None 是設定裡的)。
+      feedback:{回饋代號: 回饋};cards:這一輪查的卡;source_types:{來源代號: 哪一種};source_urls:{來源代號: 程式讀到的網址};resumes:勾選的履歷(None 是設定裡的)。
       handed:這一輪交給它的每一列是誰;read:有材料的 (owner, kind),gate.inspect 從 numbered.held() 填,
       格子只知道哪一列有哪一種材料(「有 JD」= (那一列, 'jd') in read),看不到字。"""
 
     PER_ROW = ('fetched_on', 'cites')
 
-    def __init__(self, url=None, job=None, fb=None, page=None, page_why='', tab_id=None, download_dir=None,
-                 decision=None, form_url=None, fetched_on=None, cites=None,
-                 feedback=None, cards=None, source_types=None, resumes=None, handed=None):
+    def __init__(self, url=None, job=None, fb=None, page=None, page_why='', tab_id=None,
+                 decision=None, form_url=None, fetched_on=None, cites=None, delivery_method=None,
+                 feedback=None, cards=None, source_types=None, source_urls=None, resumes=None, handed=None):
         self.url, self.job, self.fb = url, job, fb if fb is not None else {}
         self.page, self.page_why, self.tab_id, self.form_url = page, page_why, tab_id, form_url
-        self.download_dir = download_dir
         self._decision = decision
+        self.delivery_method = delivery_method
         self.fetched_on, self.cites, self.feedback = dict(fetched_on or {}), dict(cites or {}), dict(feedback or {})
         self.cards, self.source_types = set(cards or ()), dict(source_types or {})
+        self.source_urls = dict(source_urls or {})
         self.resumes = resumes
         self.handed, self.read = set(handed or ()), frozenset()
 
@@ -71,14 +70,14 @@ class Truth:
         return self._decision
 
     def text(self):
-        """頁面上看得到的字(標題、每一行、每一格的值、每一格周圍的說明)正規化後接在一起。
+        """頁面上看得到的字(標題、每一行、每一格的值、每一格周圍的說明)照讀到的樣子一行一行接在一起。
         欄位旁的說明(例如「驗證碼已寄到你的信箱」)常只出現在欄位周圍那一段,不在一般的行裡。"""
         p = self.page or {}
         fields = [f for f in p.get('fields') or [] if isinstance(f, dict)]
         parts = [p.get('title')] + list(p.get('lines') or [])
         parts += [f.get('shown') or f.get('value') for f in fields if not isinstance(f.get('value'), list)]
         parts += [f.get('context') for f in fields]
-        return '\n'.join(norm(x) for x in parts if x)
+        return '\n'.join(str(x) for x in parts if x)
 
 
 class RowTruth:
@@ -140,28 +139,6 @@ def kind(problem):
     return getattr(problem, 'kind', None)
 
 
-class Problems(str):
-    """好幾條問題接成一句給人看;items 留著每一條(和它的種類)給程式判斷。"""
-
-    def __new__(cls, items, sep='; '):
-        self = super().__new__(cls, sep.join(items))
-        self.items = list(items)
-        return self
-
-    def __getnewargs__(self):
-        return (self.items,)
-
-
-def norm(s):
-    s = unicodedata.normalize('NFKC', str(s or ''))
-    return re.sub(r'\s+', ' ', s).strip().casefold()
-
-
 def short(value, n=60):
     s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return s if len(s) <= n else s[:n] + '…'
-
-
-def same_url(a, b):
-    cut = lambda u: str(u or '').split('#')[0].rstrip('/')
-    return cut(a) == cut(b)

@@ -19,7 +19,13 @@ class BoardServerVersion(unittest.TestCase):
             self.assertEqual(board_server.resolve_hosts('auto'), ['127.0.0.1', '::1', '100.64.0.1'])
 
     def test_occupied_ipv6_loopback_port_prevents_start(self):
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as blocker:
+        try:
+            blocker = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError as error:
+            if error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL, errno.EPROTONOSUPPORT):
+                self.skipTest('IPv6 loopback is unavailable')
+            raise
+        with blocker:
             try:
                 blocker.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
                 blocker.bind(('::1', 0))

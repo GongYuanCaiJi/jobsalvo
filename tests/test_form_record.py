@@ -5,14 +5,11 @@ form_record 的回歸測試:「答案只有一個真相,就是表單答案庫;�
 
 跑法(repo 根目錄):python3 -m unittest discover -s tests
 """
-import os, sys, json, tempfile, unittest
-from unittest import mock
+import os, sys, json, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
-from _env import read_board, read_fb  # noqa: E402
-import board_doc as bd          # noqa: E402
 import form_record as fr        # noqa: E402
 
 U1, U2, U3 = 'https://ex.test/job/1', 'https://ex.test/job/2', 'https://ex.test/job/3'
@@ -27,16 +24,14 @@ def fields(fb, url):
     return fb[url]['form']['f']
 
 
-class ProgramMapsAnOptionThatIsPartOfTheAnswer(unittest.TestCase):
-    def test_a_bilingual_answer_whose_one_half_was_picked_needs_no_agent_round(self):
-        # 2026-10-07 Lever 實測:答案「公司徵才頁 / Company career page」、頁面選「Company career page」,
-        # 以前退回叫 agent 補 choice,多一輪對話 43 秒
+class PageValuesAreObservations(unittest.TestCase):
+    def test_page_values_are_not_compared_with_bank_answers(self):
         fb = {'__ans__': [{'k': 'src', 'q': '從哪裡得知', 'v': '公司徵才頁 / Company career page'}]}
         fr.apply_record(fb, U1, 'x', [{'q': 'How did you hear?', 'k': 'src', 'page_value': 'Company career page'}], today=T)
         (f,) = fields(fb, U1)
-        self.assertNotIn('choice', f)                                   # 驗收用同一支比對認得,不用另記對應
-        with self.assertRaises(ValueError):                                # 不是原文的一段:照舊退回
-            fr.apply_record(fb, U2, 'x', [{'q': 'How did you hear?', 'k': 'src', 'page_value': 'LinkedIn'}], today=T)
+        self.assertEqual(f, {'q': 'How did you hear?', 'src': 'bank', 'k': 'src'})
+        fr.apply_record(fb, U2, 'x', [{'q': 'How did you hear?', 'k': 'src', 'page_value': 'LinkedIn'}], today=T)
+        self.assertEqual(fields(fb, U2)[0]['k'], 'src')
 
 
 class OneTruth(unittest.TestCase):
@@ -50,26 +45,25 @@ class OneTruth(unittest.TestCase):
         e = [x for x in fb['__ans__'] if x['k'] == why['k']][0]
         self.assertEqual((e['q'], e['v'], e['zh'], e['kind'], e['inf']),
                          ('為什麼對這個職位有興趣', 'Because A.', '因為 A。', 'txt', T))
-        self.assertEqual(fr.validate(fb), [])
+        self.assertEqual(fr.validate(fb, list(fb)), [])
 
     def test_a_translated_question_stays_on_the_form_for_the_confirm_screen(self):
         fb = {}
         fr.apply_record(fb, U1, 'Lever', [dict(NAME, qz='全名'), dict(NAT, qz='你的國籍？')], today=T)
         name, nat = fields(fb, U1)
         self.assertEqual((name['qz'], nat['qz']), ('全名', '你的國籍？'))
-        self.assertEqual(fr.validate(fb), [])
+        self.assertEqual(fr.validate(fb, list(fb)), [])
 
-    def test_inferred_answer_is_pending_his_words_are_confirmed(self):
+    def test_a_recorded_answer_is_inferred_until_he_confirms_it_on_the_board(self):
         fb = {}
-        fr.apply_record(fb, U1, 'x', [NAT, dict(WHY, his=True)], today=T)
-        nat, why = fb['__ans__']
+        fr.apply_record(fb, U1, 'x', [NAT], today=T)
+        nat, = fb['__ans__']
         self.assertEqual(nat['inf'], T); self.assertNotIn('at', nat)
-        self.assertEqual(why['at'], T); self.assertNotIn('inf', why)
 
     def test_same_question_same_value_is_one_entry_across_forms(self):
         fb = {}
         fr.apply_record(fb, U1, 'x', [dict(WHY, v='', pj=False)], today=T)
-        fr.apply_record(fb, U2, 'x', [{'q': 'why this role', 'v': '', 'pj': False}], today=T)   # 問法大小寫標點不計
+        fr.apply_record(fb, U2, 'x', [{'q': 'Why this role?', 'v': '', 'pj': False}], today=T)   # 問法一字不差(ADR-0011)
         self.assertEqual(len(fb['__ans__']), 1)
         self.assertEqual(fields(fb, U1)[0]['k'], fields(fb, U2)[0]['k'])
 
@@ -97,7 +91,8 @@ class OneTruth(unittest.TestCase):
 
     def test_rewriting_my_own_answer_updates_it_instead_of_leaving_an_orphan(self):
         fb = {}
-        fr.apply_record(fb, U1, 'x', [dict(WHY, his=True)], today='2026-09-20')
+        fr.apply_record(fb, U1, 'x', [WHY], today='2026-09-20')
+        fb['__ans__'][0].pop('inf'); fb['__ans__'][0]['at'] = '2026-09-20'     # 他在看板上確認
         fr.apply_record(fb, U1, 'x', [dict(WHY, v='Because C.')], today=T)
         self.assertEqual(len(fb['__ans__']), 1)
         e = fb['__ans__'][0]
@@ -155,13 +150,13 @@ class Validate(unittest.TestCase):
                                                {'q': 'R', 'src': 'bank', 'k': 'gone'},
                                                {'q': 'S', 'src': 'new', 'v': 'y'}]}},
               U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Q', 'src': 'bank', 'k': 'a', 'refill': 1}]}}}
-        bad = ' '.join(fr.validate(fb))
+        bad = ' '.join(fr.validate(fb, list(fb)))
         for want in ("帶了 ['v']", 'gone 答案庫裡沒有', "src='new'", '已投遞還標著 refill'):
             self.assertIn(want, bad)
 
     def test_he_may_delete_an_answer_only_sent_forms_used(self):
         fb = {'__ans__': [], U1: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Q', 'src': 'bank', 'k': 'gone'}]}}}
-        self.assertEqual(fr.validate(fb), [])          # 送出時的原字在流水帳
+        self.assertEqual(fr.validate(fb, list(fb)), [])          # 送出時的原字在流水帳
 
     def test_an_emptied_answer_only_sent_forms_use_is_not_his_todo(self):
         fb = {'__ans__': [{'k': 'a', 'q': 'A', 'v': '', 'at': T}],
@@ -185,85 +180,30 @@ class OneBrokenFormDoesNotBlockTheOthers(unittest.TestCase):
         fr.apply_record(fb, U1, 'x', [dict(NAT, k='n', v='Taiwan')])
         self.assertEqual(fields(fb, U1)[0]['k'], 'n')
 
-    def test_translation_still_works(self):
-        fb = self.board()
-        fr.apply_translate(fb, 'n', en='Taiwan (R.O.C.)')
-        self.assertEqual(fb['__ans__'][0]['v'], 'Taiwan (R.O.C.)')
-
     def test_this_card_is_still_checked(self):
         fb = self.board()
         with self.assertRaises(ValueError):
             fr.apply_record(fb, U1, 'x', [{'q': 'S', 'src': 'new', 'v': 'y', 'k': 'n'}])   # 給了 k 卻是別的值
-        self.assertTrue(fr.validate(fb))                         # --check 照樣看全部
+        self.assertTrue(fr.validate(fb, list(fb)))               # 整個看板照樣查得出來
 
 class Translate(unittest.TestCase):
-    def test_he_edits_chinese_i_retranslate_and_unsent_forms_get_retyped(self):
-        fb = {'__ans__': [{'k': 'n', 'q': '國籍', 'v': 'Taiwan', 'zh': '中華民國', 'tr': 1, 'at': T}],
-              U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]},
-                   'ds': 'parked', 'apply': {'stage': 'fill', 'tab_id': '5'}},
-              U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}},
-              U3: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n'}]}}}
-        fr.apply_translate(fb, 'n', en='Republic of China (Taiwan)')
-        e = fb['__ans__'][0]
-        self.assertEqual((e['v'], 'tr' in e), ('Republic of China (Taiwan)', False))
-        self.assertEqual(fb[U1]['form']['f'][0].get('refill'), 1)
-        self.assertNotIn('refill', fb[U2]['form']['f'][0])          # 已投遞的不動
-        self.assertNotIn('refill', fb[U3]['form']['f'][0])          # agent 還沒填過:雇主網頁上沒有舊字,填的時候照新的填
-
-    def test_missing_chinese_is_listed_and_can_be_filled(self):
+    def test_missing_chinese_is_listed(self):
         fb = {'__ans__': [{'k': 'y', 'q': '全職', 'v': 'Yes', 'at': T}]}
-        self.assertIn('沒有中文翻譯', ' '.join(fr.validate(fb)))
-        fr.apply_translate(fb, 'y', zh='是')
-        self.assertEqual(fr.validate(fb), [])
+        self.assertIn('沒有中文翻譯', ' '.join(fr.validate(fb, list(fb))))
 
 
 class Refill(unittest.TestCase):
-    def test_find_and_clear(self):
+    def test_pending_and_clear(self):
         fb = {'__ans__': [{'k': 'n', 'q': 'N', 'v': 'X', 'at': T}],
               U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'n', 'refill': 1},
                                                {'q': 'Other', 'v': 'Y', 'src': 'rz'}]}},
               U2: {'form': {'plat': 'x', 'lock': 1, 'f': [{'q': 'Old', 'src': 'bank', 'k': 'n'}]}}}
-        self.assertEqual(fr.find_refills(fb), [(U1, 'Nationality')])
         self.assertEqual(fr.find_pending(fb), [])
         fb['__ans__'].append({'k': 'e', 'q': 'E', 'v': ' ', 'at': T})      # 空白的答案也算等他(看板上不給 ✓)
         self.assertEqual([e['k'] for e, _ in fr.find_pending(fb)], ['e'])
         self.assertEqual(fr.users(fb, 'n'), {U1: False, U2: True})
         self.assertEqual(fr.apply_clear_refill(fb, U1, 'Nation'), 1)
-        self.assertEqual(fr.find_refills(fb), [])
-
-
-class ThroughTheBoardFile(unittest.TestCase):
-    """真的走 set_fb 寫檔:他手機上已經有的標記不能被蓋掉。"""
-
-    def test_record_keeps_his_marks(self):
-        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-'))
-        p = _env.make_board(os.path.join(d, 'board.html'), {U1: {'s': 'like', 'app': 'ship'}}, jobs=[{'id': U1}])
-        made = fr.record(U1, 'Lever', [NAT], live=p)
-        self.assertEqual(made, ['nationality'])
-        fb = read_fb(p)
-        self.assertEqual(fb[U1]['s'], 'like')
-        self.assertEqual(fb[U1]['form']['f'][0], {'q': NAT['q'], 'src': 'bank', 'k': 'nationality'})
-        self.assertTrue(fb['__ans__'][0]['inf'])
-
-    def test_agent_board_is_the_default_write_target(self):
-        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-agent-board-'))
-        target = os.path.join(d, 'agent-board.html')
-        live = os.path.join(d, 'live-board.html')
-        for path in (target, live):
-            _env.make_board(path, jobs=[{'id': U1}])
-        with mock.patch.object(bd, 'LIVE', live), mock.patch.dict(os.environ, AGENT_BOARD=target):
-            self.assertEqual(fr.record(U1, 'Lever', [NAT]), ['nationality'])
-            bd.set_fb(lambda fb: fb.setdefault(U1, {}).__setitem__('s', 'like'), live=live)
-            bd.set_data(lambda data, _fb: data['jobs'].append({'id': U2}), live=live)
-        target_data = read_board(target)
-        target_fb = json.loads(target_data['fb'])
-        live_data = read_board(live)
-        live_fb = json.loads(live_data['fb'])
-        self.assertIn('form', target_fb[U1])
-        self.assertEqual(target_fb[U1]['s'], 'like')
-        self.assertEqual([job['id'] for job in target_data['data']['jobs']], [U1, U2])
-        self.assertEqual(live_fb, {})
-        self.assertEqual([job['id'] for job in live_data['data']['jobs']], [U1])
+        self.assertEqual(fr.apply_clear_refill(fb, U1), 0)
 
 
 class FromFill(unittest.TestCase):
@@ -277,75 +217,13 @@ class FromFill(unittest.TestCase):
         {'q': 'Salary', 'value': '', 'src': 'skip', 'why': '他說面談再談'},
     ]}
 
-    def test_page_value_becomes_the_value_except_for_bank_answers(self):
+    def test_bank_page_value_is_not_recorded_as_an_answer(self):
         name, nat, why, sal = fr.fields_from_fill(self.FILL)
         self.assertEqual(name, {'q': 'Full name', 'src': 'rz', 'v': 'Alex Chen'})
-        # 值以答案庫為準;頁面值只帶去記錄時比對原文,不當成答案
-        self.assertEqual(nat, {'q': 'What is your nationality?', 'src': 'bank', 'k': 'nationality', 'page_value': 'Taiwan'})
+        # value 是頁面觀察,銀行答案欄只保留來源鍵
+        self.assertEqual(nat, {'q': 'What is your nationality?', 'src': 'bank', 'k': 'nationality'})
         self.assertEqual(why['v'], 'Because A.')
         self.assertEqual((sal['v'], sal['why']), ('', '他說面談再談'))
-
-    def _board(self, d):
-        p = os.path.join(d, 'board.html')
-        # agent 記表單只在它正在填或改這張時收(狀態表的 form_recorded,#307)
-        fb = {U1: {'app': 'ship', 'ds': 'running', 'apply': {'stage': 'fill'}}, '__ans__': [dict(NAT, at=T)]}
-        return _env.make_board(p, fb, jobs=[{'id': U1}])
-
-    def _run(self, board, fill, d):
-        import subprocess
-        fp = os.path.join(d, 'fill.json')
-        with open(fp, 'w', encoding='utf-8') as f:
-            json.dump(fill, f, ensure_ascii=False)
-        r = subprocess.run([sys.executable, os.path.join(HERE, '..', 'tools', 'form_record.py'),
-                            '--from-fill', fp, '--url', U1, '--board', board], capture_output=True, text=True)
-        return r, read_fb(board)
-
-    def test_cli_records_once_and_cannot_rewrite_the_form_he_confirmed(self):
-        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-fill-'))
-        board = self._board(d)
-        r, fb = self._run(board, self.FILL, d)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([x['src'] for x in fb[U1]['form']['f']], ['rz', 'bank', 'bank', 'skip'])
-        self.assertEqual(fb[U1]['form']['plat'], 'Lever')
-        self.assertEqual(fr.validate(fb), [])
-        # 他核准了這一版;agent 之後再拿不一樣的答案記一次 → 擋下、講原因,他核准的那一份不變
-        def confirmed(x):
-            x[U1].update(ds='confirmed', apply={'stage': 'fill', 'tab_id': '1', 'delivery': {'method': 'direct_upload'}},
-                         approve={'at': T, 'snap': fr.snapshot(x, U1)})
-        bd.set_fb(confirmed, live=board)
-        fill2 = json.loads(json.dumps(self.FILL))
-        fill2['fields'][2]['value'] = 'Because B.'
-        fill2['fields'][2]['zh'] = '因為 B。'
-        before = read_fb(board)
-        r, fb = self._run(board, fill2, d)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('你已確認', r.stderr)
-        self.assertEqual(fb, before)
-
-    def test_cli_says_which_field_is_wrong(self):
-        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-fill-bad-'))
-        board = self._board(d)
-        bad = {'platform': 'Lever', 'fields': [
-            {'q': 'What is your nationality?', 'value': 'Japan', 'v': 'Japan', 'src': 'bank', 'k': 'nationality'}]}
-        r, fb = self._run(board, bad, d)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('nationality', r.stderr)
-        self.assertNotIn('form', fb[U1])
-
-    def test_malformed_fill_shapes_fail_before_writing_the_board(self):
-        d = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-fill-shape-'))
-        board = self._board(d)
-        before = read_fb(board)
-        for fields in (1, True, {}, None, [{'q': 7, 'value': 'x'}],
-                       [{'q': 'Q', 'bank_q': 7, 'value': 'x'}], [{'q': 'Q', 'v': 5}],
-                       [{'q': 'Q', 'k': ['x']}], [{'q': 'Q', 'k': {'k': 'x'}}]):
-            with self.subTest(fields=fields):
-                r, fb = self._run(board, {'platform': 'Example', 'fields': fields}, d)
-                self.assertNotEqual(r.returncode, 0)
-                self.assertIn('fields', r.stderr)
-                self.assertNotIn('TypeError', r.stderr)
-                self.assertEqual(fb, before)
-
 
 class ReadLang(unittest.TestCase):
     """他看得懂的語言(設定 resume.read_lang):送出的答案跟它不是同一套文字才要附翻譯。"""
@@ -366,11 +244,11 @@ class ReadLang(unittest.TestCase):
         from unittest.mock import patch
         fb = {'__ans__': [{'k': 'a1', 'q': 'Years', 'v': 'Five years'}]}
         with patch.object(fr, 'read_lang', return_value='zh'):
-            bad = fr.validate(fb)
+            bad = fr.validate(fb, list(fb))
             self.assertEqual(len(bad), 1)
             self.assertIn('a1', bad[0])
         with patch.object(fr, 'read_lang', return_value='en'):
-            self.assertEqual(fr.validate(fb), [])
+            self.assertEqual(fr.validate(fb, list(fb)), [])
 
 
 if __name__ == '__main__':
@@ -401,7 +279,7 @@ class RefusedInput(unittest.TestCase):
         fb = {'__ans__': [{'k': 'a', 'q': 'Q', 'v': '台灣'}, {'k': 'a', 'q': 'Q2', 'v': '台灣'},
                           {'k': 'b', 'q': 'R', 'v': '是', 'inf': T, 'at': T}],
               U1: {'form': {'plat': 'x', 'f': [{'q': 'Name', 'src': 'rz', 'k': 'a'}]}}}
-        bad = ' '.join(fr.validate(fb))
+        bad = ' '.join(fr.validate(fb, list(fb)))
         for want in ('重複的 k', '是 rz 卻有 k', '同時標了'):
             self.assertIn(want, bad)
 
@@ -412,52 +290,10 @@ class RefusedInput(unittest.TestCase):
         fr.apply_record(fb, U1, 'x', [WHY], today='2026-12-31')
         self.assertEqual(fb['__ans__'], bank)
 
-    def test_retranslating_to_the_same_english_does_not_ask_for_retyping(self):
-        fb = {'__ans__': [{'k': 'a', 'q': 'Q', 'v': 'Taiwan', 'zh': '台灣', 'tr': 1}],
-              U1: {'form': {'plat': 'x', 'f': [{'q': 'Q', 'src': 'bank', 'k': 'a'}]}}}
-        fr.apply_translate(fb, 'a', en='Taiwan')
-        self.assertNotIn('refill', fb[U1]['form']['f'][0])
-        self.assertNotIn('tr', fb['__ans__'][0])
-
     def test_fill_rows_without_a_question_are_skipped(self):
         got = fr.fields_from_fill({'fields': ['亂寫的', {'value': 'x'}, {'q': 'Name', 'value': 'Alex', 'src': 'rz'}]})
         self.assertEqual(got, [{'q': 'Name', 'src': 'rz', 'v': 'Alex'}])
 
-    def test_translating_an_answer_that_is_not_there_is_refused(self):
-        with self.assertRaises(ValueError):
-            fr.apply_translate({'__ans__': []}, 'nope', zh='中文')
-
-    def test_new_english_without_chinese_is_refused(self):
-        fb = {'__ans__': [{'k': 'a', 'q': 'Q', 'v': '台灣'}]}
-        with self.assertRaises(ValueError) as e:
-            fr.apply_translate(fb, 'a', en='Taiwan')
-        self.assertIn('翻完不對', str(e.exception))
-
 
 class Commands(unittest.TestCase):
-    """form_record.py 給 agent 跑的指令。"""
-
-    def setUp(self):
-        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='formrec-cli-'))
-        self.board = os.path.join(self.dir, 'board.html')
-        fb = {'__ans__': [{'k': 'nat', 'q': '國籍', 'v': 'Taiwan', 'zh': '台灣', 'at': T},
-                          {'k': 'eng', 'q': '英文自介', 'v': 'I build things.', 'inf': T}],
-              U1: {'form': {'plat': 'x', 'f': [{'q': 'Nationality', 'src': 'bank', 'k': 'nat', 'refill': 1},
-                                               {'q': 'About', 'src': 'bank', 'k': 'eng', 'refill': 1}]}}}
-        _env.make_board(self.board, fb, jobs=[{'id': U1}])
-
-    def run_cli(self, *args):
-        import contextlib, io
-        out = io.StringIO()
-        code = 0
-        with mock.patch.object(sys, 'argv', ['form_record.py', '--board', self.board, *args]), \
-             contextlib.redirect_stdout(out):
-            try:
-                fr.main()
-            except SystemExit as e:
-                code = e.code
-        return code, out.getvalue()
-
-    def test_from_fill_needs_a_card(self):
-        code, _ = self.run_cli('--from-fill', os.path.join(self.dir, 'fill.json'))
-        self.assertIn('--url', str(code))
+    """填表交件單改由 fill.py 的共用 Schema 收件。"""

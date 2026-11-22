@@ -9,12 +9,12 @@ chrome_door —— 程式這一側碰「agent 的瀏覽器」(ego lite)的門路
   for_card(apply)  這張卡記的那一家和工作區(之後看、改、送出、關掉都找同一個);那一家停用或移除、卡上沒記 → Unreachable
 
 門路對外提供的事(做不到的丟 NotNow,訊息講現在做不到、改用什麼):
-  讀那一頁 read_page、讀平台履歷頁 read_profile / profile_reader、下載平台附件 download_attachments、截圖 shot、
+  讀那一頁 read_page、讀平台履歷頁 read_profile、截圖 shot、
   放掉分頁 release、派工前確認 ego 準備好 ready、程式先開好申請頁 open_for_agent、給 agent 的瀏覽器用法
-  (apply_rule、fetch_rule)、查應徵進度讀頁 read_pages、接手 hand_off / resume、設定好了沒 configured、
+  (apply_rule、fetch_task_tools)、查應徵進度讀頁 read_pages、接手 hand_off / resume、設定好了沒 configured、
   看板 👀 怎麼截(live_timeout、live_refresh)、工作區不在了 gone_pages、收尾 close_if_idle。
 """
-import os, sys, shutil, json, subprocess, uuid, hashlib, time, contextlib
+import os, sys, shutil, json, subprocess, uuid, time, contextlib
 import base64
 import tempfile
 from pathlib import Path
@@ -23,7 +23,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 CODEX, CLAUDE = 'codex', 'claude-code'
+PAGE_MATERIAL_CHAR_LIMIT = 100_000
 
+
+
+# 讀一頁的唯讀函式,在頁面裡跑(瀏覽器那一側,ADR-0012:轉成段落在 web/seen.py)
+PROFILE_FN = "() => {\n  const labelFor = el => {\n    const labelled = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean)\n      .map(id => document.getElementById(id)?.innerText || '').join(' ');\n    const labels = el.labels ? [...el.labels].map(x => x.innerText || '').join(' ') : '';\n    return (el.getAttribute('aria-label') || labelled || labels || el.getAttribute('placeholder') || '').trim();\n  };\n  const sectionFor = el => {\n    const group = el.closest('fieldset,section,[role=group],[role=radiogroup],[role=listbox]');\n    const heading = group && group.querySelector('legend,[role=heading],h1,h2,h3,h4,h5');\n    return group ? (labelFor(group) || (heading && heading.innerText) || '').trim() : '';\n  };\n  const fileNames = el => [...(el.files || [])].map(file => file.name).join(', ');\n  // 保留欄位上下文與選取狀態(勾選、aria),不猜哪些值是個人聲明;送出、按鈕類 input 不是資料\n  const fields = [...document.querySelectorAll('input,textarea,select,[role=textbox],[role=combobox],[role=checkbox],[role=radio],[role=switch],[role=listbox],[role=option],[role=slider],[role=spinbutton],[contenteditable=true],[aria-selected],[aria-checked],[aria-pressed],[aria-valuenow],[aria-valuetext],[aria-activedescendant],[aria-expanded]')]\n    .filter(el => !['hidden','password'].includes((el.type || '').toLowerCase()))\n    .filter(el => !(el.tagName === 'INPUT' && ['submit','button','image','reset'].includes((el.type || '').toLowerCase())))\n    .filter(el => {const s = getComputedStyle(el); return el.getClientRects().length && s.display !== 'none' && s.visibility !== 'hidden';})\n    .map(el => ({id: el.id || '', label: labelFor(el), section: sectionFor(el), role: el.getAttribute('role') || '',\n      type: (el.type || el.tagName.toLowerCase()).toLowerCase(), autocomplete: el.getAttribute('autocomplete') || '',\n      text: el.innerText || '', parentText: el.parentElement?.innerText || '',\n      value: el.type === 'file' ? fileNames(el) : (el.isContentEditable ? el.innerText : el.value) ?? '',\n      shown: el.tagName === 'SELECT' ? [...el.selectedOptions].map(x => x.text).join(' ') : undefined,\n      checked: ['checkbox','radio'].includes(el.type) ? el.checked : undefined,\n      aria: Object.fromEntries(['aria-selected','aria-checked','aria-pressed','aria-expanded','aria-activedescendant',\n        'aria-valuenow','aria-valuetext','aria-controls','aria-labelledby','aria-describedby'].map(a => [a, el.getAttribute(a)]))}));\n  // 收起來的內容(「更多」、摺疊區)常已在 DOM 裡只是沒畫出來;innerText 讀不到,判讀就說「無法確認」。\n  // 把沒畫出來的文字接在後面(跳過程式碼類標籤),不靠各網站的按鈕名稱。\n  // display:contents 本身沒有外框,但祖先有外框時子節點仍然可見。\n  const drawn = el => !!el && (el.getClientRects().length > 0\n    || (getComputedStyle(el).display === 'contents' && drawn(el.parentElement)));\n  const body = document.body || document.documentElement;\n  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);\n  const collapsed = [];\n  for (let n = walker.nextNode(); n; n = walker.nextNode()) {\n    const p = n.parentElement, s = (n.nodeValue || '').trim();\n    if (!s || !p || p.closest('script,style,noscript,template,svg') || drawn(p)) continue;\n    collapsed.push(s);\n  }\n  const readingParts = [], readingRects = [];\n  const documentRect = node => {\n    const boxes = node.nodeType === 3 ? (() => {\n      const range = document.createRange(); range.selectNodeContents(node);\n      return [...range.getClientRects()];\n    })() : [node.getBoundingClientRect()];\n    const visible = boxes.filter(r => r.width > 0 && r.height > 0);\n    if (!visible.length) return null;\n    const x = Math.min(...visible.map(r => r.left)) + scrollX;\n    const y = Math.min(...visible.map(r => r.top)) + scrollY;\n    return {x, y, width: Math.max(...visible.map(r => r.right)) + scrollX - x,\n      height: Math.max(...visible.map(r => r.bottom)) + scrollY - y};\n  };\n  // 欄位值是使用者打的字,照讀到的樣子收(前後空白、只有空白都是值,ADR-0011);\n  // 文字節點前後的空白是排版用的原始碼,畫出來看不到,才去掉\n  const addReading = (value, node, asIs = false) => {\n    const text = String(value ?? '');\n    if (asIs ? !text : !text.trim()) return;\n    readingParts.push(asIs ? text : text.trim());\n    readingRects.push(documentRect(node));\n  };\n  const TOGGLES = [['aria-checked', {true: '已勾選', false: '未勾選', mixed: '部分勾選'}],\n                   ['aria-pressed', {true: '已按下', false: '未按下', mixed: '部分按下'}]];\n  const readableUrl = value => { try { return decodeURIComponent(value); } catch (_error) { return value; } };\n  const visit = node => {\n    if (node.nodeType === 3) { addReading(node.nodeValue, node); return; }\n    if (node.nodeType !== 1) return;\n    const el = node;\n    if (el.closest('script,style,noscript,template,svg') || !drawn(el)) return;\n    const tag = el.tagName;\n    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) {\n      if (el.type === 'file') { addReading(fileNames(el), el, true); return; }\n      if (['hidden', 'password', 'submit', 'button', 'image', 'reset'].includes((el.type || '').toLowerCase())) return;\n      if (el.type === 'checkbox' || el.type === 'radio') addReading(`⟦欄位 ${el.checked ? '已勾選' : '未勾選'}⟧`, el);\n      else addReading(tag === 'SELECT' ? [...el.selectedOptions].map(x => x.text).join(' ') : el.value, el, true);\n      return;\n    }\n    for (const child of el.childNodes) visit(child);\n    if (tag === 'A' && el.href) addReading(`⟦網址 ${readableUrl(el.href)}⟧`, el);\n    if (['IFRAME', 'VIDEO', 'AUDIO', 'SOURCE', 'EMBED', 'OBJECT'].includes(tag)) {\n      const url = el.src || el.data;\n      if (url) addReading(`⟦網址 ${readableUrl(url)}⟧`, el);\n    }\n    if (['option', 'radio', 'checkbox'].includes(el.getAttribute('role')) && el.hasAttribute('aria-selected'))\n      addReading(`⟦欄位 ${el.getAttribute('aria-selected') === 'true' ? '已選取' : '未選取'}⟧`, el);\n    // 自製開關(role=switch 等)、切換鈕的狀態只在 aria-checked、aria-pressed 上,畫面上的字不變;不認得的值照原樣寫\n    for (const [attr, words] of TOGGLES) if (el.hasAttribute(attr)) {\n      const state = el.getAttribute(attr);\n      addReading(`⟦欄位 ${words[state] || attr + '=' + state}⟧`, el);\n    }\n  };\n  visit(body);\n  return {url: location.href, title: document.title, readyState: document.readyState, sinceLoad: performance.now(),\n    documentKey: performance.timeOrigin,\n    readingParts,\n    readingRects,\n    documentSize: {width: Math.max(document.documentElement?.scrollWidth || 0, body?.scrollWidth || 0),\n      height: Math.max(document.documentElement?.scrollHeight || 0, body?.scrollHeight || 0)},\n    reading: readingParts.join(' ').replace(/\\s+/g, ' ').trim(),\n    text: (body.innerText || '') + (collapsed.length ? '\\n' + collapsed.join('\\n') : ''),\n    links: [...document.links].map(a => a.href),\n    media: [...document.querySelectorAll('iframe,video,audio,source,embed,object')].map(el => el.src || el.data).filter(Boolean),\n    anchors: [...document.links].map(a => ({href: a.href, text: (a.innerText || '').trim()})), fields};\n}"
 
 class NotNow(LookupError):
     """這一家現在做不到(不是壞了):訊息講做不到、改用什麼。"""
@@ -31,17 +36,21 @@ class NotNow(LookupError):
 
 class Unreachable(LookupError):
     """填這張的 agent 接不回來:卡上沒記是哪一家,或那一家已經停用、移除(之後這一頁算頁面不見了,要重填)。
-    訊息就是卡上要寫的那一句。sure=False:現在判斷不了(設定檔讀不懂),不准因此把卡標成頁面不見了。"""
+    訊息就是卡上要寫的那一句。sure=False:現在判斷不了(設定檔讀不懂),不准因此把卡標成頁面不見了。
+    why:ego 自己說的原因;不是填表卡的地方(拍照工具)照它記,不記卡上那一句。"""
 
-    def __init__(self, msg, sure=True):
+    def __init__(self, msg, sure=True, why=''):
         super().__init__(msg)
         self.sure = sure
+        self.why = why or msg
 
 
 AGENT_SWAPPED = '填這張的 agent 換掉了,要重填'
 NO_BROWSER_AGENT = '設定裡沒有會操作瀏覽器的 agent:到看板「⚙ 設定 → 🤖 Agent 與瀏覽器」勾一個「用它操作 ego」'
 # 開始記「哪一家開的」之前填的卡(#311 預設 A):不是換掉了,是程式不知道;一樣接不回來
 BEFORE_UPDATE = '這張是更新前填的,程式不知道是哪個 agent 開的頁,要重填'
+# ego 關掉最後一頁會留一個沒有標籤的空白分頁:沒有標籤就沒辦法叫它讀或截圖
+NO_TAB_LABEL = 'ego 沒給這個分頁標籤,無法指名讀取或截圖'
 SETTINGS_UNREADABLE = ('設定檔 jobsalvo.json 讀不懂({why}),現在不知道填這張的 agent 還在不在;'
                        '先到看板「⚙ 設定」存一次(或修好那個檔)再試')
 
@@ -51,7 +60,7 @@ def configured():
 
 
 def gone_pages(fb, running_url='', proc=None):
-    import delivery_state as ds
+    import delivery_core as ds
     bindings = {u: m['apply']['workspace'] for u, m in fb.items()
                 if isinstance(m, dict) and u != running_url and ds.page_up(m)
                 and isinstance((m.get('apply') or {}).get('workspace'), dict)}
@@ -75,7 +84,7 @@ def gone_pages(fb, running_url='', proc=None):
 def sweep_gone(live, running_url='', only=None, by='chrome_door', unreachable=False):
     """頁不在 ego 裡的卡改標成「頁面不見了,要重填」。副本不動:ego 整台電腦只有一個,副本的卡不是它填的。"""
     import board_doc as bd
-    import delivery_state as ds
+    import delivery_core as ds
     if not bd.is_live(live):
         return {}
     before = json.loads(bd.load(live)['fb'])
@@ -122,7 +131,7 @@ def close_if_idle(board=None):
         door = EgoDoor()
         door.workspace = w
         try:
-            receipt = door.release(f'{w.get("id")}:{w.get("page")}')
+            receipt = door.release(f'{w["id"]}:{w["page"]}' if w.get('page') else None)    # 不知道是哪一頁(F-20)就只核對工作區
         except Unreachable:
             completed.append(item)
         except (NotNow, OSError, ValueError) as e:
@@ -160,7 +169,7 @@ def settings_status():
                     'ok': installed and synced and skill, 'reason': reason}}
 
 
-from delivery_state import GONE as GONE  # noqa: E402 — 卡上的失聯訊息由狀態表決定
+from delivery_core import GONE as GONE  # noqa: E402 — 卡上的失聯訊息由狀態表決定
 
 
 EGO_SKILL = os.path.expanduser('~/.agents/skills/ego-browser/SKILL.md')
@@ -178,32 +187,13 @@ def imported():
 
 
 def ego_bin():
-    """launchd 的 PATH 也能找到 onboarding 安裝的指令。"""
-    found = shutil.which('ego-browser')
+    """launchd 的 PATH 也能找到 onboarding 安裝的指令;PATH 上的截圖轉接器(tools/ego-browser)不算,它要轉交的就是這一支。"""
+    wrapper = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ego-browser'))
+    search = os.pathsep.join(part for part in os.environ.get('PATH', os.defpath).split(os.pathsep)
+                             if os.path.realpath(os.path.join(part, 'ego-browser')) != wrapper)
+    found = shutil.which('ego-browser', path=search)
     fallback = os.path.expanduser('~/.local/bin/ego-browser')
     return found or (fallback if os.path.isfile(fallback) and os.access(fallback, os.X_OK) else None)
-
-
-def _osa(script):
-    return subprocess.run(['osascript', '-e', script], capture_output=True, text=True, timeout=10).stdout.strip()
-
-
-def _ensure_ego_window():
-    """ego 一個視窗都沒有時，工作區的頁面截不了圖；在背景補開視窗，焦點還給原本在前面的程式。"""
-    count = 'tell application "System Events" to tell process "ego lite" to return (count of windows) as text'
-    try:
-        if _osa(count) != '0':
-            return
-        front = _osa('tell application "System Events" to return name of first process whose frontmost is true')
-        subprocess.run(['open', '-g', '-a', 'ego lite'], timeout=10, capture_output=True)
-        for _ in range(25):
-            if _osa(count) not in ('', '0'):
-                break
-            time.sleep(0.2)
-        if front and front != 'ego lite':
-            _osa(f'tell application "System Events" to set frontmost of process {json.dumps(front)} to true')
-    except (OSError, subprocess.SubprocessError):
-        pass
 
 
 def _ego(script, timeout=60):
@@ -241,7 +231,7 @@ def _ego(script, timeout=60):
             raise NotNow('ego 指令未傳回完整資料')
         if not message.get('ok'):
             if message.get('code') in ('workspace_missing', 'page_missing'):
-                raise Unreachable(GONE)
+                raise Unreachable(GONE, why=str(message.get('error') or ''))
             raise NotNow('ego 讀不到工作區:' + str(message.get('error') or '未知原因'))
         ok = True
         return message.get('value')
@@ -316,93 +306,70 @@ def test_workspaces(keep=None):
                 os.environ['JOBSALVO_BROWSER_TEST_RUN'] = previous
 
 
-# 讀頁、判斷之前先等這一頁穩定(每個讀頁入口共用這一段,不各自補一種等法):不在載入中、有 body、
-# 網址和內容連續 quiet 次(每次 300ms)不變,最多 15 秒;逾時照樣讀。網站載完又換掉整份文件(LinkedIn)、
-# 授權視窗先閃登入頁再自己轉授權頁(Lever),都是還沒穩定。
-SETTLE = r"""const settle = async (p, quiet = 1) => {
-  let last = '', same = 0;
-  for (let i = 0; i < 50; i++) {
-    const sig = await p.evaluate(() => document.readyState === 'loading' || !document.body ? '' :
-      location.href + '|' + document.body.innerText.length + '|' + document.getElementsByTagName('*').length).catch(() => '');
-    same = sig && sig === last ? same + 1 : 0;
-    if (same >= quiet) return true;
-    last = sig;
-    await p.waitForTimeout(300);
-  }
-  return false;
-};
-"""
-SETTLED = SETTLE + 'await settle(page);\n'
+def workspace_pages(tabs):
+    """工作區每個分頁讀到的東西 → 給任務的頁面清單:讀不到、太長、沒有字的頁照實標出,不丟掉;沒有分頁就是空清單。
+    tabs:每個分頁一筆 {tab_id, url, title} 加上 error(讀取丟錯),或 size 與 data(size 沒超過上限才有 data)。"""
+    pages = []
+    for tab in tabs:
+        tab_id, url = str(tab['tab_id']), str(tab.get('url') or '')
+        where = f'工作區分頁 {tab_id}（{url or "網址不明"}）'
+        row = {'tab_id': tab_id, 'url': url, 'title': str(tab.get('title') or '')}
+        if 'error' in tab:
+            pages.append(dict(row, read_status='unreadable', read_error=f'{where}讀取失敗：{tab["error"]}',
+                              screenshot_error=str(tab.get('screenshot_error') or '')))
+        elif tab['size'] > PAGE_MATERIAL_CHAR_LIMIT:
+            pages.append(dict(row, read_status='too_large',
+                              read_error=f'{where}的讀取材料超過 {PAGE_MATERIAL_CHAR_LIMIT} 字元上限'))
+        elif not str(tab['data'].get('reading') or tab['data'].get('text') or '').strip():
+            pages.append(dict(tab['data'], tab_id=tab_id, read_status='no_text', read_error=f'{where}沒有可讀文字'))
+        else:
+            pages.append(dict(tab['data'], tab_id=tab_id, read_status='readable'))
+    return pages
 
 
 class EgoDoor:
     """agent 的瀏覽器(ego lite)的門路。Codex、Claude 兩個 CLI 共用;runtime 只用於選 agent 和接回對話。"""
     live_refresh = 4             # 看板 👀 幾秒後自動再截
-    SHOT_ATTEMPTS = 6  # #372 明定有上限的同頁暖機;超過約 5 次的上游量測仍失敗就回報。
     SHOT_TIMEOUT = 40  # 包住本機 SDK 的 30 秒 CDP 逾時,不用等待取代重試。
-    live_timeout = SHOT_ATTEMPTS * SHOT_TIMEOUT + 10
+    live_timeout = SHOT_TIMEOUT + 10
 
     def __init__(self, agent_id=None, runtime=CODEX):
         self.agent_id = agent_id     # 要叫的那一個 agent(修改、送出叫回填這張的那一個)
         self.runtime = runtime
         self.workspace = None
 
-    def profile_reader(self, board=None):
-        """給 profile_sync.check 的讀頁函式(讀取網址 → 頁面)。"""
-        return lambda read_url: self.read_profile(read_url, board)
-
     @staticmethod
     def workspaces():
         return _ego('return (await listTaskSpaces()).map(s=>({id:s.id,name:s.name,ownership:s.ownership}));')
 
     def apply_rule(self):
+        """操作 agent 瀏覽器的任務共用的前綴:只有工具用法與界線,不教網站怎麼操作、什麼時候停(#601 Solution 1)。"""
         return (
-            '【agent 的瀏覽器】ego lite,用 ego-browser 指令操作;下面是這一輪用得到的全部用法,不用另讀 skill 全文'
-            f'(真的需要清單外的 API 才查 {os.path.dirname(EGO_SKILL)}/references/api.md 對應那一段):\n'
-            "  ego-browser nodejs <<'EOF' … EOF(腳本跑在 Node.js;console.log 的內容就是回傳;要讀本機檔用 await import(\"node:fs/promises\"))\n"
-            '  const task = await taskSpace(工作區編號); const page = task.page("p1");  // 本輪有指定就用指定的編號與 Page\n'
-            '  page.goto(url) / page.snapshot()(回 @ref) / page.fill(sel, 文字) / page.selectOption(sel, {label}) / page.click(sel)\n'
-            '  sel 可用 @ref、loc=role:button[name="…"]、loc=css:…、text=…;一個 sel 要剛好對到一個元素\n'
-            '  按鈕在 iframe 裡:快照裡找到 iframe 的 @ref,再 page.snapshot({scope:"subtree",root:"@ref"}) 拿裡面的 @ref 來點\n'
-            '  自動完成欄(打字後跳出建議清單):先 click 那一格、用 page.keyboard.type 打字(fill 常常不會觸發建議清單)'
-            ' → page.waitForSelector("loc=role:option") → 點對的那一項'
-            '(loc=role:option[name*="…"])→ 同一段腳本讀回確認;沒點建議項,值常常留不住\n'
-            '  page.waitForSelector(sel) / page.waitForURL(…) / page.waitForFunction(fn) / page.evaluate(fn, 參數)\n'
-            '  page.setInputFiles(sel, [完整路徑]);選檔器:const c = page.waitForFileChooser(); 點上傳; (await c).setFiles(路徑)\n'
-            '  點擊回傳 receipt.popups[0].label → task.page(label) 接新開的頁;page.fetch(url,{saveAs}) 取檔\n'
-            '  每次執行是新的 Node 行程,變數不保留;工作區和 Page 編號保留。腳本最後印出下一步要用的快照。\n'
-            '只用 ego-browser nodejs。本輪有指定工作區與 Page(幫你填表)就只用它,接續用數字編號,不另建;'
-            '沒有指定的(查應徵進度、找缺補查):自己開一個 taskSpace("jobsalvo-這一輪做什麼"),整輪只用這一個,做完 finish({keep:[]})。'
-            '先依頁面觀察確認目標,同一頁已知的讀取、填寫、上傳在一段腳本做完,等完成狀態再觀察。'
-            '點擊後用回傳的 receipt.popups 接到同工作區的新 Page;同頁轉址就繼續用原 Page。'
-            'waitForEvent 先保存 promise,做完觸發動作才 await;事件逾時時重新觀察原頁與 task.tabs,換正常方法繼續。'
-            '上傳用要寄的檔案的完整路徑;下載在同一段腳本存到程式指定的暫存資料夾。'
-            '不清 cookie、快取或儲存區,不讀取憑證;不操作使用者本人的 Chrome、桌面或其他工作區。'
-            '不開 App、不用桌面指令。'
-            '輸入文字用 fill 或 keyboard.insertText;不用 keyboard.paste(它在 Mac 上送出真的 ⌘V,ego 會當成使用者在操作,'
-            '把工作區轉給他,這一輪就停了)。'
-            '\n【登入與授權】(這一段優先於填表做法與平台筆記)\n'
-            '  按「應徵/Apply」後真的出現登入頁或登入框,才進入登入。頁首的「登入/註冊」只是頁首(會員中心常在別的網域)。\n'
-            '  用這個瀏覽器已登入的帳號完成:Continue with Google(用 Google 繼續)、Sign in with Apple、選已登入的帳號、「Allow/允許」這類選項直接按,'
-            '同一頁也有密碼欄時照樣先按它;「用某某帳號申請」的一鍵帶入也這樣完成。\n'
-            '  授權視窗跟著走到網址和標題不再變的那一頁再判斷(剛打開常先閃一下登入頁)。帶入、SSO、選帳號、同意這一串在同一段腳本做完:'
-            '每一步先存 waitForEvent("popup") 或 waitForURL 的 promise 再點,回到申請表才印快照;等不到預期畫面才停下觀察。\n'
-            '  已登入帳號完成不了、只剩密碼、二步驗證、驗證碼或真人驗證:申請頁有一般表單就關掉登入頁改填它;投不了就照【回報】寫明網站與要本人做的事,'
-            '保留工作區與頁面,使用者按 👀 接手,按「修改」後才繼續。\n'
-            '本輪規則優先於 skill 的自動交接建議:不得呼叫 task.handOff 或 takeOverTaskSpace;程式指定的工作區也不要 finish,'
-            '卡住或結束都維持 agent 控制權,交接與接回只由程式按使用者的按鈕處理。\n\n'
+            '【agent 的瀏覽器工具】ego lite;用 ego-browser nodejs 執行 Node.js 腳本:'
+            "`ego-browser nodejs <<'EOF' … EOF`;console.log 的內容是回傳值;本機檔案用 await import(\"node:fs/promises\")。"
+            f'API 參考:{os.path.dirname(EGO_SKILL)}/references/api.md。\n'
+            '工作區:const task = await taskSpace(工作區編號); const page = task.page("Page 標籤");編號與標籤照本輪材料。'
+            'task.tabs() 列出分頁。頁面 API:page.goto(url)、page.snapshot()(回 @ref;'
+            'page.snapshot({scope:"subtree",root:"@ref"}) 取某個元素裡面的 @ref)、page.fill(selector,text)、'
+            'page.selectOption(selector,{label})、page.click(selector)、page.keyboard.type(text)、'
+            'page.keyboard.insertText(text)、page.setInputFiles(selector,paths)、page.waitForSelector(selector)、'
+            'page.waitForURL(url)、page.waitForFunction(fn)、page.waitForEvent(name)、page.evaluate(fn,args)、'
+            'page.waitForFileChooser()(回傳的 chooser 用 setFiles(paths))。'
+            'selector 可用 @ref、loc=role:button[name="…"]、loc=css:… 或 text=…;'
+            '一個 selector 應對到一個元素。點擊回傳的 receipt.popups 用 task.page(label) 取得新分頁。'
+            'waitForEvent 的 promise 要在觸發動作之前取得。每次執行是新 Node 行程,變數不保留;工作區與 Page 編號會保留。\n'
+            '【界線】只用 ego-browser nodejs 與本輪指定的工作區;不操作使用者本人的 Chrome、桌面、App 或其他工作區。'
+            '不清 cookie、快取或儲存區,不讀取憑證;不索取、不輸入使用者密碼。'
+            '輸入文字不用 keyboard.paste(它在 Mac 上送出真的 ⌘V,ego 會把工作區轉給使用者)。'
+            '不得呼叫 task.handOff 或 takeOverTaskSpace,程式指定的工作區不要 finish;交接與接回只由程式做:'
+            '頁面要本人處理時(密碼、二步驗證、驗證碼、真人驗證),照任務交件格式逐字引用那一頁的原文、寫本人要做的事,'
+            '程式重讀同一分頁核對引文後才交接。\n\n'
         )
 
-    def fetch_rule(self):
+    def fetch_task_tools(self):
         return (
-            '上傳用 page.setInputFiles(selector,[完整路徑]);需要選檔器時先 '
-            'page.waitForFileChooser(),再點上傳控制並 chooser.setFiles。讀回當頁檔案狀態。'
-            '一般表單的檔案在按送出時才傳送:送出前確認檔案欄已選妥正確檔名與大小,列入 uploaded 及 uploaded_from,'
-            'upload_readback 寫 unavailable;不可為了確認傳送而按送出,也不把尚未送出當成上傳失敗。'
-            '頁面採非同步上傳時,必須等網站確認上傳完成才列入 uploaded。'
-            '取檔用 page.fetch(href,{saveAs:完整暫存路徑}),失敗先看頁面;'
-            '需要瀏覽器下載時先 page.waitForEvent("download"),再點現場連結,'
-            '並在同一段腳本 await download.saveAs(完整暫存路徑)。不可拿本機檔冒充下載檔。'
+            '附件 API：page.setInputFiles(selector,[完整路徑])、page.waitForFileChooser()、'
+            'chooser.setFiles(paths)。'
         )
 
     def ready(self, board=None):
@@ -421,10 +388,26 @@ class EgoDoor:
     def configured(self):
         return bool(ego_bin() and imported() and os.path.isfile(EGO_SKILL))
 
+    def new_workspace(self, *, blank=True):
+        """開一個新的 agent 工作區;網站任務從一個空白分頁開始。"""
+        if not blank:
+            raise ValueError('新工作區只允許從空白分頁開始')
+        if self.workspace is not None:
+            raise NotNow('這個瀏覽器轉接器已經綁定工作區')
+        name = _workspace_name()
+        opened = _ego(
+            f'const task = await taskSpace({json.dumps(name)});\n'
+            'const page = task.page("p1");\n'
+            'return {workspace:{id:task.spaceId,name:task.name,page:page.label},'
+            'tab_id:task.spaceId+":"+page.label};'
+        )
+        self.workspace = opened['workspace']
+        return opened
+
     def open_for_agent(self, url, old_tab=None, on_open=None):
         import apply_tab
         if self.workspace is not None:
-            return _ego(self._task(old_tab) + SETTLED + f'const data=await ({apply_tab.READ_FORM})(page);\n'
+            return _ego(self._task(old_tab) + f'const data=await ({apply_tab.READ_FORM})(page);\n'
                         'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
         name = _workspace_name()
         opened = _ego(
@@ -438,23 +421,8 @@ class EgoDoor:
             on_open(opened)
         return _ego(self._task() +
                     f'await page.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}});\n'
-                    + SETTLED + f'const data=await ({apply_tab.READ_FORM})(page);\n'
+                    + f'const data=await ({apply_tab.READ_FORM})(page);\n'
                     'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
-
-    def fetch_file(self, url, dest):
-        """用這張卡的工作區(帶著登入)把一份檔下載到 dest:先開那個檔的網址,同一個來源再取一次真的位元組。"""
-        dest = os.path.abspath(dest)
-        script = self._task(page=False) + (
-            'const pg = await task.newPage();\n'
-            'try {\n'
-            f'await pg.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}}).catch(() => null);\n'
-            f'const r = await pg.fetch({json.dumps(url)}, {{saveAs:{json.dumps(dest)},credentials:"include",timeout:30000}});\n'
-            'return {ok:r.ok,status:r.status,type:r.headers["content-type"]||""};\n'
-            '} finally { await pg.close(); }\n')
-        result = _ego(script, timeout=90)
-        if not result.get('ok') or 'text/html' in result.get('type', ''):
-            raise NotNow(f'下載回傳 {result.get("status")} {result.get("type")}(可能要登入)')
-        return dest
 
     def follow_page(self, tab_id):
         """agent 把申請表留在這張卡工作區裡的另一頁(新分頁、彈出視窗):改綁那一頁。不是這個工作區的頁丟 NotNow。"""
@@ -468,14 +436,20 @@ class EgoDoor:
         return f'{w["id"]}:{label}'
 
     def _task(self, tab_id=None, page=True, take_back=False):
-        """核對數字、名稱、Page 三者;不把重用的工作區編號綁到另一張卡。"""
+        """核對工作區身分,再確認指定分頁屬於該工作區。"""
         w = self.workspace
-        if not isinstance(w, dict) or not isinstance(w.get('id'), int) or not w.get('name') or not w.get('page'):
+        # 只讀整個工作區(page=False)不用記著哪一頁:工作區的頁都關了,拍照工具這時也要讀得到它
+        if (not isinstance(w, dict) or not isinstance(w.get('id'), int) or not w.get('name')
+                or (page and tab_id is None and not w.get('page'))):
             raise Unreachable(BEFORE_UPDATE)
-        if tab_id is not None and str(tab_id) != f'{w["id"]}:{w["page"]}':
-            raise NotNow('回報的頁面不是這張卡記著的工作區')
+        binding = dict(w)
+        if tab_id is not None:
+            space, separator, label = str(tab_id).partition(':')
+            if not separator or space != str(w['id']) or not label:
+                raise NotNow('回報的頁面不在這張卡記著的工作區')
+            binding['page'] = label
         script = (
-            f'const binding = {json.dumps(w)};\n'
+            f'const binding = {json.dumps(binding)};\n'
             'const found = (await listTaskSpaces()).find(s => s.id===binding.id && s.name===binding.name);\n'
             'if (!found) throw Object.assign(new Error("工作區不見了"),{code:"workspace_missing"});\n'
             + ('if (found.ownership!=="agent") await takeOverTaskSpace(binding.id);\n' if take_back else
@@ -493,37 +467,42 @@ class EgoDoor:
     def fill_fields(self, tab_id, items):
         """程式自己填這幾格(apply_tab.FILL_FN):[{backend, how, value}] → 每一格 {backend, ok, why}。"""
         import apply_tab
-        return _ego(self._task(tab_id) + SETTLED + f'return await ({apply_tab.FILL_FN})(page, {json.dumps(items)});',
+        return _ego(self._task(tab_id) + f'return await ({apply_tab.FILL_FN})(page, {json.dumps(items)});',
                     timeout=60 + 10 * len(items))
 
     def read_page(self, tab_id):
         import apply_tab
-        return _ego(self._task(tab_id) + SETTLED + f'return await ({apply_tab.READ_FORM})(page);')
+        return _ego(self._task(tab_id) + f'return await ({apply_tab.READ_FORM})(page);')
 
     def read_profile_page(self, tab_id):
         """讀 agent 正在編輯的同一頁，保留尚未按儲存的欄位值與實際連結。"""
-        import apply_tab
-        script = self._task(tab_id) + SETTLED + f'return await page.evaluate({apply_tab.PROFILE_FN});'
-        try:
-            return _ego(script)
-        except NotNow as e:
-            # 讀頁不改任何東西；瀏覽器一時卡住（逾時）就重讀一次。
-            if '逾時' not in str(e) and 'timed out' not in str(e):
-                raise
-            return _ego(script)
+        script = self._task(tab_id) + f'return await page.evaluate({PROFILE_FN});'
+        return _ego(script)
 
-    def read_shown_page(self, url):
-        """在同一工作區開新分頁讀對外頁面：網站草稿存在原分頁，新分頁看到的才是平台存下的內容。"""
-        import apply_tab
-        return _ego(self._task(page=False) +
-                    'const page = await task.newPage();\n'
-                    'try {\n'
-                    f'const receipt = await page.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}});\n'
-                    'if (receipt?.dialog || (await page.info())?.dialog) await page.acceptDialog();\n'
-                    'await page.waitForLoadState("load").catch(() => null);\n'
-                    + SETTLED +
-                    f'return await page.evaluate({apply_tab.PROFILE_FN});\n'
-                    '} finally { await page.close().catch(() => null); }')
+    def read_workspace_pages(self):
+        script = self._task(page=False) + (
+            'const rows = [];\n'
+            'for (const tab of await task.tabs()) {\n'
+            'const row = {tab_id:`${binding.id}:${tab.label || ""}`, url:tab.url || "", title:tab.title || ""};\n'
+            f'if (!tab.label) {{ row.error = row.screenshot_error = {json.dumps(NO_TAB_LABEL)}; rows.push(row); continue; }}\n'
+            'try {\n'
+            'const data = {...await task.page(tab.label).evaluate(' + PROFILE_FN + '), tab_id:row.tab_id};\n'
+            'row.url = data.url || row.url; row.title = data.title || row.title;\n'
+            'row.size = JSON.stringify(data).length;\n'
+            f'if (row.size <= {PAGE_MATERIAL_CHAR_LIMIT}) row.data = data;\n'
+            '} catch (error) { row.error = String(error.message || error); }\n'
+            'rows.push(row);\n'
+            '}\nreturn rows;\n'
+        )
+        try:
+            tabs = _ego(script, timeout=60)
+        except Exception as error:  # noqa: BLE001 — 工作區目錄讀不到也要留下原因並繼續
+            return [{'tab_id': '', 'url': '', 'title': '', 'read_status': 'unavailable',
+                     'read_error': f'工作區讀取失敗:{str(error)[:180]}'}]
+        if not isinstance(tabs, list) or not all(isinstance(tab, dict) and tab.get('tab_id') for tab in tabs):
+            return [{'tab_id': '', 'url': '', 'title': '', 'read_status': 'unavailable',
+                     'read_error': '工作區讀頁回傳格式錯誤'}]
+        return workspace_pages(tabs)
 
     def reload_profile_page(self, tab_id, url=None):
         """重新載入並丟棄未存檔編輯；重新開啟編輯處後才讀持久內容。"""
@@ -539,76 +518,27 @@ class EgoDoor:
         with contextlib.suppress(FileNotFoundError):
             os.remove(out)
         record = evidence.active()
-        total_started = time.monotonic()
-        for attempt in range(1, self.SHOT_ATTEMPTS + 1):
-            started, ok, reason = time.monotonic(), False, ''
-            try:
-                _ego(self._task(tab_id) + f'return await page.screenshot({{path:{json.dumps(out)},fullPage:true}});',
-                     timeout=self.SHOT_TIMEOUT)
-                with open(out, 'rb') as f:
-                    if f.read(8) != b'\x89PNG\r\n\x1a\n':
-                        raise NotNow('ego 沒有傳回有效頁面截圖')
-                ok = True
-                return out
-            except NotNow as e:
-                reason = str(e)
-                if 'CDP request timed out: Page.captureScreenshot' not in reason:
-                    raise
-                if attempt == self.SHOT_ATTEMPTS:
-                    raise NotNow(f'這張頁面截圖暖機 {attempt} 次仍失敗:{reason}') from e
-                if attempt == 1:
-                    _ensure_ego_window()
-            finally:
-                if not ok:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.remove(out)
-                if record:
-                    record.note('shot_attempt', workspace=dict(self.workspace or {}), attempt=attempt,
-                                limit=self.SHOT_ATTEMPTS, retry_count=attempt - 1, ok=ok, reason=reason,
-                                seconds=round(time.monotonic() - started, 3),
-                                elapsed_seconds=round(time.monotonic() - total_started, 3))
-
-    def shot_proof(self, tab_id, out, names, links=()):
-        """申請頁上寫著送出檔名的那一塊截下來(公司網站本身的畫面);頁上找不到這些檔名回 None。"""
-        import apply_tab
-        found = _ego(self._task(tab_id) + SETTLED +
-                     f'return await page.evaluate(([n, l]) => ({apply_tab.PROOF_FN})(n, l), {json.dumps([list(names), list(links)])});')
-        if not found:
-            return None
-        # 只截目前畫面;座標乘上瀏覽器的縮放倍率(Page.getLayoutMetrics 的 zoom,視窗縮放 125% 時是 1.25)
-        clip = {k: found[k] for k in ('x', 'y', 'width', 'height')}
-        result = _ego(self._task(tab_id) +
-                      'const m = await page.cdp("Page.getLayoutMetrics", {});\n'
-                      'const z = (m.cssVisualViewport && m.cssVisualViewport.zoom) || 1;\n'
-                      f'const c = {json.dumps(clip)};\n'
-                      'return await page.cdp("Page.captureScreenshot", {format: "png", captureBeyondViewport: false, '
-                      'clip: {x: c.x * z, y: c.y * z, width: c.width * z, height: c.height * z, scale: 1}});',
-                      timeout=self.SHOT_TIMEOUT)
+        started, ok, reason = time.monotonic(), False, ''
         try:
-            content = base64.b64decode(result['data'], validate=True)
-        except (KeyError, TypeError, ValueError) as error:
-            raise NotNow('ego 沒有傳回有效局部截圖') from error
-        with open(os.path.abspath(out), 'wb') as image:
-            image.write(content)
-        return {'url': found.get('url') or '', 'name': found.get('name') or ''}
-
-    def shot_clip(self, tab_id, out, clip):
-        """在同一個 ego Page 用文件座標截局部，不改視窗或捲動位置。"""
-        out = os.path.abspath(out)
-        params = {'format': 'png', 'captureBeyondViewport': True,
-                  'clip': dict(clip, scale=1)}
-        result = _ego(self._task(tab_id) +
-                      f'return await page.cdp("Page.captureScreenshot",{json.dumps(params)});',
-                      timeout=self.SHOT_TIMEOUT)
-        try:
-            content = base64.b64decode(result['data'], validate=True)
-        except (KeyError, TypeError, ValueError) as error:
-            raise NotNow('ego 沒有傳回有效局部截圖') from error
-        if not content.startswith(b'\x89PNG\r\n\x1a\n'):
-            raise NotNow('ego 沒有傳回有效局部截圖')
-        with open(out, 'wb') as image:
-            image.write(content)
-        return out
+            _ego(self._task(tab_id) + f'return await page.screenshot({{path:{json.dumps(out)},fullPage:true}});',
+                 timeout=self.SHOT_TIMEOUT)
+            with open(out, 'rb') as f:
+                if f.read(8) != b'\x89PNG\r\n\x1a\n':
+                    raise NotNow('ego 沒有傳回有效頁面截圖')
+            ok = True
+            return out
+        except Exception as error:
+            reason = str(error)
+            raise
+        finally:
+            if not ok:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(out)
+            if record:
+                record.note('shot_attempt', workspace=dict(self.workspace or {}), attempt=1,
+                            limit=1, retry_count=0, ok=ok, reason=reason,
+                            seconds=round(time.monotonic() - started, 3),
+                            elapsed_seconds=round(time.monotonic() - started, 3))
 
     def print_pdf(self, html_path, pdf_path, timeout=120):
         """本機排版只用自己的暫時工作區;斷網、印完收掉,不碰卡片的頁。"""
@@ -648,8 +578,7 @@ class EgoDoor:
             if opened or self.workspace:
                 self.release((opened or {}).get('tab_id'))
 
-    def read_pages(self, urls, board=None, ready=None, settle=0):
-        import apply_tab
+    def read_pages(self, urls, board=None):
         temporary = self.workspace is None
         if temporary:
             script = f'const task = await taskSpace({json.dumps(_workspace_name("read-"))});\n'
@@ -662,18 +591,11 @@ class EgoDoor:
                 'const reader = binding.reader && tabs.some(t=>t.label===binding.reader) '
                 '? task.page(binding.reader) : await task.newPage();\n'
             )
-        script += SETTLE + (
+        script += (
             f'const urls = {json.dumps(list(urls))}, pages = {{}};\n'
             'for (const url of urls) {\n'
             'await reader.goto(url,{waitUntil:"domcontentloaded",timeout:30000});\n'
-            f'await settle(reader, {max(1, int(settle))});\n'
-            # 穩定了內容可能還在跑(單頁應用先畫外框):再等到有正文,最多 10 秒
-            'let data;\n'
-            'for (let i=0;i<20;i++) {\n'
-            f'data = await reader.evaluate({apply_tab.PROFILE_FN});\n'
-            'if (data.text.length>200) break;\n'
-            'await reader.waitForTimeout(500);\n'
-            '} pages[url]=data; }\n'
+            f'pages[url]=await reader.evaluate({PROFILE_FN}); }}\n'
         )
         script += 'return {pages,reader:reader.label};\n'
         if temporary:
@@ -681,59 +603,10 @@ class EgoDoor:
         result = _ego(script, timeout=max(60, len(urls) * 60))
         if not temporary:
             self.workspace['reader'] = result['reader']
-        for data in result['pages'].values():
-            data['_ready'] = bool((ready or (lambda p: len(p.get('text', '')) > 200))(data))
         return result['pages']
 
     def read_profile(self, read_url, board=None):
-        return self.read_pages([read_url], board, settle=2)[read_url]
-
-    def download_attachments(self, read_url, directory):
-        """從目前履歷頁取全部附件的真 bytes,包括多出來的檔;不採信模型的清單或雜湊。"""
-        import profile_sync as ps
-        data = self.read_profile(read_url)
-        if not data.get('_ready') or ps.identity(data.get('url')) != ps.identity(read_url):
-            raise NotNow('平台履歷沒讀完整或已轉到另一頁,附件未核對')
-        root = os.path.realpath(directory)
-        os.makedirs(root, exist_ok=True)
-        script = self._task(page=False) + (
-            'const page = task.page(binding.reader);\n'
-            'const fs = await import("node:fs/promises"), path = await import("node:path");\n'
-            f'const root={json.dumps(root)};\n'
-            'const links = await page.evaluate(() => {\n'
-            'const seen=new Set(), ext=/[.](pdf|docx?|pptx?|odt|rtf|zip|png|jpe?g)$/i;\n'
-            'return [...document.querySelectorAll("a[href]")].flatMap((a,i)=>{\n'
-            'const u=new URL(a.href,location.href), name=(a.getAttribute("download")||a.innerText||"").trim().split("\\n")[0];\n'
-            'if (seen.has(u.href) || !["http:","https:"].includes(u.protocol) || '
-            '!(a.hasAttribute("download")||ext.test(name)||ext.test(u.pathname))) return [];\n'
-            'seen.add(u.href);return [{href:u.href,name:name||u.pathname.split("/").pop(),selector:"a[href] >> nth="+i}];});});\n'
-            'const files=[], problems=[];\n'
-            'for (const [i,link] of links.entries()) {\n'
-            'const out=path.join(root,"attachment-"+i+"-"+Date.now()+".bin");\n'
-            'try {\n'
-            'try { const r=await page.fetch(link.href,{saveAs:out,credentials:"include",timeout:30000});\n'
-            'if (!r.ok || /text\\/html/i.test(r.headers["content-type"]||"")) throw new Error("下載回傳登入頁或錯誤:"+r.status);\n'
-            '} catch (fetchError) {\n'
-            'await fs.rm(out,{force:true});\n'
-            'const pending=page.waitForEvent("download",{timeout:30000});\n'
-            'await page.click(link.selector);\n'
-            'const download=await pending;await download.saveAs(out);\n'
-            '}\n'
-            'files.push({name:link.name,path:out});\n'
-            '} catch (e) {problems.push(link.name+":"+String(e.message||e));}\n'
-            '} return {files,problems};\n'
-        )
-        result = _ego(script, timeout=max(60, len(data.get('links') or []) * 60))
-        for item in result['files']:
-            candidate = os.path.realpath(item['path'])
-            if os.path.commonpath([root, candidate]) != root:
-                raise NotNow('ego 下載檔不在這一輪的暫存資料夾')
-            with open(candidate, 'rb') as f:
-                content = f.read()
-            if not content or content.lstrip().lower().startswith((b'<!doctype html', b'<html')):
-                raise NotNow('ego 下載到空檔或登入頁,附件未核對')
-            item.update(path=candidate, size=len(content), sha256=hashlib.sha256(content).hexdigest())
-        return result
+        return self.read_pages([read_url], board)[read_url]
 
     def release(self, tab_id):
         # 收尾只發生在這張卡送出、移除、頁面不見之後:他接手過也收(不然工作區永遠留著)
@@ -741,28 +614,29 @@ class EgoDoor:
         self.workspace = None
         return receipt
 
-    def human_action(self):
-        import apply_tab
-        return _ego(self._task(page=False) + SETTLE +
-                    'for (const tab of (await task.tabs()).reverse()) {\n'
-                    'if (!tab.label) continue;\n'
-                    'const p=task.page(tab.label);\n'
-                    'await settle(p);\n'
-                    'const action=await p.evaluate(()=>{\n'
-                    'const visible=e=>!!(e.getClientRects().length && getComputedStyle(e).visibility!=="hidden");\n'
-                    'const password=[...document.querySelectorAll("input[type=password]")].some(visible);\n'
-                    'const text=(document.title+" "+document.body.innerText).toLowerCase();\n'
-                    f'const verify={json.dumps(list(apply_tab.VERIFY_WORDS))}.some(w=>text.includes(w))'
-                    ' || /密碼金鑰.*(?:確認|本人)|passkey.*(?:confirm|verify|verification)|(?:confirm|verify).*passkey/.test(document.title.toLowerCase());\n'
-                    'const login=password || /sign in required|請本人登入/.test(text);\n'
-                    'if (!login && !verify) return null;\n'
-                    'return {site:location.hostname,need:"在 "+location.hostname+(verify?" 完成本人驗證":" 完成登入")};\n'
-                    '});\n'
-                    'if (action) return {page:tab.label,...action};\n'
-                    '}return null;')
+    def human_action(self, tab_id, quote, need='', page=None):
+        workspace_id, separator, label = str(tab_id or '').partition(':')
+        workspace = self.workspace
+        if not separator or workspace_id != str((workspace or {}).get('id')) or not label:
+            raise NotNow('agent 回報的分頁不在這張工作區裡')
+        previous_page = workspace['page']
+        try:
+            if label != previous_page:
+                self.follow_page(tab_id)
+            page = page if page is not None else self.read_profile_page(tab_id)
+            cited = str(quote or '')
+            if not cited.strip() or cited not in str((page or {}).get('text') or ''):
+                raise NotNow('agent 引段未在程式讀到的同一分頁核對通過')
+            return {'page': label, 'url': str((page or {}).get('url') or ''),
+                    'quote': cited, 'need': str(need or '')}
+        finally:
+            workspace['page'] = previous_page
 
     def hand_off(self):
         """使用者在卡上按 👀 時把那一頁交給他:ego 裡切到那一頁,再把 ego 叫到他面前。"""
+        w = self.workspace or {}
+        if not (w.get('handoff_page') or w.get('page')):
+            raise NotNow('程式不知道是哪一頁:agent 沒寫填表的是哪個分頁,或那個分頁不在最後一次拍改後裡')
         receipt = self._hand_off_page()
         try:
             subprocess.run(['open', '-a', 'ego lite'], check=True, timeout=15, capture_output=True)
@@ -818,12 +692,6 @@ def current():
         if a.get('browser') and a.get('runtime') in DOORS:
             return of(a['runtime'], a.get('id'))
     return None
-
-
-def of_agent(agent_id):
-    """設定裡這個 agent 那一家的門路(填表換手後,真的填的是哪一家);找不到、不能開 Chrome 回 None。"""
-    agent = next((a for a in _agents() if a.get('id') == agent_id), None)
-    return of((agent or {}).get('runtime'), agent_id)
 
 
 def for_card(apply):

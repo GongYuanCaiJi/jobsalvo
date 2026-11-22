@@ -64,22 +64,6 @@ def _axe_source_process(home, fake, sha256, ready, release, download_barrier, re
 
 
 class BoardCheckSetup(unittest.TestCase):
-    def test_confirmed_submission_case_seeds_its_own_weak_evidence_card(self):
-        import board_doc
-        import demo
-        with tempfile.TemporaryDirectory(prefix='board-check-confirmed-') as directory:
-            board = demo.build(os.path.join(directory, 'board.html'))
-
-            result = board_check.confirmed_submission_evidence_case(board)
-
-            with open(board, encoding='utf-8') as source:
-                parsed = board_doc.parse(source.read())
-            feedback = json.loads(parsed['fb'])
-        self.assertEqual(result['source_ref'], 'email:board-check')
-        self.assertNotIn('ev', feedback[result['id']])
-        self.assertEqual(feedback[result['id']]['replies']['items'][0]['source_ref'],
-                         'email:board-check')
-
     def test_seed_resume_waits_for_a_slow_local_server(self):
         state = {}
 
@@ -220,6 +204,34 @@ class CheckSelection(unittest.TestCase):
 
         self.assertNotEqual(result.exception.code, 0)
         self.assertIn('沒有分到檢查', str(result.exception))
+
+    def test_a_port_the_browser_already_stored_state_for_is_skipped_not_cleared(self):
+        # #769:ego 留著以前某一輪同一個埠記住的分頁,看板一開場就停在「可以投了」
+        stored = {'http://127.0.0.1:1': 3, 'http://127.0.0.1:2': 0}
+        made = []
+
+        class Sandbox:
+            def __init__(self, board, home=None):
+                self.url = f'http://127.0.0.1:{len(made) + 1}'
+                self.closed = False
+                made.append(self)
+
+            def close(self):
+                self.closed = True
+
+        class Page:
+            def goto(self, url):
+                self.origin = url.rsplit('/api/', 1)[0]
+
+            def run(self, expr, *_args):
+                return stored[self.origin]
+
+        with mock.patch.object(board_check.shot, 'Sandbox', Sandbox):
+            sb = board_check.clean_sandbox(Page(), 'board.html', 'home')
+
+        self.assertEqual(sb.url, 'http://127.0.0.1:2')
+        self.assertTrue(made[0].closed)
+        self.assertFalse(sb.closed)
 
 
 class AxeSource(unittest.TestCase):

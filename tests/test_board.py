@@ -10,7 +10,7 @@
 起在隨機埠,背景建包與跑準備區都換成假的,不會真的去跑 reconcile 或 agent。
 頁面那一半(自動存、送出途中又打字、衝突處理)要真的瀏覽器,在 board_check.py。
 """
-import io, os, re, sys, json, gzip, functools, time, shutil, tempfile, threading, unittest, urllib.request, urllib.error, urllib.parse, contextlib
+import io, os, re, sys, json, gzip, functools, time, shutil, tempfile, threading, unittest, urllib.request, urllib.error, urllib.parse
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +18,7 @@ TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import board_doc as bd          # noqa: E402
+import board_status             # noqa: E402
 import board_server as bs       # noqa: E402
 from http.server import ThreadingHTTPServer  # noqa: E402
 
@@ -48,57 +49,12 @@ def reconcile_process_calls(run_mock):
             any(str(part).endswith('reconcile.py') for part in call.args[0])]
 
 
-def page_result(url, text='實際 JD 片段', via='fake', posted_at='', posted_source='', applicants=''):
-    import page_fetch
-    return page_fetch.PageResult(url, 'ok', text=text, via=via,
-                                 posted_at=posted_at, posted_source=posted_source, applicants=applicants)
+def page_result(url, text='實際 JD 片段', via='fake'):
+    import web.fetch
+    return web.fetch.PageResult(url, 'ok', text=text, via=via)
 
 
 
-
-class Q(str):
-    """假 agent 引指示上印成「n. 這段字」的那一段:交件前換成 n(先在那一列的 === Jn === 底下找,再找整份)。"""
-
-
-def material(prompt):
-    return re.search(r'"material_id": ?"(\w+)"', prompt)[1]
-
-
-def judge_sheet(prompt, rows, material_id=None):
-    """判斷的交件單:rows 裡的 Q 換成指示上那一段的編號(先在那一列的 === Jn === 底下找,列用 id 或網址認),
-    最上層抄指示上的交付代號(material_id 有給就寫它)。"""
-    blocks = {}
-    for block in prompt.split('\n=== ')[1:]:
-        jid, body = block.split(' ===', 1)
-        blocks[jid] = blocks[re.search(r'網址:(\S+)', body)[1]] = body
-
-    def number(text, key):
-        for where in (blocks.get(key, ''), prompt):
-            found = re.search(rf'^(\d+)\. {re.escape(text)}$', where, re.M)
-            if found:
-                return int(found[1])
-        raise AssertionError(f'指示上沒有印「{text}」這一段')
-
-    def walk(value, jid):
-        if isinstance(value, Q):
-            return number(value, jid)
-        if isinstance(value, dict):
-            return {k: walk(v, jid) for k, v in value.items()}
-        return [walk(v, jid) for v in value] if isinstance(value, list) else value
-    return {'material_id': material_id or material(prompt), 'jobs': [walk(r, r.get('id') or r.get('url')) for r in rows]}
-
-
-def judge_agent(rows, prompts=None):
-    """假的判斷 agent:交件單寫 rows(<紀錄檔去掉 .out>.json,Q 換成指示上的編號);prompts 有給就記下拿到的指示。"""
-    import agent_run as ar
-
-    def run_agent(prompt, outfile, _model):
-        if prompts is not None:
-            prompts.append(prompt)
-        with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-            json.dump(judge_sheet(prompt, rows), f, ensure_ascii=False)
-        return ar.AgentResult('completed', 0, 1)
-    return run_agent
 
 def hand(out, texts):
     """準備履歷這一輪交付時存下的:每張卡的 JD 原文編號(handed.json)與當下的可選履歷(resumes.json),存進那一輪的夾。"""
@@ -140,9 +96,6 @@ class Tmp(unittest.TestCase):
         self.builds = []
         self._tb = bs.trigger_build
         bs.trigger_build = lambda: self.builds.append(1)   # 不要真的跑 reconcile
-        import board_status   # 職缺頁判斷的快取:每個測試從空的開始,別的測試記的判斷不能帶進來
-        with contextlib.suppress(OSError):   # 還沒有快取檔:本來就是空的
-            os.remove(board_status._verdict_cache_path())
 
     def tearDown(self):
         bs.trigger_build = self._tb
@@ -293,6 +246,7 @@ class HttpBase(Tmp):
     """起一個真的看板伺服器(臨時看板);只有工具方法,沒有測試,別的檔可以繼承它而不重跑這裡的測試。"""
     def setUp(self):
         super().setUp()
+        bs._PV_CACHE.clear()
         self.resume_paste = os.path.join(os.environ['JOBSALVO_HOME'], '.resume-paste.md')
         try:
             with open(self.resume_paste, encoding='utf-8') as f:
@@ -531,7 +485,7 @@ class Http(HttpBase):
         filled = {'app': 'ship', 'form': {'plat': 'x', 'f': []},
                   'apply': {'stage': 'fill', 'tab_id': '7', 'delivery': {'method': 'direct_upload'}}}
         make_board(self.path, {a: dict(filled, ds='sending', approve={'snap': {}}), b: dict(filled, ds='parked')},
-                   data={'jobs': JOBS, 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}})   # 驗收跑完、沒擋:能確認
+                   data={'jobs': JOBS, 'status': {'schema_version': board_status.SCHEMA_VERSION, 'issues': []}})   # 驗收跑完、沒擋:能確認
         code, raw, _ = self.req('/api/save', {'cmds': [
             {'u': a, 'set': {'n': '我的筆記', 'ds': 'confirmed', 'approve': {'snap': {}}}},   # 舊分頁想寫的狀態欄不算數
             {'u': a, 'ev': 'unconfirm'},                                    # 8 秒計時器已經開始送:取消確認撞上
@@ -553,7 +507,7 @@ class Http(HttpBase):
         a = JOBS[0]['id']
         make_board(self.path, {a: {'app': 'ship', 'ds': 'parked', 'form': {'plat': 'x', 'f': []},
                                    'apply': {'stage': 'fill', 'tab_id': '7', 'delivery': {'method': 'direct_upload'}}}},
-                   data={'jobs': JOBS, 'status': {'schema_version': 2, 'checked_links': True, 'issues': []}})
+                   data={'jobs': JOBS, 'status': {'schema_version': board_status.SCHEMA_VERSION, 'issues': []}})
         got = self.save({'u': a, 'ev': 'confirm'})
         self.assertEqual(ds.state(read_fb(self.path)[a]), 'confirmed')
         self.assertEqual(self.save(*got['undo'][0])['rejected'], [])
@@ -722,7 +676,7 @@ class Http(HttpBase):
         self.assertEqual(r1['gen'], r2['gen'])      # 只動標記,不必重拿 1MB 的職缺資料
 
     def test_rev_moves_when_a_script_writes_the_file(self):
-        """cut_tailor 收尾、custom_queue、sync_sent 都直接寫檔,不經過這支伺服器。
+        """cut_tailor 收尾、custom_queue、進度紀錄對帳都直接寫檔,不經過這支伺服器。
         以前這種改動頁面永遠看不到,要他自己重整。"""
         r1 = self.rev()
         time.sleep(0.01)
@@ -802,10 +756,8 @@ class ShipFilesApi(HttpBase):
         self.assertEqual(read_fb(self.path)[a]['sent_v'], 'en-general')
 
 
-class Prep(HttpBase):
-    """看板上的「跑準備區」。這裡的看板是臨時副本,伺服器一律跑 job_fake(不會派 agent)。"""
-
-    KIND = 'prep'
+class RunButton(HttpBase):
+    """看板任務按鈕的共用副本啟動與進度輪詢。"""
 
     def setUp(self):
         super().setUp()
@@ -821,7 +773,7 @@ class Prep(HttpBase):
         os.environ.pop('JOB_FAKE_DIE', None)
         super().tearDown()
 
-    def wait_prep(self, until, timeout=20):
+    def wait_run(self, until, timeout=20):
         end = time.time() + timeout
         while time.time() < end:
             st = self.rev()[self.KIND]
@@ -829,6 +781,12 @@ class Prep(HttpBase):
                 return st
             time.sleep(0.1)
         self.fail('等不到:%r' % st)
+
+
+class Prep(RunButton):
+    """看板上的「跑準備區」。這裡的看板是臨時副本,伺服器一律跑 job_fake(不會派 agent)。"""
+
+    KIND = 'prep'
 
     def test_runs_once_and_the_page_can_see_the_result(self):
         bd.set_fb(lambda f: f.update({JOBS[1]['id']: {'app': 'prep'}, JOBS[2]['id']: {'app': 'prep'}}),
@@ -838,7 +796,7 @@ class Prep(HttpBase):
         self.assertTrue(self.rev()['prep']['running'])
         # 按第二下:cut_tailor 一啟動會殺掉上一個 worker,所以跑的時候不准再開一個
         self.assertEqual(self.req('/api/run/prep', {})[0], 409)
-        st = self.wait_prep(lambda s: s.get('phase') == 'done')
+        st = self.wait_run(lambda s: s.get('phase') == 'done')
         self.assertFalse(st['running'])
         self.assertEqual(st['ready'], 2)
         fb = read_fb(self.path)
@@ -847,13 +805,13 @@ class Prep(HttpBase):
 
     def test_nothing_to_run_says_why(self):
         self.assertEqual(self.req('/api/run/prep', {})[0], 200)
-        st = self.wait_prep(lambda s: s.get('phase') == 'nothing')
+        st = self.wait_run(lambda s: s.get('phase') == 'nothing')
         self.assertIn('沒有卡', st['msg'])
 
     def test_a_run_that_died_does_not_block_the_next(self):
         os.environ['JOB_FAKE_DIE'] = '1'
         self.req('/api/run/prep', {})
-        st = self.wait_prep(lambda s: s.get('phase') == 'died')
+        st = self.wait_run(lambda s: s.get('phase') == 'died')
         self.assertFalse(st['running'])
         os.environ.pop('JOB_FAKE_DIE')
         self.assertEqual(self.req('/api/run/prep', {})[0], 200)
@@ -906,18 +864,6 @@ class CutTailorEarlyExit(unittest.TestCase):
                 self.assertEqual(taken, want)
                 if not want:
                     self.assertIn('沒有卡', str(stop.exception))
-
-    def test_techerr_keeps_the_mood_and_stage_it_had_so_it_can_be_put_back(self):
-        """閘門標「出錯了」會蓋掉心情、清掉階段:兩個都另存(s0、app0),看板的「放回原處」照原樣放回;
-        之前按過放回原處(live_ok)的,再被標出錯了,那個「他說沒壞」就不算了。"""
-        import cut_tailor as ct
-        fb = {'u': {'s': 'like', 'app': 'prep', 'live_ok': 1}, 'n': {}}
-        ct._techerr(fb, 'u')
-        ct._techerr(fb, 'n')
-        self.assertEqual(fb['u'], {'s': 'techerr', 's0': 'like', 'app0': 'prep'})
-        self.assertEqual(fb['n'], {'s': 'techerr'})
-        ct._techerr(fb, 'u')                  # 再標一次:不把 techerr 存成原本的心情,原本存的也不丟
-        self.assertEqual(fb['u'], {'s': 'techerr', 's0': 'like', 'app0': 'prep'})
 
     def test_empty_prep_is_not_called_all_approved(self):
         """準備區是空的,不能說成「要跑的都被標成認可過了」。"""
@@ -987,7 +933,7 @@ class CutTailorProgress(unittest.TestCase):
         self.assertNotIn('done', self.ct.progress(self.dir))
 
 
-class Research(Prep):
+class Research(RunButton):
     """看板上的「🔎 找新職缺」:更深、更廣、指定方向。臨時副本上跑 job_fake(不會派 agent)。"""
     KIND = 'research'
 
@@ -998,7 +944,7 @@ class Research(Prep):
         self.assertTrue(st['running'])
         self.assertEqual((st['mode'], st['direction']), ('dir', '遊戲反作弊'))
         self.assertEqual(self.req('/api/run/research', {'mode': 'wide', 'resume_text': '測試履歷'})[0], 409)   # 同時只跑一輪
-        st = self.wait_prep(lambda s: s.get('phase') == 'done')
+        st = self.wait_run(lambda s: s.get('phase') == 'done')
         self.assertEqual(st['added'], 2)
         self.assertEqual(len(bd.parse(read(self.path))['data']['jobs']), len(JOBS) + 2)
         self.assertNotEqual(self.rev()['gen'], r1['gen'])    # 頁面靠這個知道要重拿職缺
@@ -1008,979 +954,16 @@ class Research(Prep):
         self.assertEqual(self.req('/api/run/research', {'mode': 'dir', 'text': '  '})[0], 400)
         self.assertIsNone(bs._PROC.get('research'))
 
-    def test_nothing_to_run_says_why(self):
-        pass    # 找缺不看準備區,沒有「沒東西可跑」這一種(更深沒有種子的情況在 converge 自己判)
 
     def test_a_run_that_died_does_not_block_the_next(self):
         os.environ['JOB_FAKE_DIE'] = '1'
         self.req('/api/run/research', {'mode': 'deep', 'resume_text': '測試履歷'})
-        st = self.wait_prep(lambda s: s.get('phase') == 'died')
+        st = self.wait_run(lambda s: s.get('phase') == 'died')
         self.assertFalse(st['running'])
         os.environ.pop('JOB_FAKE_DIE')
         self.assertEqual(self.req('/api/run/research', {'mode': 'deep', 'resume_text': '測試履歷'})[0], 200)
 
 
-class ResearchPipeline(unittest.TestCase):
-    @contextlib.contextmanager
-    def in_home(self, home, settings, prefs_file, note):
-        """找缺跑在 home 這個資料夾:設定、偏好筆記都在那,寫的是這份看板。"""
-        import config as cf
-        with mock.patch.object(cf, 'HOME', home), mock.patch.object(cf, 'C', settings), \
-                mock.patch.object(cf, 'PREFS', prefs_file), mock.patch.object(cf, 'PREFERENCE_NOTE', note), \
-                mock.patch.object(self.rs.prefs, 'PREF', note), mock.patch.object(self.rs.prefs, 'refresh_like'), \
-                mock.patch.dict(os.environ, {'AGENT_BOARD': self.path}):
-            yield
-
-    """找缺一輪:找 → 程式清洗 → 判 → 進板。agent 跟網路都換成假的。"""
-
-    LIKED = 'https://jobs.lever.co/acme/1111'
-    # 假的職缺頁:假的判斷引的職稱、公司、理由都是頁面原文那幾段的編號(安檢門照編號取原文,#317、#465)
-    PAGE = '\n'.join(f'Engineer {i}' for i in range(1, 30)) + '\nACME\n工作內容包含資安工程'
-
-    def setUp(self):
-        import research as rs, converge as cv
-        self.rs, self.cv = rs, cv
-        self.dir = self.enterContext(tempfile.TemporaryDirectory(prefix='rs-'))
-        self.path = os.path.join(self.dir, 'board.html')
-        jobs = [{'id': self.LIKED, 'target': 'Security Engineer·Acme'},
-                {'id': 'https://ex.test/job/2', 'target': 'Business Analyst·Foo'}]
-        make_board(self.path, {self.LIKED: {'s': 'like', 'n': '很有趣,多找這種'},
-                               'https://ex.test/job/2': {'s': 'dislike', 'n': '不要這種'}}, jobs=jobs)
-        self.ledger = os.path.join(self.dir, 'ledger.jsonl')
-        self.sums = os.path.join(self.dir, 'sums')
-        self._dir = rs.DIR
-        rs.DIR = self.dir
-
-    def tearDown(self):
-        self.rs.DIR = self._dir
-
-    def test_deep_gives_companies_not_a_prebuilt_list(self):
-        """更深給「他喜歡過的公司」,不給程式先打 API 列好的開缺清單。
-        那個清單只認四個徵才系統,他喜歡過的公司有 19% 不在上面、整家被跳過;
-        而 agent 本來就知道要用 API(它會自己去查 Greenhouse 的 jobs API)。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        cs = prefs.cards(fb, jobs)
-        l = self.rs.liked_company_list(cs)
-        self.assertTrue(l and l[0]['company'], '沒有把喜歡過的公司交出去')
-        p = self.rs.search_prompt('deep', '', cs, [], '', '/x', '/y', l)
-        self.assertIn('使用者喜歡過的公司', p)
-        self.assertIn('怎麼查由你決定', p)
-        self.assertNotIn('程式已經從徵才系統全部列在下面', p)
-
-    def test_search_goals_not_procedures(self):
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        cs = prefs.cards(fb, jobs)
-        d = self.rs.search_prompt('dir', '遊戲反作弊,台灣或遠端', cs, [], '', '/x.json', '/x.md')
-        self.assertIn('他說:「遊戲反作弊,台灣或遠端」', d)
-        self.assertIn('怎麼找由你決定', d)
-        self.assertNotIn('stdout', d)
-        # 不叫它翻工具清單找別的搜尋工具;一次送好幾個關鍵字(以前一輪 72 步,好幾步花在找工具)
-        self.assertIn('一次送好幾個關鍵字', d)
-        # 他對舊卡的原話推到檔案、正文只留指標(那一塊佔以前那份 prompt 的六成)
-        import tempfile as _t
-        rd = self.enterContext(_t.TemporaryDirectory())
-        files = self.rs.search_files(rd, cs, self.rs.liked_company_list(cs), '')
-        d2 = self.rs.search_prompt('deep', '', cs, [], '', '/x', '/y', files=files)
-        self.assertNotIn('Security Engineer·Acme', d2)
-        self.assertIn('他說「很有趣,多找這種」', d2)      # 職稱只留在檔案裡當索引,正文只放他真的說過的話
-        self.assertIn('Security Engineer · Acme', read(files['他喜歡過的職缺.md']))
-        self.assertLess(len(d2), 6000, 'prompt 又長回去了')
-        # 更廣:只給目標和他本人的材料,不再塞「板上各類職缺的數量」——那張表 52 行、
-        # 一半是舊實驗殘留的標籤,是雜訊;而且它要 agent 去跟板上比對,等於又架一個支架。
-        w = self.rs.search_prompt('wide', '', cs, [('資安', 3)], '', '/x', '/y')
-        self.assertNotIn('資安:3 張', w)
-        self.assertIn('想知道自己還能做什麼', w)
-        self.assertIn('怎麼找由你決定', w)
-
-    def test_agent_count_is_his_switch_not_mine(self):
-        """「自己決定派幾隻」那句在派工的唯一入口加,所有 agent(找缺、判斷、準備區、代投)一起吃得到。
-        他撥的是「所有 agent」,以前只有找缺那一段讀得到,是線沒接完。預設關著:一輪一隻是他的規則。"""
-        import agent_run as ar, board_doc as bd
-        self.assertNotIn('要派幾隻', ar.rules_for('main', board=self.path))   # 預設:一輪一隻
-        bd.set_fb(lambda fb: fb.__setitem__('__agentfree__', 1), live=self.path, by='測試')
-        on = ar.rules_for('main', board=self.path)
-        self.assertIn('要派幾隻', on)
-        self.assertIn('multi_agent_v1__spawn_agent', on)                     # agent 才給它自己的工具名
-        self.assertNotIn('multi_agent_v1', ar.rules_for('alt', board=self.path))  # alt runtime 不承諾它沒有的
-
-    def test_judge_knows_which_mode_found_it(self):
-        """更廣找來的是他沒看過的職能,拿「像不像他喜歡過的」當判準等於用錯的尺。
-        判斷那段以前連這張是哪種找法來的都不知道。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        cs = prefs.cards(fb, jobs)
-        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': 'JD'}]
-        deep = self.rs.judge_prompt(b, cs, '/o', 'deep')[0]
-        wide = self.rs.judge_prompt(b, cs, '/o', 'wide')[0]
-        self.assertNotIn('不要拿「像不像他喜歡過的」當判準', deep)
-        self.assertIn('不要拿「像不像他喜歡過的」當判準', wide)
-
-    def test_judge_prompt_never_shows_the_search_agents_excerpt(self):
-        """判斷的人只看程式抓回的 JD 原文:找缺 agent 自己抄的摘錄不是程式的字,不進判斷指示(#465)。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': '程式抓回的整頁原文',
-              'jd_excerpt': '找缺時自己抄的一句'}]
-        prompt = self.rs.judge_prompt(b, prefs.cards(fb, jobs), '/o', 'deep')[0]
-        self.assertTrue('程式抓回的整頁原文' in prompt, '判斷指示裡要有程式抓回的 JD')
-        self.assertFalse('找缺時自己抄的一句' in prompt, '判斷指示印出了找缺 agent 的摘錄')
-
-    def test_judge_can_cite_the_old_cards_it_was_shown(self):
-        # 給 agent 看的相似舊卡表態,程式核對引用時也要拿得到(2026-10-05 加職缺實測:引用那幾行被當成找不到,卡片全空)
-        import gate
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': 'JD'}]
-        text, cites, numbered = self.rs.judge_prompt(b, prefs.cards(fb, jobs), '/o', 'deep')
-        shown = re.search(r'他對相似舊職缺的表態:\n\d+\. (.+)', text)[1]
-        sheet = judge_sheet(text, [{'id': 'J1', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 3, 'why': 'x',
-                                    'cat': self.rs.CATS[0],
-                                    'reasons': [{'text': '他喜歡過', 'citation': [Q(shown)], 'basis': '使用者原話'}]}])
-        verdict = gate.inspect('research_judge', sheet, gate.Truth(handed={'J1'}, cites={'J1': cites['J1']['ids']}),
-                               numbered)
-        self.assertEqual(verdict.problems, [])
-        self.assertEqual(verdict.rows['jobs'][0].facts['reasons'][0]['citation'], shown)
-
-    def test_shared_notes_count_for_every_job_but_a_jd_only_for_its_own(self):
-        """#421:偏好筆記整批共用,判哪一張都能引;JD 原文只算自己那一張。每一則理由照它自己的根據收。"""
-        import gate
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': 'Data Engineer\nBuild pipelines.'},
-             {'url': 'https://ex.test/y', 'title': 'Y', 'company': 'D', 'jd': 'Backend Engineer\nWrite Go.'}]
-        with mock.patch.object(self.rs.prefs, 'ensure_note', return_value='# 偏好筆記\n他喜歡資料管線'):
-            prompt, cites, numbered = self.rs.judge_prompt(b, prefs.cards(fb, jobs), '/o', 'deep')
-
-        def row(jid, text, basis):
-            return {'id': jid, 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 3, 'why': 'x', 'cat': self.rs.CATS[0],
-                    'reasons': [{'text': '理由', 'citation': [Q(text)], 'basis': basis}]}
-        truth = lambda: gate.Truth(handed={'J1', 'J2'}, cites={k: v['ids'] for k, v in cites.items()})
-        sheet = judge_sheet(prompt, [row('J1', 'Build pipelines.', 'JD 原文'), row('J2', '他喜歡資料管線', '偏好筆記')])
-        verdict = gate.inspect('research_judge', sheet, truth(), numbered)
-        self.assertEqual(verdict.problems, [])
-        self.assertEqual([r.facts['reasons'][0]['citation'] for r in verdict.rows['jobs']],
-                         ['Build pipelines.', '他喜歡資料管線'])
-        sheet = judge_sheet(prompt, [row('J2', 'Build pipelines.', 'JD 原文')])
-        verdict = gate.inspect('research_judge', sheet, truth(), numbered)
-        self.assertNotIn('reasons', verdict.rows['jobs'][0].facts)
-        self.assertIn('屬於 J1', ' '.join(verdict.problems))
-
-    def test_a_job_with_only_a_flag_has_no_jd_for_the_card_summary(self):
-        """抓不到頁、只有程式提醒的那一張:不算有 JD,卡片摘要用不到(不收、也不算錯),跟沒有 JD 時一樣。"""
-        import gate
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': '', 'page_status': 'unknown',
-              'flag': ['程式無法取得職缺頁文字;保留待確認,不可猜測內容']}]
-        prompt, cites, numbered = self.rs.judge_prompt(b, prefs.cards(fb, jobs), '/o', 'add')
-        sheet = judge_sheet(prompt, [{'id': 'J1', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': False, 'fit': 2, 'why': '讀不到',
-                                      'cat': self.rs.CATS[0], 'risk': {'kind': '', 'why': '', 'cite': []},
-                                      'reasons': [{'text': '讀不到頁', 'citation': [], 'basis': '推估'}],
-                                      'card': {'salary': '月薪 5 萬', 'quote': []}}])
-        verdict = gate.inspect('research_judge', sheet, gate.Truth(handed={'J1'}, cites={'J1': cites['J1']['ids']}),
-                               numbered)
-        self.assertEqual(verdict.problems, [])
-        self.assertNotIn('card', verdict.rows['jobs'][0].judged)
-
-    def test_risk_and_card_reach_the_board_with_program_text(self):
-        """幽靈缺的說明、卡片摘要的引用、理由的引用到看板時都是程式交出去的那一段字,不是 agent 寫的編號。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        flag = '刊登已經 200 天(超過 90 天):可能是幽靈職缺'
-        cands = [{'url': 'https://ex.test/a', 'title': 'Data Engineer', 'company': 'Acme',
-                  'jd': 'Data Engineer\nAcme\nSalary 50k', 'flag': [flag]}]
-        agent = judge_agent([{'id': 'J1', 'title': {'text': 'Data Engineer', 'cite': [Q('Data Engineer')]}, 'company': {'text': 'Acme', 'cite': [Q('Acme')]}, 'keep': True,
-                              'fit': 4, 'cite': [], 'why': '對味', 'cat': self.rs.CATS[0],
-                              'reasons': [{'text': '有薪資', 'citation': [Q('Salary 50k')], 'basis': 'JD 原文'}],
-                              'risk': {'kind': 'ghost', 'why': '掛很久', 'cite': [Q(flag)]},
-                              'card': {'fit': '對得上', 'salary': '50k', 'quote': [Q('Salary 50k')]}}])
-        rd = self.enterContext(tempfile.TemporaryDirectory())
-        res = self.rs.judge([dict(c) for c in cands], prefs.cards(fb, jobs), rd, False, agent, mode='add')
-        r = res['https://ex.test/a']
-        self.assertEqual(r['card']['quote'], 'Salary 50k')
-        entry = self.rs.job_entry(cands[0], r, {})
-        self.assertIn('掛很久', entry['src']['risk']['why'])
-        self.assertIn(flag, entry['src']['risk']['why'])
-        self.assertEqual(entry['src']['reasons'][0]['citation'], 'Salary 50k')
-
-    def test_retry_is_checked_against_the_retry_prompts_numbering(self):
-        """重交那隻看到的是重新組的指示(筆記可能改了):號碼照重交那一份解、代號照重交那一份核;
-        抄第一次的代號,重交也不收。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        cands = [{'url': 'https://ex.test/a', 'title': 'Data Engineer', 'company': 'Acme',
-                  'jd': 'Data Engineer\nAcme builds pipelines.'}]
-
-        def row(text):
-            return [{'id': 'J1', 'title': {'text': 'Data Engineer', 'cite': [Q('Data Engineer')]}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 4, 'cite': [],
-                     'why': '對味', 'cat': self.rs.CATS[0], 'card': {'fit': '做過管線'},
-                     'reasons': [{'text': '筆記', 'citation': [Q(text)], 'basis': '偏好筆記'}]}]
-
-        for copy_first, ok in ((False, True), (True, False)):
-            prompts = []
-
-            def agent(prompt, outfile, _browser, copy_first=copy_first):
-                prompts.append(prompt)
-                first = '【重交】' not in prompt
-                sheet = judge_sheet(prompt, row('Acme builds pipelines.' if first else '新筆記那一行'),
-                                    material(prompts[0]) if copy_first else None)
-                with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                    json.dump(sheet, f, ensure_ascii=False)
-
-            notes = iter(['舊筆記那一行', '新筆記那一行'])
-            rd = self.enterContext(tempfile.TemporaryDirectory())
-            with mock.patch.object(self.rs.prefs, 'ensure_note', side_effect=lambda: next(notes)):
-                res = self.rs.judge([dict(c) for c in cands], prefs.cards(fb, jobs), rd, False, agent, mode='add')
-            self.assertEqual(len(prompts), 2)
-            self.assertEqual(re.search(r'^(\d+)\. 舊筆記那一行$', prompts[0], re.M)[1],
-                             re.search(r'^(\d+)\. 新筆記那一行$', prompts[1], re.M)[1])   # 同一個號碼,兩份裡是不同的字
-            r = res['https://ex.test/a']
-            self.assertEqual(not r.get('wrong'), ok)
-            if ok:
-                self.assertEqual(r['reasons'][0]['citation'], '新筆記那一行')
-
-    def test_a_batch_judges_against_one_set_of_old_cards(self):
-        """2026-10-12 貼網址加入試送 20 張,有幾張引了同一批別張底下附的舊卡被擋。
-        虛擬碼:同一批任一張附的舊卡(代號與表態那幾行)誰都能引;程式沒附的舊卡代號照樣擋。"""
-        import gate
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        b = [{'url': 'https://ex.test/x', 'title': 'X', 'company': 'C', 'jd': 'JD'},
-             {'url': 'https://ex.test/y', 'title': '資安工程師', 'company': 'D', 'jd': '資安'}]
-        text, cites, numbered = self.rs.judge_prompt(b, prefs.cards(fb, jobs), '/o', 'add')
-        self.assertEqual(cites['J1']['ids'], cites['J2']['ids'])
-        shown = int(re.search(r'他對相似舊職缺的表態:\n(\d+)\. ', text.split('=== J1 ===', 1)[1])[1])
-        row = {'id': 'J2', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 3, 'why': 'x', 'cat': self.rs.CATS[0],
-               'cite': sorted(cites['J1']['ids'])[:1],
-               'reasons': [{'text': '同型舊卡', 'citation': [shown], 'basis': '偏好筆記'}]}
-        truth = lambda: gate.Truth(handed={'J1', 'J2'}, cites={k: v['ids'] for k, v in cites.items()})
-        sheet = lambda r: {'material_id': numbered.material_id, 'jobs': [r]}
-        self.assertEqual(gate.inspect('research_judge', sheet(row), truth(), numbered).problems, [])
-        verdict = gate.inspect('research_judge', sheet(dict(row, cite=['c9'])), truth(), numbered)
-        self.assertIn('程式沒附給它 c9', ' '.join(verdict.problems))
-
-    def test_what_the_program_read_counts_however_the_agent_labels_it(self):
-        """第二輪試送 30 張又擋掉 6 張:職稱和薪資只寫在頁面標題(程式讀到了,卻沒算進原文)。
-        頁面標題是 JD 原文的一段,引得到;沒有可引的理由寫 []。"""
-        import gate
-        import page_fetch
-        import prefs
-        title = 'Acme is hiring Policy Intern · USD100K–190K/yr'
-        page = page_fetch.PageResult('https://ex.test/j', 'ok', title=title,
-                                     text='About the job\nPosted 2 weeks ago\nWork on policy.')
-        self.assertIn('Policy Intern', page.jd)
-        self.assertEqual(page_fetch.PageResult('https://ex.test/j', 'ok', title='殼', text='殼').jd, '')   # 只有標題不算讀到
-        fb, jobs = prefs_load(self.path)
-        text, _cites, numbered = self.rs.judge_prompt(
-            [{'url': 'https://ex.test/j', 'title': 'Policy Intern', 'company': 'Acme', 'jd': page.jd}],
-            prefs.cards(fb, jobs), '/o', 'add')
-        row = {'id': 'J1', 'title': {'text': title, 'cite': [Q(title)]}, 'company': {'text': title, 'cite': [Q(title)]}, 'keep': True, 'fit': 3, 'cite': [], 'why': '可問',
-               'risk': {'kind': '', 'why': '', 'cite': []}, 'cat': '其他',
-               'reasons': [{'text': '筆記沒提', 'basis': '偏好筆記', 'citation': []}],
-               'card': {'fit': '可問', 'posted': '2 週前', 'salary': '100K–190K',
-                        'quote': [Q('Posted 2 weeks ago'), Q(title)]}}
-        verdict = gate.inspect('research_judge', judge_sheet(text, [row]), gate.Truth(handed={'J1'}, cites={'J1': set()}),
-                               numbered)
-        self.assertEqual(verdict.problems, [])
-        self.assertEqual(verdict.rows['jobs'][0].judged['card']['quote'], 'Posted 2 weeks ago\n' + title)
-
-    def _stop_run(self, fake_agent, finishing, pending, **kw):
-        """跑一輪找缺(假 agent、假抓頁),finishing() 為真 = 他按了停止;kw 照樣交給 research.run(time_up、tally…)。"""
-        from unittest.mock import patch
-        with patch.object(self.rs.cf, 'HOME', self.dir), \
-             patch.object(self.rs.prefs, 'PREF', os.path.join(self.dir, 'prefs.md')), \
-             patch.object(self.rs.prefs, 'resume', return_value='CV'), \
-             patch.object(self.rs.prefs, 'hard_rules', return_value=''), \
-             patch.object(self.rs.prefs, 'checked_resumes', return_value=[]), \
-             patch.object(self.rs.prefs, 'resume_selection_signature', return_value='empty'), \
-             patch.object(self.rs, 'search_files', return_value={}), \
-             patch('feedback_dump.feedback_delta', return_value=('', 0)), \
-             patch.object(self.rs.prefs, 'refresh_like'), \
-             patch('page_fetch.fetch', side_effect=lambda url: page_result(url, self.PAGE)):
-            return self.rs.run('deep', '', live=self.path, run_agent=fake_agent, ledger=self.ledger,
-                               sums=self.sums, turned=os.path.join(self.dir, 'turned.jsonl'),
-                               finishing=finishing, pending=pending, **kw)
-
-    def _stop_agent(self, found, stop_at):
-        """假 agent:找的時候交 found 張;stop_at=('search'|'judge', 第幾批) 那一刻他按了停止(agent 被停掉)。"""
-        import agent_run as ar
-        flag = {'stop': False, 'judged': 0}
-
-        def fake_agent(prompt, outfile, _browser):
-            if outfile.endswith('/note.out'):          # 整理偏好筆記的那隻(跟找缺同時跑)
-                note_path = prompt.split('更新後偏好筆記請寫到 ', 1)[1].splitlines()[0]
-                with open(note_path, 'w', encoding='utf-8') as f:
-                    f.write('# 偏好筆記\n\n## 使用者自訂\n\n\n## Agent 假設\n\n')
-                return None
-            searching = '/search_' in outfile
-            if searching:
-                with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                    json.dump(found, f, ensure_ascii=False)
-                if stop_at == ('search', 0):
-                    flag['stop'] = True
-                    raise ar.AgentRunError([])
-                with open(outfile[:-4] + '.md', 'w', encoding='utf-8') as f:
-                    f.write('- 安全職務：符合角度地圖。')
-                return None
-            if stop_at == ('judge', flag['judged']):
-                flag['stop'] = True
-                raise ar.AgentRunError([])
-            flag['judged'] += 1
-            n = prompt.count('=== J')
-            rows = [{'id': f'J{i}', 'title': {'text': f'Engineer {i}', 'cite': [Q(f'Engineer {i}')]}, 'company': {'text': 'ACME', 'cite': [Q('ACME')]}, 'keep': True, 'fit': 4,
-                     'cite': [], 'why': 'ok', 'cat': self.rs.CATS[0], 'card': {'fit': 'ok'},
-                     'reasons': [{'text': '職缺提及資安工程', 'citation': [Q('工作內容包含資安工程')], 'basis': 'JD 原文'}]}
-                    for i in range(1, n + 1)]
-            with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                json.dump(judge_sheet(prompt, rows), f, ensure_ascii=False)
-            return None
-        return fake_agent, (lambda: flag['stop'])
-
-    def _found(self, n, tag):
-        return [{'url': f'https://ex.test/{tag}/{i}', 'title': f'Engineer {i}', 'company': 'ACME',
-                 'why': 'ok', 'via': 'fake', 'angle': '安全職務'}
-                for i in range(n)]
-
-    def test_stop_while_judging_keeps_finished_batches(self):
-        """判到第二批時他按停止:第一批判完的照常進看板,第二批那兩張存起來下一輪先判。"""
-        pending = os.path.join(self.dir, 'pending.json')
-        agent, finishing = self._stop_agent(self._found(7, 'j'), ('judge', 1))
-        added = self._stop_run(agent, finishing, pending)
-        self.assertEqual(added, 5)
-        self.assertEqual(len(self.rs.pending_take(pending)), 2)
-
-    def test_stop_while_searching_saves_found_and_next_round_judges_them_first(self):
-        """找到一半他按停止:已經寫進檔的三張存起來,不判、不加卡;下一輪一開始先判這三張。"""
-        pending = os.path.join(self.dir, 'pending.json')
-        agent, finishing = self._stop_agent(self._found(3, 's'), ('search', 0))
-        self.assertEqual(self._stop_run(agent, finishing, pending), 0)
-        self.assertEqual(self.rs.pending_count(pending), 3)
-        agent, finishing = self._stop_agent([], None)
-        self.assertEqual(self._stop_run(agent, finishing, pending), 3)
-        self.assertEqual(self.rs.pending_count(pending), 0)
-
-    def test_time_up_while_searching_judges_found_in_the_same_round(self):
-        """找到一半時間到:agent 被停掉,已經寫進檔的三張這一輪就判完進看板,不存到下一輪;回報找到幾張。"""
-        pending = os.path.join(self.dir, 'pending.json')
-        agent, time_up = self._stop_agent(self._found(3, 't'), ('search', 0))
-        tally = {}
-        added = self._stop_run(agent, lambda: False, pending, minutes=15, time_up=time_up, tally=tally)
-        self.assertEqual(added, 3)
-        self.assertEqual(self.rs.pending_count(pending), 0)
-        self.assertEqual(tally, {'found': 3, 'dropped': 0})
-        with open(self.ledger, encoding='utf-8') as f:
-            self.assertEqual(json.loads(f.read().splitlines()[-1])['stopped'], 'time')
-
-    def test_time_up_with_nothing_written_adds_nothing(self):
-        pending = os.path.join(self.dir, 'pending.json')
-        agent, time_up = self._stop_agent([], ('search', 0))
-        tally = {}
-        self.assertEqual(self._stop_run(agent, lambda: False, pending, time_up=time_up, tally=tally), 0)
-        self.assertEqual(tally, {'found': 0, 'dropped': 0})
-
-    def test_old_find_reports_that_cannot_be_cleared_are_reported(self):
-        """跑完一輪要收掉上一輪的「找新職缺」回報;收不掉也要在看板上看得到(記成程式的錯),不是默默留著。"""
-        import agent_report
-        from unittest.mock import patch
-        pending = os.path.join(self.dir, 'pending.json')
-        agent, _ = self._stop_agent(self._found(1, 'r'), None)
-        with patch('agent_report.resolve', side_effect=OSError('看板檔被鎖住')):
-            self._stop_run(agent, lambda: False, pending)
-        fb, _ = prefs_load(self.path)
-        msgs = [it['msg'] for it in agent_report.open_items(fb)]
-        self.assertTrue(any('看板檔被鎖住' in m for m in msgs), msgs)
-        self.assertEqual(agent_report.todo(fb), [])
-
-    def test_no_time_limit_round_is_unchanged_and_agent_is_told_the_budget_only_when_set(self):
-        pending = os.path.join(self.dir, 'pending.json')
-        prompts = []
-        agent, _ = self._stop_agent(self._found(2, 'u'), None)
-        seen = lambda p, o, b: (prompts.append(p) if '/search_' in o else None) or agent(p, o, b)
-        self.assertEqual(self._stop_run(seen, lambda: False, pending), 2)
-        self.assertNotIn('分鐘找', prompts[0])
-        prompts.clear()
-        agent, _ = self._stop_agent(self._found(2, 'v'), None)
-        seen = lambda p, o, b: (prompts.append(p) if '/search_' in o else None) or agent(p, o, b)
-        self.assertEqual(self._stop_run(seen, lambda: False, pending, minutes=15, time_up=lambda: False), 2)
-        self.assertIn('最多有 15 分鐘找', prompts[0])
-
-    def test_find_terms_drop_cards_the_user_ruled_out_and_flag_what_the_page_never_said(self):
-        """找缺條件(#458):上架太久的在判斷前就丟、不花 agent;薪資低於下限的判完丟、不記成判過不送;
-        頁面沒寫薪資的留著、卡上標出來;每一項擋掉幾張記進這一輪。"""
-        import datetime
-        from unittest.mock import patch
-        day = lambda n: (datetime.date.today() - datetime.timedelta(days=n)).isoformat()
-        old, low, good, silent = ('https://ex.test/old', 'https://ex.test/low', 'https://ex.test/good',
-                                  'https://ex.test/silent')
-        pages = {old: ('Old Job\nACME\n月薪 90,000', day(200)), low: ('Low Job\nACME\n月薪 40,000', day(3)),
-                 good: ('Good Job\nACME\n月薪 60,000', day(3)), silent: ('Silent Job\nACME\n薪資面議', day(3))}
-        cands = [{'url': u, 'title': t.split('\n')[0], 'company': 'ACME', 'why': 'x', 'via': 'fake',
-                  'angle': '角度'} for u, (t, _d) in pages.items()]
-        judged = {'Low Job': {'salary_month': 40000, 'salary_quote': [Q('月薪 40,000')]},
-                  'Good Job': {'salary_month': 60000, 'salary_quote': [Q('月薪 60,000')]},
-                  'Silent Job': {'salary_month': None, 'salary_quote': []}}
-        prompts = []
-
-        def fake_agent(prompt, outfile, browser_required):
-            prompts.append(prompt)
-            searching = '/search_' in outfile
-            if searching:
-                payload = cands
-            else:
-                titles = re.findall(r'=== (J\d+) ===\n職缺:([^·]+)·', prompt)
-                payload = judge_sheet(prompt, [
-                    {'id': jid, 'title': {'text': title, 'cite': [Q(title)]}, 'company': {'text': 'ACME', 'cite': [Q('ACME')]}, 'keep': True, 'fit': 4, 'cite': [],
-                     'why': 'x', 'cat': self.rs.CATS[0], 'card': {'fit': 'x'}, 'terms': judged[title],
-                     'reasons': [{'text': 'x', 'citation': [], 'basis': '推估'}]}
-                    for jid, title in titles])
-            with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                json.dump(payload, f, ensure_ascii=False)
-            if searching:
-                with open(outfile[:-4] + '.md', 'w', encoding='utf-8') as f:
-                    f.write('- 角度：x')
-            return None
-
-        terms = __import__('find_terms').normalize({'posted_days': 30, 'salary_min': 50000})
-        turned = os.path.join(self.dir, 'turned.jsonl')
-        with patch.object(self.rs.cf, 'HOME', self.dir), \
-             patch.object(self.rs.prefs, 'PREF', os.path.join(self.dir, 'prefs.md')), \
-             patch.object(self.rs.prefs, 'resume', return_value='CV'), \
-             patch.object(self.rs.prefs, 'hard_rules', return_value=''), \
-             patch.object(self.rs.prefs, 'checked_resumes', return_value=[]), \
-             patch.object(self.rs.prefs, 'resume_selection_signature', return_value='empty'), \
-             patch.object(self.rs, 'search_files', return_value={}), \
-             patch('feedback_dump.feedback_delta', return_value=('', 0)), \
-             patch.object(self.rs.prefs, 'refresh_like'), \
-             patch('page_fetch.fetch', side_effect=lambda url: page_result(
-                 url, pages[url][0], posted_at=pages[url][1], posted_source='test date')):
-            added = self.rs.run('deep', '', live=self.path, run_agent=fake_agent,
-                                ledger=self.ledger, sums=self.sums, turned=turned, terms=terms)
-
-        self.assertEqual(added, 2)
-        search_prompt = prompts[0]
-        self.assertIn('上架最多 30 天', search_prompt, '找的 agent 拿到這輪條件')
-        judge_prompt = next(p for p in prompts if '=== J1 ===' in p)
-        self.assertNotIn('Old Job', judge_prompt, '上架太久的在判斷前就丟,不花 agent')
-        self.assertIn('"salary_month"', judge_prompt)
-        _, jobs = self.rs.prefs.load(self.path)
-        ids = {j['id']: j for j in jobs}
-        self.assertNotIn(old, ids)
-        self.assertNotIn(low, ids)
-        self.assertNotIn('terms_unknown', ids[good])
-        self.assertEqual(ids[silent]['terms_unknown'], ['薪資'], '頁面沒寫薪資:留著、卡上標出來')
-        rows = [json.loads(line) for line in open(turned, encoding='utf-8')] if os.path.exists(turned) else []
-        self.assertNotIn(low, [r['url'] for r in rows], '只是不符這輪條件:條件放寬後還要能再判')
-        with open(self.ledger, encoding='utf-8') as f:
-            rec = json.loads(f.read().strip().splitlines()[-1])
-        self.assertEqual(rec['terms_missed'], {'上架天數': 1, '薪資': 1})
-        self.assertEqual(rec['dropped']['不符條件'], 2)
-
-    def test_repost_hint_reaches_fake_judge_and_is_kept_on_the_new_card(self):
-        from unittest.mock import patch
-        url = 'https://ex.test/reposted'
-        candidate = {'url': url, 'title': 'Security Engineer', 'company': 'ACME',
-                     'why': 'relevant', 'via': 'fake source', 'angle': '安全職務'}
-        prompts, browser_flags = [], []
-
-        def fake_agent(prompt, outfile, browser_required):
-            prompts.append(prompt)
-            browser_flags.append(browser_required)
-            searching = '/search_' in outfile
-            payload = ([candidate] if searching else judge_sheet(prompt, [{
-                'id': 'J1', 'title': {'text': 'Security Engineer', 'cite': [Q('Security Engineer')]}, 'company': {'text': 'ACME', 'cite': [Q('ACME')]},
-                'keep': True, 'fit': 4, 'cite': [], 'why': 'relevant',
-                'cat': self.rs.CATS[0], 'card': {'fit': 'relevant'},
-                'reasons': [{'text': '職缺提及資安工程', 'citation': [Q('工作內容包含資安工程')],
-                             'basis': 'JD 原文'}],
-            }]))
-            with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                json.dump(payload, f, ensure_ascii=False)
-            if searching:
-                with open(outfile[:-4] + '.md', 'w', encoding='utf-8') as f:
-                    f.write('- 安全職務：符合角度地圖。')
-            return None
-
-        turned = os.path.join(self.dir, 'turned.jsonl')
-        with patch.object(self.rs.cf, 'HOME', self.dir), \
-             patch.object(self.rs.prefs, 'PREF', os.path.join(self.dir, 'prefs.md')), \
-             patch.object(self.rs.prefs, 'resume', return_value='CV'), \
-             patch.object(self.rs.prefs, 'hard_rules', return_value=''), \
-             patch.object(self.rs.prefs, 'checked_resumes', return_value=[]), \
-             patch.object(self.rs.prefs, 'resume_selection_signature', return_value='empty'), \
-             patch.object(self.rs, 'search_files', return_value={}), \
-             patch('feedback_dump.feedback_delta', return_value=('', 0)), \
-             patch.object(self.rs.prefs, 'refresh_like'), \
-             patch('page_fetch.fetch', side_effect=lambda url: page_result(
-                 url, 'Security Engineer\nACME\n工作內容包含資安工程', posted_at='2026-09-01',
-                 posted_source='test date', applicants='0~5 人')):
-            added = self.rs.run('deep', '', live=self.path, run_agent=fake_agent,
-                                ledger=self.ledger, sums=self.sums, turned=turned, limit=1)
-
-        self.assertEqual(added, 1, '可能是重貼的職缺仍須進入正常判斷與加卡流程')
-        self.assertEqual(browser_flags, [True, False], '搜尋可用瀏覽器,JD 判斷只能讀程式提供的文字')
-        judge_prompt = next(prompt for prompt in prompts if '=== J1 ===' in prompt)
-        self.assertIn('可能是重貼', judge_prompt)
-        self.assertIn(self.LIKED, judge_prompt)
-        self.assertIn('喜歡', judge_prompt)
-        self.assertIn('很有趣,多找這種', judge_prompt)
-        self.assertIn('不要只因為重貼就排除', judge_prompt)
-        self.assertIn('工作內容包含資安工程', judge_prompt)
-        self.assertNotIn('請直接用瀏覽器', judge_prompt)
-        _, jobs = self.rs.prefs.load(self.path)
-        new = next(j for j in jobs if j['id'] == url)
-        self.assertEqual(new['src']['reposts'][0]['url'], self.LIKED)
-        self.assertEqual(new['src']['reposts'][0]['mark'], '喜歡')
-        self.assertEqual(new['posted_at'], '2026-09-01')
-        self.assertEqual(new['posted_src'], 'test date')
-        self.assertEqual(new['applicants'], '0~5 人', '抓到當下的應徵人數區間要跟著卡片存下來')
-        self.assertEqual(new['applicants_at'], time.strftime('%Y-%m-%d'))
-        self.assertEqual(new['applicants_log'], [[time.strftime('%Y-%m-%d'), '0~5 人']])
-
-    def test_judge_batches_run_together_when_he_lets_them(self):
-        """判斷四批彼此不相干,沒有理由排隊(實測:排隊 37 分鐘,是整輪 84 分鐘裡最大的一塊)。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        cs = prefs.cards(fb, jobs)
-        cands = [{'url': 'https://ex.test/%d' % i, 'title': 'T%d' % i, 'company': 'C', 'jd': 'JD'} for i in range(10)]
-        sent = []
-        rd = self.enterContext(tempfile.TemporaryDirectory())
-        self.rs.judge(cands, cs, rd, 'main', lambda *a: sent.append('一批'),
-                      par=True, launch_all=lambda jobs_, m: sent.append('同時 %d 批' % len(jobs_)))
-        self.assertEqual(sent, ['同時 2 批'], '撥了開關還是一批一批排隊')
-
-    def test_a_blocked_judgment_is_sent_back_once_with_what_was_wrong(self):
-        """2026-10-12 擋下的 21 張裡 5 張是 agent 真的引錯(別張的 JD、程式的指示、編的舊卡代號),
-        以前擋下就沒了、卡上摘要空白。虛擬碼:擋下的那幾張帶著安檢門的原話退回去重交一次;
-        改對就收,還是不對就停(不無限重試)。"""
-        import prefs
-        fb, jobs = prefs_load(self.path)
-        cs = prefs.cards(fb, jobs)
-        cands = [{'url': 'https://ex.test/a', 'title': 'Data Engineer', 'company': 'Acme',
-                  'jd': 'Data Engineer\nAcme builds pipelines. Remote.'}]
-
-        def row(citation):
-            return [{'id': 'J1', 'title': {'text': 'Data Engineer', 'cite': [Q('Data Engineer')]}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 4, 'cite': [],
-                     'why': '對味', 'cat': self.rs.CATS[0], 'card': {'fit': '做過管線'},
-                     'reasons': [{'text': '遠端', 'citation': citation, 'basis': 'JD 原文'}]}]
-
-        for second, ok in (([Q('Acme builds pipelines. Remote.')], True), ('Builds rockets', False)):
-            prompts = []
-
-            def agent(prompt, outfile, _browser, second=second):
-                prompts.append(prompt)
-                with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                    json.dump(judge_sheet(prompt, row(second if '【重交】' in prompt else 'Ten years of Go')), f)
-
-            rd = self.enterContext(tempfile.TemporaryDirectory())
-            res = self.rs.judge([dict(c) for c in cands], cs, rd, False, agent, mode='add')
-            self.assertEqual(len(prompts), 2)
-            self.assertIn('Ten years of Go', prompts[1])                 # 退回去時講了哪一句對不上
-            self.assertEqual(not res['https://ex.test/a'].get('wrong'), ok)
-
-    def test_unreadable_judgment_is_not_reported_nor_remembered_as_rejected(self):
-        from unittest.mock import patch
-        import config as cf
-        url = 'https://ex.test/unreadable'
-        candidate = {'url': url, 'title': 'Search result title', 'company': 'Acme',
-                     'angle': '安全職務'}
-        drop = {'不是單一職缺頁': [], '板上已經有': [], '判過不送': [],
-                '硬排除': [], '職缺已下架': []}
-        turned = []
-        raw_prefs = os.path.join(self.dir, 'prefs.md')
-        preference_note = os.path.join(self.dir, 'preference-note.md')
-        with open(raw_prefs, 'w', encoding='utf-8') as f:
-            f.write('# 使用者逐張表態\n')
-
-        def fake_search(*_args, **kwargs):
-            return [candidate], '- 安全職務：符合指定方向。', []
-
-        def fake_note(_files, _rd, note_out, _run_agent):
-            with open(note_out, 'w', encoding='utf-8') as f:
-                f.write('# 偏好筆記\n\n## 使用者自訂\n\n\n## Agent 假設\n\n')
-
-        with patch.object(self.rs, 'run_search', side_effect=fake_search), \
-             patch.object(self.rs, 'run_note', side_effect=fake_note), \
-             patch.object(self.rs, 'clean', return_value=([candidate], drop)), \
-             patch.object(self.rs, 'judge', return_value={url: {'readable': False, 'keep': False,
-                                                                 'why': '頁面讀不到', 'bad_cite': []}}), \
-             patch.object(self.rs, 'turned_add', side_effect=lambda rows, _path: turned.extend(rows)), \
-             patch.object(self.rs, 'ledger_add'), \
-             patch.object(self.rs, '_report') as report, \
-             patch.object(self.rs.bd, 'set_data'), \
-             patch.object(self.rs.prefs, 'refresh_like'), \
-             patch.object(cf, 'PREFS', raw_prefs), \
-             patch.object(cf, 'PREFERENCE_NOTE', preference_note, create=True), \
-             patch.object(self.rs.prefs, 'PREF', preference_note):
-            self.rs.run('dir', 'security', live=self.path, st=lambda *a, **k: None,
-                        ledger=self.ledger, sums=self.sums, turned=os.path.join(self.dir, 'turned.jsonl'))
-        msgs = [c.args[0] for c in report.call_args_list]
-        # 讀不到頁的是 agent 找來的候選,不是他的事:記在這一輪的紀錄,不發回報
-        self.assertFalse(any('沒有可確認的頁面職稱' in m for m in msgs), msgs)
-        self.assertFalse(any('agent 沒有完成' in m for m in msgs), msgs)   # 這一輪有判完,不是整輪失敗
-        self.assertEqual(turned, [])
-
-    def test_five_default_research_skills_are_product_neutral(self):
-        import config as cf
-
-        names = tuple(item['file'] for item in cf.RESEARCH_SKILLS.values())
-        self.assertEqual(set(cf.DEFAULTS['research']['skills']), set(cf.RESEARCH_SKILLS))
-        root = os.path.join(os.path.dirname(self.rs.__file__), 'research_skills')
-        for name in names:
-            with self.subTest(name=name):
-                with open(os.path.join(root, name), encoding='utf-8') as f:
-                    skill = f.read()
-                self.assertTrue(skill.strip())
-                self.assertNotRegex(skill, r'(?m)(?:^|\s)/[^/\s]+/')
-                self.assertNotRegex(skill, r'(?i)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b')
-        read = lambda key: open(os.path.join(root, cf.RESEARCH_SKILLS[key]['file']), encoding='utf-8').read()
-        common, note = read('common'), read('note')
-        # 份量由 agent 照表態分配、限制只用他說過的(正向寫法,writing-for-agents)
-        self.assertIn('份量照表態和角度地圖分配', common)
-        self.assertIn('限制只用使用者說過的', common)
-        # 整理偏好筆記另一份 skill:自訂區照原文、衝突交給他決定
-        self.assertIn('跟「使用者自訂」某條衝突', note)
-        self.assertIn('列在交件筆記，請使用者決定是否修改', note)
-
-    def test_find_round_uses_selected_and_default_skills_and_judges_every_candidate(self):
-        from copy import deepcopy
-        from unittest.mock import patch
-        import config as cf
-
-        home = os.path.join(self.dir, 'home')
-        custom_dir = os.path.join(home, 'custom', 'skills')
-        os.makedirs(custom_dir)
-        task_skills = {
-            'common': 'custom/skills/common.md',
-            'deep': 'custom/skills/deep.md',
-            'wide': '',
-            'dir': 'custom/skills/direction.md',
-            'judge': 'custom/skills/judge.md',
-        }
-        markers = {
-            'common': 'CUSTOM-COMMON',
-            'deep': 'CUSTOM-DEEP',
-            'direction': 'CUSTOM-DIRECTION',
-            'judge': 'CUSTOM-JUDGE',
-        }
-        for name, marker in markers.items():
-            with open(os.path.join(custom_dir, name + '.md'), 'w', encoding='utf-8') as f:
-                f.write(marker)
-
-        settings = deepcopy(cf.DEFAULTS)
-        settings.setdefault('research', {})['skills'] = task_skills
-        found = {'deep': 25, 'wide': 1, 'dir': 1}
-        search_prompts, judge_prompts = {}, []
-
-        def fake_agent(prompt, outfile, _browser_required):
-            name = os.path.basename(outfile)
-            result_path = os.path.splitext(outfile)[0] + '.json'
-            if name == 'note.out':                     # 整理偏好筆記的那隻(跟找缺同時跑)
-                note_path = re.search(r'更新後偏好筆記請寫到\s+([^\n]+)', prompt).group(1).strip()
-                delta_ids = re.findall(r'卡片代號=([^\n｜]+)', note_material(prompt, '新表態'))
-                with open(note_path, 'w', encoding='utf-8') as f:
-                    f.write('# 偏好筆記\n\n## 使用者自訂\n\n\n## Agent 假設\n\n'
-                            + '\n'.join(f'- 探索平台｜出處卡片代號={i}' for i in delta_ids) + '\n')
-                with open(self.rs.tracking_path(note_path), 'w', encoding='utf-8') as f:
-                    f.write('\n'.join(f'- 卡片代號={i}：來源假設=探索平台' for i in delta_ids) + '\n')
-                return
-            if name.startswith('search_'):
-                mode = name[len('search_'):-len('.out')]
-                search_prompts[mode] = prompt
-                rows = [{'url': f'https://jobs.lever.co/acme/issue41-{mode}-{i}',
-                         'title': f'Candidate {mode} {i}', 'company': 'Acme',
-                         'why': 'fake', 'via': 'fake', 'angle': '探索平台職務'}
-                        for i in range(found[mode])]
-                with open(os.path.splitext(outfile)[0] + '.md', 'w', encoding='utf-8') as f:
-                    f.write('- 探索平台職務：符合本輪方向與角度地圖。')
-            else:
-                judge_prompts.append(prompt)
-                ids = re.findall(r'^=== J(\d+) ===$', prompt, re.M)
-                rows = judge_sheet(prompt, [{'id': f'J{i}', 'title': {'text': '實際 JD 片段', 'cite': [Q('實際 JD 片段')]}, 'company': {'text': '', 'cite': []},
-                                             'keep': False, 'fit': 3, 'cite': [], 'why': 'fake', 'cat': '其他',
-                                             'reasons': [{'text': '依據職缺原文', 'citation': [Q('實際 JD 片段')],
-                                                          'basis': 'JD 原文'}]}
-                                            for i in ids])
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump(rows, f, ensure_ascii=False)
-
-        prefs_file = os.path.join(home, 'prefs.md')
-        preference_file = os.path.join(home, 'preference-note.md')
-        with open(prefs_file, 'w', encoding='utf-8') as f:
-            f.write('# 使用者逐張表態\n')
-        with self.in_home(home, settings, prefs_file, preference_file), patch.object(cf, 'RESUMES', {}), \
-                patch('page_fetch.fetch', side_effect=lambda url: page_result(url)):
-            for mode, direction in (('deep', ''), ('wide', ''), ('dir', '遊戲反作弊,台灣或遠端')):
-                self.rs.run(mode, direction, live=self.path, st=lambda *a, **k: None,
-                            run_agent=fake_agent, ledger=self.ledger, sums=self.sums,
-                            turned=os.path.join(self.dir, 'turned.jsonl'))
-
-        self.assertEqual(set(search_prompts), {'deep', 'wide', 'dir'})
-        deep = search_prompts['deep']
-        self.assertIn('CUSTOM-COMMON', deep)
-        self.assertIn('CUSTOM-DEEP', deep)
-        self.assertLess(deep.index('CUSTOM-COMMON'), deep.index('CUSTOM-DEEP'))
-        self.assertLess(deep.index('CUSTOM-DEEP'), deep.index('一頁履歷原文'))
-        self.assertIn('CUSTOM-COMMON', search_prompts['wide'])
-        self.assertIn('# 更廣', search_prompts['wide'])  # 空白使用產品預設
-        self.assertIn('CUSTOM-COMMON', search_prompts['dir'])
-        self.assertTrue(search_prompts['dir'].startswith('他說:「遊戲反作弊,台灣或遠端」'))
-        self.assertIn('CUSTOM-DIRECTION', search_prompts['dir'])
-        self.assertEqual(len(judge_prompts), 7)  # 25 + 1 + 1 張候選分成 7 批
-        self.assertEqual(sum(p.count('=== J') for p in judge_prompts), 27)
-        self.assertTrue(all('CUSTOM-JUDGE' in p for p in judge_prompts))
-        self.assertTrue(all('把結果寫成一個 JSON 檔' in p for p in judge_prompts))
-        records = [json.loads(line) for line in open(self.ledger, encoding='utf-8')]
-        self.assertEqual([r['judged'] for r in records[-3:]], [25, 1, 1])
-
-    def test_a_reason_cites_only_what_its_basis_allows(self):
-        """理由的引用照它自己的根據收:JD 原文只收這一張的 JD,偏好筆記只收筆記與舊卡,推估都可以但不含程式提醒;
-        沒有可引的寫 []。"""
-        import gate
-        from numbered import Numbered
-        numbered = Numbered()
-        numbered.add('假設:具備平台經驗', 'note')
-        numbered.add('工作內容包含平台維運', 'jd', 'J1')
-        numbered.add('刊登超過 90 天', 'flag', 'J1')
-
-        def check(citation, basis):
-            sheet = {'material_id': numbered.material_id,
-                     'jobs': [{'id': 'J1', 'reasons': [{'text': '理由', 'citation': citation, 'basis': basis}]}]}
-            return gate.inspect('research_judge', sheet, gate.Truth(handed={'J1'}), numbered).rows['jobs'][0]
-        for citation, basis, want in (([2], 'JD 原文', '工作內容包含平台維運'),
-                                      ([1, 2], '推估', '假設:具備平台經驗\n工作內容包含平台維運'), ([], '偏好筆記', '')):
-            self.assertEqual(check(citation, basis).facts['reasons'][0]['citation'], want)
-        for citation, basis in (([1], 'JD 原文'), ([2], '偏好筆記'), ([3], '推估')):
-            self.assertFalse(check(citation, basis).ok, (citation, basis))
-
-    def test_incomplete_feedback_note_does_not_advance_checkpoint(self):
-        from copy import deepcopy
-        from unittest.mock import patch
-        import config as cf
-        import feedback_dump
-
-        home = os.path.join(self.dir, 'coverage-home')
-        os.makedirs(home)
-        preference_file = os.path.join(home, 'preference-note.md')
-        legacy_file = os.path.join(home, 'prefs.md')
-        with open(legacy_file, 'w', encoding='utf-8') as f:
-            f.write('# 使用者逐張表態\n')
-        reports = []
-
-        def fake_agent(prompt, outfile, _browser_required):
-            result_path = os.path.splitext(outfile)[0] + '.json'
-            if os.path.basename(outfile) == 'note.out':   # 整理偏好筆記的那隻(跟找缺同時跑)
-                note_path = re.search(
-                    r'更新後偏好筆記請寫到\s+([^\n]+)', prompt).group(1).strip()
-                delta_ids = re.findall(r'卡片代號=([^\n｜]+)', note_material(prompt, '新表態'))
-                first = delta_ids[0]
-                with open(note_path, 'w', encoding='utf-8') as f:
-                    f.write('# 偏好筆記\n\n## 使用者自訂\n\n\n## Agent 假設\n\n'
-                            f'- 探索平台｜出處卡片代號={first}\n')
-                with open(self.rs.tracking_path(note_path), 'w', encoding='utf-8') as f:
-                    f.write(f'- 卡片代號={first}：來源假設=探索平台\n')
-                return
-            if os.path.basename(outfile).startswith('search_'):
-                with open(result_path, 'w', encoding='utf-8') as f:
-                    json.dump([], f)
-                with open(os.path.splitext(outfile)[0] + '.md', 'w', encoding='utf-8') as f:
-                    f.write('本輪沒有新候選。')
-                return
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump([], f)
-
-        settings = deepcopy(cf.DEFAULTS)
-        with self.in_home(home, settings, legacy_file, preference_file), patch.object(cf, 'SUMS', self.sums), \
-                patch.object(self.rs, '_report', side_effect=lambda msg, *_: reports.append(msg)), \
-                patch('page_fetch.fetch', side_effect=lambda url: page_result(url)):
-            self.rs.run('deep', '', live=self.path, st=lambda *a, **k: None,
-                        run_agent=fake_agent, ledger=self.ledger, sums=self.sums,
-                        turned=os.path.join(self.dir, 'turned.jsonl'))
-
-        checkpoint = feedback_dump.feedback_state_path(preference_file)
-        self.assertFalse(os.path.exists(checkpoint))
-        self.assertTrue(any('新表態未交代' in msg for msg in reports))
-
-    def test_find_round_uses_new_feedback_angles_and_protected_preferences(self):
-        from copy import deepcopy
-        from unittest.mock import patch
-        import config as cf
-        import card
-        import feedback_dump
-
-        home = os.path.join(self.dir, 'home')
-        os.makedirs(home)
-        preference_file = os.path.join(home, 'preference-note.md')
-        legacy_file = os.path.join(home, 'prefs.md')
-        cloud_one = 'https://ex.test/cloud-one'
-        cloud_two = 'https://ex.test/cloud-two'
-        cloud_unseen = 'https://ex.test/cloud-unseen'
-        recent = 'https://ex.test/recent-feedback'
-        jobs = [
-            {'id': cloud_one, 'target': 'Cloud Platform Engineer·CloudCo',
-             'src': {'angle': '雲端基礎設施'},
-             'sum': {'co': '代管雲端資料平台', 'bar': '三年平台維運', 'fit': '維護資料服務'}},
-            {'id': cloud_two, 'target': 'Cloud Operations Engineer·CloudCo',
-             'src': {'angle': '雲端基礎設施'},
-             'sum': {'co': '代管雲端資料平台', 'bar': '三年平台維運', 'fit': '維護資料服務'}},
-            {'id': cloud_unseen, 'target': 'Cloud Support Engineer·CloudCo',
-             'src': {'angle': '雲端基礎設施'},
-             'sum': {'co': '代管雲端資料平台', 'bar': '三年平台維運', 'fit': '維護資料服務'}},
-            {'id': recent, 'target': 'Data Engineer·FintechCo',
-             'src': {'angle': '金融科技'}, 'jd': '近期職缺 JD 全文：即時支付風險資料平台。',
-             'sum': {'co': '即時支付服務', 'bar': '熟悉資料平台', 'fit': '風險資料'}},
-        ]
-        fb = {
-            cloud_one: {'s': 'like', 'n': '我喜歡維護雲端平台'},
-            cloud_two: {'s': 'dislike', 'n': '我不想只做值班'},
-        }
-        make_board(self.path, fb, jobs=jobs)
-        with open(preference_file, 'w', encoding='utf-8') as f:
-            f.write('# 偏好筆記\n\n## 使用者自訂\n\n不要外派\n\n## Agent 假設\n\n')
-        os.makedirs(self.sums, exist_ok=True)
-        for job in jobs:
-            with open(os.path.join(self.sums, card.card_id_from_url(job['id']) + '.json'),
-                      'w', encoding='utf-8') as f:
-                json.dump(job['sum'], f, ensure_ascii=False)
-
-        settings = deepcopy(cf.DEFAULTS)
-        fake_round = [0]
-        search_prompts, judge_prompts, reports, deltas, note_prompts = [], [], [], [], []
-        raw_dump, summary_dump = '', ''
-
-        note_round = [0]
-
-        def fake_agent(prompt, outfile, _browser_required):
-            result_path = os.path.splitext(outfile)[0] + '.json'
-            if os.path.basename(outfile) == 'note.out':   # 整理偏好筆記的那隻(跟找缺同時跑)
-                note_round[0] += 1
-                note_path = re.search(r'更新後偏好筆記請寫到\s+([^\n]+)', prompt).group(1).strip()
-                custom = '不要外派' if note_round[0] == 1 else '不要外派（agent 嘗試修改）'
-                note_prompts.append(prompt)
-                delta = note_material(prompt, '新表態')
-                deltas.append(delta)
-                delta_ids = re.findall(r'卡片代號=([^\n｜]+)', delta)
-                names = {
-                    cloud_one: '喜歡雲端平台',
-                    cloud_two: '不想只做值班',
-                    recent: '最近也關注即時支付',
-                }
-                assumptions = '\n'.join(
-                    f'- {names.get(card_id, "新表態")}｜出處：卡片代號={card_id}；支持 1；反例 0'
-                    for card_id in delta_ids)
-                tracking = '\n'.join(
-                    f'- 卡片代號={card_id}：來源假設={names.get(card_id, "新表態")}'
-                    for card_id in delta_ids)
-                with open(note_path, 'w', encoding='utf-8') as f:
-                    f.write('# 偏好筆記\n\n## 使用者自訂\n\n' + custom +
-                            '\n\n## Agent 假設\n\n' + assumptions + '\n')
-                with open(self.rs.tracking_path(note_path), 'w', encoding='utf-8') as f:
-                    f.write(tracking + '\n')
-                return
-            if os.path.basename(outfile).startswith('search_'):
-                fake_round[0] += 1
-                n = fake_round[0]
-                search_prompts.append(prompt)
-                if n == 1:
-                    rows = []
-                    note = '本輪沒有新候選。'
-                else:
-                    rows = [{'url': f'https://jobs.lever.co/cloudco/issue42-{i}',
-                             'title': f'Candidate deep {i}', 'company': 'CloudCo',
-                             'why': 'fake', 'via': 'fake', 'angle': '雲端基礎設施'}
-                            for i in range(25)]
-                    note = ('## 角度選擇理由\n'
-                            '- 雲端基礎設施：地圖已有三張，還有一張未看；沿用舊角度繼續探索。')
-                with open(result_path, 'w', encoding='utf-8') as f:
-                    json.dump(rows, f, ensure_ascii=False)
-                with open(os.path.splitext(outfile)[0] + '.md', 'w', encoding='utf-8') as f:
-                    f.write(note)
-                return
-
-            judge_prompts.append(prompt)
-            titles = re.findall(r'^=== J\d+ ===\n職缺:([^·\n]+)', prompt, re.M)
-            rows = []
-            for title in titles:
-                m = re.search(r'Candidate deep (\d+)', title)
-                candidate = int(m.group(1)) if m else -1
-                row = {'id': f'J{len(rows) + 1}', 'title': {'text': title, 'cite': [Q(title)]}, 'company': {'text': 'CloudCo', 'cite': [Q('CloudCo')]},
-                       'keep': candidate == 0, 'fit': 4, 'cite': [], 'why': '根據實際 JD',
-                       'cat': '工程',
-                       'card': {'fit': '履歷有平台維運經驗', 'co': '代管雲端資料平台',
-                                'loc': '遠端', 'deadline': '無', 'salary': '未公開',
-                                'bar': '三年平台維運', 'posted': '無', 'ammo': '直投'},
-                       'reasons': [{'text': 'JD 要求平台維運',
-                                    'citation': [Q('平台維運 實際 JD 片段')], 'basis': 'JD 原文'}]}
-                if candidate == 1:
-                    row['reasons'] = [{'text': '跟使用者表態相反', 'basis': '使用者原話'}]
-                elif candidate == 2:
-                    row['reasons'] = [{'text': '公司資訊不足', 'citation': []}]
-                rows.append(row)
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump(judge_sheet(prompt, rows), f, ensure_ascii=False)
-
-        with self.in_home(home, settings, legacy_file, preference_file), patch.object(cf, 'SUMS', self.sums), \
-                patch.object(self.rs, '_report', side_effect=lambda msg, *_: reports.append(msg)), \
-                patch('page_fetch.fetch', side_effect=lambda url: page_result(
-                    url, 'Candidate deep ' + url.rsplit('-', 1)[-1] + '\nCloudCo\n平台維運 實際 JD 片段')):
-            summary_dump = feedback_dump.build(self.path, only_ids=[cloud_one])
-            self.rs.run('deep', '', live=self.path, st=lambda *a, **k: None,
-                        run_agent=fake_agent, ledger=self.ledger, sums=self.sums,
-                        turned=os.path.join(self.dir, 'turned.jsonl'))
-            bd.set_fb(lambda current: current.update({recent: {'s': 'like', 'n': '最近想做支付風險資料'}}),
-                      live=self.path, by='看板')
-            self.rs.run('deep', '', live=self.path, st=lambda *a, **k: None,
-                        run_agent=fake_agent, ledger=self.ledger, sums=self.sums,
-                        turned=os.path.join(self.dir, 'turned.jsonl'))
-            raw_dump = feedback_dump.build(self.path)
-
-        self.assertEqual(len(search_prompts), 2)
-        self.assertEqual(len(deltas), 2)
-        # 新表態只給整理筆記那隻(原文直接在 prompt 裡);找的那隻不用讀它
-        self.assertTrue(all('新表態' not in re.sub(r'「1. 整理」.*?\n', '', p.split('他是誰')[1]) for p in search_prompts))
-        self.assertIn(cloud_one, summary_dump)
-        self.assertIn('卡片摘要=公司在做什麼=代管雲端資料平台', summary_dump)
-        delta = deltas[1]
-        self.assertIn('近期職缺 JD 全文：即時支付風險資料平台。', delta)
-        self.assertIn('最近想做支付風險資料', delta)
-        self.assertNotIn('Cloud Platform Engineer', delta)
-        self.assertIn('我喜歡維護雲端平台', raw_dump)
-        self.assertIn('我不想只做值班', raw_dump)
-        self.assertIn('最近想做支付風險資料', raw_dump)
-        angle_path = re.search(r'- 角度地圖:\s*([^\n]+)', search_prompts[1]).group(1).strip()
-        angle_map = read(angle_path)
-        self.assertIn('雲端基礎設施：送過 3、喜歡 1、不喜歡 1、還沒看 1', angle_map)
-        self.assertTrue(judge_prompts)
-        self.assertIn('公司在做什麼：代管雲端資料平台', judge_prompts[0])
-        self.assertIn('門檻：三年平台維運', judge_prompts[0])
-        self.assertIn('偏好筆記', judge_prompts[0])
-        self.assertNotIn('來源假設=', judge_prompts[-1])     # 歸屬清單另外交:不進筆記、不給判斷的 agent(#76)
-        self.assertIn('請使用者決定是否修改', note_prompts[1])
-
-        records = [json.loads(line) for line in open(self.ledger, encoding='utf-8')]
-        self.assertEqual(records[-1]['judged'], 25)
-        self.assertEqual(records[-1]['bad_evidence'], 2)
-        self.assertEqual(records[-1]['angle_reasons'], [
-            {'angle': '雲端基礎設施', 'reason': '地圖已有三張，還有一張未看；沿用舊角度繼續探索。'}])
-        self.assertGreaterEqual(sum(len(re.findall(r'^=== J\d+ ===$', p, re.M))
-                                    for p in judge_prompts), 25)
-        board_jobs = bd.parse(read(self.path))['data']['jobs']
-        added = next(j for j in board_jobs if j.get('id') == 'https://jobs.lever.co/cloudco/issue42-0')
-        self.assertEqual(added['src']['angle'], '雲端基礎設施')
-        self.assertEqual(added['src']['reasons'][0]['basis'], 'JD 原文')
-        note = read(preference_file)
-        self.assertIn('## 使用者自訂\n\n不要外派', note)
-        self.assertNotIn('不要外派（agent 嘗試修改）', note)
-        self.assertIn('最近也關注即時支付', note)
-        checkpoint = json.loads(read(feedback_dump.feedback_state_path(preference_file)))
-        self.assertTrue(checkpoint['organized_at'])
-        self.assertTrue(any('使用者自訂' in msg for msg in reports))
-        # 引用對不上的兩張:重交一次還是對不上 → 不進板;是 agent 找來的候選,不是他的事,不發回報
-        self.assertFalse(any('引用' in msg for msg in reports))
-        self.assertEqual(sum('【重交】' in p for p in judge_prompts), 1)
-        self.assertFalse({'https://jobs.lever.co/cloudco/issue42-1', 'https://jobs.lever.co/cloudco/issue42-2'}
-                         & {j.get('id') for j in board_jobs})
 
 
 class FeedbackDump(Tmp):
@@ -2006,197 +989,15 @@ class FeedbackDump(Tmp):
         self.assertEqual(first.count(feedback_dump.START), 1)
         self.assertEqual(first.count(feedback_dump.END), 1)
 
+    def test_a_card_only_added_to_prep_counts_as_new_feedback(self):
+        import feedback_dump
 
-class ResumeSelection(Tmp):
-    def test_find_judgment_reads_checked_resumes_and_rejects_invalid_picks(self):
-        import config as cf
-        import research as rs
-        import ship
-        from unittest.mock import patch
-        import agent_run as ar
-
-        zh_file = os.path.join(self.dir, 'zh.pdf')
-        en_file = os.path.join(self.dir, 'en.pdf')
-        disabled_file = os.path.join(self.dir, 'disabled.pdf')
-        for path, text in ((zh_file, 'resume zh'), (en_file, 'resume en'),
-                           (disabled_file, 'resume disabled')):
-            with open(path, 'wb') as f:
-                f.write(text.encode())
-        resumes = [
-            {'id': 'zh-only', 'name': '中文履歷', 'enabled': True, 'when': '資料職缺',
-             'files': {'zh': zh_file}},
-            {'id': 'en-only', 'name': 'English resume', 'enabled': True, 'when': 'English roles',
-             'files': {'en': en_file}},
-            {'id': 'unchecked', 'name': 'Unchecked', 'enabled': False, 'when': '',
-             'files': {'zh': disabled_file}},
-        ]
-        url = 'https://ex.test/job/resume-choice'
-        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example'}
-        prompts = []
-
-        def runner_for(choice):
-            def run_agent(prompt, outfile, _model):
-                prompts.append(prompt)
-                payload = judge_sheet(prompt, [{'id': 'J1', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []},
-                                                'keep': True, 'fit': 4, 'cite': [], 'why': '職缺符合方向',
-                                                'cat': rs.CATS[0], 'resume': choice[0], 'lang': choice[1],
-                                                'pick_why': '履歷中的經驗符合職缺要求',
-                                                'card': {'fit': '符合', 'ammo': '直投'}}])
-                with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                    json.dump(payload, f, ensure_ascii=False)
-                return ar.AgentResult('completed', 0, 123)
-            return run_agent
-
-        with patch.object(cf, 'LANGS', ['zh', 'en']), patch.object(
-                cf, 'RESUMES', {item['id']: item for item in resumes}):
-            result = rs.judge([dict(candidate)], [], self.dir, 'main',
-                              runner_for(('zh-only', 'zh')), resumes=resumes)
-            prompt = prompts[-1]
-            self.assertIn(zh_file, prompt)
-            self.assertIn(en_file, prompt)
-            self.assertNotIn(disabled_file, prompt)
-            self.assertNotIn('【他的一頁履歷】', prompt)
-            entry = rs.job_entry(candidate, result[url], {})
-            self.assertEqual(entry['resume']['recommend'], 'zh-only')
-            self.assertEqual(entry['resume']['lang'], 'zh')
-            self.assertEqual(entry['resume']['pick_why'], '履歷中的經驗符合職缺要求')
-            self.assertTrue(entry['resume']['selection_signature'])
-
-            for choice in (('unchecked', 'zh'), ('zh-only', 'en')):
-                rejected = rs.judge([dict(candidate)], [], self.dir, 'main',
-                                    runner_for(choice), resumes=resumes)
-                unpicked = rs.job_entry(candidate, rejected[url], {})
-                self.assertNotIn('recommend', unpicked['resume'])
-                self.assertNotIn('lang', unpicked['resume'])
-                self.assertEqual(ship.resolve(unpicked, {url: {}})[0], '')
-
-    def test_find_completes_without_a_checked_resume_and_stores_no_pick(self):
-        import config as cf
-        import research as rs
-        from unittest.mock import patch
-
-        url = 'https://ex.test/job/no-resume'
-        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example', 'jd': 'Engineer at Example',
-                     'page_status': 'ok'}
-        prompts = []
-
-        run_agent = judge_agent([{'id': 'J1', 'title': {'text': 'Engineer at Example', 'cite': [Q('Engineer at Example')]}, 'keep': True, 'fit': 4, 'why': '符合方向',
-                                  'cat': rs.CATS[0], 'resume': 'unchecked', 'lang': 'zh',
-                                  'pick_why': '這個不應被採用'}], prompts)
-
-        disabled = [{'id': 'unchecked', 'enabled': False, 'files': {'zh': '/missing.pdf'}}]
-        with patch.object(cf, 'LANGS', ['zh']), patch.object(
-                cf, 'RESUMES', {'unchecked': disabled[0]}):
-            judged = rs.judge([dict(candidate)], [], self.dir, 'main', run_agent,
-                              resumes=disabled)
-            card_entry = rs.job_entry(candidate, judged[url], {})
-
-        self.assertTrue(judged[url]['keep'])
-        self.assertIn('目前沒有已勾選且可挑的履歷', prompts[0])
-        self.assertNotIn('"resume":', prompts[0])
-        self.assertNotIn('recommend', card_entry['resume'])
-        self.assertNotIn('lang', card_entry['resume'])
-
-    def test_judge_placeholder_company_keeps_the_search_company(self):
-        # 頁面沒抓到時 agent 的職稱、公司沒有可引的段:空的不能蓋掉找缺時已經知道的公司名
-        import research as rs
-
-        url = 'https://ex.test/job/placeholder'
-
-        run_agent = judge_agent([{'id': 'J1', 'title': {'text': '', 'cite': []}, 'company': {'text': '', 'cite': []}, 'keep': True,
-                                  'fit': 4, 'why': '符合方向', 'cat': rs.CATS[0]}])
-
-        candidate = {'url': url, 'title': 'QA', 'company': '範例科技'}
-        res = rs.judge([candidate], [], self.dir, 'main', run_agent, resumes=[])
-        self.assertEqual(candidate['company'], '範例科技')
-        self.assertEqual(candidate['title'], 'QA')
-        self.assertFalse(res[url]['keep'])        # 沒確認到頁面職稱:不送到他眼前,列進沒讀到的
-        self.assertFalse(res[url]['readable'])
-
-    def test_a_confirmed_card_never_carries_the_search_agents_uncited_company(self):
-        import research as rs
-
-        url = 'https://ex.test/job/uncited-company'
-        page = 'QA Engineer\n負責測試'
-        run_agent = lambda prompt, out, browser_required: (open(out[:-4] + '.json', 'w', encoding='utf-8').write(
-            json.dumps(judge_sheet(prompt, [{'id': 'J1', 'title': {'text': 'QA Engineer', 'cite': [Q('QA Engineer')]}, 'company': {'text': '', 'cite': []}, 'keep': True,
-                                             'fit': 4, 'why': '符合方向', 'cat': rs.CATS[0]}]), ensure_ascii=False)) and None)
-        candidate = {'url': url, 'title': 'QA', 'company': '找缺時寫的公司', 'jd': page, 'page_status': 'ok'}
-        res = rs.judge([candidate], [], self.dir, 'main', run_agent, resumes=[])
-        self.assertTrue(res[url]['keep'])
-        self.assertEqual(candidate['title'], 'QA Engineer')
-        self.assertEqual(candidate['company'], '', '公司沒引,卡上不留找缺 agent 沒證據的說法')
-
-    def test_a_labelled_line_gives_the_card_the_value_not_the_label(self):
-        """頁面那一行寫「公司: Acme 股份有限公司」:卡上的公司是 agent 寫出、一字不差在那一行裡的值(ADR-0009);
-        寫了那一行沒有的字,這一格不收。"""
-        import research as rs
-        import card as cards
-
-        def judged(company_text):
-            url = 'https://ex.test/job/labelled'
-            run_agent = lambda prompt, out, browser_required: (open(out[:-4] + '.json', 'w', encoding='utf-8').write(
-                json.dumps(judge_sheet(prompt, [{'id': 'J1', 'title': {'text': 'QA Engineer', 'cite': [Q('QA Engineer')]},
-                                                 'company': {'text': company_text, 'cite': [Q('公司: Acme 股份有限公司')]},
-                                                 'keep': True, 'fit': 4, 'why': '符合方向', 'cat': rs.CATS[0]}]),
-                           ensure_ascii=False)) and None)
-            candidate = {'url': url, 'title': 'QA', 'company': '', 'page_status': 'ok',
-                         'jd': 'QA Engineer\n公司: Acme 股份有限公司\n負責測試'}
-            return candidate, rs.judge([candidate], [], self.dir, 'main', run_agent, resumes=[])[url]
-
-        candidate, res = judged('Acme 股份有限公司')
-        self.assertTrue(res['keep'])
-        self.assertEqual(candidate['company'], 'Acme 股份有限公司')
-        self.assertTrue(cards.same_company(candidate['company'], 'Acme'), '跟別張卡的同一家公司認得出來')
-        _candidate, res = judged('Acme Corp')
-        self.assertFalse(res['keep'])
-        self.assertIn('沒有一字不差出現', '\n'.join(res.get('wrong') or []))
+        make_board(self.path, {'https://ex.test/job/1': {'app': 1}})
+        text, listed, _lines = feedback_dump.feedback_delta(self.path, os.path.join(self.dir, 'note.md'))
+        self.assertEqual(['https://ex.test/job/1'], listed)
+        self.assertIn('    - 卡片代號=https://ex.test/job/1\n    - 標記=已加入準備區\n', text)
 
 
-class ReapplySync(Tmp):
-    """再投一次的卡回到可投遞:104 應徵紀錄裡那筆是上一次的,不能把它補標回已投遞;他寫的原因也不能被蓋掉。"""
-
-    def test_old_104_record_does_not_mark_a_reapply_card_sent(self):
-        import sync_sent as ss, datetime
-        a = 'https://www.104.com.tw/job/abc12'
-        b = 'https://www.104.com.tw/job/def34'
-        today = datetime.date.today()
-        old = (today - datetime.timedelta(days=20)).isoformat()
-        make_board(self.path, {a: {'app': 'ship', 'n': '他寫的', 'tries': [{'sent_at': old, 'oc': 'rej'}]},
-                               b: {'app': 'ship', 'n': '他寫的'}},
-                   jobs=[{'id': a, 'target': 'A'}, {'id': b, 'target': 'B'}])
-        d20 = today - datetime.timedelta(days=20)
-        recs = [{'id': 'abc12', 'title': 'A', 'applied_at': d20.strftime('%m/%d 10:00')},
-                {'id': 'def34', 'title': 'B', 'applied_at': d20.strftime('%m/%d 10:00')}]
-        rf = os.path.join(self.dir, 'recs.json')
-        with open(rf, 'w', encoding='utf-8') as fh: json.dump(recs, fh)
-        ss.main(['--records', rf, '--apply', '--board', self.path])
-        fb = read_fb(self.path)
-        self.assertEqual(fb[a]['app'], 'ship')          # 上一次的紀錄,不算這一次
-        self.assertEqual(fb[b]['app'], 'sent')          # 沒有歷史的照舊補標
-        self.assertEqual(fb[b]['n'], '他寫的')           # 原因欄是他的字,不寫程式訊息
-
-    def test_a_record_he_backed_out_is_not_pulled_back_and_platform_date_wins(self):
-        """平台對帳:移除的卡照樣記成已送出;他退回那一筆之後同一筆不再拉回(修正 22)。
-        agent 送出的卡,投遞日以平台紀錄優先(額外抓到 3)。"""
-        import sync_sent as ss, datetime
-        import delivery_state as ds
-        a = 'https://www.104.com.tw/job/abc12'
-        b = 'https://www.104.com.tw/job/def34'
-        today = datetime.date.today()
-        d3 = today - datetime.timedelta(days=3)
-        make_board(self.path, {a: {'app': 'ship', 'rm': 1},
-                               b: {'app': 'sent', 'ds': 'sent', 'sent_by': 'agent', 'sent_at': today.isoformat()}},
-                   jobs=[{'id': a, 'target': 'A'}, {'id': b, 'target': 'B'}])
-        recs = [{'id': 'abc12', 'title': 'A', 'applied_at': d3.isoformat()},
-                {'id': 'def34', 'title': 'B', 'applied_at': d3.isoformat()}]
-        ss.sync(self.path, recs)
-        fb = read_fb(self.path)
-        self.assertEqual((fb[a]['app'], fb[a].get('rm'), fb[a]['sent_by']), ('sent', None, 'platform'))
-        self.assertEqual(fb[b]['sent_at'], d3.isoformat())          # 平台上的日期
-        bd.set_fb(lambda f: ds.fire(f, a, 'back', to='ship'), live=self.path)
-        self.assertEqual(ss.sync(self.path, recs), '')              # 同一筆不再拉回
-        self.assertEqual(ds.state(read_fb(self.path)[a]), 'todo')
 
 
 class PrepSkips(Tmp):
@@ -2215,40 +1016,38 @@ class PrepSkips(Tmp):
         fb = read_fb(self.path)
         self.assertEqual(fb[a], {'s': 'like', 'app': 'prep'})       # 一個字都沒動
         self.assertEqual(fb[b], {'s': 'meh', 'app': 'ready'})       # 產出履歷的照舊推到待你決定
-        self.assertEqual(moved, {'ready': 1, 'skipped': 1, 'closed': 0})
+        self.assertEqual(moved, {'ready': 1, 'skipped': 1})
 
-    def test_agent_says_closed_card_leaves_prep_as_dead(self):
-        """agent 讀過頁面判斷「職缺已關」:程式照判斷標下架、移出準備區,不再留給他處理。"""
+    def test_agent_reported_page_status_stays_as_agent_text(self):
+        """agent 對頁面或網址的說法只照原文留在卡上,不改階段或標記下架。"""
         import cut_tailor as ct
         a = JOBS[0]['id']
         make_board(self.path, {a: {'s': 'meh', 'app': 'prep'}})
         out = os.path.join(self.dir, 'trial')
         numbered = hand(out, {a: 'Risk Analyst.\nThis job is no longer available.'})
         write_fill(out, a, {'material_id': numbered.material_id, 'skip': True,
-                            'reason': '職缺已關:網址導回職缺列表', 'quote': [2]})
-        moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
-        self.assertEqual(read_fb(self.path)[a], {'s': 'techerr', 's0': 'meh', 'app0': 'prep'})   # 原本的心情、階段都留著,可以放回原處
-        job = bd.parse(read(self.path))['data']['jobs'][0]
-        self.assertTrue(job['dead'])
-        self.assertIn('agent 判斷', job['prep_note'])                         # 標明是 agent 判斷、附它抄的原文
-        self.assertIn('This job is no longer available', job['prep_note'])
-        self.assertEqual(moved['closed'], 1)
-
-    def test_a_closure_whose_quote_is_not_in_the_jd_leaves_the_card_where_it_was(self):
-        """安檢門(#317):agent 說職缺已關,引的那一段不是這張卡的 JD:不標出錯、不推進,卡上寫出 agent 引了什麼、屬於誰。"""
-        import cut_tailor as ct
-        a, b = JOBS[0]['id'], JOBS[1]['id']
-        make_board(self.path, {a: {'s': 'meh', 'app': 'prep'}})
-        out = os.path.join(self.dir, 'trial')
-        numbered = hand(out, {a: 'Risk Analyst. Apply now.', b: '本職缺已額滿'})
-        write_fill(out, a, {'material_id': numbered.material_id, 'skip': True, 'reason': '職缺已關:已額滿', 'quote': [2]})
+                            'reason': '職缺已關:網址導回職缺列表'})
         moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
         self.assertEqual(read_fb(self.path)[a], {'s': 'meh', 'app': 'prep'})
         job = bd.parse(read(self.path))['data']['jobs'][0]
         self.assertFalse(job.get('dead'))
-        self.assertIn('本職缺已額滿', job['prep_note'])
-        self.assertIn(f'屬於 {b}', job['prep_note'])
-        self.assertEqual(moved['closed'], 0)
+        self.assertEqual(job['prep_note'], '職缺已關:網址導回職缺列表')
+        self.assertEqual(moved, {'ready': 0, 'skipped': 1})
+
+    def test_agent_skip_is_not_blocked_by_a_page_citation(self):
+        """跳過理由保留為 agent 說法,不因頁面文字或缺少引文拒收。"""
+        import cut_tailor as ct
+        a = JOBS[0]['id']
+        make_board(self.path, {a: {'s': 'meh', 'app': 'prep'}})
+        out = os.path.join(self.dir, 'trial')
+        numbered = hand(out, {a: 'Risk Analyst. Apply now.'})
+        write_fill(out, a, {'material_id': numbered.material_id, 'skip': True, 'reason': '職缺已關:已額滿'})
+        moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
+        self.assertEqual(read_fb(self.path)[a], {'s': 'meh', 'app': 'prep'})
+        job = bd.parse(read(self.path))['data']['jobs'][0]
+        self.assertFalse(job.get('dead'))
+        self.assertEqual(job['prep_note'], '職缺已關:已額滿')
+        self.assertEqual(moved, {'ready': 0, 'skipped': 1})
 
     def test_agent_fixes_a_drifted_card_name_and_keeps_the_link(self):
         """agent 判斷「同一個缺、看板上的名字過時」時寫 real_title,程式照改卡片名字,後面的連結留著。"""
@@ -2378,7 +1177,7 @@ class PrepRunFinish(Tmp):
         with patch.multiple(ct, SP=sp, OUT=os.path.join(sp, 'fills'), PIDF=os.path.join(sp, 'pid'),
                             WORKER_PIDF=os.path.join(sp, 'worker.pid'),
                             STATUSF=os.path.join(sp, 'cut_tailor_status.json')), \
-             patch.object(ct.ar, 'run', return_value=ct.ar.AgentResult('completed', 0, 123)), \
+             patch.object(ct.ar, 'run', autospec=True, return_value=ct.ar.AgentResult('completed', 0, 123)), \
              patch.object(ct.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='')), \
              patch.object(sys, 'argv', ['cut_tailor.py', '--finish', '--board', self.path,
                                         '--out-dir', run_out]):
@@ -2394,7 +1193,7 @@ class PrepRunFinish(Tmp):
         with patch.multiple(ct, SP=sp, OUT=os.path.join(sp, 'fills'), PIDF=os.path.join(sp, 'pid'),
                             WORKER_PIDF=os.path.join(sp, 'worker.pid'),
                             STATUSF=os.path.join(sp, 'cut_tailor_status.json')), \
-             patch.object(ct.ar, 'run', return_value=ct.ar.AgentResult('completed', 0, 123)), \
+             patch.object(ct.ar, 'run', autospec=True, return_value=ct.ar.AgentResult('completed', 0, 123)), \
              patch.object(ct.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='')):
             ct.run_finish(self.path, out_dir=os.path.join(sp, 'runs', 'r2'))
         self.assertFalse(any(name in it['msg'] for it in agent_report.open_items(read_fb(self.path))))
@@ -2413,7 +1212,7 @@ class PrepRunFinish(Tmp):
         with patch.multiple(ct, SP=sp, OUT=os.path.join(sp, 'fills'), PIDF=os.path.join(sp, 'pid'),
                             WORKER_PIDF=os.path.join(sp, 'worker.pid'),
                             STATUSF=os.path.join(sp, 'cut_tailor_status.json')), \
-             patch.object(ct.ar, 'run', return_value=ct.ar.AgentResult('completed', 0, 123)), \
+             patch.object(ct.ar, 'run', autospec=True, return_value=ct.ar.AgentResult('completed', 0, 123)), \
              patch.object(ct.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='')), \
              patch('agent_report.resolve', side_effect=OSError('看板檔被鎖住')):
             ct.run_finish(self.path, out_dir=run_out)
@@ -2475,7 +1274,7 @@ class PrepReselection(Tmp):
 
         with patch.object(cf, 'LANGS', languages), patch.object(cf, 'RESUMES', {'general': resume}), \
              patch.multiple(ct, **paths), patch.object(ct, 'stop_previous'), \
-             patch('page_fetch.fetch', side_effect=lambda url: page_result(
+             patch('web.fetch.request_page', side_effect=lambda url, **_: page_result(
                  url, 'Active role: expired credentials; unrelated account is 已關閉.')), \
              patch.object(ct.subprocess, 'Popen', return_value=SimpleNamespace(pid=123)), \
              patch.object(sys, 'argv', ['cut_tailor.py', '--board', self.path]):
@@ -2533,7 +1332,7 @@ class PrepReselection(Tmp):
         def start(name, *urls):
             with patch.object(cf, 'LANGS', ['zh']), patch.object(cf, 'RESUMES', {name: resume[name]}), \
                  patch.multiple(ct, **paths), patch.object(ct, 'stop_previous'), \
-                 patch('page_fetch.fetch', side_effect=lambda url: page_result(url, jd[url])), \
+                 patch('web.fetch.request_page', side_effect=lambda url, **_: page_result(url, jd[url])), \
                  patch.object(ct.subprocess, 'Popen', return_value=SimpleNamespace(pid=123)), \
                  patch.object(sys, 'argv', ['cut_tailor.py', '--board', self.path,
                                             '--jids', ','.join(ct.jid(u) for u in urls)]):
@@ -2561,7 +1360,7 @@ class PrepReselection(Tmp):
                 return real(*args, **kwargs)
             return wrapped
         with patch.object(cf, 'LANGS', ['zh']), patch.object(cf, 'RESUMES', {'b': resume['b']}), \
-             patch.multiple(ct, **paths), patch.object(ct.ar, 'run', side_effect=agent), \
+             patch.multiple(ct, **paths), patch.object(ct.ar, 'run', autospec=True, side_effect=agent), \
              patch.object(ct, 'check_written', side_effect=record('check_written', ct.check_written)), \
              patch.object(ct, '_apply_stages', side_effect=record('apply', ct._apply_stages)), \
              patch.object(ct, '_promote_cached', side_effect=record('cached', ct._promote_cached)), \
@@ -2610,7 +1409,7 @@ class PrepReselection(Tmp):
         paths = self._state_paths()
         with patch.object(cf, 'LANGS', languages), patch.object(cf, 'RESUMES', {'general': resume}), \
              patch.multiple(ct, **paths), patch.object(ct, 'stop_previous'), \
-             patch('page_fetch.fetch_many', return_value=[SimpleNamespace(status='ok')]), \
+             patch('web.fetch.request_page', side_effect=lambda url, **_: page_result(url)), \
              patch.object(ct.subprocess, 'Popen') as launch, \
              patch.object(ct.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as reconcile, \
              patch.object(sys, 'argv', ['cut_tailor.py', '--board', self.path]):
@@ -2817,6 +1616,40 @@ class SandboxHome(unittest.TestCase):
             if tmp:
                 shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_website_and_platform_notes_are_copied_not_linked(self):
+        import config as cf
+        with tempfile.TemporaryDirectory(prefix='sandbox-notes-test-') as root:
+            home = os.path.join(root, 'home')
+            os.makedirs(home)
+            originals = {
+                'website-notes.json': {'schema_version': 1, 'hosts': {'example.test': [
+                    {'id': 'note-1', 'host': 'example.test', 'text': '原始網站筆記'}]}},
+                'platform-notes.json': {'104': ['舊平台筆記']},
+            }
+            for name, notes in originals.items():
+                with open(os.path.join(home, name), 'w', encoding='utf-8') as f:
+                    json.dump(notes, f, ensure_ascii=False)
+
+            copy = None
+            try:
+                with mock.patch.object(cf, 'HOME', home):
+                    copy = bs.sandbox_home()
+                for name, notes in originals.items():
+                    copied = os.path.join(copy, name)
+                    self.assertTrue(os.path.isfile(copied))
+                    self.assertFalse(os.path.islink(copied))
+                    with open(copied, encoding='utf-8') as f:
+                        self.assertEqual(json.load(f), notes)
+
+                website_copy = os.path.join(copy, 'website-notes.json')
+                with open(website_copy, 'w', encoding='utf-8') as f:
+                    json.dump({'changed': True}, f)
+                with open(os.path.join(home, 'website-notes.json'), encoding='utf-8') as f:
+                    self.assertEqual(json.load(f), originals['website-notes.json'])
+            finally:
+                if copy:
+                    shutil.rmtree(copy, ignore_errors=True)
+
     def test_external_source_links_and_styles_are_copied_as_files(self):
         import config as cf
         with tempfile.TemporaryDirectory(prefix='sandbox-source-test-') as root:
@@ -2939,7 +1772,8 @@ class ConversionKeepsARestorePoint(OwnHome):
         self.assertFalse(row['ok'])
         self.assertTrue(row['warn'])
         self.assertIn('沒有退回點', row['detail'])
-        self.assertIn('沒跑完的填表收尾轉換還沒轉換', row['detail'])
+        self.assertIn('沒跑完的填表收尾', row['detail'])
+        self.assertIn('轉換還沒轉換', row['detail'])
         self.assertTrue(row['fix'])
 
 
@@ -2983,8 +1817,8 @@ class ServerStartCleansUpOnDisk(OwnHome):
         self.assertEqual([(u in (a, b, c), 'shot' in fb[u]['apply']) for u in (a, b, c)], [(True, False)] * 3)
         self.assertEqual((fb[b]['apply'].get('ev'), fb[c]['apply']['ev']), (None, 'r/shot-1.png'))
 
-    def test_server_start_settles_rounds_that_are_no_longer_running(self):
-        """伺服器起來時,卡停在正在填、正在送出,那一輪卻已經不在跑(Mac 重開、當掉):照狀態表收尾(修正 4、13)。"""
+    def test_server_start_settles_interrupted_fills_without_guessing_page_presence(self):
+        """中斷的填表不依舊有沒有 tab_id 猜頁面狀態;送出中斷仍標結果不明。"""
         import delivery_state as ds
         a, b, c = JOBS[0]['id'], JOBS[1]['id'], JOBS[2]['id']
         make_board(self.path, {a: {'app': 'ship', 'ds': 'running', 'apply': {'stage': 'fill', 'tab_id': '7'}},
@@ -2993,8 +1827,9 @@ class ServerStartCleansUpOnDisk(OwnHome):
         with mock.patch.object(bs, 'run_status', return_value={'running': False}):
             bs.migrate_marks(self.path)
         fb = read_fb(self.path)
-        self.assertEqual([ds.state(fb[u]) for u in (a, b, c)], ['stuck', 'nopage', 'unsure'])
+        self.assertEqual([ds.state(fb[u]) for u in (a, b, c)], ['stuck', 'stuck', 'unsure'])
         self.assertIn('沒跑完', fb[a]['apply']['issues'][0])
+        self.assertIn('沒跑完', fb[b]['apply']['issues'][0])
 
 
 class AgentSandbox(unittest.TestCase):
@@ -3003,201 +1838,6 @@ class AgentSandbox(unittest.TestCase):
         import agent_run as ar
         argv, _ = ar.argv_for('main', '嗨', tempfile.gettempdir())
         self.assertEqual(argv[argv.index('-s') + 1], 'danger-full-access')
-
-class PreApplyPageReading(Tmp):
-    def test_link_gate_fetches_pages_concurrently_and_keeps_prompt_order(self):
-        from types import SimpleNamespace
-        import board_status, page_fetch
-
-        urls = ['https://example.invalid/jobs/first', 'https://example.invalid/jobs/second']
-        jobs = [{'id': url, 'target': f'Job {index}'} for index, url in enumerate(urls, 1)]
-        make_board(self.path, {url: {'app': 'ready'} for url in urls}, jobs=jobs)
-        pages = {url: page_fetch.PageResult(url, 'ok', text=f'Active role {index}', via='fake')
-                 for index, url in enumerate(urls, 1)}
-        barrier = threading.Barrier(2)
-        fetched = []
-        prompts = []
-
-        def fetch_page(url):
-            fetched.append(url)
-            barrier.wait(timeout=5)
-            return pages[url]
-
-        def run_agent(prompt, _log, _browser_required):
-            prompts.append(prompt)
-            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
-            with open(output, 'w', encoding='utf-8') as f:
-                json.dump({'jobs': [{'id': f'J{index}', 'status': 'live'}
-                                    for index in range(1, len(urls) + 1)]}, f)
-            return SimpleNamespace(ok=True, message=lambda: 'completed')
-
-        issues, revived, revived_ids = board_status._link_issues(
-            {'ready': jobs, 'ship': []}, self.path, fetch_page=fetch_page, run_agent=run_agent,
-        )
-
-        self.assertEqual(issues, [])
-        self.assertEqual(set(fetched), set(urls))
-        self.assertLess(prompts[0].index(f'URL: {urls[0]}'), prompts[0].index(f'URL: {urls[1]}'))
-        self.assertEqual(revived, [])
-        self.assertEqual(revived_ids, set())
-
-    def test_same_page_text_is_not_asked_again(self):
-        # 以前每重建一次就把每一頁全部重問 agent 一次;原文沒變就沿用上次的判斷,變了、過期了才重問
-        from types import SimpleNamespace
-        import board_status, page_fetch
-        url = 'https://example.invalid/jobs/cached'
-        asked = []
-
-        def run_agent(prompt, _log, _browser_required):
-            asked.append(prompt)
-            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
-            with open(output, 'w', encoding='utf-8') as f:
-                json.dump({'jobs': [{'id': 'J1', 'status': 'live', 'reason': '還在徵'}]}, f)
-            return SimpleNamespace(ok=True, message=lambda: 'completed')
-
-        page = {url: page_fetch.PageResult(url, 'ok', text='Active role', via='fake')}
-        t = 1_000_000.0
-        self.assertEqual(board_status._agent_link_verdicts(page, self.path, run_agent, now=t)[url][0], 'live')
-        self.assertEqual(board_status._agent_link_verdicts(page, self.path, run_agent, now=t + 60)[url],
-                         ('live', '還在徵'))
-        self.assertEqual(len(asked), 1)                                   # 同一段原文:沒再問
-        changed = {url: page_fetch.PageResult(url, 'ok', text='Active role (updated)', via='fake')}
-        board_status._agent_link_verdicts(changed, self.path, run_agent, now=t + 120)
-        self.assertEqual(len(asked), 2)                                   # 原文變了:重問
-        board_status._agent_link_verdicts(page, self.path, run_agent,
-                                          now=t + board_status.LINK_VERDICT_DAYS * 86400 + 1)
-        self.assertEqual(len(asked), 3)                                   # 過期了:重問
-
-    def test_only_confirmed_closures_block_the_card(self):
-        """#60 第 5 點:404/410 與 agent 判關閉才擋;無法確認、抓不到只提示(soft)。"""
-        from types import SimpleNamespace
-        import board_status, page_fetch
-
-        urls = {k: f'https://example.invalid/jobs/{k}' for k in ('gone', 'closed', 'unsure', 'unread', 'live')}
-        jobs = [{'id': u, 'target': k} for k, u in urls.items()]
-        make_board(self.path, {u: {'app': 'ready'} for u in urls.values()}, jobs=jobs)
-        pages = {
-            urls['gone']: page_fetch.PageResult(urls['gone'], 'closed', http_status=404, via='direct'),
-            urls['closed']: page_fetch.PageResult(urls['closed'], 'ok', text='closed role', via='fake'),
-            urls['unsure']: page_fetch.PageResult(urls['unsure'], 'ok', text='vague page', via='fake'),
-            urls['unread']: page_fetch.PageResult(urls['unread'], 'unknown', via=''),
-            urls['live']: page_fetch.PageResult(urls['live'], 'ok', text='open role', via='fake'),
-        }
-        answer = {urls['closed']: 'closed', urls['unsure']: 'uncertain', urls['live']: 'live'}
-
-        def run_agent(prompt, _log, _browser_required):
-            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
-            rows = []
-            for block in prompt.split('=== ')[1:]:
-                jid = block.split(' ===', 1)[0]
-                url = block.split('URL: ', 1)[1].split('\n', 1)[0]
-                quote = int(re.search(r'^(\d+)\. closed role$', block, re.M)[1]) if answer[url] == 'closed' else 0
-                rows.append(dict({'id': jid, 'status': answer[url]}, **({'quote': [quote]} if quote else {})))
-            with open(output, 'w', encoding='utf-8') as f:
-                json.dump({'jobs': rows, 'material_id': re.search(r'"material_id":"(\w+)"', prompt)[1]}, f)
-            return SimpleNamespace(ok=True, message=lambda: 'completed')
-
-        issues, _revived, _ids = board_status._link_issues(
-            {'ready': jobs, 'ship': []}, self.path, fetch_page=pages.get, run_agent=run_agent)
-        soft = {x['jid']: bool(x.get('soft')) for x in issues}
-        self.assertEqual(soft, {urls['gone']: False, urls['closed']: False,
-                                urls['unsure']: True, urls['unread']: True})
-        closed = next(x for x in issues if x['jid'] == urls['closed'])
-        self.assertIn('agent 判斷', closed['msg'])            # 標明是 agent 判斷、附它抄的原文
-        self.assertEqual(closed['judged'], 'closed role')
-        # 他在卡上按「不對,職缺還在」:同一個判斷不再擋,只留一行提示
-        issues, _r, _i = board_status._link_issues(
-            {'ready': jobs, 'ship': []}, self.path, fetch_page=pages.get, run_agent=run_agent,
-            fb={urls['closed']: {'judged_no': {'closed': '2026-09-30'}}})
-        self.assertTrue(next(x for x in issues if x['jid'] == urls['closed']).get('soft'))
-
-    def test_a_closure_whose_quote_is_not_on_the_page_does_not_block(self):
-        """安檢門(#317):agent 說關了,卻抄了一句字而不是引那一頁的段落編號:不擋,卡上寫出 agent 寫了什麼、要寫什麼。"""
-        from types import SimpleNamespace
-        import board_status, page_fetch
-        url = 'https://example.invalid/jobs/lie'
-        jobs = [{'id': url, 'target': 'lie'}]
-        make_board(self.path, {url: {'app': 'ready'}}, jobs=jobs)
-
-        def run_agent(prompt, _log, _browser_required):
-            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
-            with open(output, 'w', encoding='utf-8') as f:
-                json.dump({'jobs': [{'id': 'J1', 'status': 'closed', 'quote': 'Position closed'}],
-                           'material_id': re.search(r'"material_id":"(\w+)"', prompt)[1]}, f)
-            return SimpleNamespace(ok=True, message=lambda: 'completed')
-
-        issues, _r, _i = board_status._link_issues(
-            {'ready': jobs, 'ship': []}, self.path,
-            fetch_page=lambda u: page_fetch.PageResult(u, 'ok', text='Open role, apply now', via='fake'),
-            run_agent=run_agent)
-        self.assertEqual(len(issues), 1)
-        self.assertTrue(issues[0].get('soft'))
-        self.assertIn('Position closed', issues[0]['msg'])
-        self.assertIn('段落編號無效', issues[0]['msg'])
-
-    def test_link_gate_asks_the_agent_in_small_batches(self):
-        """一次把幾十頁全文塞給同一隻 agent,容易整批判不出來;分小批問。"""
-        from types import SimpleNamespace
-        import board_status, page_fetch
-
-        urls = [f'https://example.invalid/jobs/{i}' for i in range(20)]
-        jobs = [{'id': u, 'target': u} for u in urls]
-        make_board(self.path, {u: {'app': 'ready'} for u in urls}, jobs=jobs)
-        sizes = []
-
-        def run_agent(prompt, _log, _browser_required):
-            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
-            ids = [b.split(' ===', 1)[0] for b in prompt.split('=== ')[1:]]
-            sizes.append(len(ids))
-            with open(output, 'w', encoding='utf-8') as f:
-                json.dump({'jobs': [{'id': i, 'status': 'live'} for i in ids]}, f)
-            return SimpleNamespace(ok=True, message=lambda: 'completed')
-
-        issues, _r, _i = board_status._link_issues(
-            {'ready': jobs, 'ship': []}, self.path,
-            fetch_page=lambda u: page_fetch.PageResult(u, 'ok', text='open role', via='fake'),
-            run_agent=run_agent)
-        self.assertEqual(issues, [])
-        self.assertEqual(sum(sizes), 20)
-        self.assertLessEqual(max(sizes), board_status.LINK_AGENT_BATCH)
-
-    def test_link_gate_sends_fetched_text_to_a_browserless_agent(self):
-        from contextlib import redirect_stdout
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        import board_status, page_fetch
-
-        url = 'https://example.invalid/jobs/security-engineer'
-        text = 'The active role handles expired credentials; an unrelated account is 已關閉.'
-        job = {'id': url, 'target': 'Security Engineer'}
-        make_board(self.path, {url: {'app': 'ready'}}, jobs=[job])
-        page = page_fetch.PageResult(url, 'ok', text=text, via='reader')
-        calls = []
-
-        def fake_agent(prompt, _log, _home, **kwargs):
-            calls.append((prompt, kwargs))
-            output = prompt.split('把 JSON 寫到 ', 1)[1].split(':{"jobs"', 1)[0]
-            with open(output, 'w', encoding='utf-8') as f:
-                json.dump({'jobs': [{'id': 'J1', 'status': 'live', 'reason': '原文說仍在招募'}]}, f)
-            return SimpleNamespace(ok=True, message=lambda: 'completed')
-
-        with patch.object(sys, 'argv', ['board_status.py', '--links', '--board', self.path]), \
-             patch('page_fetch.fetch', return_value=page), \
-             patch('agent_run.run', side_effect=fake_agent), \
-             patch.object(board_status.ship, 'check', return_value=[]), \
-             redirect_stdout(io.StringIO()) as output:
-            result = board_status.main()
-
-        self.assertEqual(result, 0)
-        self.assertEqual(len(calls), 1)
-        prompt, options = calls[0]
-        self.assertIn(text, prompt)
-        self.assertIn('expired', prompt)
-        self.assertIn('不代表職缺已關', prompt)
-        self.assertFalse(options['browser_required'])
-        self.assertFalse(options['web'])
-        self.assertIn('每一張都過關', output.getvalue())
-
 
 class BoardStatusExitCode(Tmp):
     def test_card_acceptance_issue_uses_a_distinct_exit_code(self):
@@ -3211,42 +1851,6 @@ class BoardStatusExitCode(Tmp):
 
         self.assertEqual(result, 3)
         self.assertTrue(bd.parse(read(self.path))['data']['status']['issues'])
-
-    def test_link_verdicts_have_distinct_kinds_and_unknown_stays_soft(self):
-        import board_status, page_fetch
-
-        closed, unknown = JOBS[:2]
-        make_board(self.path, {j['id']: {'app': 'ready'} for j in (closed, unknown)},
-                   jobs=[closed, unknown])
-        pages = {
-            closed['id']: page_fetch.PageResult(closed['id'], 'closed', via='104', http_status=200),
-            unknown['id']: page_fetch.PageResult(unknown['id'], 'unknown'),
-        }
-        with mock.patch.object(sys, 'argv', ['board_status.py', '--board', self.path, '--links', '--write']), \
-             mock.patch('page_fetch.fetch', side_effect=pages.get), \
-             mock.patch('sys.stdout', new=io.StringIO()):
-            result = board_status.main()
-
-        issues = bd.parse(read(self.path))['data']['status']['issues']
-        links = [x for x in issues if x.get('kind') in ('closed', 'unverified')]
-        self.assertEqual(result, 3)
-        self.assertEqual([(x['jid'], x['kind'], bool(x.get('soft'))) for x in links],
-                         [(closed['id'], 'closed', False), (unknown['id'], 'unverified', True)])
-
-    def test_officially_live_104_job_does_not_need_agent_link_judgement(self):
-        import board_status, page_fetch
-
-        job = JOBS[0]
-        make_board(self.path, {job['id']: {'app': 'ready'}}, jobs=[job])
-        page = page_fetch.PageResult(job['id'], 'ok', text='職缺仍在徵', via='104', verified_live=True)
-        with mock.patch.object(sys, 'argv', ['board_status.py', '--board', self.path, '--links', '--write']), \
-             mock.patch('page_fetch.fetch', return_value=page), \
-             mock.patch('agent_run.run', side_effect=AssertionError('官方仍在徵,不須 agent 判斷')), \
-             mock.patch('sys.stdout', new=io.StringIO()):
-            board_status.main()
-
-        issues = bd.parse(read(self.path))['data']['status']['issues']
-        self.assertFalse([x for x in issues if x['kind'] in ('closed', 'unverified')])
 
 
 class ResumeForAgents(unittest.TestCase):
@@ -3269,35 +1873,6 @@ def prefs_load(path):
     return prefs.load(path)
 
 
-class NoRejudging(unittest.TestCase):
-    """判過、判定不送的那些,下一輪不要再抓一次 JD、再花一批判斷。結論一定一樣,純浪費。"""
-    def setUp(self):
-        import research
-        self.rs = research
-        self.f = os.path.join(tempfile.mkdtemp(), 'judged-no.jsonl')
-
-    def test_rejected_urls_are_dropped_before_the_expensive_part(self):
-        import converge
-        self.rs.turned_add([{'url': 'https://ex.test/job/9', 'at': '', 'mode': 'deep', 'why': '不對味'}], self.f)
-        called = []
-        def fetch_page(url):
-            called.append(url)
-            return page_result(url)
-        ok, drop = self.rs.clean([{'url': 'https://ex.test/job/9', 'title': '資安工程師'}],
-                                 set(), converge.EXCLUDE_TITLE, turned=self.rs.turned_down(self.f),
-                                 fetch_page=fetch_page)
-        self.assertEqual(ok, [])
-        self.assertEqual(drop['判過不送'], ['https://ex.test/job/9'])
-        self.assertEqual(called, [], '判過不送的還去問 HTTP 狀態')
-
-    def test_a_job_still_on_the_board_is_not_double_counted(self):
-        """板上已經有的走原本那條,不要因為多了這個機制就算成兩種原因。"""
-        import converge
-        ok, drop = self.rs.clean([{'url': 'https://ex.test/job/1', 'title': 'X'}],
-                                 {'https://ex.test/job/1'}, converge.EXCLUDE_TITLE,
-                                 turned=self.rs.turned_down(self.f), fetch_page=page_result)
-        self.assertEqual(drop['板上已經有'], ['https://ex.test/job/1'])
-        self.assertEqual(drop['判過不送'], [])
 
 
 class SeedRuns(HttpBase):
@@ -3360,13 +1935,28 @@ class PromptPreview(HttpBase):
         self.assertNotIn('一次查完', note)
         self.assertIn('跑幾張', note)
 
+    def test_replies_prompt_lists_only_cards_a_real_run_checks(self):
+        """看板上沒有那張職缺的已投出卡,真的跑不查;預覽也不列,不能出錯。"""
+        gone = 'https://ex.test/job/gone'
+        make_board(self.path, {JOBS[0]['id']: {'app': 'sent', 'ds': 'sent', 'sent_at': '2026-11-01'},
+                               gone: {'app': 'sent', 'ds': 'sent', 'sent_at': '2026-11-01'}})
+        code, raw, _ = self.req('/api/prompt?kind=replies')
+        prompt = json.loads(raw)['prompt']
+        self.assertEqual(code, 200)
+        self.assertNotIn('組這份 prompt 的時候出錯了', prompt)
+        self.assertIn(JOBS[0]['id'], prompt)
+        self.assertNotIn(gone, prompt)
+
     def test_every_agent_button_has_a_prompt(self):
         """會派 agent 的按鈕,每一顆都要看得到它會送出去的東西:找缺三種＋判斷、準備區、代投三段。"""
         for q in ('kind=find&mode=deep', 'kind=find&mode=wide', 'kind=find&mode=dir', 'kind=judge', 'kind=prep',
-                  'kind=apply&stage=fill', 'kind=apply&stage=fix', 'kind=apply&stage=submit'):
+                  'kind=apply&stage=fill', 'kind=apply&stage=fix', 'kind=apply&stage=submit', 'kind=replies'):
             code, raw, _ = self.req('/api/prompt?' + q)
             self.assertEqual(code, 200, q)
-            self.assertTrue(json.loads(raw)['prompt'].strip(), q)
+            prompt = json.loads(raw)['prompt']
+            self.assertTrue(prompt.strip(), q)
+            with self.subTest(q):
+                self.assertNotIn('組這份 prompt 的時候出錯了', prompt, q)
 
     def test_cached_prompt_expires_when_the_code_changes(self):
         """記住的那份要跟著「組它的程式」一起作廢。不然別人改了代投的 prompt,
@@ -3406,90 +1996,10 @@ class PromptPreview(HttpBase):
         """看 prompt 不准真的派 agent 出去。"""
         import agent_run as ar
         launched = []
-        with mock.patch.object(ar, 'run', side_effect=lambda *a, **k: launched.append(a)):
+        with mock.patch.object(ar, 'run', autospec=True, side_effect=lambda *a, **k: launched.append(a)):
             self.req('/api/prompt?kind=find&mode=deep')
             self.req('/api/prompt?kind=prep')
         self.assertEqual(launched, [])
-
-
-class FlagWords(unittest.TestCase):
-    """設定頁「要小心的字」:職稱中了不丟,標出來交給判斷(以前設定了完全沒效果)。"""
-
-    def test_flag_words_mark_candidate_for_judge(self):
-        import re as _re
-        import research as rs
-        import page_fetch
-        cands = [{'url': 'https://jobs.lever.co/acme/1', 'title': 'Sales Engineer', 'company': 'Acme'},
-                 {'url': 'https://jobs.lever.co/acme/2', 'title': 'Platform Engineer', 'company': 'Acme'}]
-        page = lambda u: page_fetch.PageResult(u, 'ok', text='JD text', via='direct')
-        ok, drop = rs.clean(cands, set(), _re.compile('(?!x)x'), fetch_page=page, flag_re=_re.compile('sales', _re.I))
-        self.assertEqual(len(ok), 2)                          # 沒有被丟掉
-        flagged = {c['title']: c.get('flag') or [] for c in ok}
-        self.assertTrue(any('要小心' in f and 'Sales' in f for f in flagged['Sales Engineer']))
-        self.assertFalse(any('要小心' in f for f in flagged['Platform Engineer']))
-
-
-class GhostAndScam(Tmp):
-    """#27:詐騙徵兆一律不進看板;幽靈職缺照樣進,但標出來;刊登太久的由程式先提醒。"""
-
-    def _judge(self, risk):
-        import research as rs
-        url = 'https://ex.test/job/risk'
-        # 判斷拿程式抓回的 JD 原文和程式提醒核對(#317):它引的那句要在裡面
-        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example',
-                     'jd': 'Engineer at Example.\n錄取前需繳交保證金。', 'page_status': 'ok',
-                     'flag': ['刊登已經 120 天(超過 90 天):可能是長期掛著、沒在真的招人的幽靈職缺,判斷時一起看']}
-
-        run_agent = judge_agent([{'id': 'J1', 'title': {'text': 'Engineer at Example.', 'cite': [Q('Engineer at Example.')]}, 'company': {'text': '', 'cite': []}, 'keep': True, 'fit': 4,
-                                  'cite': [], 'why': '看起來符合', 'cat': rs.CATS[0], 'risk': risk,
-                                  'card': {'fit': '符合', 'ammo': '直投'}}])
-        res = rs.judge([dict(candidate)], [], self.dir, 'main', run_agent, resumes=[])
-        return rs, candidate, res[url]
-
-    def test_a_title_that_is_not_on_the_page_keeps_the_card_off_the_board(self):
-        """安檢門(#317):判斷抄了職稱的字,而不是引程式抓回的 JD 原文那一段的編號:這一張不進板、不算判過,原因寫出 agent 寫了什麼。"""
-        import research as rs
-        url = 'https://ex.test/job/lie'
-        candidate = {'url': url, 'title': 'Engineer', 'company': 'Example', 'jd': 'Engineer at Example.',
-                     'page_status': 'ok'}
-
-        run_agent = judge_agent([{'id': 'J1', 'title': 'Chief Chef', 'company': 'Example', 'keep': True, 'fit': 5,
-                                  'cite': [], 'why': '很合', 'cat': rs.CATS[0]}])
-        r = rs.judge([dict(candidate)], [], self.dir, 'main', run_agent, resumes=[])[url]
-        self.assertFalse(r['keep'])
-        self.assertFalse(r['readable'])                   # 不記成「判過不送」,下一輪找到會再判
-        self.assertTrue(any('頁面上的職稱' in p and 'Chief Chef' in p for p in r['wrong']), r['wrong'])
-
-    def test_scam_is_never_kept(self):
-        _rs, _c, r = self._judge({'kind': 'scam', 'why': 'JD 要先繳錢', 'cite': [Q('錄取前需繳交保證金。')]})
-        self.assertFalse(r['keep'])
-        self.assertIn('疑似詐騙', r['why'])
-
-    def test_ghost_is_kept_and_marked_on_card(self):
-        rs, c, r = self._judge({'kind': 'ghost', 'why': '刊登很久',
-                                'cite': [Q('刊登已經 120 天(超過 90 天):可能是長期掛著、沒在真的招人的幽靈職缺,判斷時一起看')]})
-        self.assertTrue(r['keep'])
-        self.assertEqual(rs.job_entry(c, r, {})['src']['risk']['kind'], 'ghost')
-
-    def test_no_risk_leaves_card_alone(self):
-        rs, c, r = self._judge({'kind': '', 'why': '', 'cite': []})
-        self.assertNotIn('risk', rs.job_entry(c, r, {})['src'])
-
-    def test_old_posting_is_flagged_for_judge(self):
-        import datetime
-        import re as _re
-        import research as rs
-        import page_fetch
-        old = (datetime.date.today() - datetime.timedelta(days=120)).isoformat()
-        new = datetime.date.today().isoformat()
-        cands = [{'url': 'https://jobs.lever.co/a/old', 'title': 'Old', 'company': 'A'},
-                 {'url': 'https://jobs.lever.co/a/new', 'title': 'New', 'company': 'A'}]
-        pages = {'https://jobs.lever.co/a/old': old, 'https://jobs.lever.co/a/new': new}
-        ok, _ = rs.clean(cands, set(), _re.compile('(?!x)x'),
-                         fetch_page=lambda u: page_fetch.PageResult(u, 'ok', text='JD', posted_at=pages[u]))
-        flags = {c['title']: ' '.join(c.get('flag') or []) for c in ok}
-        self.assertIn('幽靈職缺', flags['Old'])
-        self.assertNotIn('幽靈職缺', flags['New'])
 
 
 if __name__ == '__main__':

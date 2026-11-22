@@ -415,8 +415,8 @@ def status_summary(board_path):
         return '⚠ 看板驗收:沒有驗收結果'
     issues = status.get('issues') or []
     if not issues:
-        return '看板驗收:全過' if status.get('checked_links') else '看板驗收:連結尚未檢查'
-    names = {'closed': '已下架', 'unverified': '還沒確認', 'files': '檔案'}
+        return '看板驗收:全過'
+    names = {'files': '檔案'}
     counts = {}
     for issue in issues:
         name = names.get(issue.get('kind'), '其他')

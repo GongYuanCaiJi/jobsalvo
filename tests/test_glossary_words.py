@@ -17,13 +17,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 WORDS = ('代投',)
 
 # 只給開發者跑、不會出現在他面前的工具
-DEV_ONLY = ('tools/board_check*.py', 'tools/apply_accept.py', 'tools/realdata_check.py')
+DEV_ONLY = ('tools/board_check*.py', 'tools/realdata_check.py')
 
 # 可以留著的:(檔案, 字串裡的一段, 為什麼)
-ALLOWED = (
-    # 給 agent 看的 prompt,不是畫面文字
-    ('tools/apply_run.py', '你是代投 agent', '給 agent 的 prompt'),
-)
+ALLOWED = ()
 
 
 def _allowed(path, text):

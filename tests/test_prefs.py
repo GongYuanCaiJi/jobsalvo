@@ -31,6 +31,9 @@ class LikeScores(unittest.TestCase):
         )
         self.assertEqual(prefs.like_scores(fb, jobs), {'j0': 100, 'j1': 50, 'j3': 0})
 
+    def test_card_reason_cleanup_does_not_depend_on_platform_names(self):
+        self.assertEqual(prefs.his_words('我做過 Lever 表單串接'), '我做過 Lever 表單串接')
+
 
 class AgentNoteMerge(unittest.TestCase):
     """整理偏好筆記的 agent 跟找缺同時跑,可以跑很久;這段時間他在看板上改的筆記以現在的為準。"""

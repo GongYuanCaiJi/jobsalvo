@@ -84,11 +84,6 @@ def current_paused():
     return paused_seconds(_CURRENT[0]) if _CURRENT else 0.0
 
 
-def clear_paused(path):
-    with contextlib.suppress(OSError):   # 這一輪沒暫停過
-        os.remove(path + '.pausedsum')
-
-
 def clear_finish(path):
     with contextlib.suppress(OSError):   # 沒有收工記號是正常的(沒按過停止)
         os.remove(path + '.finish')

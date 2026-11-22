@@ -12,7 +12,6 @@ import _env  # noqa: E402,F401  測試跑在暫存資料夾(派 agent 的執行�
 
 import agent_run as ar
 import chrome_door
-import research
 
 
 class FakeProcess:
@@ -39,8 +38,6 @@ class Outcomes(unittest.TestCase):
         results = ar.wait_done([done, failed], timeout=0)
         self.assertEqual([r.status for r in results], ['completed', 'failed'])
         self.assertEqual(results[1].returncode, 7)
-        with self.assertRaisesRegex(ar.AgentRunError, '結束碼 7'):
-            ar.require_success(results)
 
     def test_timeout_stops_and_reaps_the_process_tree(self):
         proc = FakeProcess()
@@ -54,16 +51,6 @@ class Outcomes(unittest.TestCase):
         self.assertEqual(proc.wait_calls, [2, None])
         self.assertEqual(proc.returncode, -9)
 
-    def test_search_does_not_consume_partial_output_after_failure(self):
-        with tempfile.TemporaryDirectory(prefix='search-outcome-') as rd:
-            def failed_agent(_prompt, outfile, _browser_required):
-                with open(outfile[:-4] + '.json', 'w', encoding='utf-8') as f:
-                    f.write('[{"url":"https://partial.example/job","title":"Partial"}]')
-                return ar.AgentResult('failed', 7, 123)
-
-            with self.assertRaises(ar.AgentRunError):
-                research.run_search('wide', '', [], {}, '', rd, 'main', failed_agent)
-            self.assertTrue(os.path.exists(os.path.join(rd, 'search_wide.json')))
 
 
 class PausedTimeIsNotCounted(unittest.TestCase):
@@ -100,10 +87,23 @@ class BrowserCapability(unittest.TestCase):
                         'enabled = true\n')
             with patch.object(ar, 'CODEX_CONFIG', config):
                 argv, _ = ar.argv_for(agent, 'TASK', '/repo',
-                                      browser=ar.apply_overrides(), chrome=True)
+                                      browser=ar.lean(True), chrome=True)
 
         self.assertIn('plugins.unified-computer-use@openai-bundled.enabled=false', argv)
         self.assertIn('plugins.pdf@openai-primary-runtime.enabled=false', argv)
+
+    def test_browser_agent_gets_the_installed_ego_when_the_wrapper_is_first_on_path(self):
+        # 答案來源:.audit/exam1-diagnosis.md 第一節;使用者 shell 的 PATH 先有 tools/ 時,真指令也不能是轉接器自己。
+        with tempfile.TemporaryDirectory(prefix='agent-installed-ego-') as d:
+            real = os.path.join(d, 'ego-browser')
+            with open(real, 'w', encoding='utf-8') as f:
+                f.write('#!/bin/sh\nexit 0\n')
+            os.chmod(real, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+            with patch.object(chrome_door, 'ego_bin', _env.REAL_EGO_BIN), \
+                 patch.dict(os.environ, {'PATH': os.pathsep.join((ar.HERE, d, '/usr/bin', '/bin'))}):
+                env = ar.agent_env(None, (), 'taskSpace(7)', chrome=True)
+
+            self.assertEqual(os.path.realpath(real), os.path.realpath(env['JOBSALVO_EGO_REAL_BIN']))
 
     def test_browser_work_uses_ego_rules_without_an_override_list(self):
         with patch.object(ar, '_runtime', return_value=('codex', '')) as runtime, \
@@ -117,6 +117,31 @@ class BrowserCapability(unittest.TestCase):
         runtime.assert_called()
         self.assertIn('ego-browser nodejs', prompt)
         self.assertNotIn('【抓網頁鐵律】', prompt)
+
+    def test_browser_commands_keep_the_ego_wrapper_ahead_of_shell_startup_path(self):
+        if not os.path.exists('/bin/zsh'):
+            self.skipTest('browser agents use zsh only on macOS')
+        with tempfile.TemporaryDirectory(prefix='agent-browser-shell-') as d:
+            startup = os.path.join(d, 'startup')
+            installed = os.path.join(d, 'installed')
+            os.makedirs(startup)
+            os.makedirs(installed)
+            real_ego = os.path.join(installed, 'ego-browser')
+            with open(real_ego, 'w', encoding='utf-8') as f:
+                f.write('#!/bin/sh\nexit 0\n')
+            os.chmod(real_ego, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+            with open(os.path.join(startup, '.zprofile'), 'w', encoding='utf-8') as f:
+                f.write(f'export PATH={installed}:$PATH\n')
+
+            with patch.dict(os.environ, {'PATH': '/usr/bin:/bin', 'ZDOTDIR': startup}), \
+                 patch.object(chrome_door, 'ego_bin', return_value=real_ego):
+                env = ar.agent_env(None, (), 'taskSpace(7)', chrome=True)
+
+            resolved = ar.subprocess.run(
+                ['/bin/zsh', '-lc', 'command -v ego-browser'], env=env,
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            self.assertEqual(resolved, os.path.join(ar.HERE, 'ego-browser'))
 
 class LeanParity(unittest.TestCase):
     def test_codex_and_claude_both_skip_personal_memory(self):
@@ -499,6 +524,32 @@ class ClaudeCodeRuntime(unittest.TestCase):
             with self.subTest(text=text[:60]):
                 self.assertEqual(ar._failure_reason('claude-code', 1, text), reason)
 
+    def test_the_evidence_folder_keeps_the_whole_instruction_the_agent_received(self):
+        import evidence
+        fed = []
+
+        def popen(_argv, **kw):
+            fed.append(kw['stdin'].read().decode('utf-8'))
+            return FakeProcess(pid=101)
+
+        with (
+            tempfile.TemporaryDirectory(prefix='agent-evidence-') as d,
+            self.settings([self.entry('cc', 'claude-code', browser=True)]),
+            patch.object(ar, 'claude_bin', return_value='/bin/claude'),
+            patch.object(ar.subprocess, 'Popen', side_effect=popen),
+            patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
+            patch.object(ar, '_claude_outcome', return_value={'is_error': False, 'subtype': 'success'}),
+            evidence.opened('sync', 'profile') as rnd,
+        ):
+            self.assertTrue(ar.run('TASK BODY', os.path.join(d, 't.log'), d, browser_required=True).ok)
+            with open(os.path.join(rnd.dirs[0], evidence.EVENTS), encoding='utf-8') as f:
+                names = [row['file'] for row in map(json.loads, f) if row.get('kind') == 'instruction']
+            with open(os.path.join(rnd.dirs[0], names[0]), encoding='utf-8') as f:
+                kept = f.read()
+        self.assertEqual(len(names), 1)
+        self.assertEqual(kept, fed[0])
+        self.assertNotEqual(kept, 'TASK BODY')
+
     def test_claude_code_with_chrome_can_take_browser_work(self):
         # 代投:勾了「可使用 Chrome」的 Claude Code 也接得了要開瀏覽器的工作(Claude in Chrome)
         seen = []
@@ -524,7 +575,8 @@ class ClaudeCodeRuntime(unittest.TestCase):
     def test_search_and_add_never_get_chrome_even_when_the_first_agent_can_browse(self):
         # #287:找缺、加職缺不給操作 Chrome 的能力(Codex、Claude 都一樣);網頁由程式的 page_fetch 抓。
         # 以前能開瀏覽器的 agent 排前面、開著 Chrome 做,沒有代投那把鎖,也沒限制只准用 agent 專用的 Chrome
-        import add_job
+        # 現在:找缺、貼網址加入不開工作區(find.Run 帶 NO_WORKSPACE),真瀏覽器邊界沒開工作區就不給 Chrome
+        from web.outside import Real
         seen = []
 
         def launch(_prompt, outfile, _repo, agent, **kwargs):
@@ -542,8 +594,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
                 patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
                 patch.object(ar, '_claude_outcome', return_value={'is_error': False, 'subtype': 'success'}),
             ):
-                self.assertTrue(research.web_agent(d)('task', os.path.join(d, 's.log'), True).ok)
-                self.assertIs(add_job.web_agent, research.web_agent)      # 加職缺跟找缺同一支
+                self.assertEqual(Real().run_agent('task', directories=[d], timeout=60).status, 'completed')
             self.assertEqual(seen, [(entries[0]['id'], False, None)])
 
 
@@ -557,7 +608,7 @@ class NoChromeOutsideApply(unittest.TestCase):
                     patch.object(ar, 'CODEX_SKILL_DIRS', ()), \
                     patch.object(ar, 'codex_bin', return_value='/bin/codex'):
                 argv, _ = ar.argv_for(agent, 'TASK', '/repo', web=True)
-                apply_argv, _ = ar.argv_for(agent, 'TASK', '/repo', chrome=True, browser=ar.apply_overrides())
+                apply_argv, _ = ar.argv_for(agent, 'TASK', '/repo', chrome=True, browser=ar.lean(True))
         for name in ('chrome@openai-bundled', 'computer-use@openai-bundled', 'unified-computer-use@openai-bundled'):
             self.assertIn(f'plugins.{name}.enabled=false', argv)
             self.assertIn(f'plugins.{name}.enabled=false', apply_argv)

@@ -3,12 +3,7 @@
 """Canonical card names and URL identifiers."""
 import functools
 import hashlib
-import urllib.parse
 import re
-
-
-SOURCE_LINK_SUFFIX = re.compile(r'\s*[（(]\s*\[[^\]]+\]\([^)]*\)\s*[）)]\s*$')
-MARKDOWN_LINK = re.compile(r'\[([^\]]+)\]\([^)]*\)')
 
 
 def card_id_from_url(url):
@@ -20,16 +15,8 @@ def legacy_id(url):
 
 
 def name(value, company=None):
-    target = value.get('target') if isinstance(value, dict) else value
-    target = str(target or '').strip()
-    company = str(company or '').strip()
-    if company and company.casefold() not in target.casefold():
-        target = f'{target} · {company}' if target else company
-    target = SOURCE_LINK_SUFFIX.sub('', target)
-    target = MARKDOWN_LINK.sub(r'\1', target)
-    target = re.sub(r'[*`]', '', target)
-    target = re.sub(r'\s*[·・]\s*', ' · ', target)
-    return re.sub(r'\s+', ' ', target).strip()
+    from card_title import name as display_name
+    return display_name(value, company)
 
 
 def legacy_score_name_parts(value, title_keywords):
@@ -47,23 +34,13 @@ def legacy_score_name_parts(value, title_keywords):
     return title, company
 
 
-def name_key(value):
-    return re.sub(r'[\s·・,|()（）\-–]+', '', name(value)).lower()
-
-
 def with_name(value, replacement):
-    target = value.get('target') if isinstance(value, dict) else value
-    target = str(target or '')
-    suffix = SOURCE_LINK_SUFFIX.search(target)
-    return name(replacement) + (suffix.group(0) if suffix else '')
+    from card_title import with_name as display_with_name
+    return display_with_name(value, replacement)
 
 
 # ── 公司名(卡片分組、封鎖名單、指名要找的都用它)──────────────────────
 # 只有這一份:看板拿的是 label_jobs 算好跟著職缺送去的公司名,不自己算(#343)。
-_CO_URL = [re.compile(p, re.I) for p in (
-    r'lever\.co/([^/?#]+)', r'greenhouse\.io/([^/?#]+)', r'ashbyhq\.com/([^/?#]+)',
-    r'cake(?:resume)?\.(?:me|com)/companies/([^/?#]+)', r'join\.com/companies/([^/?#]+)',
-    r'workable\.com/[^/]*/?([^/?#]+)')]
 # 標題有「職稱 · 公司」也有「公司 · 職稱」:哪一段像職稱,另一段就是公司。看板(label_jobs)、
 # 你的喜好(prefs)、自動流程都用這一份。
 # 各行各業常見的職稱字都放;使用者在設定 board.title_words 再加自己領域的字(當一般文字比對,不是正規表示式)。
@@ -113,20 +90,41 @@ _CO_SUFFIX = re.compile(
 
 
 def company_norm(value):
-    """去掉公司名結尾的法律字尾;去完什麼都不剩就原樣。"""
+    """舊卡(升級前、沒有 agent 引的公司欄)才用:去掉公司名結尾的法律字尾;去完什麼都不剩就原樣。"""
     text = str(value or '').strip()
     return _CO_SUFFIX.sub('', text).strip() or text
 
 
 def same_company(a, b):
-    """兩個公司名是不是同一家(封鎖名單、指名要找的舊資料存的可能是還沒去字尾的寫法)。"""
+    """兩個公司名是不是同一家:一字不差相同。別的寫法算同一家,由使用者在公司別名(board.company_alias)列。"""
+    return bool(a) and a == b
+
+
+def legacy_same_company(a, b):
+    """升級前的舊卡照舊:大小寫、法律字尾不同也算同一家(卡上的公司是程式從卡名切出來的,不是頁上的字)。"""
     return bool(a) and bool(b) and company_norm(a).casefold() == company_norm(b).casefold()
 
 
+def cited_company(job):
+    """agent 從職缺頁一字不差引的公司(找缺進板時存的);升級前的舊卡沒有,回空字串。"""
+    value = job.get('company') if isinstance(job, dict) else None
+    return value if isinstance(value, str) else ''
+
+
+def aliased(text, alias=None):
+    """使用者的公司別名:這個寫法列成哪一家就是哪一家;沒列就照原字。設定頁存的鍵是小寫。"""
+    alias = alias or {}
+    value = alias.get(text, alias.get(text.lower()))
+    return value if isinstance(value, str) and value else text
+
+
 def company(job, alias=None, extra_titles=None):
-    """卡片歸在哪一家。alias = 設定 board.company_alias(鍵是小寫),使用者自訂的寫法優先;
+    """卡片歸在哪一家。有 agent 引的公司(cited_company)就是那串字,套使用者的公司別名;
+    舊卡才從卡名切:alias = 設定 board.company_alias(鍵是小寫),使用者自訂的寫法優先;
     extra_titles = 設定 board.title_words(使用者自己加的職稱字)。找不出來回 '其他'(看板的分組名)。
     只看卡的網址和職稱:同樣的輸入記住答案(看板每算一次每張卡的下一步,每張要問好幾次,每次都是一串正規表示式)。"""
+    if cited_company(job):
+        return aliased(cited_company(job), alias)
     alias_items = tuple(sorted((str(k), v) for k, v in (alias or {}).items()))
     titles = tuple(extra_titles or ())
     if not all(isinstance(v, str) for _, v in alias_items) or not all(isinstance(x, str) for x in titles):
@@ -156,14 +154,6 @@ def _company(job, alias=None, extra_titles=None):
         stripped = company_norm(s)
         return alias.get(stripped.lower(), stripped)
 
-    url = str((job or {}).get('id') or '') if isinstance(job, dict) else ''
-    for rx in _CO_URL:
-        m = rx.search(url)
-        if m:
-            try:
-                return norm(urllib.parse.unquote(m.group(1), errors='strict'))
-            except UnicodeDecodeError:
-                return norm(m.group(1))
     t = re.sub(r'[\[\]]', '', name(job)).strip()
     low = t.lower()
     for key, value in alias.items():
@@ -181,8 +171,7 @@ def _company(job, alias=None, extra_titles=None):
 
 
 def platform(job):
-    """這張卡是從哪個平台來的(已投遞成效的「來源平台」):找缺時存的平台網域,沒有就看職缺網址;都沒有是「不明」。
-    posted_src 是刊登日期欄位名稱,不能當平台。"""
+    """已投遞成效的來源標記:沿用找缺存的主機名,沒有就讀職缺網址;沒有主機時保留原值或回「不明」。"""
     j = job if isinstance(job, dict) else {}
     src = j.get('src') if isinstance(j.get('src'), dict) else {}
     s = str(j.get('source_platform') or src.get('platform') or src.get('site') or j.get('platform') or '').strip()
@@ -192,32 +181,78 @@ def platform(job):
         return '不明'
     host = re.split(r'[/?#]', re.sub(r'^https?://', '', s, flags=re.I))[0].lower()
     host = host[4:] if host.startswith('www.') else host
-    for pat, label in ((r'(^|\.)104\.com\.tw$', '104'), (r'(^|\.)linkedin\.com$', 'LinkedIn'),
-                       (r'(^|\.)cakeresume\.(com|me)$', 'CakeResume'), (r'greenhouse\.io$', 'Greenhouse'),
-                       (r'lever\.co$', 'Lever'), (r'workday|myworkdayjobs', 'Workday'), (r'ashbyhq\.com$', 'Ashby')):
-        if re.search(pat, host):
-            return label
     return host if '.' in host else s
 
 
 def label_jobs(jobs, alias=None, extra_titles=None):
     """送給看板的卡:每張帶上卡名(name)、公司名(co)、來源平台(src_plat)、死線那一天(dl),看板直接用,不自己算(#343)。
-    同一家(same_company:大小寫、德文的雙 s、法律字尾不同也算)整份看板只用一個寫法(先看到的那張),
-    看板拿 co 分組、比同一家就是比字串。不改原本的 list。"""
+    有 agent 引的公司的卡,co 就是那串字(套使用者的別名);升級前的舊卡照舊:同一家(legacy_same_company)
+    在舊卡之間只用一個寫法(先看到的那張)。看板拿 co 分組、比同一家就是比字串。不改原本的 list。"""
     seen, out = {}, []
     for j in jobs or []:
         if not isinstance(j, dict):
             out.append(j)
             continue
         co = company(j, alias, extra_titles)
-        co = seen.setdefault(company_norm(co).casefold(), co)
+        if not cited_company(j):
+            co = seen.setdefault(company_norm(co).casefold(), co)
         out.append(dict(j, name=name(j), co=co, src_plat=platform(j), dl=deadline(j)))
     return out
 
 
+VERIFIED = '程式核對過'
+
+
+def claims(job):
+    """卡上 agent 寫的每一個值 → 一筆紀錄 {claim, raw, state, marks}(找缺用 find._record 寫在 src.verification)。
+    讀卡上 agent 寫的值一律走這一支:state 是 VERIFIED 才是事實,其他是 agent 說的、沒核對到。
+    沒有紀錄的欄位(升級前的舊卡、手動加的卡)只有 sum 的原字,state 是 None:程式沒判斷過,照舊用。"""
+    job = job if isinstance(job, dict) else {}
+    src = job.get('src') if isinstance(job.get('src'), dict) else {}
+    checked = src.get('verification') if isinstance(src.get('verification'), dict) else {}
+    summary = checked.get('summary') if isinstance(checked.get('summary'), dict) else {}
+    recorded = {key: record for part in (checked.get('fields'), summary.get('fields')) if isinstance(part, dict)
+                for key, record in part.items() if isinstance(record, dict)}
+    old = job.get('sum') if isinstance(job.get('sum'), dict) else {}
+    return {**{key: {'claim': str(value), 'raw': '', 'state': None, 'marks': []}
+               for key, value in old.items() if value is not None}, **recorded}
+
+
+def said_each(record):
+    """一筆紀錄逐項的字,跟看板 claimSaid 同一套:核對過的是主張原字;其他照紀錄的標記逐項(agent 說：…),
+    沒有標記(舊卡只有 sum 的原字)才把主張標成 agent 說的;都沒有回 []。"""
+    record = record if isinstance(record, dict) else {}
+    claim = str(record.get('claim') or '')
+    if record.get('state') == VERIFIED:
+        return [claim] if claim else []
+    marks = [mark['text'] for mark in record.get('marks') or [record.get('mark')]
+             if isinstance(mark, dict) and mark.get('text')]
+    return marks or ([f'agent 說：{claim}'] if claim else [])
+
+
+def said(record):
+    """said_each 逐項用「、」接成看板摘要列的一段字。"""
+    return '、'.join(said_each(record))
+
+
+def iso_day(value):
+    """agent 寫的日期:一字不差是 YYYY-MM-DD 的一天才算;其他寫法回 ''(程式不從句子裡抓日期)。"""
+    import datetime
+    text = value if isinstance(value, str) else ''
+    try:
+        return text if datetime.date.fromisoformat(text).isoformat() == text else ''
+    except ValueError:
+        return ''
+
+
 def deadline(job):
-    """死線是哪一天(YYYY-MM-DD,認不出是 ''):摘要裡的截止日可能寫在一句話裡(2026.9.26 前)。
+    """死線是哪一天(YYYY-MM-DD,沒有是 ''):找缺卡的截止日紀錄程式核對過、一字不差是一天才算。
+    沒有紀錄的卡照舊:有 deadline 欄就用它,升級前的舊卡從摘要的截止日認(可能寫在一句話裡:2026.9.26 前)。
     看板拿它比今天(當地時間):那一天整天都還來得及。"""
-    s = job.get('sum')
-    m = re.search(r'(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})', str((s.get('deadline') if isinstance(s, dict) else '') or ''))
+    record = claims(job).get('deadline') or {}
+    if record.get('state') is not None:
+        return iso_day(record['claim']) if record['state'] == VERIFIED else ''
+    if 'deadline' in job:
+        return iso_day(job.get('deadline'))
+    m = re.search(r'(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})', str(record.get('claim') or ''))
     return '%s-%02d-%02d' % (m[1], int(m[2]), int(m[3])) if m else ''

@@ -105,6 +105,7 @@ CHECKS=[
    return bad.join('；');
  """),
  ('破壞性動作固定在卡片右側那條',"""
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
    var h=document.querySelectorAll('#app .cohead')[0]; if(!h)return '看板上沒有公司列';
    h.click();
    var card=document.querySelector('#app article[data-fid]');
@@ -118,6 +119,7 @@ CHECKS=[
    return bad.join('；');
  """),
  ('卡片不重複講同一件事',"""
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
    var h=document.querySelectorAll('#app .cohead')[0]; if(!h)return '看板上沒有公司列';
    h.click();
    var card=document.querySelector('#app article[data-fid]'); if(!card){h.click();return '展開公司列沒有卡';}
@@ -130,6 +132,7 @@ CHECKS=[
    return bad.join('；');
  """),
  ('主要按鈕摸得到(高度 ≥32px)',"""
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
    var h=document.querySelectorAll('#app .cohead')[0]; if(!h)return '看板上沒有公司列';
    h.click();
    var card=document.querySelector('#app article[data-fid]'); if(!card){h.click();return '展開公司列沒有卡';}
@@ -238,13 +241,13 @@ CHECKS=[
        document.getElementById('ivr-date').value='2031-01-02'; document.getElementById('ivr-time').value='09:30';
        [['ivr-date','日期'],['ivr-time','時間'],['ivr-how','怎麼面'],['ivr-where','在哪'],['ivr-note','備註']].forEach(function(f){var el=document.getElementById(f[0]), k=el.labels&&el.labels[0];
          if(!k||k.textContent.trim()!==f[1]||k.closest('.cfg-row').querySelectorAll('.cfg-in').length!==1)bad.push('記時間的視窗:#'+f[0]+' 沒有自己那一行、綁在那一格的名字「'+f[1]+'」');});
-       document.getElementById('ivr-how').value='電話'; document.getElementById('ivr-where').value='https://meet.google.com/abc-defg-hij';
+       document.getElementById('ivr-how').value='電話'; document.getElementById('ivr-where').value='https://meet.example/abc-defg-hij';
        document.querySelector('#rzmodal [data-ivrsave]').click();
        await T.until(function(){return document.querySelectorAll('#app .iv-round').length===nr0+1;},5000);
        var nr=[...document.querySelectorAll('#app .iv-round')].filter(function(r){return r.textContent.indexOf('01/02（四） 09:30 電話')>=0;})[0];
        if(!nr)bad.push('記了一輪 2031-01-02 09:30 電話,那一塊沒出現「01/02（四） 09:30 電話」');
        else{var wl=nr.querySelector('.iv-round-w a');
-         if(!wl||wl.textContent.trim()!=='開連結↗'||wl.getAttribute('href')!=='https://meet.google.com/abc-defg-hij')bad.push('面試在哪裡填了視訊連結,那一輪的連結字不是「開連結↗」('+(wl?wl.textContent.trim():'沒有連結')+')');nr.querySelector('[data-ivround]').click(); await T.idle(); document.querySelector('#rzmodal [data-ivrdel]').click();
+         if(!wl||wl.textContent.trim()!=='開連結↗'||wl.getAttribute('href')!=='https://meet.example/abc-defg-hij')bad.push('面試在哪裡填了視訊連結,那一輪的連結字不是「開連結↗」('+(wl?wl.textContent.trim():'沒有連結')+')');nr.querySelector('[data-ivround]').click(); await T.idle(); document.querySelector('#rzmodal [data-ivrdel]').click();
          await T.until(function(){return document.querySelectorAll('#app .iv-round').length===nr0;},5000);
          if(document.querySelectorAll('#app .iv-round').length!==nr0)bad.push('刪掉那一輪之後沒回到原本');}}
      // 追問收在原題裡面,不另佔一行
@@ -392,6 +395,7 @@ CHECKS=[
  # 漏掉這半條的時候,他在待評估頁上看到一張掛著「正在準備履歷」的卡,
  # 以為沒生效又按一次。這裡兩半一起驗。
  ('標完心情卡片留在原地,按了加入準備就離開',"""
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
    var h=document.querySelectorAll('#app .cohead')[0]; if(h)h.click();
    var card=document.querySelector('#app article[data-fid]'); if(!card)return '找不到卡片';
    var fid=card.getAttribute('data-fid');
@@ -426,6 +430,7 @@ CHECKS=[
    return bad.join('；');
  """),
  ('破壞性動作做完就地可復原',"""
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
    var h=document.querySelectorAll('#app .cohead')[0]; if(!h)return '看板上沒有公司列';
    h.click();
    var card=document.querySelector('#app article[data-fid]'); if(!card){h.click();return '展開公司列沒有卡';}
@@ -441,6 +446,27 @@ CHECKS=[
    var tab=document.querySelector('[data-tab="cfg"]'); if(!tab)return '沒有設定頁';
    tab.click(); await T.until(function(){return document.querySelector('[data-cfsync]');},15000);
    var button=document.querySelector('[data-cfsync]'); if(!button)return '沒有全部同步按鈕';
+   var selectors=[...document.querySelectorAll('[data-cfsync]')].map(function(b){
+     try{return {button:b,args:JSON.parse(b.getAttribute('data-cfsync')||'{}')};}catch(_e){return {button:b,args:null};}
+   });
+   var single=selectors.find(function(x){return x.args&&x.args.platform==='board-check.example';});
+   if(!single)return '履歷列沒有單份同步按鈕';
+   if(single.args.lang!=='zh'||single.args.variant!=='board-check')return '單份同步按鈕選錯履歷';
+   var realFetch=window.fetch, selected=null;
+   window.fetch=function(url,options){
+     if(String(url)==='/api/run/sync'){
+       selected=JSON.parse((options||{}).body||'{}');
+       return Promise.resolve({ok:true,json:function(){return Promise.resolve({phase:'nothing',running:false});}});
+     }
+     return realFetch.apply(this,arguments);
+   };
+   single.button.click(); await T.frame(); await T.idle(); window.fetch=realFetch;
+   if(!selected||selected.platform!=='board-check.example'||selected.lang!=='zh'||selected.variant!=='board-check')
+     return '單份同步沒有送出正確的履歷選擇';
+   button=[...document.querySelectorAll('[data-cfsync]')].find(function(b){
+     try{return !Object.keys(JSON.parse(b.getAttribute('data-cfsync')||'{}')).length;}catch(_e){return false;}
+   });
+   if(!button)return '找不到全部同步按鈕';
    var before=await fetch('/api/rev').then(function(x){return x.json();});
    var old=(before.sync||{}).t0||0;
    button.click();
@@ -448,7 +474,7 @@ CHECKS=[
      return r.sync&&r.sync.t0>old&&['done','nothing','incomplete'].indexOf(r.sync.phase)>=0?r.sync:null;},15000);
    if(document.querySelector('[data-tab="none"]'))document.querySelector('[data-tab="none"]').click();
    return result&&result.msg?'':'全部同步沒有背景結果';
- """),
+ """,'sync_review',{'fresh_page': True}),
 ]
 
 # ---- 存檔這條路:每一條都是他先撞到才發現、而且會安靜掉資料的 bug ----
@@ -616,6 +642,20 @@ SAVE_CHECKS=[
    await T.put(A,a0); await T.put(B,b0); await T.resync();
    return bad.join('；');
  """),
+ ('這台存過的那一格,別的裝置又改回原樣:這台跟著變回去',"""
+   var A=T.open(0).getAttribute('data-fid'), a0=(await T.state())[A]||null, bad=[];
+   function rev(){return fetch('/api/rev').then(function(r){return r.json();}).then(function(v){return v.rev;});}
+   var r0=await rev(), ta=T.card(A).querySelector('.fb-t');
+   T.type(ta,'這台打的字'); T.leave(ta); await T.idle();
+   if(((await T.state())[A]||{}).n!=='這台打的字')return '這台打的字沒存進去';
+   await T.put(A,a0);
+   // 版本號是內容指紋:改回原樣就跟這台存之前同號,這條考的就是這種情況
+   var r1=await rev(); if(r1!==r0)return '劇本沒湊出來:改回原樣後版本號 '+r0+' → '+r1+',要換一種改回去的方式';
+   await T.resync();
+   if((FB0()[A]||{}).n!==(a0||{}).n)bad.push('別台改回原樣,這台還留著自己存過的字(以為已經是最新的)');
+   if(T.card(A).querySelector('.fb-t').value!==((a0||{}).n||''))bad.push('畫面上還是這台存過的字');
+   return bad.join('；');
+ """),
  ('別的裝置改了同一格:留這台打的字,告訴他,按復原換回那邊的',"""
    var A=T.open(0).getAttribute('data-fid'), a0=(await T.state())[A]||null, bad=[];
    // 這個分頁還不知道別台改過(輪詢剛好跟上的話它就知道了,那不是撞到):這段時間輪詢拿到的都是改之前的版本
@@ -758,7 +798,7 @@ OUTCOME_CHECKS=[
    if(start<0){document.querySelector('[data-tab="none"]').click(); return '沒有來源平台拆分';}
    for(var i=start+1;i<rows.length&&!rows[i].classList.contains('fn-g');i++)platformRows.push(rows[i]);
    var platforms={}; platformRows.forEach(function(r){platforms[r.cells[0].textContent.trim()]=r.cells[1].textContent.trim();});
-   if(platforms['104']!=='1'||platforms['LinkedIn']!=='1'){
+   if(platforms['board-x.example']!=='1'||platforms['board-y.example']!=='1'){
      document.querySelector('[data-tab="none"]').click(); return '平台列或各列投出數不符: '+JSON.stringify(platforms);
    }
    var reason=funnel.querySelector('.fn-reasons li'), link=reason&&reason.querySelector('a.fn-source');
@@ -994,6 +1034,102 @@ WEB_CHECKS.append(('設定頁:偏好筆記分開顯示、編輯後存得住,手�
    return bad.join('；');
  """))
 
+WEB_CHECKS.append(('設定頁:網站筆記可新增、編輯、刪除,來源輪次打開證據夾、文字框至少卡片內寬九成',"""
+   document.querySelector('[data-tab="cfg"]').click(); await T.idle();
+   var bad=[], fold=document.querySelector('#app details[data-fold="cfg:website-notes"]');
+   if(!fold)return '找不到網站筆記設定';
+   if(!fold.open)fold.querySelector('summary').click();
+   await T.idle();
+   var textareas=[...fold.querySelectorAll('textarea[data-wn-text],textarea[data-wn-new-text]')];
+   var narrow=textareas.filter(function(textarea){
+     var card=textarea.closest('.cfg-card');
+     return !card||textarea.getBoundingClientRect().width<card.clientWidth*.9;
+   });
+   if(narrow.length)bad.push(narrow.length+' 個網站筆記文字框不到卡片內寬九成');
+   var source=document.querySelector('[data-wn-source="'+P.source_id+'"]');
+   if(!source)return '有證據輪次的筆記沒有來源連結';
+   var evidence=await fetch(source.getAttribute('href'));
+   if(!evidence.ok||!(await evidence.text()).includes('events.jsonl'))bad.push('來源連結沒有打開該輪證據夾');
+   var url='https://website-notes-ui-check.example/jobs/570';
+   var addUrl=document.querySelector('[data-wn-url]'), addText=document.querySelector('[data-wn-new-text]');
+   var add=document.querySelector('[data-wn-add]');
+   if(!addUrl||!addText||!add)return '沒有新增網站筆記的欄位';
+   addUrl.value=url; addText.value='BOARD-CHECK-WEBSITE-NOTE-570'; add.click();
+   var created=null;
+   await T.until(async function(){
+     var d=await fetch('/api/settings/website_notes').then(function(r){return r.json();});
+     created=(d.notes||[]).find(function(n){return n.url===url&&n.text==='BOARD-CHECK-WEBSITE-NOTE-570';});
+     return !!created;
+   },10000);
+   if(!created)return '新增的網站筆記沒有存起來';
+   await T.until(function(){return !!document.querySelector('[data-wn-text="'+created.id+'"]');},5000);
+   var editor=document.querySelector('[data-wn-text="'+created.id+'"]');
+   var save=document.querySelector('[data-wn-save="'+created.id+'"]');
+   if(!editor||!save)return '新增筆記沒有出現在設定頁';
+   editor.value='BOARD-CHECK-WEBSITE-NOTE-570-EDITED'; save.click();
+   await T.until(async function(){
+     var d=await fetch('/api/settings/website_notes').then(function(r){return r.json();});
+     var n=(d.notes||[]).find(function(x){return x.id===created.id;});
+     return n&&n.text==='BOARD-CHECK-WEBSITE-NOTE-570-EDITED'&&n.author==='user';
+   },10000);
+   var updated=(await fetch('/api/settings/website_notes').then(function(r){return r.json();})).notes||[];
+   if(!updated.some(function(n){return n.id===created.id&&n.text==='BOARD-CHECK-WEBSITE-NOTE-570-EDITED'&&n.author==='user';}))
+     bad.push('編輯後沒有保存為使用者自訂');
+   var remove=document.querySelector('[data-wn-delete="'+created.id+'"]');
+   if(!remove)return '沒有刪除網站筆記的按鈕';
+   remove.click();
+   await T.until(async function(){var d=await fetch('/api/settings/website_notes').then(function(r){return r.json();});
+     return !(d.notes||[]).some(function(n){return n.id===created.id;});},10000);
+   await T.until(function(){return !document.querySelector('[data-wn-text="'+created.id+'"]');},5000);
+   if((await fetch('/api/settings/website_notes').then(function(r){return r.json();})).notes.some(function(n){return n.id===created.id;}))
+     bad.push('刪除後筆記仍存在');
+   var undo=document.querySelector('#snack .snack-undo');
+   if(!undo)bad.push('刪除網站筆記後沒有復原按鈕');
+   else{
+     undo.click();
+     await T.until(async function(){var d=await fetch('/api/settings/website_notes').then(function(r){return r.json();});
+       return (d.notes||[]).some(function(n){return n.id===created.id&&n.text==='BOARD-CHECK-WEBSITE-NOTE-570-EDITED';});},10000);
+     await T.until(function(){return !!document.querySelector('[data-wn-delete="'+created.id+'"]');},5000);
+     var restored=document.querySelector('[data-wn-delete="'+created.id+'"]');
+     if(!restored)bad.push('復原後網站筆記沒有回到設定頁');
+     else restored.click();
+     await T.until(async function(){var d=await fetch('/api/settings/website_notes').then(function(r){return r.json();});
+       return !(d.notes||[]).some(function(n){return n.id===created.id;});},10000);
+   }
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
+   return bad.join('；');
+ """,'website_note_board_check'))
+
+WEB_CHECKS.append(('設定頁:同步清單顯示事實標記、本機前後值、所有比較頁、分組與變動數',"""
+   document.querySelector('[data-tab="cfg"]').click(); await T.idle();
+   var fold=document.querySelector('details[data-fold="cfg:resumes"]');
+   if(!fold)return '找不到履歷設定';
+   if(!fold.open)fold.querySelector('summary').click(); await T.idle();
+   var list=fold.querySelector('.cfg-sync-list');
+   if(!list)return '找不到同步改動清單';
+   var bad=[], text=list.textContent, pages=[...list.querySelectorAll('details.cfg-sync-page')];
+    if(!text.includes('原稿一字不差找到'))bad.push('沒有列事實標記');
+    if(!text.includes('改前讀得到：是；改後讀得到：否'))bad.push('沒有列刪除項目的前後讀取狀態');
+   if(!text.includes('履歷摘要')||!text.includes('原本的摘要')||!text.includes('新版摘要'))
+     bad.push('沒有列這次本機原稿的改前與改後');
+   if(!text.includes('程式比對 2 頁；共 1 處可見變動'))bad.push('比較頁數或變動總數不符');
+   if(pages.length!==2)bad.push('比較了 '+pages.length+' 頁,應為 2 頁');
+   if(pages.length===2&&(!pages[0].textContent.includes('sync.example/profile/one')||
+      !pages[1].textContent.includes('sync.example/profile/two')||
+      !pages[1].textContent.includes('這一頁沒有可見文字變動')))
+     bad.push('頁面沒有按分頁分組或沒有列出未變動頁');
+   var unchanged=[...fold.querySelectorAll('.cfg-sync-list')].find(function(row){
+     return row.textContent.includes('sync.example/profile/three');
+   });
+   if(!unchanged||!unchanged.textContent.includes('程式比對 1 頁；共 0 處可見變動')||
+      !unchanged.textContent.includes('sync.example/profile/three · 0 處')||
+      !unchanged.textContent.includes('這一頁沒有可見文字變動'))bad.push('沒有變動的頁面被算成可見變動');
+   if(list.querySelectorAll('.cfg-sync-change details').length!==1)bad.push('改動不能逐筆展開');
+   if(list.querySelectorAll('.cfg-sync-shot img').length!==2)bad.push('改動缺少改前或改後截圖');
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
+   return bad.join('；');
+ """,'sync_review'))
+
 WEB_CHECKS.append(('首頁「要你處理」:散在各頁要你動手的事列在最上面,點 Agent 回報那一顆就打開回報、捲到那裡',"""
    // 放一件要你處理的回報(跟步數量測同一種假回報),檢查完拿掉
    var st0=await T.state(), box0=(st0.__inbox__||[]).slice();
@@ -1075,7 +1211,7 @@ ans.push({k:'zz_nat',q:'你的國籍(測試)',v:'Taiwan',zh:'台灣',why:'測試
 ans.push({k:'zz_empty',q:'空白測試',v:'',why:'',inf:'2026-01-01'});
 ans.push({k:'zz_why',q:'為什麼對這個職位有興趣(測試)',v:'Because.',zh:'因為。',pj:1,pjw:'測試用',why:'',at:'2026-01-01'});   // 這缺專用,只有第一張在用   // 答案還空著:不給 ✓(一按就變成「都確認過了」)   // 每次內容都不同:版本號是內容雜湊,種回一模一樣的內容,頁面會以為沒變
 // 兩張可投遞都是 agent 已經填好、停在送出前的樣子:確認的是那一頁,還沒填過的卡不給確認
-// (真的送出要叫回填這張的那段對話,沒有就整筆作廢,見 apply_run._no_session)。
+// (真的送出要叫回填這張的那段對話,沒有就整筆作廢,由 fill.eligible 判斷)。
 await T.put('__ans__',ans);
 await T.resync();
 document.querySelector('[data-tab="ship"]').click(); await T.idle();
@@ -1424,6 +1560,7 @@ ANS_CHECKS = [
    // 要他處理的回報一定附他要去的那一頁(#389):標題列就點得開,開新分頁
    var link=document.querySelector('#inboxbar [data-ib="rzz1"] summary a[href="https://example.com/login"]');
    if(!link||link.target!=='_blank')bad.push('要他處理的回報沒附點得開的那一頁');
+    if(link&&!/example\.com/.test(link.textContent))bad.push('回報沒有顯示要處理的網站');
    if(!r2)bad.push('缺證據的回報沒列出來');
    else{if(/你要做的/.test(r2.textContent))bad.push('缺證據的回報還寫「你要做的」');
      // 沒附截圖的收在最後一個子開合,標題寫原因
@@ -1557,14 +1694,6 @@ VERIFY_CHECKS=[
    document.querySelector('[data-tab="none"]').click();
    return bad.join('；');
  """, 'status_issue'),
- ('無法確認的連結不能算已下架一鍵移除',"""
-   if(!P.sid)return '找不到第二張待決假卡';
-   await T.resync();
-   document.querySelector('[data-tab="ready"]').click(); await T.idle();
-   var bad=document.querySelector('[data-closedrm="ready"]');
-   document.querySelector('[data-tab="none"]').click();
-   return bad?'soft 連結提示被當成確定下架的一鍵移除候選':'';
- """, 'status_issue'),
 ]
 # 捲下去會切成「已捲動」(回頂鈕出現)。以前分頁列跟著縮成一行,縮了頁面變矮 → 捲動錨定把位置往回推 → 又判成該展開……
 # 頁面只比畫面長一點點時一秒來回 60 次。現在分頁列不縮了,這條守住「切換不改頁面高度、不來回閃」。
@@ -1649,20 +1778,17 @@ PREP_CHECKS=[
 def status_issue(board):
     """模擬投遞前驗收重跑之後多了一個問題(board_status --write 也是走看板檔唯一的寫入)。"""
     import board_doc as bd
+    import board_status
     def put(d):
         fb=d['fb']
         ready=[j['id'] for j in d['data']['jobs'] if (fb.get(j['id']) or {}).get('app')=='ready']
         fid=ready[0] if ready else None
-        sid=ready[1] if len(ready)>1 else None
         if not fid: return bd.SKIP
-        st=dict(d['data'].get('status') or {},schema_version=2,checked_links=True)
+        st=dict(d['data'].get('status') or {},schema_version=board_status.SCHEMA_VERSION)
         st['issues']=[x for x in st.get('issues') or [] if x.get('jid') not in ready]+[
-            {'jid':fid,'t':'','stage':'ready','msg':'測試用的原因'}]
-        if sid:
-            st['issues'].append({'jid':sid,'kind':'unverified','soft':True,'stage':'ready',
-                                 'msg':'無法確認是否已下架'})
+            {'jid':fid,'t':'','stage':'ready','kind':'files','msg':'測試用的原因'}]
         d['data']['status']=st
-        return {'fid':fid,'sid':sid}
+        return {'fid':fid}
     got=bd.rewrite(put,board,by='board_check')
     return {} if got is bd.SKIP else got
 
@@ -1950,7 +2076,7 @@ SAVE_CHECKS.append(
 
 
 def research_round(board):
-    """模擬找缺跑完一輪(research.run 收尾也是直接寫檔)。"""
+    """為看板的找缺歷史面板放一筆測試資料。"""
     import board_doc as bd
     bd.set_data(lambda data, fb: data.__setitem__('research', [{'round': '2026-09-22 04:30', 'mode': 'dir',
         'direction': '測試方向二', 'judged': 3, 'kept': 0, 'added': [], 'dropped': {}, 'notes': '往 X 找'}]), live=board)
@@ -1984,6 +2110,51 @@ def seed_check_resume(url):
     with urllib.request.urlopen(save, timeout=setup_timeout) as response:
         if response.status != 200:
             raise RuntimeError('無法儲存看板檢查用履歷設定')
+
+
+def seed_sync_review(_board=None):
+    """給設定頁的同步清單檢查一份多分頁假資料;只在那一條種,每串檢查開始時清回去(見 restore_profiles)。"""
+    visual = {
+        'evidence': 'board-check-sync-list', 'item': '履歷摘要',
+        'intended_changes': [
+            {'item': '履歷摘要', 'before': '原本的摘要', 'after': '新版摘要',
+             'marker': '原稿一字不差找到'},
+            {'item': '舊技能', 'before': '待移除技能', 'after': '', 'marker': '',
+             'before_read': True, 'after_read': False},
+        ],
+        'pages_compared': [
+            {'page_tab_id': 'one', 'page_url': 'https://sync.example/profile/one'},
+            {'page_tab_id': 'two', 'page_url': 'https://sync.example/profile/two'},
+        ],
+        'page_changes': [{
+            'page_tab_id': 'one', 'page_url': 'https://sync.example/profile/one',
+            'item': '摘要', 'before_text': '原本的摘要', 'after_text': '新版摘要',
+            'before_shot': 'before.png', 'after_shot': 'after.png', 'verdicts': ['文字改動'],
+        }],
+    }
+    unchanged = {
+        'evidence': 'board-check-sync-list', 'item': '沒有變動的頁',
+        'before_text': '沒有變動的頁面內容', 'after_text': '沒有變動的頁面內容',
+        'pages_compared': [{'page_tab_id': 'three', 'page_url': 'https://sync.example/profile/three'}],
+        'page_changes': [],
+    }
+    entry = {'read': 'https://sync.example/profile/one', 'edit': 'https://sync.example/profile/one',
+             'sync_version': 'board-check-sync-list', 'sync_visuals': [visual, unchanged]}
+    path = os.path.join(os.environ['JOBSALVO_HOME'], 'profiles.json')
+    with open(path, 'w', encoding='utf-8') as file:
+        json.dump({'board-check.example': {'zh/' + CHECK_RESUME: entry}}, file, ensure_ascii=False)
+
+
+def restore_profiles(pristine):
+    """平台履歷登記回到開跑時的樣子:某一條種的平台履歷不帶到下一串(步數量測要量的是示範看板本身)。"""
+    path = os.path.join(os.environ['JOBSALVO_HOME'], 'profiles.json')
+    if pristine is None:
+        if os.path.exists(path):
+            os.remove(path)
+    else:
+        with open(path, 'wb') as file:
+            file.write(pristine)
+
 
 def flow_off(home):
     """這些規矩驗的是他手動按的那條路(種資料、按按鈕、看結果)。自動流程開著的話,
@@ -2562,6 +2733,126 @@ CHECKS=CHECKS+UX_CHECKS
 PRE={'external_write':external_write,'status_issue':status_issue,'research_round':research_round,
      'lazy_resume':lazy_resume,'xss_job':xss_job}
 PRE.update(ANS_PRE)
+
+def website_note_board_check(_board):
+    import card
+    url='https://board-check.example/jobs/website-notes'
+    card_id=card.card_id_from_url(url)
+    round_id='20261026-120000-000001-fill-board-check'
+    note={'id':'board-check-website-note-source','host':'board-check.example','text':'測試來源連結',
+          'url':url,'date':time.strftime('%Y-%m-%d'),'card_id':card_id,'round_id':round_id,'author':'agent'}
+    path=os.path.join(os.environ['JOBSALVO_HOME'],'website-notes.json')
+    with open(path,'w',encoding='utf-8') as f:
+        json.dump({'schema_version':1,'hosts':{note['host']:[note]}},f,ensure_ascii=False)
+    folder=os.path.join(os.environ['EVIDENCE_TMP'],'evidence',card_id,round_id)
+    os.makedirs(folder,exist_ok=True)
+    with open(os.path.join(folder,'events.jsonl'),'w',encoding='utf-8') as f:
+        f.write('{}\n')
+    return {'source_id':note['id']}
+
+PRE['website_note_board_check']=website_note_board_check
+PRE['sync_review']=seed_sync_review
+
+
+def find_claims_board_check(board):
+    """看板找缺卡片保留 agent 主張與來源標記,未核對摘要不可被畫成頁面事實。"""
+    import board_doc as bd
+    import jobrun
+
+    url = 'https://board-check.example/jobs/find-summary-claims'
+    fields = {
+        name: {'claim': claim, 'raw': f'原頁引用-{name}', 'state': '沒核對到',
+               'marks': [{'text': 'agent 說的・沒核對到'}]}
+        for name, claim in (('loc', 'Taipei remote'), ('salary', 'NT$80,000'),
+                            ('deadline', '2026-12-31'))
+    }
+    card = {
+        'id': url, 'target': 'Platform Engineer · Board Check Research',
+        'title': 'Platform Engineer', 'company': 'Board Check Research',
+        'cat': '其他', 'chan': '官方', 'note': '4', 'ammo': '', 'bk': False,
+        'dead': False, 'added': time.strftime('%Y-%m-%d'),
+        'sum': {'loc': 'Taipei remote', 'salary': 'NT$80,000', 'deadline': '2026-12-31'},
+        'terms_unknown': ['薪資'],
+        'src': {'fit': 4, 'mode': 'dir', 'direction': 'UI-DIRECTION', 'site': 'board-check.example',
+                'verification': {'state': 'review', 'fields': {}, 'summary': {'fields': fields}},
+                'risk': {'kind': 'ghost', 'why': 'UI-RISK-WHY', 'by': 'agent'},
+                'reposts': [{'claim': 'UI-REPOST-WHY', 'raw': 'Old Card｜https://board-check.example/jobs/old',
+                             'state': '沒核對到',
+                             'marks': [{'source': 'agent 說的', 'text': 'agent 說「UI-REPOST-WHY」'}]},
+                            {'url': 'https://board-check.example/jobs/legacy', 'title': 'Legacy', 'mark': '喜歡'}]},
+    }
+    bd.set_data(lambda data, _fb: data.setdefault('jobs', []).append(card), live=board)
+    status_dir = os.path.join(os.path.dirname(board), '.research')
+    os.makedirs(status_dir, exist_ok=True)
+    jobrun.write(os.path.join(status_dir, 'converge_status.json'), {
+        'phase': 'done', 'mode': 'dir', 'direction': 'UI-DIRECTION', 'found': 1,
+        'added': 1, 'finished_at': time.time(), 'msg': 'UI-INCOMPLETE-MESSAGE',
+    })
+    return {'id': url}
+
+
+PRE['find_claims_board_check'] = find_claims_board_check
+
+FIND_CHECKS.append(('找缺卡片把未核對摘要、未知條件、agent 判斷的風險與重貼標明,上一輪交件問題仍看得到', r'''
+   document.querySelector('[data-tab="none"]').click(); await T.resync(); await T.idle();
+   var bad=[], heads=[...document.querySelectorAll('#app .cohead')];
+   var head=heads.find(function(h){return h.textContent.includes('Board Check Research');});
+   if(head&&!head.parentNode.open){head.click(); await T.idle();}
+   var card=T.card(P.id);
+   if(!card)return '找缺的新卡沒有出現在待評估';
+   var group=card.closest('details.cogrp'); if(group&&!group.open){group.querySelector('summary').click(); await T.idle();}
+   card=T.card(P.id);
+   if(card.querySelectorAll('.facts .fact-unverified').length!==3)bad.push('地點、薪資、截止日沒有逐項標「agent 說的・沒核對到」');
+   if(!card.textContent.includes('agent 說查不到：薪資'))bad.push('agent 回報查不到的條件沒有照實標明來源');
+   if(!card.textContent.includes('agent 判斷：可能是幽靈職缺')||!card.textContent.includes('UI-RISK-WHY'))bad.push('幽靈職缺理由沒有標成 agent 判斷');
+   if(!card.textContent.includes('agent 判斷：可能是重貼')||!card.textContent.includes('UI-REPOST-WHY'))bad.push('重貼沒有標成 agent 判斷、附它引的舊卡');
+   if(card.textContent.includes('一字不差相同'))bad.push('看板還在說程式比過公司職稱');
+   var details=document.getElementById('finddet'); if(details)details.open=true;
+   await T.resync();
+   var status=(document.getElementById('find-st')||{}).textContent||'';
+   if(!status.includes('UI-INCOMPLETE-MESSAGE'))bad.push('上一輪交件問題沒有出現在找缺狀態');
+   return bad.join('；');
+''', 'find_claims_board_check'))
+
+def find_claims_interview_check(board):
+    """記成面試中的找缺卡:沒核對到的摘要與截止日在面試頁也只能標成 agent 說的。"""
+    import board_doc as bd
+
+    url = 'https://board-check.example/jobs/find-claims-interview'
+    said = {'bar': 'UI-IV-BAR', 'co': 'UI-IV-CO', 'deadline': '2026-01-31 extended'}
+    card = {
+        'id': url, 'target': 'Platform Engineer · Board Check Interview',
+        'title': 'Platform Engineer', 'company': 'Board Check Interview',
+        'cat': '其他', 'chan': '官方', 'note': '4', 'ammo': '', 'bk': False,
+        'dead': False, 'added': time.strftime('%Y-%m-%d'), 'sum': dict(said),
+        'src': {'fit': 4, 'mode': 'dir', 'site': 'board-check.example', 'verification': {
+            'state': 'review', 'fields': {}, 'summary': {'fields': {
+                name: {'claim': claim, 'raw': '', 'state': '沒核對到',
+                       'marks': [{'source': 'agent 說的', 'text': f'agent 說「{claim}」'}]}
+                for name, claim in said.items()}}}},
+    }
+    bd.set_data(lambda data, _fb: data.setdefault('jobs', []).append(card), live=board)
+    bd.set_fb(lambda fb: fb.update({url: {'app': 'sent', 'oc': 'iv'}}), live=board)
+    return {'id': url}
+
+
+PRE['find_claims_interview_check'] = find_claims_interview_check
+
+FIND_CHECKS.append(('面試頁的找缺卡:沒核對到的門檻、公司內容標明是 agent 說的,沒核對到的截止日不算死線', r'''
+   var t=document.querySelector('[data-tab="iv"]'); if(!t)return '沒有 🎤 面試準備那一籤';
+   t.click(); await T.idle();
+   var v=document.querySelector('#app [data-ivview="iv"]'); if(v){v.click(); await T.idle();}
+   var row=document.querySelector('#app .iv-jrow[data-ivopen="'+P.id+'"]');
+   if(!row)return '記成面試中的找缺卡沒有出現在面試清單';
+   row.click(); await T.idle();
+   var job=document.querySelector('#app .iv-job'); if(!job)return '點進那一場沒看到在面什麼';
+   var bad=[];
+   if(!job.textContent.includes('UI-IV-BAR')||!job.textContent.includes('UI-IV-CO'))bad.push('面試頁沒有畫出 agent 寫的門檻與公司內容');
+   if(job.querySelectorAll('.sum .fact-unverified').length!==2)bad.push('門檻、公司內容沒有逐項標「agent 說的・沒核對到」');
+   if(job.textContent.includes('死線已過'))bad.push('沒核對到的截止日被當成死線');
+   return bad.join('；');
+''', 'find_claims_interview_check'))
+
 CHECKS=CHECKS+SAVE_CHECKS+PREP_CHECKS+FIND_CHECKS+[
   ('設定頁:分類、標籤的關鍵字寫錯,存的時候看到的就是後台拒絕的那一句(看板不自己先擋)',r'''
     var bad=[];
@@ -3148,10 +3439,10 @@ CHECKS.append((
     r"""
       var bad=[], originalFetch=window.fetch;
       var longName='ExecutiveResumeNameWithNoSpacesAndAnUnusuallyLongEnglishIdentifierForMobileLayoutRegressionCheck'.repeat(2);
-      var mk=function(variant,state,extra){return Object.assign({platform:'LinkedIn',lang:'en',variant:variant,state:state},extra||{});};
+      var mk=function(variant,state,extra){return Object.assign({platform:'board-check.example',lang:'en',variant:variant,state:state},extra||{});};
       var states=[mk(longName,'ok',{confirmation_pending:true}),mk('short-name','master-changed')];
       // 短名那份上一輪沒同步過:原因另起一行寫在下面,不能把名字和狀態拆開
-      var results=[{platform:'LinkedIn',lang:'en',variant:'short-name',ok:false,msg:'HTTP 503: sync failed'}];
+      var results=[{platform:'board-check.example',lang:'en',variant:'short-name',ok:false,msg:'HTTP 503: sync failed'}];
       window.fetch=async function(input,init){
         var response=await originalFetch(input,init), url=String(input);
         if(url.indexOf('/api/settings')>=0&&(!init||!init.method||init.method==='GET')){
@@ -3199,8 +3490,8 @@ CHECKS.append((
     '設定頁平台履歷:狀態已同步的那份不看上一輪的失敗結果,還沒同步好的照舊寫原因',
     r"""
       var bad=[], originalFetch=window.fetch;
-      var mk=function(variant,state){return {platform:'LinkedIn',lang:'en',variant:variant,state:state};};
-      var fail=function(variant){return {platform:'LinkedIn',lang:'en',variant:variant,ok:false,msg:'HTTP 503: sync failed'};};
+      var mk=function(variant,state){return {platform:'board-check.example',lang:'en',variant:variant,state:state};};
+      var fail=function(variant){return {platform:'board-check.example',lang:'en',variant:variant,ok:false,msg:'HTTP 503: sync failed'};};
       // 上一輪全部同步兩份都沒過,之後第一份被別的流程同步成功(狀態 ok),第二份真的還沒好
       var states=[mk('synced-later','ok'),mk('still-failing','master-changed')];
       var results=[fail('synced-later'),fail('still-failing')];
@@ -3229,7 +3520,7 @@ CHECKS.append((
       var okRow=rowFor('synced-later'), failRow=rowFor('still-failing');
       var text=function(row){var s=row&&row.querySelector('.cfg-file'); return s?s.textContent:'';};
       var cause=function(row){return row&&row.querySelector('.cfg-help');};
-      if(text(okRow).indexOf('已同步')<0)bad.push('之後同步成功的那份,狀態格不是「已同步」');
+      if(text(okRow).indexOf('已跟上最新原稿')<0)bad.push('之後同步成功的那份,狀態格不是「已跟上最新原稿」');
       if(cause(okRow))bad.push('之後同步成功的那份,還掛著上一輪的「卡住」');
       if(text(failRow).indexOf('落後')<0)bad.push('還沒同步好的那份,狀態格不是「落後」');
       if(!cause(failRow)||cause(failRow).textContent.indexOf('卡住：HTTP 503: sync failed')<0)bad.push('還沒同步好的那份,下一行沒寫失敗原因');
@@ -3718,7 +4009,6 @@ CHECKS.append((
 
 def human_check_ship_case(board):
     """一張可投遞卡:agent 去填,那個網站停在真人驗證(Cloudflare),填不了。"""
-    import apply_tab
     import board_doc as bd
     jobs = bd.load(board)['data'].get('jobs') or []
     job = next(j for j in jobs[12:] if str(j['id']).startswith('http'))
@@ -3729,8 +4019,9 @@ def human_check_ship_case(board):
         entry['app'] = 'ship'
         entry['form'] = {'plat': '測試', 'f': []}
         entry['ds'] = 'stuck'
-        entry['apply'] = {'stage': 'fill', 'issues': [apply_tab.HUMAN_CHECK], 'session': 'board-check-cf',
-                          'tab_id': '777', 'at': '2026-01-01T00:00:00'}
+        entry['apply'] = {'stage': 'fill', 'issues': ['卡住:要本人登入'],
+                          'block': {'kind': 'human', 'text': '網站要本人登入或驗證'},
+                          'session': 'board-check-cf', 'tab_id': '777', 'at': '2026-01-01T00:00:00'}
 
     bd.set_fb(mut, live=board, by='board_check')
     return {'id': job['id']}
@@ -3910,12 +4201,11 @@ CHECKS.append((
         open(); await T.idle();
         var want={posted_days:7,applicants_max:10,salary_min:50000,exp_max:3,location:'台北 遠端'};
         for(var k in want){ if(!cell(k)){bad.push('找缺面板沒有「'+k+'」這一格'); continue;} fill(k,String(want[k])); await T.idle(); }
-        var cb=document.querySelector('#findrow [data-fstrict="salary_min"]');
-        if(!cb)bad.push('薪資沒有「查不到就排除」');
-        else{cb.checked=true; cb.dispatchEvent(new Event('change',{bubbles:true})); await T.idle();}
+        var findrow=document.querySelector('#findrow');
+        if(findrow&&findrow.textContent.indexOf('查不到就排除')>=0)bad.push('找缺條件還提供未核實欄位排除選項');
         var got=await terms();
         for(var k2 in want){ if(got[k2]!==want[k2])bad.push(k2+' 存成 '+JSON.stringify(got[k2])+'(填的是 '+want[k2]+')'); }
-        if((got.strict||[]).indexOf('salary_min')<0)bad.push('勾了薪資查不到就排除,沒存進去');
+        if(got.strict)bad.push('設定仍接受查不到就排除');
         // 重畫後還在
         document.querySelector('[data-tab="like"]').click(); await T.idle();
         document.querySelector('[data-tab="none"]').click(); await T.idle(); open(); await T.idle();
@@ -4502,62 +4792,6 @@ CHECKS.append((
 ))
 
 
-def confirmed_submission_evidence_case(board):
-    """經過正式回音 parser 與套用函式,在副本加入一封確認信。"""
-    import board_doc as bd
-    import reply_run as rr
-    parsed_board = bd.load(board)
-    feedback = json.loads(parsed_board['fb'])
-    jobs = parsed_board['data'].get('jobs') or []
-    job = next((item for item in jobs if (feedback.get(item['id']) or {}).get('ev')), None)
-    if not job:
-        weak_submission_evidence_case(board)
-        parsed_board = bd.load(board)
-        feedback = json.loads(parsed_board['fb'])
-        jobs = parsed_board['data'].get('jobs') or []
-        job = next((item for item in jobs if (feedback.get(item['id']) or {}).get('ev')), None)
-    if not job:
-        raise ValueError('找不到只有送出頁證據的測試卡')
-    from numbered import Numbered
-    url = job['id']
-    source_ref = 'email:board-check'
-    numbered = Numbered()                 # 程式編號交出去的那一封合成確認信:引了它的回音才算核實
-    numbered.add('2026-09-21 確認已收到此次應徵', 'mail', source_ref)
-    finding = {
-        'url': url, 'source_ref': source_ref, 'source_type': 'email',
-        'source': 'Gmail 合成確認信', 'date': '2026-09-21',
-        'summary': '合成確認信', 'link': 'https://mail.google.com/mail/u/0/#all/board-check',
-        'kind': 'confirm', 'quote': [1],
-    }
-    result = rr.parse_result(
-        {'material_id': numbered.material_id, 'checked': [url], 'findings': [finding]}, [url],
-        source_types={source_ref: 'email'}, numbered=numbered,
-    )
-    bd.set_fb(lambda fb: rr.apply_findings(fb, result.findings), live=board, by='board_check')
-    return {'id': url, 'source_ref': source_ref}
-
-
-PRE['confirmed_submission_evidence_case'] = confirmed_submission_evidence_case
-CHECKS.append((
-    '確認信經過回音流程後清除弱證據標記',
-    r"""
-      var bad=[], tab=document.querySelector('[data-tab="sent"]');
-      if(!tab)return '找不到已投遞分頁';
-      tab.click(); await T.resync();
-      [...document.querySelectorAll('#app .cohead')].forEach(function(h){if(!h.parentNode.open)h.click();});
-      await T.idle();
-      var card=T.card(P.id), state=await T.state(), evidence=(state[P.id]||{});
-      if(evidence.ev)bad.push('回音流程已確認來源,弱證據資料仍存在');
-      if((evidence.replies||{}).items?.[0]?.source_ref!==P.source_ref)
-        bad.push('回音流程沒有保留合成確認信來源');
-      if(card&&card.querySelector('.ev-weak'))bad.push('回音流程確認來源後看板仍顯示弱證據標記');
-      if(!card)bad.push('找不到確認信測試卡');
-      return bad.join('；');
-    """,
-    'confirmed_submission_evidence_case',
-))
-
-
 # 快版(--fast)跳過的:這幾條要等副本上的假流程(job_fake)真的跑完,或等代投核准後 8 秒的反悔期,
 # 一條就 10~60 秒,合起來佔完整版一半以上的時間。規矩本身沒變,只是改介面時先不等它們。
 SLOW=('代投:','幫你填表:','代投修改:','找新職缺:','找新職缺面板','找缺紀錄:','跑準備區:',
@@ -4567,8 +4801,9 @@ SLOW=('代投:','幫你填表:','代投修改:','找新職缺:','找新職缺面
 def flow_on(board):
     """開自動流程,並放一份「驗收過、沒有問題」的結果(示範看板沒有;沒有的話推進可投遞一律被擋,那是對的)。"""
     import board_doc as bd
-    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00',
-                                                         'checked_links': True, 'issues': []}), live=board)
+    import board_status
+    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': board_status.SCHEMA_VERSION,
+                                                         'at': '2026-01-01 00:00', 'issues': []}), live=board)
     # 一條他確認過的答案:檢查裡把它標成「改過、網頁待重打」,看自動流程會不會叫 agent 重打
     # 挑一張還沒碰過的卡,先放一份用到它的表單(agent 填表時照記那幾欄):答案改了才有欄位可標重打。
     # 只放這一張:同一份副本後面的檢查還要用其他卡
@@ -4787,11 +5022,23 @@ CHECKS.append((
       var bad=[]; await T.resync();
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       var b=document.querySelector('[data-riskrm]'); if(!b)return '待評估沒有「可能已關:收掉」';
+      var days=document.querySelector('[data-riskdays]');
+      if(!days)bad.push('可能已關預覽沒有天數設定');
+      else{
+        days.value='365'; days.dispatchEvent(new Event('change',{bubbles:true}));
+        var saved=await T.until(async function(){var s=await fetch('/api/settings').then(function(r){return r.json();});
+          return ((s.effective||{}).board||{}).risk_days===365;},8000);
+        if(!saved)bad.push('改過的天數沒有存進使用者設定');
+        days=document.querySelector('[data-riskdays]');
+        if(days){days.value='180'; days.dispatchEvent(new Event('change',{bubbles:true}));
+          await T.until(async function(){var s=await fetch('/api/settings').then(function(r){return r.json();});
+            return ((s.effective||{}).board||{}).risk_days===180;},8000); await T.idle();}
+      }
       if(matchMedia('(max-width:720px)').matches){
         var riskAction=document.querySelector('#pagehd .pg-act .rv-risk'), bulkSummary=document.querySelector('#pagehd .pg-act .bulkpv>summary');
         if(riskAction&&riskAction.getBoundingClientRect().height<44)bad.push('手機「移除可能已關」不到 44px');
         if(bulkSummary&&bulkSummary.getBoundingClientRect().height<44)bad.push('手機批次預覽不到 44px');}
-      b.click(); await T.idle();
+      document.querySelector('[data-riskrm]').click(); await T.idle();
       var s=await T.state(); if(!(s[P.id]||{}).rm)bad.push('收掉之後那張沒有進已移除');
       var un=document.querySelector('#snack .snack-undo'); if(!un)bad.push('收掉之後沒有「復原」');
       else{un.click(); await T.idle(); s=await T.state(); if((s[P.id]||{}).rm)bad.push('按了復原,那張還在已移除');}
@@ -4806,55 +5053,31 @@ CHECKS.append((
 ))
 
 
-def closed_ship_case(board):
-    """一張可投遞卡,驗收查到它已經下架。"""
-    import board_doc as bd
-    parsed = bd.load(board)
-    job = parsed['data']['jobs'][12]
-
-    def put_fb(fb):
-        fb.setdefault(job['id'], {})['app'] = 'ship'
-        fb[job['id']].pop('rm', None)
-    bd.set_fb(put_fb, live=board, by='board_check')
-    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True,
-        'issues': [{'jid': job['id'], 't': 'x', 'stage': 'ship', 'msg': '職缺已下架(HTTP 回 404/410 或重導離開職缺頁)'}]}), live=board)
-    return {'id': job['id']}
+FILES_PROBLEM = '可投遞夾尚未由本模組建置驗收'     # board_status 寫進驗收的 ship.check 原句
 
 
-PRE['closed_ship_case'] = closed_ship_case
+def files_case(stage):
+    """一張待你決定/可投遞的卡,投遞前驗收(board_status --write)查到它要寄的檔案有問題。"""
+    def seed(board):
+        import board_doc as bd
+        import board_status
+        job = bd.load(board)['data']['jobs'][12]
+
+        def put_fb(fb):
+            fb.setdefault(job['id'], {})['app'] = stage
+            fb[job['id']].pop('rm', None)
+        bd.set_fb(put_fb, live=board, by='board_check')
+        bd.set_data(lambda d, _fb: d.__setitem__('status', {
+            'schema_version': board_status.SCHEMA_VERSION, 'at': '2026-01-01 00:00',
+            'issues': [{'jid': job['id'], 't': 'x', 'stage': stage, 'kind': 'files', 'msg': FILES_PROBLEM}]}), live=board)
+        return {'id': job['id'], 'why': FILES_PROBLEM}
+    return seed
+
+
+PRE['files_ship_case'] = files_case('ship')
+PRE['files_ready_case'] = files_case('ready')
 CHECKS.append((
-    '可投遞:驗收查到已經下架的卡,一次收進已移除,可以復原',
-    r"""
-      var bad=[]; await T.resync();
-      document.querySelector('[data-tab="ship"]').click(); await T.idle();
-      var b=document.querySelector('#app [data-closedrm="ship"]'); if(!b)return '可投遞頁沒有「已經下架:收掉」';
-      b.click(); await T.idle();
-      var s=await T.state(); if(!(s[P.id]||{}).rm)bad.push('收掉之後那張沒有進已移除');
-      var un=document.querySelector('#snack .snack-undo'); if(!un)bad.push('收掉之後沒有「復原」');
-      else{un.click(); await T.idle(); s=await T.state(); if((s[P.id]||{}).rm)bad.push('按了復原,那張還在已移除');}
-      document.querySelector('[data-tab="none"]').click(); await T.idle();
-      return bad.join('；');
-    """,
-    'closed_ship_case',
-))
-def closed_ready_case(board):
-    """一張待你決定的卡,驗收查到它已經下架。"""
-    import board_doc as bd
-    parsed = bd.load(board)
-    job = parsed['data']['jobs'][12]
-
-    def put_fb(fb):
-        fb.setdefault(job['id'], {})['app'] = 'ready'
-        fb[job['id']].pop('rm', None)
-    bd.set_fb(put_fb, live=board, by='board_check')
-    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True,
-        'issues': [{'jid': job['id'], 't': 'x', 'stage': 'ready', 'msg': '職缺已下架(HTTP 回 404/410 或重導離開職缺頁)'}]}), live=board)
-    return {'id': job['id']}
-
-
-PRE['closed_ready_case'] = closed_ready_case
-CHECKS.append((
-    '待你決定:主數字寫可以送的張數,先不送的收成清單最後一個開合、一張一行寫原因,已下架的一次收掉',
+    '待你決定:主數字寫可以送的張數,先不送的收成清單最後一個開合、一張一行寫原因',
     r"""
       var bad=[]; await T.resync();
       document.querySelector('[data-tab="ready"]').click(); await T.idle();
@@ -4868,23 +5091,20 @@ CHECKS.append((
         var last=[...document.querySelectorAll('#app .applygrp > *')].pop();
         if(last!==f)bad.push('「先不送」不在清單最後');
         var sm=f.querySelector('summary').textContent;
-        if(sm.indexOf('1 張先不送')<0||sm.indexOf('1 張已下架')<0)bad.push('開合標題沒寫「1 張先不送:1 張已下架」:'+sm);
+        if(sm.indexOf('1 張先不送')<0||sm.indexOf('1 張沒過驗收')<0)bad.push('開合標題沒寫「1 張先不送:1 張沒過驗收」:'+sm);
         f.querySelector('summary').click(); await T.idle();
-        // 打開分段:「已下架」那一段一張一行,卡名點得到、跳到那張卡
-        var sec=[...f.querySelectorAll('.held-sec')].filter(function(x){return /^已下架/.test(x.querySelector('.held-t').textContent.trim());})[0];
+        // 打開分段:「沒過驗收」那一段一張一行、寫驗收的原句,卡名點得到、跳到那張卡
+        var sec=[...f.querySelectorAll('.held-sec')].filter(function(x){return /^沒過驗收/.test(x.querySelector('.held-t').textContent.trim());})[0];
         var li=sec?sec.querySelectorAll('li'):[];
-        if(li.length!==1)bad.push('打開沒有「已下架」那一段、一張一行');
-        else{T.press('[data-todogo]',li[0]); await T.idle();
+        if(li.length!==1)bad.push('打開沒有「沒過驗收」那一段、一張一行');
+        else{if((li[0].querySelector('em')||{}).textContent!==P.why)bad.push('那一行沒寫驗收的原句:'+li[0].textContent);
+          T.press('[data-todogo]',li[0]); await T.idle();
           var cd=document.querySelector('#app article[data-fid="'+CSS.escape(P.id)+'"]');
-          if(!cd||!cd.getClientRects().length)bad.push('點「已下架」那一行的卡名沒有跳到那張卡');
-          f=document.querySelector('#app details[data-fold="st:ready"]'); if(f&&!f.open){f.querySelector('summary').click(); await T.idle();}}
-        T.press('#app details[data-fold="st:ready"] [data-closedrm="ready"]'); await T.idle();
-        var s=await T.state(); if(!(s[P.id]||{}).rm)bad.push('收掉之後那張沒有進已移除');
-        if(document.querySelector('#app details[data-fold="st:ready"]'))bad.push('收掉之後「先不送」還在');}
+          if(!cd||!cd.getClientRects().length)bad.push('點「沒過驗收」那一行的卡名沒有跳到那張卡');}}
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
-    'closed_ready_case',
+    'files_ready_case',
 ))
 CHECKS.append((
     '待你決定:主按鈕旁那行接一句「其餘 N 張先不送(原因計數)」,點了捲到清單末端那段說明並展開,說明只有一份',
@@ -4910,8 +5130,8 @@ CHECKS.append((
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
-    # 前一條同一張卡剛按了收掉:重載頁面,不帶著那一頁記得的收掉
-    'closed_ready_case', {'viewports': ['wide', 'mobile'], 'fresh_page': True},
+    # 前一條點卡名捲走了、開合也開著:重載頁面,從頁頂開始
+    'files_ready_case', {'viewports': ['wide', 'mobile'], 'fresh_page': True},
 ))
 CHECKS.append((
     '準備履歷:自動準備沒開時,同一行「打開自動準備」按了就打開設定、這一頁等著的卡也交給它',
@@ -4932,48 +5152,43 @@ CHECKS.append((
     """,
     'no_setup', {'fresh_page': True},
 ))
-def judged_closed_case(board):
-    """一張待你決定的卡,驗收時 agent 判斷職缺關了(程式核對不了,只核對它抄的那一句在頁面上)(#317)。"""
+def claimed_closed_case(board):
+    """一張待你決定的卡,找缺 agent 交的招募狀態說職缺關了(程式沒核對到,附它引的頁面原文)。"""
     import board_doc as bd
-    parsed = bd.load(board)
-    job = parsed['data']['jobs'][13]
+    url = 'https://board-check.example/jobs/claimed-closed'
+    status = {'claim': '已關閉', 'raw': 'This position has been filled', 'state': '沒核對到',
+              'marks': [{'source': 'agent 說的', 'text': 'agent 說「已關閉」'}]}
+    card = {'id': url, 'target': 'Platform Engineer · Board Check Closed', 'title': 'Platform Engineer',
+            'company': 'Board Check Closed', 'cat': '其他', 'chan': '官方', 'note': '4', 'ammo': '', 'bk': False,
+            'dead': False, 'added': time.strftime('%Y-%m-%d'),
+            'src': {'fit': 4, 'mode': 'dir', 'site': 'board-check.example',
+                    'verification': {'state': 'review', 'fields': {'status': status}}}}
+    bd.set_data(lambda data, _fb: data.setdefault('jobs', []).append(card), live=board)
+    bd.set_fb(lambda fb: fb.update({url: {'app': 'ready'}}), live=board, by='board_check')
+    return {'id': url, 'mark': status['marks'][0]['text'], 'raw': status['raw']}
 
-    def put_fb(fb):
-        fb.setdefault(job['id'], {})['app'] = 'ready'
-        fb[job['id']].pop('rm', None)
-        fb[job['id']].pop('judged_no', None)
-    bd.set_fb(put_fb, live=board, by='board_check')
-    bd.set_data(lambda d, _fb: d.__setitem__('status', {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True,
-        'issues': [{'jid': job['id'], 't': 'x', 'stage': 'ready', 'kind': 'closed', 'judged': 'This position has been filled',
-                    'msg': 'agent 判斷職缺已關閉,頁面原文:「This position has been filled」'}]}), live=board)
-    return {'id': job['id']}
 
-
-PRE['judged_closed_case'] = judged_closed_case
+PRE['claimed_closed_case'] = claimed_closed_case
 CHECKS.append((
-    '待你決定:agent 判斷職缺關了,卡上標明是 agent 判斷、附原文;按「不對,職缺還在」就不再因為它擋,可以復原',
+    '待你決定:找缺 agent 說職缺關了,卡上照它的話標明是 agent 說的、附頁面原文;不擋、由你決定',
     r"""
       var bad=[]; await T.resync();
-      async function open(){document.querySelector('[data-tab="ready"]').click(); await T.idle();
-        [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
-        await T.idle(); return T.card(P.id);}
-      var c=await open(); if(!c)return '待你決定頁找不到那張卡';
-      var t=c.textContent;
-      if(t.indexOf('agent 判斷職缺已關閉')<0)bad.push('卡上沒標明是 agent 判斷');
-      if(t.indexOf('This position has been filled')<0)bad.push('卡上沒附 agent 抄的原文');
-      var b=c.querySelector('[data-judgedno]'); if(!b)return bad.concat(['卡上沒有「不對,職缺還在」']).join('；');
-      b.click(); await T.idle();
-      var s=await T.state(); if(!((s[P.id]||{}).judged_no||{}).closed)bad.push('按了之後沒記下「他說職缺還在」');
-      c=await open(); if(c&&c.textContent.indexOf('agent 判斷職缺已關閉')>=0&&c.querySelector('[data-judgedno]'))
-        bad.push('按了之後還因為 agent 判斷關了而擋');
-      var un=document.querySelector('#snack .snack-undo'); if(!un)bad.push('沒有「復原」');
-      else{un.click(); await T.idle(); s=await T.state();
-        if(((s[P.id]||{}).judged_no||{}).closed)bad.push('按了復原,「他說職缺還在」還在');
-        c=await open(); if(!(c&&c.querySelector('[data-judgedno]')))bad.push('復原後沒有回到被 agent 判斷擋住');}
+      document.querySelector('[data-tab="ready"]').click(); await T.idle();
+      [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
+      await T.idle();
+      var c=T.card(P.id); if(!c){document.querySelector('[data-tab="none"]').click(); return '待你決定頁找不到那張卡';}
+      var rows=[].slice.call(c.querySelectorAll('.verification-note > div')).filter(function(d){
+        return (d.querySelector('strong')||{}).textContent==='招募狀態 · 沒核對到';});
+      if(rows.length!==1)bad.push('卡上沒有「招募狀態 · 沒核對到」那一項');
+      else{var said=[].slice.call(rows[0].children).slice(1).map(function(d){return d.textContent;});
+        if(said[0]!==P.mark)bad.push('沒照 agent 的話標明是它說的:'+said[0]);
+        if(said[1]!=='程式讀到：'+P.raw)bad.push('沒附頁面原文:'+said[1]);}
+      if(c.querySelector('.stage-blocked'))bad.push('agent 說關了就把卡擋住了');
+      if(!c.querySelector('[data-adv="ship"]'))bad.push('卡上沒有「可以投了」讓你自己決定');
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
-    'judged_closed_case',
+    'claimed_closed_case',
 ))
 CHECKS.append((
     '可投遞:頁首說幾張沒過驗收、原因在卡上,那幾張卡上真的寫了原因,也按不了確認送出',
@@ -4985,13 +5200,13 @@ CHECKS.append((
       var txt=document.getElementById('app').textContent, held=+((txt.match(/(\d+) 張(沒過驗收|還不能往下走)/)||[])[1]||0);
       if(held!==1)bad.push('頁首寫 '+held+' 張擋住,實際 1 張');
       var c=T.card(P.id);
-      if(!c)bad.push('找不到那張下架的卡');
-      else{if(!/職缺已下架/.test(c.textContent))bad.push('頁首說原因寫在卡上,卡上卻沒寫');
-        var ab=c.querySelector('[data-approve]'); if(ab&&!ab.disabled)bad.push('驗收沒過(已下架)的卡還按得了確認送出');}
+      if(!c)bad.push('找不到那張沒過驗收的卡');
+      else{if(c.textContent.indexOf(P.why)<0)bad.push('頁首說原因寫在卡上,卡上卻沒寫');
+        var ab=c.querySelector('[data-approve]'); if(ab&&!ab.disabled)bad.push('驗收沒過的卡還按得了確認送出');}
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
-    'closed_ship_case',
+    'files_ship_case',
 ))
 
 
@@ -5077,77 +5292,86 @@ def _days_ago(n):
     return (datetime.date.today() - datetime.timedelta(days=n)).isoformat()
 
 
+def _reply_round(m, jid, today, found=()):
+    """照查應徵進度這一輪查過、核對過 found 那幾則的改卡(progress._outcome、_ghost);回這一輪改了狀態的卡。"""
+    import progress as rr
+    result = {'moved': 0}
+    m.setdefault('replies', {'items': []})['items'].extend(found)
+    rr._outcome(m, list(found), {item['id']: today for item in found}, today, result)
+    rr._ghost(m, True, today, result)
+    return [jid] if result['moved'] else []
+
+
+def _reply(kind, snippet, link):
+    return {'id': f'board-check-{kind}', 'src': '信箱', 'date': _days_ago(0), 'kind': kind, 'link': link,
+            'subject': snippet, 'quote': snippet, 'snippet': snippet}
+
+
 def down_auto_ghost(board):
-    import reply_run as rr
+    import progress as rr
 
     def fn(fb, jid):
-        fb[jid]['sent_at'] = _days_ago(rr.GHOST_DAYS + 17)
+        fb[jid]['sent_at'] = _days_ago(rr.ghost_days() + 17)
         fb[jid].pop('replies', None)
-        rr.apply_ghost(fb, _days_ago(0), checked={jid})
-    return dict(_down(board, fn), by=f'送出 {rr.GHOST_DAYS + 17} 天沒有回音')
+        _reply_round(fb[jid], jid, _days_ago(0))
+    return dict(_down(board, fn), by=f'送出 {rr.ghost_days() + 17} 天沒有回音')
 
 
 def down_next_round(board):
     """再跑一輪查應徵進度的「沒下文」那一步(這張本輪查過、還是沒回音)。"""
-    import board_doc as bd, reply_run as rr
+    import board_doc as bd
     got = []
     jid = _down(board)['id']
-    bd.set_fb(lambda fb: got.extend(rr.apply_ghost(fb, _days_ago(0), checked={jid})), live=board, by='board_check')
+    bd.set_fb(lambda fb: got.extend(_reply_round(fb[jid], jid, _days_ago(0))), live=board, by='board_check')
     return dict(_down(board), ghosted=got)
 
 
 def down_ghost_then_interview(board):
-    import reply_run as rr
+    import progress as rr
 
     def fn(fb, jid):
-        fb[jid]['sent_at'] = _days_ago(rr.GHOST_DAYS + 20)
+        fb[jid]['sent_at'] = _days_ago(rr.ghost_days() + 20)
         fb[jid].pop('replies', None)
-        rr.apply_ghost(fb, _days_ago(10), checked={jid})
-        rr.apply_findings(fb, {jid: [{'src': 'Gmail', 'date': _days_ago(0), 'kind': 'interview',
-                                       'link': 'https://mail.example/board-check-iv',
-                                       'snippet': '面試邀請(檢查用)'}]}, _days_ago(0))
+        _reply_round(fb[jid], jid, _days_ago(10))
+        _reply_round(fb[jid], jid, _days_ago(0),
+                     [_reply('interview', '面試邀請(檢查用)', 'https://mail.example/board-check-iv')])
     return dict(_down(board, fn), ghostAt=_days_ago(10))
 
 
 def down_reject_without_subject(board):
-    import reply_run as rr
-
     def fn(fb, jid):
         fb[jid].pop('replies', None)
-        rr.apply_findings(fb, {jid: [{'src': 'Gmail', 'date': _days_ago(0), 'kind': 'reject',
-                                       'link': 'https://mail.example/board-check-rej',
-                                       'snippet': 'Unfortunately we moved on(檢查用)'}]}, _days_ago(0))
+        _reply_round(fb[jid], jid, _days_ago(0),
+                     [dict(_reply('reject', 'Unfortunately we moved on(檢查用)', 'https://mail.example/board-check-rej'),
+                           subject='')])
     return _down(board, fn)
 
 
 def down_maybe_letter(board):
-    """同一封拒絕信也對到另一張卡(#289 決定 1):用 reply_run 真的那一條走一遍,兩張都不自動改。"""
-    import reply_run as rr
+    """同一封拒絕信也對到另一張卡(#289 決定 1):用 progress 的改卡規則走一遍,不自動改。"""
     other = 'https://example.test/board-check-other-card'
 
     def fn(fb, jid):
         fb[jid].pop('replies', None)
-        letter = {'src': 'Gmail', 'date': _days_ago(0), 'kind': 'reject', 'source_type': 'email',
-                  'source_ref': 'email:bcmaybe1', 'link': 'https://mail.google.com/mail/u/0/#all/bcmaybe1',
-                  'snippet': '很遺憾(檢查用)'}
-        fake = {other: {'app': 'sent'}}
-        rr.apply_findings(dict(fake, **{jid: fb[jid]}), {jid: [dict(letter)], other: [dict(letter)]}, _days_ago(0))
+        letter = dict(_reply('reject', '很遺憾(檢查用)', 'https://mail.example/thread/bcmaybe1'),
+                      source_type='email', maybe=[other])      # 查應徵進度寫進卡的樣子:同一封也對到 other
+        _reply_round(fb[jid], jid, _days_ago(0), found=[letter])
     return dict(_down(board, fn), other=other)
 
 
 def down_ended_with_todo(board):
     def fn(fb, jid):
         fb[jid].update(oc='rej', oc_at={'rej': _days_ago(0)}, replies={'items': [
-            {'id': 'bc-iv', 'src': 'Gmail', 'date': _days_ago(3), 'kind': 'interview',
+            {'id': 'bc-iv', 'src': '信箱', 'date': _days_ago(3), 'kind': 'interview',
              'snippet': '線上測驗邀請(檢查用)', 'todo': '完成線上測驗(檢查用)'},
-            {'id': 'bc-rej', 'src': 'Gmail', 'date': _days_ago(0), 'kind': 'reject', 'snippet': '很遺憾(檢查用)'}]})
+            {'id': 'bc-rej', 'src': '信箱', 'date': _days_ago(0), 'kind': 'reject', 'snippet': '很遺憾(檢查用)'}]})
     return _down(board, fn)
 
 
 def down_waiting_with_replies(board):
     def fn(fb, jid):
         fb[jid].update(replies={'at': _days_ago(1), 'items': [
-            {'id': 'bc-ok', 'src': 'Gmail', 'date': _days_ago(2), 'kind': 'confirm', 'snippet': '已收到申請(檢查用)'}]},
+            {'id': 'bc-ok', 'src': '信箱', 'date': _days_ago(2), 'kind': 'confirm', 'snippet': '已收到申請(檢查用)'}]},
             ev='送出頁是目前唯一證據(檢查用)', ghost_no=1)
     return _down(board, fn)
 
@@ -5163,6 +5387,58 @@ PRE.update(down_auto_ghost=down_auto_ghost, down_next_round=down_next_round,
            down_reject_without_subject=down_reject_without_subject, down_ended_with_todo=down_ended_with_todo,
            down_maybe_letter=down_maybe_letter,
            down_waiting_with_replies=down_waiting_with_replies, down_ghost_he_undid_before=down_ghost_he_undid_before)
+
+
+def ended_interview_tab_case(board):
+    import board_doc as bd
+    import interview_bank as ib
+
+    data = bd.load(board)['data']
+    job = next(j for j in reversed(data['jobs']) if str(j.get('id', '')).startswith('http'))
+    jid, qid = job['id'], 'bc_ended_interview_tab'
+    bank = ib.apply({}, 'put', {'id': qid, 't': '獨立檢查面試題', 'cat': '其他', 'stage': 'todo'})
+    bank = ib.apply(bank, 'link', {'src': 'me'}, item_id=qid, job=jid, kind='asked')
+
+    def reset(fb):
+        for item in data['jobs']:
+            fb[item['id']] = {}
+        fb[jid] = {'app': 'sent', 'oc': 'rej', 'oc_at': {'rej': _days_ago(1)}}
+
+    bd.set_fb(reset, live=board, by='board_check')
+    bd.set_data(lambda d, _fb: d.__setitem__('bank', bank), live=board)
+    return {'id': jid}
+
+
+PRE['ended_interview_tab_case'] = ended_interview_tab_case
+CHECKS.append((
+    '面試:已結束且仍有題目的場次,籤數等於列數且詳細頁可開',
+    r"""
+      var id=P.id, bad=[], tab=document.querySelector('#tabs [data-tab="iv"]');
+      if(!tab||!tab.querySelector('.n'))return '沒有面試分頁籤數';
+      tab.click(); await T.idle();
+      var tabIv=document.querySelector('#app [data-ivview="iv"]'); if(tabIv){tabIv.click(); await T.idle();}
+      var fold=document.querySelector('#app details[data-fold="ivended"]');
+      if(!fold)return '沒有「已結束的面試」那一折';
+      if(!fold.open){fold.querySelector('summary').click(); await T.idle();}
+      var rows=[...document.querySelectorAll('#app .iv-jrow')];
+      var count=parseInt((tab.querySelector('.n')||{}).textContent||'-1',10);
+      var innerCount=parseInt((tabIv&&tabIv.querySelector('b')||{}).textContent||'-1',10);
+      if(rows.length!==1)bad.push('獨立情境應畫 1 場,實際 '+rows.length+' 場');
+      if(count!==rows.length)bad.push('籤上 '+count+' 張,畫出 '+rows.length+' 張');
+      if(innerCount!==rows.length)bad.push('面試切換籤上 '+innerCount+' 張,畫出 '+rows.length+' 張');
+      var row=rows.find(function(r){return r.getAttribute('data-ivopen')===id;});
+      if(!row)bad.push('已結束場次 '+id+' 沒有畫成一列(目前: '+rows.map(function(r){return r.getAttribute('data-ivopen');}).join('、')+
+        '; 標記: '+JSON.stringify((await T.state())[id]||{})+')');
+      else{
+        row.click(); await T.idle();
+        if(!document.querySelector('#app .iv-ptitle')||!document.querySelector('#app .iv-job'))
+          bad.push('點開已結束場次沒有詳細頁');
+      }
+      return bad.join('；');
+    """,
+    'ended_interview_tab_case',
+    {'fresh_page': True},
+))
 
 # 每條開頭:切到已投出、所有公司展開;結尾:那張卡放回原樣(跟「結果往前走…」那條同一個做法)
 DOWN_JS = r"""
@@ -5263,13 +5539,13 @@ DOWN_CHECKS=[
       return n?'已投出頁有 '+n+' 家的選單還能「這家全部移除」,按下去已投出的卡全被收走':'';
     """),
  (
-    '已投出下游:自動記成沒下文那一行寫真的天數;查應徵進度的說明不寫死「Gmail、104、LinkedIn」',
+    '已投出下游:自動記成沒下文那一行寫真的天數;查應徵進度的說明講的是你設定的來源',
     DOWN_JS + r"""
       await sentTab(); var bad=[], c=T.card(P.id), line=c&&c.querySelector('.rp-auto');
       if(!line)bad.push('卡上沒有自動改狀態那一行');
       else if(line.textContent.indexOf(P.by)<0)bad.push('那一行沒寫「'+P.by+'」:'+line.textContent.trim().slice(0,60));
       var rb=document.querySelector('#replybar [data-replyrun]'), t=rb?rb.getAttribute('title')||'':'';
-      if(/LinkedIn|Gmail/.test(t))bad.push('查應徵進度的說明寫死了 Gmail、LinkedIn:'+t.slice(0,40));
+      if(t.indexOf('你設定的')<0)bad.push('查應徵進度的說明沒講查的是你設定的來源:'+t.slice(0,40));
       await putBack(); return bad.join('；');
     """,
     'down_auto_ghost'),
@@ -5956,7 +6232,7 @@ def profile_visuals_case(board):
 
 APPLY_PRE['profile_visuals_case'] = profile_visuals_case
 APPLY_CHECKS.append((
-    '確認送出畫面逐處列判定、平台結果、全文與相鄰局部截圖',
+    '確認送出畫面逐處列事實標記、全文與相鄰局部截圖',
     OPEN_SHIP + r"""
       var id=P.ids[0], original=window.fetch, bad=[];
       window.fetch=function(input,init){
@@ -5975,8 +6251,8 @@ APPLY_CHECKS.append((
               ['ev','test-round/before.png','平台履歷「測試段落」改前'],
               ['ev','test-round/after.png','平台履歷「測試段落」改後']]);
             v.line=(v.line||[]).concat([
-              ['bad','測試段落：agent 代填待確認',{sync:true}],
-              ['idle','平台實際結果：只驗收、已撤回',{sync:true}],
+              ['idle','測試段落：原稿沒在頁上一字不差找到',{sync:true}],
+              ['idle','https://platform.example/resume/one：頁面內容有變動',{sync:true}],
               ['idle','改前：短文 → 改後：短文',{sync:true,full:'改前：完整舊文\n改後：完整新文'}],
               ['idle','',{sync:true,shot_indices:[start,start+1]}]]);
           }
@@ -5992,7 +6268,10 @@ APPLY_CHECKS.append((
           return found.some(function(x){return x.textContent.includes('測試段落：')})?found:null;},8000);
         if(!rows)return '確認送出畫面沒有逐處紀錄';
         var title=rows.findIndex(function(x){return x.textContent.includes('測試段落：')});
-        if(!rows[title+1].textContent.includes('平台實際結果：只驗收、已撤回'))bad.push('平台結果與判定混在一起');
+        if(!rows[title].textContent.includes('原稿沒在頁上一字不差找到'))bad.push('沒有顯示事實標記');
+        if(!rows[title+1].textContent.includes('https://platform.example/resume/one'))bad.push('沒有列出被比較的頁面');
+        if(rows.some(function(row){return /成功|失敗|已同步|平台實際結果/.test(row.textContent)}))
+          bad.push('改動清單寫了同步結果');
         var details=rows[title+2].querySelector('details.fold.ap-sync-detail');
         if(!details||details.open)bad.push('改前改後全文沒有預設收起');
         else{details.querySelector('summary').click();
@@ -6241,7 +6520,7 @@ def closed_posting_case(board):
     """兩張可投遞卡,agent 去填時發現職缺關了或換了(要你處理:不投就移除)。"""
     shot.flow()
     block = {'kind': 'posting', 'text': '這個網址上的職缺已經關了或換成別的'}
-    return _seed(board, [_filled('stuck', block=block), _filled('stuck', block=block)])
+    return dict(_seed(board, [_filled('stuck', block=block), _filled('stuck', block=block)]), said=block['text'])
 
 
 APPLY_PRE['closed_posting_case'] = closed_posting_case
@@ -6249,6 +6528,8 @@ APPLY_CHECKS.append((
     '可投遞:要你處理的好幾張都是職缺關了,一顆鈕一起移除;已移除那一頁按「放回」整批回來',
     OPEN_SHIP + r"""
       var I=P.ids, bad=[]; if(!await openShip(I[0]))return '找不到那兩張可投遞卡';
+      for(var k=0;k<I.length;k++){var pc=await cardOf(I[k]);
+        if(!pc||pc.textContent.indexOf(P.said)<0)bad.push(I[k]+' 卡上沒照填表 agent 的原話寫職缺怎麼了');}
       T.press('#app .todo [data-todorm]'); await T.idle();
       var s=await T.state(), day=(s[I[0]]||{}).rm;
       I.forEach(function(id){if(!(s[id]||{}).rm)bad.push('按了「全部移除」,'+id+' 沒進已移除');});
@@ -6406,7 +6687,7 @@ def _sent(by, **more):
                       'delivery': {'method': 'direct_upload'},
                       'sent': {'at': SENT_AT + 'T00:05:00', 'text': '已收到申請(檢查用)'}}
     if by == 'platform':
-        m['sent_rec'] = '104:bc:' + SENT_AT
+        m['sent_rec'] = 'board-check.example:bc:' + SENT_AT
     m.update(more)
     return m
 
@@ -6520,7 +6801,7 @@ def rest_buttons_case(board):
     2 標「普通」超過一個月;自動查應徵進度開著但停著(ego 沒開)。"""
     import board_doc as bd
     shot.flow(replies_at='23:59')
-    todo = {'items': [{'id': 'bc_todo', 'kind': 'interview', 'date': SENT_AT, 'src': 'Gmail', 'todo': '回信約面試時間'}]}
+    todo = {'items': [{'id': 'bc_todo', 'kind': 'interview', 'date': SENT_AT, 'src': '信箱', 'todo': '回信約面試時間'}]}
 
     def extra(fb, ids):
         fb['__inbox__'] = [x for x in fb.get('__inbox__') or [] if x.get('id') != 'bc_go'] + [
@@ -6830,8 +7111,10 @@ STEP_ROUTES = {
 STEP_BUDGETS = {
     'open': {'wide': {'clicks':0, 'scroll':0}, 'mobile': {'clicks':0, 'scroll':0}},
     # 手機首頁照 G 版在公司列上面放了「要你處理」大數字格和三條流程(#657),第一家公司的卡要往下捲一點才按得到喜歡
-    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':23}},
-    'ship': {'wide': {'clicks':5, 'scroll':0}, 'mobile': {'clicks':5, 'scroll':344}},
+    # 卡上沒核對到的欄位各標「agent 說的・沒核對到」、沒核對到的門檻寫原文不縮成「3+ 年」徽章(ADR 0012、A-40);
+    # 示範資料全是沒核對到的,卡變高,手機上喜歡和可以投了要多捲一段(CI 量到 23→114、344→449,#582)
+    'mood': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':114}},
+    'ship': {'wide': {'clicks':5, 'scroll':0}, 'mobile': {'clicks':5, 'scroll':449}},
     'inbox': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
     'resume': {'wide': {'clicks':2, 'scroll':0}, 'mobile': {'clicks':2, 'scroll':0}},
 }
@@ -7126,6 +7409,42 @@ CHECKS.append((
 ))
 
 CHECKS.append((
+    '重新載入時,存下來的分頁、類別、標籤已經不存在(舊版的名稱):看板照沒存過的情況開場(新職缺亮著、有卡片),分頁組記的舊分頁也不卡住',
+    SEARCH_VIEW_JS + r'''
+      var bad=[], st=await setup(); if(st.err)return st.err;
+      var K='sts_view', LK='jobsalvo.lasttab', oldV=localStorage.getItem(K), oldL=localStorage.getItem(LK);
+      async function load(view){
+        localStorage.setItem(K,JSON.stringify(view)); localStorage.setItem(LK,JSON.stringify({find:'go',flow:'zzz',misc:'old'}));
+        var fr=document.createElement('iframe'); fr.style.cssText='position:fixed;left:0;top:0;width:390px;height:800px;border:0;z-index:99999;background:#fff';
+        fr.src=location.href; document.body.appendChild(fr);
+        await new Promise(function(r){fr.addEventListener('load',r,{once:true});});
+        await T.until(function(){return fr.contentDocument.querySelector('#tabs .tab');},8000);
+        return fr;}
+      try{
+        var cases=[['分頁叫 go',{a:'go',c:'all',f:'',q:'',y:0}],['類別叫「已改名的類別」',{a:'none',c:'已改名的類別',f:'',q:'',y:0}],['標籤叫「已刪掉的標籤」',{a:'none',c:'all',f:'已刪掉的標籤',q:'',y:0}]];
+        for(var i=0;i<cases.length;i++){
+          var fr=await load(cases[i][1]), d=fr.contentDocument;
+          try{
+            var on=[].map.call(d.querySelectorAll('#tabs .tab.on'),function(t){return t.getAttribute('data-tab');});
+            if(on.join()!=='none')bad.push('存的'+cases[i][0]+',重新載入後亮著的分頁是「'+on.join()+'」,不是新職缺');
+            if(!d.querySelector('#app .cogrp'))bad.push('存的'+cases[i][0]+',重新載入後沒有任何卡片(空白頁)');
+            if(d.querySelector('#facetf .ff'))bad.push('存的'+cases[i][0]+',重新載入後還掛著標籤篩選');
+          }finally{fr.remove();}}
+        var fr2=await load({a:'none',c:'all',f:'',q:'',y:0}), d2=fr2.contentDocument;
+        try{
+          var g=d2.querySelector('#tabs [data-botgrp="find"]'); if(g)g.click(); await T.idle();
+          var on2=d2.querySelectorAll('#tabs .tab.on').length;
+          if(on2!==1)bad.push('分頁組記的是舊分頁,按下分頁組後亮著的分頁有 '+on2+' 個');
+        }finally{fr2.remove();}
+      }finally{
+        if(oldV===null)localStorage.removeItem(K); else localStorage.setItem(K,oldV);
+        if(oldL===null)localStorage.removeItem(LK); else localStorage.setItem(LK,oldL);}
+      return bad.join('；');
+    ''',
+    'no_setup', {'viewports': ['mobile'], 'fresh_page': True},
+))
+
+CHECKS.append((
     '手機搜尋層那一行寫出在哪一頁搜、還在生效的篩選條件,按「清掉條件」張數跟著變(搜尋的字留著);0 張時講得出為什麼是 0',
     SEARCH_VIEW_JS + r"""
       var bad=[], st=await setup(); if(st.err)return st.err;
@@ -7233,6 +7552,18 @@ def checks_for_run(only='', fast=False):
     return todo
 
 
+def clean_sandbox(page, board, home):
+    """開一份看板副本,網址要是這個瀏覽器沒存過東西的。
+    ego 的瀏覽器資料跨次留著,也不准清(tests/test_ego_door.py);macOS 的埠照順序發,繞一圈會撞回
+    以前某一輪用過的埠,看板開場就帶著那一輪記住的分頁、篩選(#769:一開場停在「可以投了」)。撞到就換一個埠。"""
+    for _ in range(20):
+        sb=shot.Sandbox(board, home=home)
+        page.goto(sb.url+'/api/rev')   # 只回版本號的小包:看板程式沒跑,不會先寫東西進去
+        if not page.run('localStorage.length'): return sb
+        sb.close()
+    sys.exit('連換 20 個埠,瀏覽器在每一個都存過東西')
+
+
 def run_shards(n):
     """分成 n 組同時跑(跟 Playwright 的 --shard、pytest-xdist 一樣的做法):每組一個行程,各自開看板副本和瀏覽器。
     回結束碼:任一組失敗就是 1。"""
@@ -7290,21 +7621,23 @@ def main():
             demo_dir=stack.enter_context(tempfile.TemporaryDirectory(prefix='boardcheck-demo-'))
             board=demo.build(os.path.join(demo_dir,'board.html'),int(os.environ.get('JOBSALVO_DEMO_EXTRA') or 0))
         boardcheck_home=stack.enter_context(tempfile.TemporaryDirectory(prefix='boardcheck-home-'))
-        stack.enter_context(mock.patch.dict(os.environ,JOBSALVO_HOME=boardcheck_home))
+        stack.enter_context(mock.patch.dict(os.environ,JOBSALVO_HOME=boardcheck_home,
+                                            EVIDENCE_TMP=os.path.join(boardcheck_home,'evidence-tmp')))
         preference_note(boardcheck_home)
         flow_off(boardcheck_home)
         skill=os.path.join(boardcheck_home,'custom','skills','board-check.md')
         os.makedirs(os.path.dirname(skill),exist_ok=True)
         with open(skill,'w',encoding='utf-8') as f: f.write('# 看板檢查用 skill\n')
-        sb=shot.Sandbox(board)
-        stack.callback(sb.close)
-        stack.enter_context(mock.patch.dict(os.environ,AGENT_BOARD=sb.copy))
-        # Prepare the fake resume before starting Chrome; both use the same local
-        # server, and Chrome startup can otherwise starve this short API request.
-        seed_check_resume(sb.url)
         # 開瀏覽器:本機走 ego(跟產品同一條路),CI 的 Linux 用 Chrome(dev_browser)
         import dev_browser
         page=stack.enter_context(dev_browser.page())
+        # PRE 在 server 啟動後才寫資料,副本必須讀同一個隔離 home。
+        sb=clean_sandbox(page,board,boardcheck_home)
+        stack.callback(sb.close)
+        stack.enter_context(mock.patch.dict(os.environ,AGENT_BOARD=sb.copy))
+        seed_check_resume(sb.url)
+        profiles_path=os.path.join(boardcheck_home,'profiles.json')
+        pristine_profiles=open(profiles_path,'rb').read() if os.path.exists(profiles_path) else None
         shot.SB_URL[0]=sb.url
         prelude=HELPERS+'\nif(typeof axe==="undefined"){'+axe_source()+'\n}'   # 檢查用的 T、無障礙檢查 axe
         page.goto(sb.url)
@@ -7317,12 +7650,14 @@ def main():
             step_check=len(item)>3 and item[3].get('step')
             if first and not step_check:
                 with bd.live_lock(sb.copy): bd.write_doc(sb.copy,pristine)
+                restore_profiles(pristine_profiles)
             profiles=(item[3].get('viewports',['desktop']) if len(item)>3 else [None])
             for profile in profiles:
                 t0=time.time()
                 try:
                     if step_check:
                         with bd.live_lock(sb.copy): bd.write_doc(sb.copy,pristine)
+                        restore_profiles(pristine_profiles)
                     arg=PRE[item[2]](sb.copy) if len(item)>2 else None
                     if step_check:
                         step=item[3]['step']

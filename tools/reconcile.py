@@ -8,7 +8,7 @@ reconcile —— 改完任何東西,只跑這一個。
 
   · 看板外殼  board/{board.css,board.js,header.html} 變了 → 換上現行看板(看板檢查在 CI 跑,合進 main 之前就驗過了)
   · 可投遞夾  「待你決定」「可投遞」的卡建好可投遞夾(ship.reconcile_packages)
-  · 驗收狀態  board_status --links --write:可投遞之前的機械把關,結果寫進看板
+  · 檔案檢查  board_status --write:可投遞之前檢查要寄的檔案,結果寫進看板
   · 排序分數  prefs.refresh_like:照最新的表態重算「最可能喜歡」
   · 清過期夾  卡片離開準備/投遞階段,它的可投遞夾就是過期快照,刪掉;對不到任何卡的只報不刪
 
@@ -17,7 +17,7 @@ reconcile —— 改完任何東西,只跑這一個。
     uv run python tools/reconcile.py --check   # 只報哪裡漂了,不動手
     uv run python tools/reconcile.py --force   # 無視雜湊,全部重建
 
-事件驅動的步驟(找缺 converge、跑準備區 cut_tailor、手機上標階段)跑完會自己呼叫這支。
+事件驅動的步驟(找缺 find、跑準備區 cut_tailor、手機上標階段)跑完會自己呼叫這支。
 """
 import sys, os, json, hashlib, subprocess, argparse, time, datetime
 
@@ -151,12 +151,9 @@ def run(a):
     timings['套件'] = time.perf_counter() - started
     status_code = 0
     if not a.check:
-        # 看板的「可投遞」按鈕只在最新機械驗收沒有問題時放行;連結也一起驗(只驗待你決定/可投遞那幾張)。
+        # 看板的「可投遞」按鈕只在最新檔案檢查沒有問題時放行。
         started = time.perf_counter()
-        status_command = [sys.executable, os.path.join(HERE, 'board_status.py'),
-                          '--links', '--write', '--board', live]
-        if show_timings:
-            status_command.append('--timings')
+        status_command = [sys.executable, os.path.join(HERE, 'board_status.py'), '--write', '--board', live]
         sys.stdout.flush()
         status_code = subprocess.run(status_command, check=False).returncode
         timings['看板驗收'] = time.perf_counter() - started
@@ -195,7 +192,7 @@ def run(a):
     from board_status import ISSUES_FOUND
     status_failed = status_code not in (0, ISSUES_FOUND)
     if status_code == ISSUES_FOUND:
-        print('  ⓘ 有卡未過投遞前驗收,原因已寫在看板;本輪重建正常。')
+        print('  ⓘ 有卡的要寄檔案檢查未通過,原因已寫在看板;本輪重建正常。')
     elif status_failed:
         print(f'  ⚠ 投遞前驗收程式失敗(結束碼 {status_code})')
     if status_failed or source_errors or (a.check and source_changes):

@@ -1,0 +1,2 @@
+def _capture_delta(before_reason):
+    return '紀錄讀取失敗' in before_reason

@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(單一真相):
-手機看、手機存、agent 的產線(cut_tailor、converge、apply_run…)都讀寫這一個檔。
+手機看、手機存、agent 的產線(cut_tailor、find、fill…)都讀寫這一個檔。
 
   GET  /            → 服務現行看板(送出前注入設定裡的類別、標籤、可用履歷與附件及各自有哪些語言的檔與預覽、agent 名字)
   POST /api/save    → {cmds: [指令…]}:看板的指令(write_fb),回存好的那幾份、每一道的復原單、新的下一步
   GET  /api/state   → 回傳目前 data-fb(給 agent/loop 讀狀態用)
   GET  /api/rev     → 小包:標記版本、職缺資料版本、背景建包中、兩個「跑」的進度(頁面輪詢用)
   POST /api/run/prep      → 跑準備區(cut_tailor)
-  POST /api/run/research  → 找新職缺 {mode: deep|wide|dir, text: 指定方向}(converge)
+  POST /api/run/research  → 找新職缺 {mode: deep|wide|dir, text: 指定方向}(find)
                             這些只有使用者按得到;看板副本上跑假的,見 job_fake.py
 
 用法:python3 tools/board_server.py [--port 8899] [--state <board html>] [--host <ip>]
@@ -142,6 +142,8 @@ def page_cfg():
             'categories': C['board']['categories'], 'tags': C['board']['tags'],
             'company_alias': {str(k).lower(): v for k, v in (C['board'].get('company_alias') or {}).items()},
             'title_words': card.title_words(C['board'].get('title_words')),
+            'risk_days': C['board'].get('risk_days', 180),
+            'risk_days_configured': 'risk_days' in ((cf.user_settings().get('board') or {})),
             'read_lang': C['resume'].get('read_lang') or 'zh',
             'flow': autopilot.flow(),
             'find_minutes': (C.get('search') or {}).get('find_minutes') or 0,
@@ -268,7 +270,7 @@ def current_shell():
 
 # rev(標記)與 gen(職缺資料)從檔案內容算,不是這支自己數。
 # 會寫這個檔的不只這支:cut_tailor 收尾把卡推到「待你決定」、reconcile 裝新的職缺資料、
-# converge 進新缺,全部直接寫檔。只數 /api/save 的話,開著的頁面會一直停在舊的,
+# find 進新缺,全部直接寫檔。只數 /api/save 的話,開著的頁面會一直停在舊的,
 # 在舊的上面一改還會被版本檢查擋下來。所以誰寫的都一樣:內容變了,數字就變。
 def content_sig():
     """(標記版本, 職缺資料版本):檔案沒換過就是上次那份(snapshot),輪詢本身不讀檔。
@@ -311,16 +313,6 @@ def write_fb(cmds, out=None, client_id=None, save_seq=None):
     """看板送來的一串指令(#407 R8):照 apply_cmds 套在磁碟上「現在」那一份。單寫者鎖。回不收的那幾道。
     out:收這一包動到的那幾份存好的樣子(cards)和每一道的復原單(undo,跟 cmds 對齊;不收的是 None)。"""
     cmds=[c if isinstance(c,dict) else {} for c in cmds or []]
-    # 按「✅ 確認送出」之前:程式自己讀那一頁,跟驗收時核對過的樣子比;變了就不讓他確認,卡上寫哪一格從什麼變成什麼和下一步(#316)。
-    # 讀頁很慢(Codex 幾秒),在拿鎖之前做。副本(沙箱、測試、看板檢查)沒有真的 agent 的 Chrome,不讀
-    changed={}
-    if is_real():
-        import apply_run
-        for c in cmds:
-            u=str(c.get('u') or '')
-            if u and not u.startswith('__') and c.get('ev')=='confirm':
-                problems=apply_run.confirm_check(u,STATE)
-                if problems: changed[u]=problems
     got={}
     with LOCK:
         order=_SAVE_ORDER.get(client_id,{}) if client_id else {}
@@ -329,7 +321,7 @@ def write_fb(cmds, out=None, client_id=None, save_seq=None):
             cmds=[dict(c,set={f:v for f,v in c['set'].items()
                               if order.get((str(c.get('u') or ''),f),0)<save_seq})
                   if isinstance(c.get('set'),dict) else c for c in cmds]
-        bd.rewrite(lambda d: got.update(zip(('rejected','undo','cards'),apply_cmds(d,cmds,changed))),STATE,by='看板')
+        bd.rewrite(lambda d: got.update(zip(('rejected','undo','cards'),apply_cmds(d,cmds))),STATE,by='看板')
         got['save_order']=str(time.monotonic_ns())
         if client_id:
             rejected={x['i'] for x in got['rejected']}
@@ -350,7 +342,7 @@ def write_fb(cmds, out=None, client_id=None, save_seq=None):
     return got['rejected']
 
 
-def apply_cmds(d, cmds, changed=None):
+def apply_cmds(d, cmds):
     """一串指令套在一份看板(d:{fb, data})上,只算不寫檔。指令只有三種:
     {u, ev?, data?, set?}(事件照狀態表和這張卡的下一步收或擋;set 只改送來的那幾欄,delivery_state.put)、
     {u, back, expect}(復原單送回來,delivery_state.restore)、{refill|redo: 答案鍵}(答案改了、清掉:
@@ -379,7 +371,7 @@ def apply_cmds(d, cmds, changed=None):
                     if why: raise ValueError(why)
             else:
                 if ev:
-                    _event(cur,u,ev,c.get('data') if isinstance(c.get('data'),dict) else {},jobs,changed or {},
+                    _event(cur,u,ev,c.get('data') if isinstance(c.get('data'),dict) else {},jobs,
                            d['data'].get('status'))
                 sets=c.get('set') if isinstance(c.get('set'),dict) else {}
                 if sets and not u.startswith('__'):
@@ -410,16 +402,12 @@ class _Refused(ValueError):
     """不收,但卡上已經記了原因(確認前頁面變了):卡不放回。"""
 
 
-def _event(cur, u, ev, data, jobs, changed, status):
+def _event(cur, u, ev, data, jobs, status):
     """看板送來的一個事件:收不收照這張卡的下一步(#341,擋的原因就是卡上灰掉的按鈕寫的那一句),收了照狀態表改。"""
     import delivery_state as ds, next_step
     why=next_step.refuse(cur,u,ev,status) or (_manual_sent_problem(jobs.get(u),cur) if ev=='sent_manual' else None)
     if why:
         raise ValueError(why)
-    if ev=='confirm' and u in changed:
-        import apply_run
-        apply_run.page_changed(cur,u,changed[u],'確認前')     # 停著等你 → 填了卡住,原因和下一步寫在卡上
-        raise _Refused('確認前'+apply_run.PAGE_CHANGED+changed[u][0])
     if ev=='confirm':
         # 確認時記下的答案由後台當下算(#340 user story 9),時間也是後台的:頁面送來的快照、手機的時鐘都不算數
         import form_record
@@ -431,9 +419,9 @@ def _event(cur, u, ev, data, jobs, changed, status):
         data=dict(data,evidence=dict(((cur.get(u) or {}).get('apply') or {}).get('submit_fail') or {},you_sent=data.get('at')))
     ds.fire(cur,u,ev,**data)
     # 這張之前還開著、跟送出有關的回報已經有答案了,一起收掉(#316)
-    import agent_report, apply_run
+    import agent_report
     if ev=='not_sent':
-        agent_report.apply_resolve(cur,u,'你確認沒送出',src=apply_run.REPORT_FROM)
+        agent_report.apply_resolve(cur,u,'你確認沒送出',src=agent_report.FROM_APPLY)
     elif ev in ('actually_sent','sent_manual'):
         agent_report.apply_resolve(cur,u,'你確認其實送出了' if ev=='actually_sent' else '你標了已在外部送出')
 
@@ -505,8 +493,8 @@ def _swap_why(old, new):
     if new.get('resume_id')!=old.get('resume_id') and new.get('resume_id'):
         return f'履歷換成「{cf.resume_name(new["resume_id"]) or new["resume_id"]}」'
     if new.get('lang')!=old.get('lang') and new.get('lang'):
-        import profile_sync
-        return f'語言換成「{profile_sync.LANG_WORDS.get(new["lang"],new["lang"])}」'
+        import form_record
+        return f'語言換成「{form_record.lang_words(new["lang"])[0]}」'
     return '要寄的檔案換過了'
 
 
@@ -679,23 +667,23 @@ def _source_preflight():
     return ''
 
 # ---- 看板上的「跑」:跑準備區、找新職缺 ----
-# 看板本身就是這台電腦上的伺服器,按鈕直接叫 cut_tailor / converge / apply_run / reply_run,跟背景建可投遞夾
+# 看板本身就是這台電腦上的伺服器,按鈕直接叫 cut_tailor / find / fill / progress,跟背景建可投遞夾
 # (trigger_build)同一個道理。發動的還是他:按鈕只有他按得到(agent 被擋)。
 # 進度格式兩支共用(jobrun),伺服器只負責啟動、單飛、把進度交給頁面。
 RUNS={
  'prep':    {'script':'cut_tailor.py','env':'CUT_TAILOR_TMP','status':'cut_tailor_status.json','dir':'.prep'},
  'customize':{'script':'customize.py','env':'CUSTOMIZE_TMP','status':'customize_status.json','dir':'.customize'},
- 'research':{'script':'converge.py',  'env':'CONVERGE_TMP',  'status':'converge_status.json',  'dir':'.research'},
+ 'research':{'script':'find.py',      'env':'CONVERGE_TMP',  'status':'converge_status.json',  'dir':'.research'},
  # 代投:填表單(fill)、修改(fix)、送出(submit)共用一個 kind,單飛一起算:三段都是 agent 在他的 Chrome 裡操作,
  # 一次一隻,不會兩隻同時動他的瀏覽器。
- 'apply':   {'script':'apply_run.py',  'env':'APPLY_TMP',     'status':'apply_status.json',     'dir':'.apply'},
+ 'apply':   {'script':'fill.py',       'env':'APPLY_TMP',     'status':'apply_status.json',     'dir':'.apply'},
  # 查回音(已投遞那一頁的「📬 查回音」):agent 在自己的 Chrome 查回音與各平台應徵紀錄,程式照證據改狀態。
- 'replies': {'script':'reply_run.py',  'env':'REPLY_TMP',     'status':'reply_status.json',     'dir':'.replies'},
+ 'replies': {'script':'progress.py',   'env':'REPLY_TMP',     'status':'reply_status.json',     'dir':'.replies'},
  # 貼網址加入(add_job):agent 讀職缺頁並寫卡片摘要,加進新職缺;頁面上看不到職缺的不加,結果放在貼網址那一格底下。
  'add':     {'script':'add_job.py',    'env':'ADD_TMP',       'status':'add_status.json',       'dir':'.add'},
  # 「⚙ 設定 → 分類」讓 agent 建議類別與標籤(suggest_cats),建議寫在 suggest.json,套用要使用者按。
  'suggest': {'script':'suggest_cats.py','env':'SUGGEST_TMP',  'status':'suggest_status.json',   'dir':'.suggest'},
- 'sync':    {'script':'sync_profiles.py','env':'SYNC_TMP',     'status':'sync_status.json',      'dir':'.sync'},
+ 'sync':    {'script':'sync.py',         'env':'SYNC_TMP',     'status':'sync_status.json',      'dir':'.sync'},
 }
 MODES=('deep','wide','dir')
 _PROC={}
@@ -705,7 +693,7 @@ _PV_LOCK=threading.Lock()
 
 def pv_sig():
     """記住的那份什麼時候該作廢。prompt 是「組它的程式」加「他的材料」一起算出來的,
-    兩邊任何一邊變了都要重算。只看看板版本(gen)不夠:改了 apply_run.py 裡的 prompt,
+    兩邊任何一邊變了都要重算。只看看板版本(gen)不夠:改了 fill.py 裡的 prompt,
     看板 gen 沒變,他打開看到的還是舊的那份——看起來像真的,其實不是真的會送出去的東西。
     """
     t=0.0
@@ -740,25 +728,27 @@ def first_run(state):
 
 def migrate_marks(state):
     """伺服器起來時收尾,寫回檔案(記進流水帳):伺服器的填表、送出、自動流程讀的都是檔案。
-    卡停在正在填、正在送出,那一輪卻已經不在跑(伺服器重開前被停掉、當掉):照狀態表收尾(apply_run.settle)。
+    卡停在正在填、正在送出,那一輪卻已經不在跑(伺服器重開前被停掉、當掉):照狀態表收尾(delivery_core.settle)。
     產生它的規則改了、造成它的 bug 修掉了的 agent 回報和還沒確認的答案:清掉(stale.sweep,GLOSSARY「過時」)。
-    證據夾之前填的卡,可投遞夾裡的填表截圖搬進證據夾(apply_run.old_shots)。"""
-    import copy, apply_run, stale
+    證據夾之前填的卡,可投遞夾裡的填表截圖搬進證據夾(evidence.old_shots)。"""
+    import copy, delivery_core, evidence, stale
     with open(state,encoding='utf-8') as source: fb0=json.loads(bd.parse(source.read())['fb'])
     probe=copy.deepcopy(fb0)
-    stuck=apply_run.settle(probe,_apply_busy())
+    stuck=delivery_core.settle(probe,_apply_busy())
     before=stale.boundaries()
     outdated=stale.sweep(probe,before)
-    shots=apply_run.old_shots(fb0)
-    if not stuck and not outdated and not shots: return
+    shots=evidence.old_shots(fb0)
+    if not stuck and not outdated and not shots:
+        return
     def mut(fb):
-        apply_run.settle(fb,_apply_busy())
+        delivery_core.settle(fb,_apply_busy())
         stale.sweep(fb,before)
-        apply_run.adopt_old_shots(fb,kept)
+        evidence.adopt_old_shots(fb,kept)
     # 回不了頭:一律走 folder_history.convert,先留退回點(存一版或備份看板檔),沒有退回點就不轉
     import folder_history
-    why='、'.join(w for w,need in (('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated),('舊的填表截圖',shots)) if need)+'轉換'
-    kept=apply_run.keep_old_shots(shots,state)   # 先複製進證據夾,卡上才改指過去
+    why='、'.join(w for w,need in (('沒跑完的填表收尾',stuck),('過時的回報與答案',outdated),
+                                   ('舊的填表截圖',shots)) if need)+'轉換'
+    kept=evidence.keep_old_shots(shots,state)   # 先複製進證據夾,卡上才改指過去
     done=folder_history.convert(cf.HOME,[state],why,lambda: bd.set_fb(mut, live=state, by='board_server'))
     if not done['done']:
         print(f'⚠ {why}沒有做:沒有退回點({done["reason"]})')
@@ -841,6 +831,13 @@ def run_sp(kind):
     """進度狀態放哪。真的看板用設定的 tmp;副本各自放在自己旁邊,不會蓋到真的那一份。"""
     return cf.TMP if is_real() else os.path.join(os.path.dirname(STATE),RUNS[kind]['dir'])
 
+def run_env(kind,args):
+    """任務指令的環境:進度檔放哪;找缺、建議分類帶著他的履歷文字。"""
+    sp=run_sp(kind); os.makedirs(sp,exist_ok=True)
+    env=dict(os.environ); env[RUNS[kind]['env']]=sp
+    if kind in ('research', 'suggest'): env['JOBSALVO_RESUME_TEXT']=args['resume_text']
+    return env
+
 def run_argv(kind,args):
     """只有真的看板才跑真的。副本(沙箱、測試、board_check)跑 job_fake:真的那兩支會派 agent、
     寫 repo 裡的檔、改現行看板,副本上按一下就動到真的東西。"""
@@ -856,34 +853,39 @@ def run_argv(kind,args):
         return [sys.executable,os.path.join(HERE,'suggest_cats.py' if is_real() else 'job_fake.py'),'--board',STATE]+(
             [] if is_real() else ['--kind','suggest'])
     if kind=='sync':
-        return [sys.executable,os.path.join(HERE,'sync_profiles.py' if is_real() else 'job_fake.py'),'--board',STATE]+(
+        argv=[sys.executable,os.path.join(HERE,'sync.py' if is_real() else 'job_fake.py'),'--board',STATE]+(
             [] if is_real() else ['--kind','sync'])
+        if is_real() and args.get('action')=='restore':
+            payload={key:args[key] for key in ('platform','lang','variant','version','change_ids')}
+            argv+=['--restore-json',json.dumps(payload,ensure_ascii=False)]
+        elif is_real() and all(args.get(key) for key in ('platform','lang','variant')):
+            for key in ('platform','lang','variant'):
+                argv+=['--'+key,str(args[key])]
+        return argv
     if kind=='customize':
         argv=[sys.executable,os.path.join(HERE,'customize.py' if is_real() else 'job_fake.py'),'--board',STATE]
         if not is_real(): argv+=['--kind','customize']
         argv+=['--url',args['url']]
         for item in args.get('items') or []: argv+=['--item',item]
         return argv
-    if kind=='replies' and not is_real():    # 副本不連外查回音,也不以未查來源推斷沒下文
-        return [sys.executable,os.path.join(HERE,'reply_run.py'),'--no-agent','--board',STATE]
     if not is_real():
         return [sys.executable,os.path.join(HERE,'job_fake.py'),'--kind',kind,'--board',STATE,
                 '--mode',args.get('mode',''),'--direction',args.get('text',''),
                 '--stage',args.get('stage',''),'--url',args.get('url','')]+lim+(
                 ['--minutes',str(args['minutes'])] if args.get('minutes') else [])   # 「跑幾張」「幾分鐘」副本也照著跑
     if kind=='replies':
-        return [sys.executable,os.path.join(HERE,'reply_run.py'),'--board',STATE]+lim+(['--url',one] if one else [])
+        return [sys.executable,os.path.join(HERE,'progress.py'),'--board',STATE]+lim+(['--url',one] if one else [])
     if kind=='apply':
-        return [sys.executable,os.path.join(HERE,'apply_run.py'),'--stage',args['stage'],'--board',STATE]+(
+        return [sys.executable,os.path.join(HERE,'fill.py'),'--stage',args['stage'],'--board',STATE]+(
             ['--url',args['url']] if args.get('url') else [])+(['--note',args['note']] if args.get('note') else [])+(
             ['--approval-ids',json.dumps(args['approval_ids'],ensure_ascii=False,separators=(',',':'))]
             if args.get('approval_ids') is not None else [])+lim
     if kind=='prep':
         return [sys.executable,os.path.join(HERE,'cut_tailor.py'),'--board',STATE]+lim+(
             ['--jids',card.card_id_from_url(one)] if one else [])
-    argv=[sys.executable,os.path.join(HERE,'converge.py'),'--mode',args['mode']]+lim+(
+    argv=[sys.executable,os.path.join(HERE,'find.py'),'--mode',args['mode']]+lim+(
         ['--direction',args['text']] if args['mode']=='dir' else [])
-    # 他在卡片/公司列上點的種子:走的還是更深,只是範圍由他指定(converge 那邊統一處理)
+    # 他在卡片/公司列上點的種子:走的還是更深,只是範圍由他指定(find 那邊統一處理)
     for x in (args.get('seeds') or []):
         argv+=(['--seed-co',x['v']] if x.get('k')=='co' else ['--seed-url',x['v']])
     if args.get('minutes'): argv+=['--minutes',str(args['minutes'])]
@@ -928,6 +930,26 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
         problem = _source_preflight()
         if problem:
             return 409, {'msg':problem}
+    if kind=='sync':
+        action=args.get('action')
+        if action not in (None,'restore'):
+            return 400,{'msg':'不知道要做什麼'}
+        if action=='restore':
+            if not is_real():
+                return 409,{'msg':'恢復平台履歷只可從現行看板執行'}
+            platform,lang,variant,version=(str(args.get(key) or '')
+                                          for key in ('platform','lang','variant','version'))
+            change_ids=args.get('change_ids')
+            if not all((platform,lang,variant,version)):
+                return 400,{'msg':'恢復清單缺少履歷或版本'}
+            args={'action':'restore','platform':platform,'lang':lang,'variant':variant,
+                  'version':version,'change_ids':change_ids}
+        else:
+            selector=tuple(str(args.get(key) or '').strip() for key in ('platform','lang','variant'))
+            if any(selector) and not all(selector):
+                return 400,{'msg':'指定單份同步時要提供平台、語言和履歷版本'}
+            if all(selector):
+                args={'platform':selector[0],'lang':selector[1],'variant':selector[2]}
     try: limit=max(0,min(500,int(args.get('limit') or 0)))
     except (TypeError,ValueError): limit=0
     one=str(args.get('url') or '')
@@ -935,8 +957,8 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
         fb0=snapshot()['fb']
         if kind=='prep' and (fb0.get(one) or {}).get('app')!='prep': return 400,{'msg':'這張不在「準備履歷」那一階'}
         if kind=='replies':
-            import reply_run   # 查應徵進度查哪幾張只有一份規則:已投出的,加上送出結果不明的
-            if one not in reply_run.to_check(fb0): return 400,{'msg':'這張不在已投出,也不是送出結果不明'}
+            import progress   # 查應徵進度查哪幾張只有一份規則:已投出的,加上送出結果不明的
+            if one not in progress.to_check(fb0): return 400,{'msg':'這張不在已投出,也不是送出結果不明'}
     if kind in ('research', 'suggest'):
         pasted = str(args.get('resume_text') or '').strip()[:100000]
         if kind == 'research':
@@ -1004,8 +1026,8 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
                     return 409,{'msg':f'{available[item_id]["name"]} 的頁數基準 PDF 讀取失敗:{str(e)[:120]}'}
         args={'url':url,'items':items}
     if kind=='apply':
-        # 送出只對他核准過、核准後答案沒變的卡(判斷跟 apply_run、看板按鈕同一支 form_record.approval_problem)。
-        # 最後一關一定是人:這裡先擋一次,apply_run 啟動時再擋一次。
+        # 送出只對他核准過、核准後答案沒變的卡(判斷跟 fill、看板按鈕同一支 form_record.approval_problem)。
+        # 最後一關一定是人:這裡先擋一次,fill 啟動時再擋一次。
         import form_record as fr
         stage=args.get('stage'); url=str(args.get('url') or '')
         has_dispatched_id=approval_id is not _APPROVAL_UNSET
@@ -1028,8 +1050,8 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
             if not url or not ((m.get('apply') or {}).get('session')): return 400,{'msg':'這張沒有 agent 填過的紀錄,先讓 agent 填表單'}
             if not delivery_state.allowed(m,'fix_start'):
                 return 400,{'msg':'這張「'+delivery_state.label(delivery_state.state(m))+'」,不能叫 agent 在原頁改'}
-            import apply_run
-            if not note and not apply_run.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
+            import form_record
+            if not note and not form_record.to_translate(fb,url) and not any(x.get('refill') for x in (m.get('form') or {}).get('f',[])):
                 return 400,{'msg':'寫一下要 agent 改什麼'}
         args={'stage':stage,'url':url,'note':note,'limit':0 if url else limit}
         if stage=='submit': args['approval_ids']=approval_ids
@@ -1053,9 +1075,7 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
         other=kind in jobrun.BROWSER_JOBS and next((k for k in jobrun.BROWSER_JOBS if k!=kind and run_status(k).get('running')),None)
         if other:
             return 409,{'other':True,'msg':{'replies':'查應徵進度','apply':'幫你填表','sync':'全部同步'}[other]+'正在用 agent 的瀏覽器,等它跑完再按'}
-        sp=run_sp(kind); os.makedirs(sp,exist_ok=True)
-        env=dict(os.environ); env[RUNS[kind]['env']]=sp
-        if kind in ('research', 'suggest'): env['JOBSALVO_RESUME_TEXT']=args['resume_text']
+        env=run_env(kind,args); sp=run_sp(kind)
         with open(os.path.join(sp,kind+'_launch.out'),'w') as log:
             p=subprocess.Popen(run_argv(kind,args),cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,
                                start_new_session=True)
@@ -1104,7 +1124,7 @@ class H(BaseHTTPRequestHandler):
             # 但預設會把整段 traceback 印進日誌,看起來就像當機,真正的問題反而被埋掉。
             self.close_connection=True
     def _tampered(self, e):
-        """看板檔被繞過正常寫入改過(bd.Tampered):不照改過的內容送頁面、不存檔,講清楚發生什麼事。"""
+        """看板檔讀不了(bd.BoardError:不是看板、或被繞過正常寫入改過):不照它送頁面、不存檔,講清楚發生什麼事。"""
         msg=str(e)
         if self.command=='GET' and self.path in ('/','/index.html'):
             page=('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1114,10 +1134,10 @@ class H(BaseHTTPRequestHandler):
         self._json(423,{'ok':False,'err':'tampered','msg':msg})
     def do_GET(self):
         try: self._do_GET()
-        except bd.Tampered as e: self._tampered(e)
+        except bd.BoardError as e: self._tampered(e)
     def do_POST(self):
         try: self._do_POST()
-        except bd.Tampered as e: self._tampered(e)
+        except bd.BoardError as e: self._tampered(e)
     def _do_GET(self):
         if self._foreign(False): return
         if self.path in ('/','/index.html'):
@@ -1223,6 +1243,60 @@ class H(BaseHTTPRequestHandler):
             if f:
                 with open(f,'rb') as fh: self._send(200,fh.read(),'image/jpeg' if f.lower().endswith(('.jpg','.jpeg')) else 'image/png')
             else: self._send(404,'沒有截圖','text/plain; charset=utf-8')
+        elif self.path.startswith('/api/evidence-folder?'):
+            from html import escape
+            from urllib.parse import urlencode
+            import evidence
+            card_id, round_id = self._q('c'), self._q('r')
+            folder = evidence.round_dir(card_id, round_id, STATE)
+            if not folder:
+                return self._send(404,'沒有這輪證據','text/plain; charset=utf-8')
+            files = sorted(entry.name for entry in os.scandir(folder)
+                           if entry.is_file(follow_symlinks=False) and evidence.FILE.fullmatch(entry.name))
+            body = '<!doctype html><meta charset="utf-8"><title>證據輪次</title><h1>證據輪次</h1><ul>'
+            body += ''.join(
+                '<li><a href="/api/evidence-file?' + escape(urlencode({'c': card_id, 'r': round_id, 'f': name}), quote=True)
+                + '">' + escape(name) + '</a></li>' for name in files) + '</ul>'
+            self._send(200,body)
+        elif self.path.startswith('/api/evidence-file?'):
+            import mimetypes
+            import evidence
+            folder = evidence.round_dir(self._q('c'), self._q('r'), STATE)
+            name = self._q('f')
+            path = os.path.join(folder or '', name)
+            try:
+                if (not folder or not evidence.FILE.fullmatch(name)
+                        or os.path.commonpath((folder, os.path.realpath(path))) != folder
+                        or os.path.islink(path) or not os.path.isfile(path)):
+                    return self._send(404,'沒有這份證據','text/plain; charset=utf-8')
+                with open(path, 'rb') as f:
+                    body = f.read()
+            except (OSError, ValueError):
+                return self._send(404,'沒有這份證據','text/plain; charset=utf-8')
+            ctype = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+            if ctype.startswith('text/') or name.lower().endswith(('.json', '.jsonl', '.log')):
+                ctype = 'text/plain; charset=utf-8'
+            self._send(200,body,ctype)
+        elif self.path.startswith('/api/sync-evidence?'):
+            import mimetypes
+            import evidence
+            round_id, name = self._q('r'), self._q('f')
+            # 平台履歷上的清單是同步那一輪拍的,或填表那一輪發來的(fill._publish_fixed)
+            folder = (evidence.flow_round_dir('sync', round_id, STATE)
+                      or evidence.flow_round_dir('fill', round_id, STATE))
+            path = os.path.join(folder or '', name)
+            try:
+                if (not folder or not evidence.FILE.fullmatch(name)
+                        or not name.lower().endswith(('.png', '.jpg', '.jpeg'))
+                        or os.path.commonpath((folder, os.path.realpath(path))) != folder
+                        or os.path.islink(path) or not os.path.isfile(path)):
+                    return self._send(404, '沒有這張同步截圖', 'text/plain; charset=utf-8')
+                with open(path, 'rb') as f:
+                    body = f.read()
+            except (OSError, ValueError):
+                return self._send(404, '沒有這張同步截圖', 'text/plain; charset=utf-8')
+            ctype = mimetypes.guess_type(name)[0] or 'image/png'
+            self._send(200, body, ctype)
         elif self.path in ('/api/rev','/api/rev?sync=1'):
             # 切回看板分頁時頁面帶 sync=1:跟打開看板一樣比對一次原稿,變了就在背景先建
             if self.path.endswith('?sync=1'):
@@ -1246,6 +1320,9 @@ class H(BaseHTTPRequestHandler):
                 return self._json(200,{'current':'','latest':'','new':False,'blocked':'副本不檢查更新'})
             import update
             return self._json(200,update.check(force=self.path.endswith('?now=1')))
+        elif self.path.startswith('/api/settings/website_notes'):
+            import website_notes
+            self._json(200, {'notes': website_notes.all_notes()})
         elif self.path=='/api/settings':
             import settings_api as sa
             note_existed=os.path.exists(cf.PREFERENCE_NOTE)
@@ -1429,6 +1506,36 @@ class H(BaseHTTPRequestHandler):
         body=self._json_body()
         if body is None: return
         act=self.path[len('/api/settings/'):] if self.path.startswith('/api/settings/') else ''
+        if act=='website_notes':
+            import website_notes
+            try:
+                action = body.get('action')
+                if action == 'undo':
+                    if not website_notes.user_action('undo', undo=body.get('undo')):
+                        return self._json(409, {'ok':False,'msg':'網站筆記已變動，不能套用這張復原單'})
+                    return self._json(200, {'ok':True})
+                if action not in ('add', 'edit', 'delete'):
+                    return self._json(400, {'ok':False,'msg':'不認得的網站筆記動作'})
+                result = website_notes.user_action(action, url=body.get('url'), text=body.get('text'),
+                                                   note_id=body.get('id'))
+                if result is None:
+                    return self._json(404, {'ok':False,'msg':'找不到這則網站筆記，請重新載入設定頁後再操作'})
+            except ValueError as e:
+                return self._json(400, {'ok':False,'msg':str(e)})
+            return self._json(200, {'ok':True,'note':result['note'],'undo':result['undo']})
+        if act=='profile_sync_review':
+            import profile_sync
+            platform, lang, variant, version = (str(body.get(key) or '')
+                                                  for key in ('platform', 'lang', 'variant', 'version'))
+            if not all((platform, lang, variant, version)):
+                return self._json(400, {'ok':False,'msg':'缺少同步清單版本'})
+            try:
+                recorded = profile_sync.mark_sync_reviewed(platform, lang, variant, version)
+            except ValueError as e:
+                return self._json(409, {'ok':False,'msg':str(e)})
+            if not recorded:
+                return self._json(409, {'ok':False,'msg':'同步清單已更新，請重整設定後看最新一版'})
+            return self._json(200, {'ok':True,'version':version})
         if act=='skill':
             skill,msg=sa.create_skill(body.get('name'),body.get('content'),body.get('kind'))
             if skill: note_saved()
@@ -1510,22 +1617,33 @@ class H(BaseHTTPRequestHandler):
             if kind=='prep':
                 import cut_tailor as ct; p=ct.preview(STATE)
             elif kind=='judge':
-                import research; p=research.preview('judge', live=STATE)
+                import agent_run, find; from web.numbered import Numbered
+                shared,fb0,jobs0=find.user_materials(STATE)
+                p=agent_run.rules_for('main',board=STATE,website_task=True)+find.judge_brief(
+                    find.ask_of('judge'),shared,Numbered(),(),(),fb0,jobs0).render(workspace=0)
                 note='這是骨架。真的跑的時候每批 5 張:每張的 JD 原文、和他對最像的十幾張舊卡的表態與原話,會接在下面。'
             elif kind=='find' and mode in MODES:
-                import research; p=research.preview(mode, text or '(你在上面寫的方向會放這裡)', live=STATE)
+                import agent_run, find
+                shared,_fb0,jobs0=find.user_materials(STATE)
+                p=agent_run.rules_for('main',board=STATE,website_task=True)+find.search_brief(
+                    find.ask_of(mode,text or '(你在上面寫的方向會放這裡)'),shared,jobs0).render(workspace=0)
                 if mode=='dir' and not text:
                     note='你還沒寫方向。在框裡寫的那一句,會放進下面「他說:『…』」的位置。'
             elif kind=='replies':
-                import reply_run; p=reply_run.preview(STATE)
+                import board_doc, progress
+                doc=board_doc.load(STATE); fb=json.loads(doc['fb'])
+                jobs={str(r['id']):r for r in doc['data']['jobs']}      # 跟真的跑一樣只列看板上有的卡
+                p=progress.brief_nav({u:fb[u] for u in progress.to_check(fb) if u in jobs},jobs,
+                                     progress.sources()).render(workspace=1)
                 note='這份列出「已投出」裡所有還在等的卡;真的跑時照你選的「跑幾張」只查前幾張。卡片清單照你按下去那一刻的看板。'
             elif kind=='apply' and stage in ('fill','fix','submit'):
-                import apply_run; p=apply_run.preview(stage, board=STATE)
-                meta=getattr(apply_run,'preview_meta',None); m=None
-                if meta:
-                    m=meta(stage, board=STATE)   # 出錯交給外面那層照實顯示,不當成「沒有符合的卡」
-                t=(m or {}).get('title') or ''
-                if meta and not m:
+                import card_title, fill, form_record
+                jobs, fb=fill._load(STATE)
+                picked=fill.eligible(jobs, fb, stage, None, '', form_record.board_status(STATE))[:1]
+                p=(fill.brief(stage, picked[0], jobs[picked[0]], fb, '').render(workspace=0) if picked else
+                   {'fill':'現在沒有可以填表的卡','fix':'現在沒有要 agent 改的卡','submit':'現在沒有確認過、可以送出的卡'}[stage])
+                t=card_title.name(jobs[picked[0]]) if picked else ''
+                if not picked:
                     note='現在沒有符合這個階段的卡,組不出例子。下面是程式給的說明,不是會送出去的 prompt。'
                 else:
                     note=('這是例子:'+('用「%s」這張組的'%t if t else '用現在符合這個階段的其中一張組的')+
@@ -1654,7 +1772,7 @@ class H(BaseHTTPRequestHandler):
             self._json(200,{'ok':True,'building':building,'rejected':rejected,'cards':got.get('cards',{}),'undo':got.get('undo',[]),
                             'next':next_steps(snapshot(),None if any(k.startswith('__') for k in touched) else touched),
                             'save_order':got.get('save_order')})
-        except bd.Tampered:
+        except bd.BoardError:
             raise
         except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)
             self._json(400,{'ok':False,'err':str(e)})
@@ -1690,7 +1808,7 @@ def resolve_hosts(arg):
 
 def sandbox_home():
     """副本(沙箱、截圖、介面檢查、測試)用的暫存資料夾:設定頁的改動與上傳寫進這裡,不碰真的設定。
-    設定、偏好筆記、客製 skill,以及設定裡每份履歷與附件指到的檔都複製一份(是複製不是連結:
+    設定、偏好筆記、網站筆記、客製 skill,以及設定裡每份履歷與附件指到的檔都複製一份(是複製不是連結:
     副本上傳、改檔寫的都是這一份,原檔一個位元組都不動)。以前沒帶履歷檔,副本上找缺會要你貼上履歷內容、
     設定頁顯示開始前 0/1、每份履歷都標找不到檔案。可投遞夾那些建置產物不複製(幾百 MB,副本用不到)。"""
     import tempfile
@@ -1705,6 +1823,7 @@ def sandbox_home():
                 return
             os.makedirs(os.path.dirname(dst),exist_ok=True); shutil.copy2(src,dst)   # 只複製內容,不連回原檔
         for f in (os.path.join(cf.HOME,cf.NAME),cf.PREFS,cf.PREFERENCE_NOTE,
+                  os.path.join(cf.HOME,'website-notes.json'),os.path.join(cf.HOME,'platform-notes.json'),
                   cf.APPLY_RULES,os.path.join(cf.HOME,'resume.md'),os.path.join(cf.HOME,'.resume-paste.md'),
                   os.path.join(cf.HOME,'profiles.json')):
             if os.path.commonpath((home,os.path.realpath(f)))==home:
@@ -1741,12 +1860,13 @@ def main():
     ap.add_argument('--port',type=int,default=cf.PORT)
     ap.add_argument('--host',default='auto',help='auto=127.0.0.1 ＋ ::1 ＋ Tailscale IP(預設,安全);或指定 IP。禁 0.0.0.0')
     ap.add_argument('--state',default=cf.LIVE)
+    ap.add_argument('--sandbox-home',default='',help=argparse.SUPPRESS)
     a=ap.parse_args(); STATE=os.path.abspath(a.state); SERVING[0]=True
     first_run(STATE)
     tmp=None; srvs=[]; previous_sigterm=None
     try:
         if not is_real():
-            tmp=sandbox_home()
+            tmp=os.path.abspath(a.sandbox_home) if a.sandbox_home else sandbox_home()
             def stop_sandbox(_sig,_frame):
                 raise SystemExit(0)
             previous_sigterm=signal.getsignal(signal.SIGTERM)

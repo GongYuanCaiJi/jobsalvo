@@ -38,7 +38,9 @@ class Classification(unittest.TestCase):
 
 
 
-PASSED = {'schema_version': 2, 'checked_links': True, 'issues': []}     # 投遞前驗收跑完、沒擋
+import board_status  # noqa: E402
+
+PASSED = {'schema_version': board_status.SCHEMA_VERSION, 'issues': []}     # 投遞前驗收跑完、沒擋
 JOB = {'id': URL, 'target': 'Role · Acme'}
 
 
@@ -60,6 +62,61 @@ class ConfirmButton(unittest.TestCase):
 
     def test_a_filled_card_with_every_answer_ready_can_be_confirmed(self):
         self.assertIsNone(step(ready_to_confirm())['confirm'])
+
+    def test_an_unreviewed_profile_sync_list_is_shown_without_blocking_confirmation_or_send(self):
+        fb = ready_to_confirm()
+        fb[URL]['apply']['delivery'] = {'method': 'platform_profile',
+                                        'profile_url': 'https://example.test/profile'}
+        entry = {'read': 'https://example.test/profile',
+                 'sync_versions': [{'round_id': 'round-new', 'target': 'old target',
+                                    'target_text': {}, 'reviewed_at': None}],
+                 'sync_visuals': [{'evidence': 'round-new', 'card': URL, 'item': '作品',
+                                   'verdicts': ['頁面內容有變動']}]}
+        with mock.patch('profile_sync.slots', return_value=[('example.test', 'zh', 'general', entry)]), \
+                mock.patch('profile_registry.load', return_value={'example.test': {'zh/general': entry}}), \
+                mock.patch('profile_sync.decided', return_value={
+                    'platform': 'example.test', 'lang': 'zh', 'variant': 'general', 'profile_kind': 'fixed'}):
+            next_step = step(fb)
+            self.assertIsNone(next_step['confirm'])
+            self.assertTrue(any('最新同步清單尚未看過' in line[1]
+                                for line in next_step['view']['line']))
+            import form_record
+            ds.fire(fb, URL, 'confirm', approve=form_record.approval(fb, URL))
+            self.assertIsNone(step(fb)['send'])
+
+            entry['sync_versions'][-1]['reviewed_at'] = 'reviewed'
+            stale = ready_to_confirm()
+            stale[URL]['apply']['delivery'] = fb[URL]['apply']['delivery']
+            next_step = step(stale)
+        self.assertIsNone(next_step['confirm'])
+        self.assertTrue(any('平台履歷落後' in line[1] for line in next_step['view']['line']))
+
+    def test_shared_profile_url_shows_only_the_selected_resume_slot(self):
+        import next_step
+        import profile_sync as ps
+
+        fb = ready_to_confirm()
+        profile_url = 'https://example.test/profile/shared'
+        fb[URL]['apply']['delivery'] = {'method': 'platform_profile', 'profile_url': profile_url}
+        slots = [
+            ('example.test', 'zh', 'one', {
+                'read': profile_url, 'sync_version': 'one-v1', 'sync_reviewed_version': 'one-v1',
+                'sync_visuals': [{'card': URL, 'item': 'zh/one', 'verdicts': ['wrong resume list']}],
+            }),
+            ('example.test', 'zh', 'two', {
+                'read': profile_url, 'sync_version': 'two-v1', 'sync_reviewed_version': 'two-v1',
+                'sync_visuals': [{'card': URL, 'item': 'zh/two', 'verdicts': ['selected resume list']}],
+            }),
+        ]
+        decision = {'platform': 'example.test', 'lang': 'zh', 'variant': 'two',
+                    'profile_kind': 'fixed', 'fixed_url': profile_url}
+        with mock.patch.object(ps, 'slots', return_value=slots), \
+                mock.patch.object(ps, 'decided', return_value=decision), \
+                mock.patch.object(ps, 'state', return_value='ok'):
+            view = next_step.card(fb, URL, job=JOB)['view']
+        lines = [line[1] for line in view['line']]
+        self.assertTrue(any('selected resume list' in line for line in lines), lines)
+        self.assertFalse(any('wrong resume list' in line for line in lines), lines)
 
     def test_the_resume_as_shown_on_the_employer_page_comes_first_on_the_card(self):
         fb = ready_to_confirm()
@@ -90,35 +147,52 @@ class ConfirmButton(unittest.TestCase):
         fb[URL].pop('ds')
         self.assertIn('還沒填', step(fb)['confirm'])
 
-    def test_profile_change_list_puts_pending_first_and_keeps_result_separate(self):
+    def test_profile_change_list_shows_only_the_list_and_factual_markers(self):
         fb = ready_to_confirm()
         fb[URL]['apply']['delivery'] = {'method': 'platform_profile',
                                         'profile_url': 'https://example.test/profile'}
         rows = [
-            {'card': URL, 'item': '技能', 'verdicts': ['照原文'], 'platform_result': '已存上平台',
-             'before_text': '舊技能', 'after_text': '新技能',
-             'before_shot': 'round/before.png', 'after_shot': 'round/after.png'},
-            {'card': URL, 'item': '自傳', 'verdicts': ['agent 代填待確認', '範圍外有內容消失'],
-             'platform_result': '只驗收、已撤回', 'before_text': '舊文' * 100,
-             'after_text': '新文' * 100, 'outside_losses': ['旁欄消失'],
-             'answer_question': '自傳題目'},
+            {'card': URL, 'item': 'zh/one', 'verdicts': ['原稿沒在頁上一字不差找到'],
+             'intended_changes': [{'item': '技能', 'before': '舊技能', 'after': '新技能',
+                                   'marker': '原稿沒在頁上一字不差找到'}],
+             'page_changes': [{'page_url': 'https://example.test/profile',
+                               'verdicts': ['頁面內容有變動'], 'before_text': '舊技能',
+                               'after_text': '新技能', 'before_shot': 'round/before.png',
+                               'after_shot': 'round/after.png'}]},
         ]
         registry = {'example.test': {'zh/one': {'read': 'https://example.test/profile',
                                                 'sync_visuals': rows}}}
-        with mock.patch('profile_sync.registry', return_value=registry):
+        with mock.patch('profile_sync.registry', return_value=registry), \
+                mock.patch('profile_sync.decided', return_value={
+                    'platform': 'example.test', 'lang': 'zh', 'variant': 'one', 'profile_kind': 'fixed'}):
             view = step(fb)['view']
         labels = [line[1] for line in view['line']]
-        self.assertLess(next(i for i, label in enumerate(labels) if label.startswith('自傳：')),
-                        next(i for i, label in enumerate(labels) if label.startswith('技能：')))
-        self.assertIn('平台實際結果：只驗收、已撤回', labels)
+        self.assertIn('技能：原稿沒在頁上一字不差找到', labels)
+        self.assertFalse(any(any(term in label for term in ('成功', '失敗', '已同步', '平台實際結果'))
+                             for label in labels))
         self.assertTrue(any(line[2].get('full') for line in view['line']
                             if len(line) > 2 and isinstance(line[2], dict)))
-        self.assertIn('用到的常用答案：自傳題目', labels)
         self.assertEqual([shot[1] for shot in view['shots']][-2:],
                          ['round/before.png', 'round/after.png'])
         shot_line = next(i for i, line in enumerate(view['line'])
                          if len(line) > 2 and isinstance(line[2], dict) and line[2].get('shot_indices'))
         self.assertGreater(shot_line, next(i for i, label in enumerate(labels) if label.startswith('技能：')))
+
+    def test_profile_deletion_shows_both_page_read_results_without_saying_not_compared(self):
+        fb = ready_to_confirm()
+        fb[URL]['apply']['delivery'] = {'method': 'platform_profile',
+                                        'profile_url': 'https://example.test/profile'}
+        rows = [{'card': URL, 'item': 'zh/one', 'verdicts': [],
+                 'intended_changes': [{'item': '技能', 'before': '舊技能', 'after': '', 'marker': '',
+                                       'before_read': True, 'after_read': False}]}]
+        registry = {'example.test': {'zh/one': {'read': 'https://example.test/profile',
+                                                 'sync_visuals': rows}}}
+        with mock.patch('profile_sync.registry', return_value=registry), \
+                mock.patch('profile_sync.decided', return_value={
+                    'platform': 'example.test', 'lang': 'zh', 'variant': 'one', 'profile_kind': 'fixed'}):
+            labels = [line[1] for line in step(fb)['view']['line']]
+        self.assertIn('技能：改前讀得到：是；改後讀得到：否', labels)
+        self.assertNotIn('技能：沒比到；改前讀得到：是；改後讀得到：否', labels)
 
     def test_profile_change_list_shows_only_the_latest_round_of_each_item(self):
         fb = ready_to_confirm()
@@ -132,7 +206,9 @@ class ConfirmButton(unittest.TestCase):
         ]
         registry = {'example.test': {'zh/one': {'read': 'https://example.test/profile',
                                                 'sync_visuals': rows}}}
-        with mock.patch('profile_sync.registry', return_value=registry):
+        with mock.patch('profile_sync.registry', return_value=registry), \
+                mock.patch('profile_sync.decided', return_value={
+                    'platform': 'example.test', 'lang': 'zh', 'variant': 'one', 'profile_kind': 'fixed'}):
             labels = [line[1] for line in step(fb)['view']['line']]
         self.assertEqual([label for label in labels if label.startswith('技能：')], ['技能：照原文'])
         self.assertNotIn('平台實際結果：沒做成', ' '.join(labels))
@@ -577,17 +653,16 @@ class CustomVersionWaiting(unittest.TestCase):
         self.assertIsNone(got['auto'])
 
 
-class Gate(unittest.TestCase):
-    """投遞前把關的結果和原因(#340):進「可以投了」那顆按鈕、卡上那一句都照它。"""
+FILES = dict(PASSED, issues=[{'jid': URL, 'kind': 'files', 'msg': '可投遞夾尚未由本模組建置驗收'}])
 
-    def test_the_agents_closed_verdict_holds_until_you_say_the_job_is_still_open(self):
-        fb = {URL: {'app': 'ready'}}
-        got = next_step_of(fb, CLOSED)
-        self.assertIn(CLOSED['issues'][0]['msg'], got['gate'])
-        self.assertEqual((got['closed'], got['holds']), (True, CLOSED['issues']))
-        fb[URL]['judged_no'] = {'closed': '2026-01-02'}
-        got = next_step_of(fb, CLOSED)
-        self.assertEqual((got['gate'], got['closed'], got['holds']), ('', False, []))
+
+class Gate(unittest.TestCase):
+    """投遞前把關的結果和原因:進「可以投了」那顆按鈕、卡上那一句、確認送出都照它。"""
+
+    def test_a_file_problem_holds_the_card_and_blocks_confirming(self):
+        got = next_step_of({URL: {'app': 'ready'}}, FILES)
+        self.assertEqual((got['gate'], got['holds']), ('驗收未通過：可投遞夾尚未由本模組建置驗收', FILES['issues']))
+        self.assertEqual(step(ready_to_confirm(), FILES)['confirm'], got['gate'])
 
 
 def next_step_of(fb, status):
@@ -811,32 +886,28 @@ class EveryEventOnTheServer(Server):
                 self.assertEqual([(r['u'], r['msg']) for r in got['rejected']], [(URL, why)])
 
 
-CLOSED = dict(PASSED, issues=[{'jid': URL, 'kind': 'closed', 'judged': 'This position has been filled',
-                               'msg': 'agent 判斷職缺已關閉'}])
+class WrittenStatusDecidesTheGate(unittest.TestCase):
+    """board_status --write 寫進看板的投遞前驗收,下一步照它擋或放行:要寄的檔案有問題的卡先不送、原因寫在卡上,
+    沒問題的卡自動進可以投了。"""
 
-
-class JobStillOpen(unittest.TestCase):
-    """你按「不對,職缺還在」推翻 agent 的判斷:下一步當下就不擋,不等驗收重跑(#339 第四條)。"""
-
-    def test_the_agents_closed_verdict_blocks_confirming(self):
-        self.assertIn(CLOSED['issues'][0]['msg'], step(ready_to_confirm(), CLOSED)['confirm'])
-
-    def test_saying_the_job_is_still_open_unblocks_it_at_once(self):
-        fb = ready_to_confirm()
-        fb[URL]['judged_no'] = {'closed': '2026-01-02'}
-        self.assertIsNone(step(fb, CLOSED)['confirm'])
-
-
-class JobStillOpenOnTheServer(Server):
-    def test_saving_the_job_is_still_open_unblocks_the_backend_too(self):
-        self.use(ready_to_confirm())
+    def test_the_written_report_holds_a_card_with_file_problems_and_advances_a_clean_one(self):
+        import tempfile
         import board_doc as bd
-        bd.rewrite(lambda d: d['data'].__setitem__('status', CLOSED), self.path, 'test')
-        self.assertIn(CLOSED['issues'][0]['msg'], self.next_of()['confirm'])
-        self.save({'u': URL, 'set': {'judged_no': {'closed': '2026-01-02'}}})
-        self.assertIsNone(self.next_of()['confirm'])
-        got = self.save({'u': URL, 'ev': 'confirm', 'data': {'approve': {}}})
-        self.assertEqual((got['rejected'], ds.state(self.card())), ([], 'confirmed'))
+        import board_status
+        import next_step
+        import ship
+        real = ship.check
+        fb, jobs = flow_board(clean='ready', unbuilt='ready')
+        with tempfile.TemporaryDirectory(prefix='written-status-') as directory:
+            board = _env.make_board(os.path.join(directory, 'board.html'), fb=fb, jobs=jobs)
+            with mock.patch.object(ship, 'check', side_effect=lambda j, f, **k: [] if j['id'] == 'clean' else real(j, f, **k)), \
+                 mock.patch.object(sys, 'argv', ['board_status', '--write', '--board', board]):
+                board_status.main()
+            status = bd.load(board)['data']['status']
+        got = next_step.of(fb, jobs, status, flow=FLOW, now=NOW, real=False)
+        self.assertEqual((got['clean']['gate'], (got['clean']['auto'] or {}).get('do')), ('', 'advance'))
+        self.assertEqual(got['unbuilt']['gate'], '驗收未通過：可投遞夾尚未由本模組建置驗收')
+        self.assertIsNone(got['unbuilt']['auto'])
 
 
 class PageGetsTheNextStep(Server):

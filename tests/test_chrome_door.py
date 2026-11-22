@@ -86,7 +86,6 @@ class OnlyTheDoorAsksWhichFamily(unittest.TestCase):
     ALLOWED = {
         'agent_run.py': ('def rules_for', 'def prompt_stdin', 'def argv_for', 'def _failure_reason', 'def run(',
                          'def _run(', 'def _attempt_line'),   # _run 是 run 拆出來的本體(#315),同一段成敗判斷
-        'reply_run.py': ('def _copy_only_agent_id',), # 只讀分析固定用 Codex(關得掉瀏覽器和搜尋),不是 Chrome 的門路
     }
 
     def test_only_dev_tools_launch_a_browser_themselves(self):

@@ -10,6 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import _env  # noqa: E402,F401  測試跑在暫存資料夾
 
+import board_status
 import delivery_state as ds
 
 with open(os.path.join(HERE, 'fixtures', 'delivery-cards.json'), encoding='utf-8') as f:
@@ -131,14 +132,15 @@ class PageLeftWaiting(unittest.TestCase):
 
 class Checklist(unittest.TestCase):
     """能不能確認送出:狀態允許 + 檢查清單(看板 approvalProblem / approveBlocker 由看板檢查跑同一張)。"""
-    PASSED = {'schema_version': 2, 'checked_links': True, 'issues': []}
 
     def test_cases(self):
         import form_record as fr
         for c in FIX['checklist']:
             with self.subTest(c['name']):
                 fb = copy.deepcopy(c['fb'])
-                status = c.get('status', self.PASSED)
+                status = c.get('status', {'issues': []})
+                if status is not None:                            # 驗收跑完:照 board_status 寫的格式
+                    status = dict(status, schema_version=board_status.SCHEMA_VERSION)
                 self.assertEqual(fr.approval_problem(fb, c['url'], status), c['problem'])
                 self.assertEqual(fr.confirm_problem(fb, c['url'], status), c['confirm'])
                 self.assertEqual(fb, c['fb'])                     # 試算確認不會留下東西
@@ -155,14 +157,6 @@ class CellEffects(unittest.TestCase):
         fb = board('confirmed')
         fire(fb, 'leave')
         self.assertEqual(ds.state(fb[URL]), 'parked')
-        self.assertNotIn('approve', fb[URL])
-
-    def test_marking_it_broken_voids_the_confirmation(self):
-        """額外抓到 2:程式判定職缺下架(標出錯了)也一樣作廢確認;放回來不會又變有效。"""
-        import cut_tailor
-        fb = board('confirmed')
-        cut_tailor._techerr(fb, URL)
-        self.assertEqual((ds.state(fb[URL]), fb[URL]['s'], fb[URL].get('app')), ('parked', 'techerr', None))
         self.assertNotIn('approve', fb[URL])
 
     def test_changing_files_after_confirm_voids_it(self):

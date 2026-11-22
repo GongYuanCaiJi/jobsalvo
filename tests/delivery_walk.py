@@ -1,5 +1,5 @@
 """連續很多步的隨機走法(#302 補充驗收):照固定亂數種子產生一串一串的動作,每一步都經過正式的入口
-(看板的指令走 board_server.apply_cmds、apply_run 的關卡、自動流程、平台對帳、Chrome 關過),記下每一步送了什麼。
+(看板的指令走 board_server.apply_cmds、fill 的流程、自動流程、平台對帳、Chrome 關過),記下每一步送了什麼。
 
 後台測試(tests/test_delivery_sequences.py)每一步驗「永遠要成立的事」。
 種子、張數、步數不准亂改:失敗訊息印的是種子和第幾串,重跑得出同一串。"""
@@ -12,14 +12,15 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, '..', 'tools')))
 
-import apply_run
+import board_status
+import fill
 import autopilot
 import board_server as bs
 import delivery_state as ds
 import form_record as fr
 
 CAP = 2
-STATUS = {'schema_version': 2, 'at': '2026-01-01 00:00', 'checked_links': True, 'issues': []}
+STATUS = {'schema_version': board_status.SCHEMA_VERSION, 'at': '2026-01-01 00:00', 'issues': []}
 JOBS = [{'id': 'https://walk.example/a', 'target': '**Role A · Acme**'},
         {'id': 'https://walk.example/b', 'target': '**Role B · Acme**'},
         {'id': 'https://walk.example/c', 'target': '**Role C · Beta**'}]
@@ -72,13 +73,13 @@ class Walk:
             self.last = (before, got)
         return [s is not None for s in undo]
 
-    # ---- 系統那一邊(apply_run、自動流程、Chrome、平台對帳)----
+    # ---- 系統那一邊(fill、自動流程、Chrome、平台對帳)----
     def sys_fill(self, u):
-        if u in apply_run.eligible(BY, self.fb, 'fill', url=u, status=STATUS):
+        if u in fill.eligible(BY, self.fb, 'fill', u, '', None):
             self.fire(u, 'fill_start', apply={'stage': 'fill', 'at': self.at(), 'issues': ['這一輪還沒跑完']})
 
     def sys_fix(self, u):
-        if u in apply_run.eligible(BY, self.fb, 'fix', url=u, status=STATUS):
+        if u in fill.eligible(BY, self.fb, 'fix', u, '', None):
             self.fire(u, 'fix_start', apply={'stage': 'fix', 'at': self.at(), 'issues': ['這一輪還沒跑完']})
 
     def sys_done(self, u, how):
@@ -102,7 +103,7 @@ class Walk:
 
     def sys_submit(self, u):
         before = copy.deepcopy(self.fb[u])
-        if fr.start_submit(self.fb, u, STATUS) is None:           # 正式的關卡(apply_run 派 agent 送出前走的那一支)
+        if fr.approval_problem(self.fb, u, STATUS) is None and ds.try_fire(self.fb, u, 'submit_start'):   # 跟 fill 送出前的關卡同一套
             self.ops.append({'op': 'fire', 'u': u, 'ev': 'submit_start', 'data': {}})
             return before
         return None
@@ -124,7 +125,7 @@ class Walk:
 
     def sys_platform(self, u):
         rec = 'p:' + u + ':2026-01-30'
-        if rec not in (self.fb[u].get('sync_no') or []):      # sync_sent.plan:他退回過的那一筆不再拉回
+        if rec not in (self.fb[u].get('sync_no') or []):      # progress.plan_records:他退回過的那一筆不再拉回
             self.fire(u, 'platform_found', by='platform', at=self.at(), sent_at='2026-01-30', rec=rec)
 
     def sys_settle(self):
@@ -135,13 +136,6 @@ class Walk:
                 self.fire(u, 'fill_bad' if a.get('tab_id') else 'fill_nopage', apply=a)
             elif s == 'sending':
                 self.fire(u, 'submit_unsure', evidence={'at': self.at(), 'problems': ['送出途中停掉了'], 'clicked': None})
-
-    def sys_translate(self):
-        """後台照他改的中文重翻英文(form_record.apply_translate):英文變了,頁還在的表單標重打;不送事件。"""
-        v = 'Because %d.' % self.n
-        changed = v != self.fb['__ans__'][0].get('v')
-        fr.apply_translate(self.fb, 'k1', en=v)
-        self.ops += [{'op': 'bank', 'v': v}] + ([{'op': 'refill'}] if changed else [])   # 英文沒變就不標重打
 
     # ---- 他按的按鈕(看板送的事件,後台照下一步收或擋)----
     def busy(self, u):
@@ -222,7 +216,7 @@ class Walk:
             ('再投一次', lambda: self.user_simple(u, 'retry')),
             ('換語言', lambda: self.user_files(u)), ('移除/放回', lambda: self.user_remove(u)),
             ('推回可以投了', lambda: self.user_push(u)),
-            ('封鎖/解除封鎖 Acme', self.user_block), ('改答案', self.user_answer), ('後台重翻', self.sys_translate),
+            ('封鎖/解除封鎖 Acme', self.user_block), ('改答案', self.user_answer),
             ('伺服器重開', self.sys_settle), ('復原', self.user_undo),
         ]
         # 大多照這張現在的狀態挑「畫面上會有的那幾顆、會發生的那幾件事」(不然隨機亂按很少走到正在送出);
@@ -233,7 +227,7 @@ class Walk:
             'nopage': ['讓 agent 填'], 'stuck': ['讓 agent 填', '要 agent 改', 'Chrome 關過', '換語言'],
             'stale': ['讓 agent 填', 'Chrome 關過'], 'gone': ['讓 agent 填'],
             'parked': ['確認送出', '確認送出', '確認送出', '要 agent 改', 'Chrome 關過', '換語言', '改答案', '移除/放回'],
-            'confirmed': ['送出', '送出', '送出', '取消確認', '改答案', '後台重翻', '換語言', 'Chrome 關過', '移除/放回',
+            'confirmed': ['送出', '送出', '送出', '取消確認', '改答案', '換語言', 'Chrome 關過', '移除/放回',
                           '封鎖/解除封鎖 Acme'],
             'sending': ['送出成功', '送出結果不明', '送出結果不明', 'agent 沒開起來', '伺服器重開', '平台對帳找到', '改答案'],
             'unsure': ['確認沒送出', '確認沒送出', '其實送出了', 'Chrome 關過', '平台對帳找到', '換語言', '改答案'],
@@ -250,7 +244,7 @@ class Walk:
         before = copy.deepcopy(self.fb)
         n_ops = len(self.ops)
         result = act()
-        self.log.append(f'{len(self.log) + 1}. {name}' + ('' if name in ('封鎖/解除封鎖 Acme', '改答案', '後台重翻', '伺服器重開', '復原')
+        self.log.append(f'{len(self.log) + 1}. {name}' + ('' if name in ('封鎖/解除封鎖 Acme', '改答案', '伺服器重開', '復原')
                                                           else ' ' + u.rsplit('/', 1)[-1]))
         return name, u, before, result, self.ops[n_ops:]
 

@@ -97,7 +97,7 @@ class Walks(unittest.TestCase):
         同一欄被 B 改過,A 的復原不放回那一欄(不蓋掉 B)。"""
         import board_server as bs
         rnd = random.Random(dw.SEED)
-        plain = ['n', 's', 'cat', 'rzfb', 'judged_no']
+        plain = ['n', 's', 'cat', 'rzfb']
         n = 0
         for i in range(400):
             w = dw.Walk(dw.SEED * 100000 + 90000 + i)

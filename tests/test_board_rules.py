@@ -8,6 +8,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.abspath(os.path.join(HERE, '..', 'tools'))
 sys.path.insert(0, TOOLS)
 
+import board_status
 import delivery_state
 import config as cf
 import settings_api
@@ -16,7 +17,7 @@ import settings_api
 with open(os.path.join(HERE, 'fixtures', 'board-rule-cases.json'), encoding='utf-8') as f:
     CASES = json.load(f)
 # 案例沒寫 status 的:投遞前驗收跑過、沒有問題(看板那邊沿用副本的驗收結果,也是這樣)
-PASSED = {'schema_version': 2, 'checked_links': True, 'issues': []}
+PASSED = {'schema_version': board_status.SCHEMA_VERSION, 'issues': []}
 
 
 class SharedBoardRules(unittest.TestCase):

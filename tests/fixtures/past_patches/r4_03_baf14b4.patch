@@ -1,0 +1,1 @@
+_APPLICANT_COUNT = re.compile(r'applicant_count\\?"\s*:\s*(\d+)')

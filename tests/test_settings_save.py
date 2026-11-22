@@ -72,6 +72,18 @@ class SettingsSave(unittest.TestCase):
         self.assertTrue(sa.save({'set': {'replies.ghost_days': 0}}))
         self.assertNotIn('replies', self.saved())
 
+    def test_possible_closed_days_are_a_shared_saved_board_setting(self):
+        self.assertEqual(cf.C['board'].get('risk_days', 180), 180)
+        for bad in (0, -1, 3651, '', '180', True):
+            with self.subTest(risk_days=bad):
+                self.assertTrue(sa._check({'board': {'risk_days': bad}}))
+        self.assertEqual(sa._check({'board': {}}), [])
+        self.assertEqual(sa.save({'set': {'board.risk_days': 365}}), [])
+        self.assertEqual(self.saved()['board']['risk_days'], 365)
+        self.assertEqual(cf.C['board']['risk_days'], 365)
+        import board_server
+        self.assertEqual(board_server.page_cfg()['risk_days'], 365)
+
     def test_both_supported_agents_can_use_the_shared_browser_sequentially(self):
         settings = {'agent': {'agents': [
             {'id': 'a', 'runtime': 'codex', 'model': '', 'effort': 'high', 'browser': True},
@@ -118,6 +130,18 @@ class SettingsSave(unittest.TestCase):
         with open(cf.__file__, encoding='utf-8') as f:
             line = next(x for x in f if "'fill_max':" in x)
         self.assertNotIn('空的或 0 = 不限', line)
+
+    def test_fill_parallel_is_three_for_everyone_and_a_blank_or_wrong_value_is_three_too(self):
+        # 同時填幾張(#777):升級前存的設定沒有這一欄,照預設 3;空的、看不懂的照 3,小於 1 當 1
+        import fill
+        self.assertEqual(cf.DEFAULTS['flow']['fill_parallel'], 3)
+        self.assertEqual(len(sa._check({'flow': {'fill_parallel': '很多'}})), 1)
+        self.assertEqual(sa._check({'flow': {'fill_parallel': ''}}), [])
+        self.assertEqual([len(sa._check({'flow': {'fill_parallel': n}})) for n in (0, '0', 1, '10', 11, '99')], [1, 1, 0, 0, 1, 1])
+        self.assertEqual([fill.parallel(flow) for flow in ({}, None, {'fill_parallel': ''}, {'fill_parallel': '很多'},
+                                                           {'fill_parallel': 'nan'}, {'fill_parallel': 0},
+                                                           {'fill_parallel': '2'}, {'fill_parallel': 4.9}, {'fill_parallel': 99})],
+                         [3, 3, 3, 3, 3, 1, 2, 4, 10])
 
     def test_a_write_that_fails_halfway_says_so_and_leaves_the_settings_as_they_were(self):
         # 以前先寫 jobsalvo.json 再寫文字設定:後面失敗就丟例外、連線斷掉,畫面說沒存成,設定其實已經換了;

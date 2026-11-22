@@ -1,0 +1,4 @@
+class PageResult:
+    url: str
+    job_title: str = ''
+    company: str = ''

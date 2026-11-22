@@ -84,7 +84,7 @@ class StaleIsCleared(unittest.TestCase):
         self.assertIn('refused', bank)
         self.assertEqual(bank['refused']['v'], '')
         self.assertNotIn('refused_sent', bank)
-        self.assertEqual(fr.validate(fb), [])
+        self.assertEqual(fr.validate(fb, list(fb)), [])
 
         # 使用者確認過或改過的一條都沒變;不是那條規則產生的也不動
         self.assertEqual([bank[e['k']] for e in HIS], HIS)

@@ -154,8 +154,7 @@ class BoardServerSaysWhatWentWrong(unittest.TestCase):
     def test_prompt_preview_says_it_failed_instead_of_no_matching_card(self):
         # 以前組例子出錯被當成「現在沒有符合這個階段的卡」
         import board_server as bs
-        with mock.patch('apply_run.preview', return_value='程式給的說明'), \
-             mock.patch('apply_run.preview_meta', side_effect=RuntimeError('看板讀不懂')), \
+        with mock.patch('fill.eligible', side_effect=RuntimeError('看板讀不懂')), \
              mock.patch.dict(bs._PV_CACHE, clear=True):
             code, raw, _ = self.server.req('/api/prompt?kind=apply&stage=fill')
         got = json.loads(raw)
@@ -174,27 +173,111 @@ class BoardServerSaysWhatWentWrong(unittest.TestCase):
 
 
 class RunLogSaysWhatCouldNotBeReported(unittest.TestCase):
-    """跑準備區的回報寫不進看板時,至少印進這一輪的紀錄(看板上「看紀錄」看得到),不是整句不見。"""
+    """看板任務寫不進「📣 回報」時,讓使用者仍能從這一輪的紀錄看到原因。"""
 
     def test_a_report_that_cannot_reach_the_board_goes_to_the_run_log(self):
-        """跑準備區、找缺、照網址加缺各一份。"""
+        """從看板貼網址入口派發任務;agent 判斷失敗、回報檔也寫不進去時,原因仍進任務紀錄。"""
+        import contextlib
+        import sys
+        sys.path.insert(0, os.path.join(ROOT, 'tests'))
+        import _env  # noqa: F401  測試跑在暫存資料夾
+        import agent_report
+        import agent_run
+        import add_job
+        import board_server as bs
+        import web.fetch
+
+        directory = self.enterContext(tempfile.TemporaryDirectory(prefix='report-run-log-'))
+        board = os.path.join(directory, 'board.html')
+        url = 'https://jobs.example/report-fallback'
+        _env.make_board(board, jobs=[])
+        page = web.fetch.PageResult(url, 'ok', text='職缺頁原文', via='direct')
+
+        def failed_agent(*_args, **_kwargs):
+            raise agent_run.AgentRunError([agent_run.AgentResult('failed', returncode=7)])
+
+        with mock.patch.object(bs, 'is_real', return_value=True), mock.patch.object(bs, 'STATE', board):
+            argv = bs.run_argv('add', {'urls': [url]})
+        self.assertEqual(os.path.basename(argv[1]), 'add_job.py')
+        run_log = os.path.join(directory, 'add_launch.out')
+        with mock.patch.object(agent_run, 'run', side_effect=failed_agent), \
+             mock.patch.object(web.fetch, 'request_page', return_value=page), \
+             mock.patch.object(web.fetch, 'screenshot', side_effect=OSError('測試不截圖')), \
+             mock.patch.object(agent_report, 'report', side_effect=OSError('看板檔被鎖住')), \
+             mock.patch.dict(os.environ, {'EVIDENCE_TMP': os.path.join(directory, 'evidence'), 'ADD_TMP': directory}), \
+             mock.patch.object(sys, 'argv', argv[1:]), \
+             open(run_log, 'w', encoding='utf-8') as log, \
+             contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                add_job.main()
+
+        import settings_api
+        run_log_text = settings_api.tail_log('add', directory)
+        self.assertIn('這則回報寫不進看板', run_log_text)
+        self.assertIn('看板檔被鎖住', run_log_text)
+        self.assertIn('判斷沒有完成', run_log_text)
+
+    def test_prep_report_that_cannot_reach_the_board_goes_to_the_run_log(self):
+        """從看板準備履歷入口跑到收尾 agent 失敗;回報寫不進去仍進該輪紀錄。"""
         import contextlib
         import io
         import sys
         sys.path.insert(0, os.path.join(ROOT, 'tests'))
-        import _env  # noqa: F401  測試跑在暫存資料夾
-        import add_job
+        import _env
+        _env.use_home(self)
+        import agent_report
+        import agent_run
+        import board_server as bs
         import cut_tailor
-        import research
-        for module, msg, need in ((cut_tailor, '準備履歷 agent 沒完成', '看紀錄再重跑'),
-                                  (research, '找缺 agent 沒寫出候選', '看紀錄再重跑'),
-                                  (add_job, '2 個網址確定已下架', '確認網址對不對')):
-            with self.subTest(module.__name__):
-                out = io.StringIO()
-                with mock.patch('agent_report.report', side_effect=OSError('看板檔被鎖住')), contextlib.redirect_stdout(out):
-                    module._report(msg, need, '/nowhere/board.html')
-                self.assertIn(msg, out.getvalue())
-                self.assertIn('看板檔被鎖住', out.getvalue())
+        import web.fetch as page_fetch
+
+        directory = self.enterContext(tempfile.TemporaryDirectory(prefix='prep-report-run-log-'))
+        board = os.path.join(directory, 'board.html')
+        url = 'https://jobs.example/prep-report-fallback'
+        _env.make_board(board, fb={url: {'app': 'prep'}},
+                        jobs=[{'id': url, 'target': 'Software Engineer · Acme'}])
+        with mock.patch.object(bs, 'is_real', return_value=True), mock.patch.object(bs, 'STATE', board):
+            argv = bs.run_argv('prep', {})
+        self.assertEqual(os.path.basename(argv[1]), 'cut_tailor.py')
+
+        run_dir = os.path.join(directory, 'runs')
+        status_file = os.path.join(directory, 'cut_tailor_status.json')
+        page = page_fetch.PageResult(url, 'ok', text='Software Engineer at Acme', title='Software Engineer',
+                                     via='direct', http_status=200)
+        supervisors = []
+
+        def start_supervisor(command, **kwargs):
+            supervisors.append(command)
+            kwargs['stdout'].close()
+            return type('Process', (), {'pid': 4317})()
+
+        with mock.patch.object(cut_tailor, 'SP', directory), \
+             mock.patch.object(cut_tailor, 'RUNS', run_dir), \
+             mock.patch.object(cut_tailor, 'OUT', os.path.join(directory, 'out')), \
+             mock.patch.object(cut_tailor, 'STATUSF', status_file), \
+             mock.patch.object(cut_tailor, 'PIDF', os.path.join(directory, 'cut_tailor.pid')), \
+             mock.patch.object(cut_tailor, 'WORKER_PIDF', os.path.join(directory, 'worker.pid')), \
+             mock.patch.object(cut_tailor.subprocess, 'Popen', side_effect=start_supervisor), \
+             mock.patch.object(page_fetch, 'request_page', return_value=page), \
+             mock.patch.object(sys, 'argv', argv[1:]), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cut_tailor.main()
+
+        self.assertEqual(1, len(supervisors))
+        finish = supervisors[0]
+        log_path = os.path.join(directory, 'cut_tailor_finish.out')
+        with mock.patch.object(cut_tailor.ar, 'run', return_value=agent_run.AgentResult('failed', returncode=7)), \
+             mock.patch.object(agent_report, 'report', side_effect=OSError('看板檔被鎖住')), \
+             mock.patch.dict(os.environ, {'EVIDENCE_TMP': os.path.join(directory, 'evidence')}), \
+             mock.patch.object(sys, 'argv', finish[1:]), \
+             open(log_path, 'w', encoding='utf-8') as log, \
+             contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+            cut_tailor.main()
+
+        import settings_api
+        run_log_text = settings_api.tail_log('prep', directory)
+        self.assertIn('這則回報寫不進看板', run_log_text)
+        self.assertIn('看板檔被鎖住', run_log_text)
+        self.assertIn('準備履歷 agent 沒完成', run_log_text)
 
     def test_progress_that_cannot_be_written_goes_to_the_run_log(self):
         # 進度檔寫不進去,看板上的進度就停在上一格:至少這一輪的紀錄要講

@@ -26,6 +26,17 @@ _cd.EGO_STATE = os.path.join(os.environ['JOBSALVO_TEST_HOME'], 'ego-local-state.
 _cd.ego_bin = lambda: None  # 真 ego 是固定的機器路徑;單元測試只能顯式換入假的指令邊界。
 
 
+
+def as_agent(board, fake):
+    """劇本的假 agent 跑在測試行程裡:讓它看到派出去的 agent 拿到的環境(agent_run.agent_env),
+    不是任務行程自己的;任務行程不替 agent 改自己的環境(真 agent 考試第一場的 127)。"""
+    def run(prompt, *args, **kwargs):
+        import agent_run
+        from unittest import mock
+        with mock.patch.dict(os.environ, agent_run.agent_env(board, (), prompt, chrome=True), clear=True):
+            return fake(prompt, *args, **kwargs)
+    return run
+
 def use_home(test, **overrides):
     """這個測試用一個假的資料夾當家目錄(test.tmp/home,裡面有 resume/):設定照預設值,
     overrides 逐段蓋過(例如 resume={'langs': ['zh']}),寫進 jobsalvo.json 並 reload。

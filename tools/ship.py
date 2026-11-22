@@ -23,7 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config as cf
 import board_doc as bd
-import card
+import card_identity
+import card_title
 import pdf_tools as pdf
 import pdf_preview
 import markdown_pdf
@@ -89,7 +90,7 @@ def record_sent(fb, url, j=None, version=None):
     if not isinstance(m, dict) or m.get('sent_v'):
         return None
     if not version:
-        info = read_info(folder(url, name=card.name(j) if j else None, migrate=False))
+        info = read_info(folder(url, name=card_title.name(j) if j else None, migrate=False))
         if info.get('lang') and info.get('variant'):
             version = f"{info['lang']}-{info['variant']}"
     if not version and j:
@@ -319,7 +320,7 @@ def customization_problem(j, fb):
 
 def path_for(j, root=None):
     root = root or cf.SHIP_DIR
-    return os.path.join(root, f'{_safe(card.name(j))}-{card.card_id_from_url(j["id"])}')
+    return os.path.join(root, f'{_safe(card_title.name(j))}-{card_identity.card_id_from_url(j["id"])}')
 
 
 def _folders(root, suffix):
@@ -328,23 +329,23 @@ def _folders(root, suffix):
 
 def folder(url, root=None, name=None, migrate=True):
     root = root or cf.SHIP_DIR
-    hits = _folders(root, card.card_id_from_url(url))
+    hits = _folders(root, card_identity.card_id_from_url(url))
     if hits:
         if name:
-            canonical = os.path.join(root, f'{_safe(name)}-{card.card_id_from_url(url)}')
+            canonical = os.path.join(root, f'{_safe(name)}-{card_identity.card_id_from_url(url)}')
             if canonical in hits:
                 return canonical
             if len(hits) == 1 and migrate and not os.path.exists(canonical):
                 os.rename(hits[0], canonical)
                 return canonical
         return hits[0] if len(hits) == 1 else None
-    old = _folders(root, card.legacy_id(url))
+    old = _folders(root, card_identity.legacy_id(url))
     if len(old) != 1:
         return None
     if not migrate:
         return old[0]
     prefix = _safe(name) if name else os.path.basename(old[0]).rsplit('-', 1)[0]
-    new = os.path.join(root, f'{prefix}-{card.card_id_from_url(url)}')
+    new = os.path.join(root, f'{prefix}-{card_identity.card_id_from_url(url)}')
     if os.path.exists(new):
         return new if os.path.isdir(new) else None
     os.rename(old[0], new)
@@ -371,7 +372,7 @@ def rename(url, new_title):
     d = folder(url)
     if not d:
         return None
-    new = os.path.join(cf.SHIP_DIR, f'{_safe(card.name(new_title))}-{card.card_id_from_url(url)}')
+    new = os.path.join(cf.SHIP_DIR, f'{_safe(card_title.name(new_title))}-{card_identity.card_id_from_url(url)}')
     if new != d and not os.path.exists(new):
         os.rename(d, new)
         return new
@@ -501,9 +502,9 @@ def build_default(j, fb):
     resume_id, lang = resolve(j, fb)
     waiting = customization_problem(j, fb)
     if waiting:
-        return folder(j['id'], name=card.name(j)), [waiting]
+        return folder(j['id'], name=card_title.name(j)), [waiting]
     src, atts, own = sources(j, fb)
-    d = folder(j['id'], name=card.name(j))
+    d = folder(j['id'], name=card_title.name(j))
     if not resume_id:
         return d, ['沒有已勾選的履歷可供這張卡使用']
     if not own and not cf.RESUMES.get(resume_id):
@@ -704,7 +705,7 @@ def _sync_report(url, message, board):
 def chosen_not_built(j, fb):
     """卡上選的履歷、語言跟可投遞夾裡建好的不是同一份(他剛換、還沒重建):回那一句,一樣就回 None。
     夾子還沒建的不算(那是別的問題,check 會講)。"""
-    d = folder(j['id'], name=card.name(j), migrate=False)
+    d = folder(j['id'], name=card_title.name(j), migrate=False)
     s = read_info(d) if d else {}
     if not s.get('files'):
         return None
@@ -718,7 +719,7 @@ def chosen_not_built(j, fb):
 
 
 def _package_problems(j, fb, migrate=True):
-    d = folder(j['id'], name=card.name(j), migrate=migrate)
+    d = folder(j['id'], name=card_title.name(j), migrate=migrate)
     if not d:
         return ['可投遞夾還沒建']
     s = read_info(d)
@@ -778,10 +779,10 @@ def _finish_build(j, message, board):
 
 def _busy(fb):
     """agent 正在用可投遞夾的卡:正在填或改、正在送出,和幫你填表那一輪正在跑的那一張(送出前的附件核對時還是你已確認)。"""
-    import delivery_state as ds
+    import delivery_core as ds
     import jobrun
     out = {u for u, m in fb.items() if isinstance(m, dict) and ds.state(m) in ds.WORKING}
-    st = jobrun.read(os.path.join(os.environ.get('APPLY_TMP') or cf.TMP, 'apply_status.json'), ('apply_run.py', 'job_fake.py'))
+    st = jobrun.read(os.path.join(os.environ.get('APPLY_TMP') or cf.TMP, 'apply_status.json'), ('fill.py', 'job_fake.py'))
     if st.get('running') and st.get('url'):
         out.add(st['url'])
     return out
@@ -789,7 +790,7 @@ def _busy(fb):
 
 def reconcile_packages(man, force, check_only, board, timings=False):
     """建置、驗收與記錄可投遞夾；呼叫端只負責重建其他衍生物。"""
-    import delivery_state as ds
+    import delivery_core as ds
     parsed = bd.load(board)
     fb = json.loads(parsed['fb'])
     jobs = [j for j in parsed['data']['jobs'] if ds.app_of(fb.get(j['id'])) in STAGES
@@ -812,14 +813,14 @@ def reconcile_packages(man, force, check_only, board, timings=False):
         # 送出檔名、合併檔名改了也要重建(公司頁上看到的名字跟著變);都沒設定時跟以前同一個記號,不會整批重建
         names = [d.get('send_name') or '' for d in documents(j, fb)] + [str((cf.C.get('resume') or {}).get('merged_name') or '')]
         wanted = _inputs_hash([src or ''] + attachments, f'{variant}/{lang}' + ('|' + '|'.join(names) if any(names) else ''))
-        key = 'ship:' + card.card_id_from_url(j['id'])
+        key = 'ship:' + card_identity.card_id_from_url(j['id'])
         current = not check(j, fb, migrate=not check_only)
         elapsed['比對'] += time.perf_counter() - started
         if not force and man.get(key) == wanted and current:
             continue
         did = True
         if check_only:
-            print(f'  可投遞夾過時:{card.name(j)[:40]}')
+            print(f'  可投遞夾過時:{card_title.name(j)[:40]}')
             continue
         _set_build_state(j['id'], False, '可投遞夾本輪建置尚未完成')
         started = time.perf_counter()
@@ -843,7 +844,7 @@ def reconcile_packages(man, force, check_only, board, timings=False):
         message = _finish_build(j, '；'.join(problems), board)
         elapsed['回報'] += time.perf_counter() - started
         if message:
-            failed.append(f'{card.name(j)[:30]}:{message}')
+            failed.append(f'{card_title.name(j)[:30]}:{message}')
             print(f'  ⚠ {failed[-1]}')
         elif directory:
             man[key] = wanted
@@ -877,9 +878,9 @@ def clean_orphans(check_only, board):
         url = str(job.get('id') or '')
         if not url:
             continue
-        by_id.setdefault(card.card_id_from_url(url), []).append(job)
-        by_legacy.setdefault(card.legacy_id(url), []).append(job)
-        folder(url, name=card.name(job), migrate=not check_only)
+        by_id.setdefault(card_identity.card_id_from_url(url), []).append(job)
+        by_legacy.setdefault(card_identity.legacy_id(url), []).append(job)
+        folder(url, name=card_title.name(job), migrate=not check_only)
     cleaned, unknown = [], []
     root_real = os.path.realpath(root)
     for entry in sorted(os.listdir(root)):
@@ -912,3 +913,39 @@ def clean_orphans(check_only, board):
             shutil.rmtree(full)
         cleaned.append(entry)
     return cleaned, unknown
+
+
+def take_unmet(fb, url: str, job: dict, unmet: list[dict]) -> list[str]:
+    """把已核對的職缺要求交給可投遞附件的自動客製流程。"""
+    import uuid
+    known = info(url) or {}
+    by_name = {name: sid for sid, name in (known.get('sources') or {}).items()}
+    docs = {doc['id']: doc for doc in documents(job, fb)}
+
+    def doc_id(source_id):
+        return next((item for item in docs if item == source_id or item.rsplit(':', 1)[0] == source_id), None)
+
+    card_data = fb.setdefault(url, {})
+    queued = []
+    for item in unmet:
+        source_id = by_name.get(str(item.get('file') or ''))
+        if not source_id:
+            continue
+        quote, why = str(item.get('quote') or ''), str(item.get('why') or '')
+        if item.get('act') == 'drop' and source_id.startswith('attachment:'):
+            card_data.setdefault('drop_att', {})[source_id.split(':', 1)[1]] = quote
+            continue
+        target = 'resume' if source_id == 'custom' else doc_id(source_id)
+        target = next((key for key, doc in docs.items() if doc['kind'] == 'resume'), None) if target == 'resume' else target
+        if not target:
+            continue
+        entry = card_data.setdefault('custom_docs', {}).setdefault(
+            target, {'id': target, 'kind': docs[target]['kind'], 'name': docs[target]['name']})
+        entry.setdefault('feedbacks', []).append({
+            'id': uuid.uuid4().hex[:12], 'at': __import__('datetime').datetime.now().isoformat(timespec='microseconds'), 'auto': 'unmet',
+            'text': f'這家職缺要求:「{quote}」' + (f'({why})' if why else '')
+                    + '。只改為了符合這句要求必要的地方,其他一個字都不動。',
+        })
+        entry['status'], entry['auto'] = 'queued', True
+        queued.append(target)
+    return list(dict.fromkeys(queued))

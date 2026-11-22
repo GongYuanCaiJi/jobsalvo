@@ -1,0 +1,1 @@
+_APPLICANT_LINE = re.compile(r'class="num-applicants__[^"]*"[^>]*>(.*?)</', re.S)

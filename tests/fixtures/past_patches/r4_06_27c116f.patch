@@ -1,0 +1,1 @@
+x = PageResult(url, 'ok', text=text, via='lever', title=title, job_title=title)

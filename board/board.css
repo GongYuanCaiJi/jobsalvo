@@ -1270,6 +1270,8 @@ footer{margin-top:var(--space-32);padding-top:var(--space-16);border-top:1px sol
 .repost-note{font-size:var(--text-xs);line-height:var(--leading-normal);margin:var(--space-4) 0 var(--space-6);padding:var(--space-6) var(--space-8);border-left:3px solid var(--warn);border-radius:var(--radius-md);background:var(--warn-soft)}
 .repost-note div{margin-top:var(--space-2)}
 .repost-note a{font-weight:var(--weight-semibold)}
+.verification-note pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:24em;overflow:auto;margin:var(--space-4) 0}
+.verification-note details{margin-top:var(--space-4)}
 /* 「📝 prompt」:三條 bar 共用同一顆,一律靠右;內容開在彈窗裡,不把版面撐開 */
 .pv-b{margin-left:auto;flex:0 0 auto;border:1px solid var(--line);background:transparent;color:var(--ink-dim);
   border-radius:var(--radius-full);padding:var(--space-4) var(--space-12);font-size:var(--text-xs);cursor:pointer}
@@ -1413,6 +1415,20 @@ label.cfg-row:has(>.cfg-ck){align-items:baseline}   /* 字折成幾行,勾選框
 }
 .cfg-file{font-size:var(--text-sm);color:var(--ink-dim);overflow-wrap:anywhere}
 .cfg-file.pending{color:var(--warn);font-weight:var(--weight-semibold)}
+.cfg-sync-list{margin:var(--space-8) 0;padding:var(--space-12);border:1px solid var(--line);border-radius:var(--radius-md);background:var(--surface)}
+.cfg-sync-intent{margin:var(--space-8) 0;padding:var(--space-8);border-radius:var(--radius-md);background:var(--surface-2)}
+.cfg-sync-page{margin:var(--space-6) 0;padding:var(--space-8);border:1px solid var(--line);border-radius:var(--radius-md)}
+.cfg-sync-page>summary,.cfg-sync-title{font-size:var(--text-sm);font-weight:var(--weight-semibold);overflow-wrap:anywhere;cursor:pointer}
+.cfg-sync-change{display:flex;gap:var(--space-8);align-items:flex-start;margin:var(--space-8) 0;padding:var(--space-12);border:1px solid var(--line);border-radius:var(--radius-md);background:var(--surface)}
+.cfg-sync-change details{flex:1;min-width:0}
+.cfg-sync-title{margin-bottom:var(--space-6)}
+.cfg-sync-select{display:inline-flex;align-items:center;gap:var(--space-4);margin-right:var(--space-8);font-weight:var(--weight-medium);white-space:nowrap}
+.cfg-sync-pair,.cfg-sync-shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:var(--space-8)}
+.cfg-sync-pair pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:var(--space-4) 0;padding:var(--space-8);border-radius:var(--radius-md);background:var(--surface-2);
+  font-family:var(--mono);font-size:var(--text-xs);line-height:var(--leading-normal)}
+.cfg-sync-shot{margin:var(--space-4) 0;min-width:0}
+.cfg-sync-shot img{display:block;width:100%;max-width:640px;height:auto;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--paper)}
+.cfg-sync-shot figcaption{font-size:var(--text-xs);color:var(--ink-dim);margin:var(--space-2) 0}
 /* 平台履歷卡住那一份:狀態格裡「卡住 · 看回報」,看回報是文字連結,不另起一行 */
 .cfg-ib{color:inherit}
 .cust-pick{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:var(--space-8);padding:var(--space-8) 0;border-bottom:1px solid var(--line)}

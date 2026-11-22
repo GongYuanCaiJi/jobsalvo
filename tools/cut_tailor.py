@@ -3,7 +3,7 @@
 """
 cut_tailor —— 跑準備區:一隻 agent 直接讀「正在準備」每張卡的 JD,判這張用哪份履歷、哪個語言。
 
-程式先抓取職缺頁文字;只有直連 HTTP 404/410 會直接標記下架,其他狀態交由 agent 依原文判斷。
+程式先抓取職缺頁文字交給 agent;職缺關了沒由 agent 讀原文判斷(HTTP 404/410 也只是這一條路讀不到)。
 agent 每張寫一個 <resume.prepare_dir>/<jid>/fill.json(variant、lang,名字不對時 real_title,
 對不上或關了就 skip+reason)。收尾把判斷寫進卡片、把有結果的卡推到「待你決定」,再跑 reconcile
 建可投遞夾(見 ship.py:Markdown 原稿會先排成 PDF)。
@@ -69,24 +69,6 @@ def stop_previous():
             os.kill(child,signal.SIGKILL)
 
 
-
-
-
-def _techerr(ff, u):
-    """把一張卡標成「技術錯誤」(看板本來就有那一頁,不另外開地方寫原因)。
-    技術錯誤跟喜歡/還好是同一個欄位,直接寫就把他原本的標記蓋掉了,先另存到 s0;階段也清掉,另存到 app0。
-    看板「出錯了」那一頁的「放回原處」照這兩個放回去(board.js 手動標出錯了也存同一組)。
-    live_ok 是他之前按放回原處時說的「頁面沒壞」,又被判出錯了就不算了。"""
-    ds.try_fire(ff, u, 'leave')          # 出錯了:你之前按的確認送出作廢
-    e = ff.setdefault(u, {})
-    if e.get('s') and e['s'] != 'techerr': e['s0'] = e['s']
-    if e.get('app'): e['app0'] = e['app']
-    e['s'] = 'techerr'; e.pop('app', None); e.pop('live_ok', None)
-
-
-
-
-
 # fill.json 裡 worker 這一輪只擁有這幾欄。其他欄位是別人寫的(自己的產線寫的客製內容、approved…),
 # 存回時原樣留著:防覆蓋不能靠誰記得標 approved。
 WORKER_KEYS=('resume','variant','lang','why','content_problem','real_title','skip','reason')
@@ -126,21 +108,18 @@ def check_written(rows,t0,out_dir=None):
     return bad
 
 
-def row_line(u, t, numbered, verdict=None, note=''):
-    """一個職缺在 prompt 裡的幾行,包含擷取狀態與收到的原文(JD 原文邊印邊編號,屬於這張卡)。"""
-    v, fetched = verdict or ('', None)
-    if fetched is not None and getattr(fetched, 'readable', False):
-        check = f'可讀;路徑 {fetched.via}; HTTP {fetched.http_status or "未知"}'
-        body = f'\n    JD 原文開始:\n{numbered.add(fetched.text, "jd", u)}\n    JD 原文結束'
-    elif v == 'unknown':
-        check = (f'無法擷取;嘗試路徑 {getattr(fetched, "via", "") or "無"}; '
-                 f'HTTP {getattr(fetched, "http_status", 0) or "無回應"}; '
-                 f'原因 {"; ".join(getattr(fetched, "errors", ()) or ()) or "沒有可讀文字"}')
-        body = '\n    沒有可讀職缺頁原文;不可猜測頁面內容'
-    elif not verdict:
+def row_line(u, t, numbered, page=None, note=''):
+    """一個職缺在 prompt 裡的幾行,包含擷取狀態與收到的原文(JD 原文邊印邊編號,屬於這張卡)。page:listing.job_page。"""
+    if page is None:
         check, body = '預覽未執行抓取', '\n    預覽中沒有職缺頁原文'
+    elif page['readable']:
+        read = f'只讀到部分頁面({page["partial"]})' if page['partial'] else '可讀'
+        check = f'{read};路徑 {page["via"]}; HTTP {page["http_status"] or "未知"}'
+        body = f'\n    JD 原文開始:\n{numbered.add(page["text"], "jd", u)}\n    JD 原文結束'
     else:
-        check, body = '沒有可讀職缺頁原文', '\n    不可猜測頁面內容'
+        check = (f'無法擷取;嘗試路徑 {page["via"] or "無"}; HTTP {page["http_status"] or "無回應"}; '
+                 f'原因 {page["why"] or "沒有可讀文字"}')
+        body = '\n    沒有可讀職缺頁原文;不可猜測頁面內容'
     return (f'  {card.card_id_from_url(u)}  看板上的名字:{t}\n'
             f'    來源URL:{u}\n    程式擷取:{check}{body}'
             + (f'\n    使用者對上一版的回饋(照著調整這一次的判斷):{note.strip()[:600]}'
@@ -220,20 +199,14 @@ def prompt(rows, verdicts=None, notes=None, out_dir=None, resumes=None):
       choices + '\n\n'
       f'以下 {len(rows)} 個職缺,請依程式提供的 JD 原文判斷,不可開啟來源網址或使用瀏覽器:\n\n'
       + '\n'.join(jobs) + '\n\n'
-      '只有程式直連來源頁得到 HTTP 404/410 時會自動跳過。其他狀態不能單獨證明職缺已關;'
-      '請讀取提供的頁面文字,由你判斷職缺是否真的已關。若頁面文字未取得,不得猜測或標記已關;'
-      '在 fill.json 留下 skip 與「抓不到 JD:」開頭的理由。\n'
+      '請讀取程式提供的 JD 原文並完成每個職缺的判斷;若這一張無法處理,就在 fill.json 留下 skip 與原因。\n'
       '每一個都先判斷:網址那一頁跟「看板上的名字」是不是同一個職缺(名字可能是舊的、寫法不同、中英不同)。\n'
       '  · 同一個缺、只是看板上的名字不對或過時:照做,並在 fill.json 多寫 "real_title": {"text": "職稱,照那一段裡的字一字不差、不含標籤字", "cite": [寫著職稱那一段的編號]}。\n'
-      '  · 網址指到的是別的職缺,或職缺已經關了:把 {"skip": true, "reason": "…"} 寫進那個 jid 的 fill.json,\n'
-      '    reason 開頭寫「網址指到的是別的職缺:」或「職缺已關:」,講清楚你看到什麼。\n'
-      '    寫「職缺已關:」的,另外寫 "quote": [這張卡 JD 原文裡講職缺關了的那幾段的編號];程式會把卡標下架、移出準備區。\n'
       '編號是 JD 原文每段前面的數字;程式照編號取這張卡的 JD 原文(別張卡的編號不收)、拿挑的履歷跟勾選的比,對不上的那一張不推進。\n'
-      '真的讀不到 JD,也寫 skip,reason 開頭寫「抓不到 JD:」。其他跳過的卡會留在使用者的準備區,\n'
-      '原因原封不動顯示在卡上,所以理由要寫他看得懂的一句話。\n\n'
+      '跳過的卡會留在使用者的準備區,原因照原文顯示在卡上。\n\n'
       '只有在使用者回饋指出履歷內容本身需要修改、重挑版本與語言解決不了時,content_problem 才填 true;這表示要開客製。沒有這種回饋填 false。\n\n'
       '不要去找、也不要讀任何既有的 fill.json 或舊產出。每個職缺都從 JD 重新判一次。\n'
-      '每個職缺都要處理並寫出 fill.json;真的對不上/已關/讀不到就寫 skip+理由。\n\n'
+      '每個職缺都要處理並寫出 fill.json;無法處理的卡寫 skip+理由。\n\n'
       f'每個職缺寫一個檔 {out_dir}/<JID>/fill.json:\n'
       f'  "material_id": "{numbered.material_id}"   照抄(這一輪材料的交付代號,每個 fill.json 都寫)\n'
       + selection_fields +
@@ -307,7 +280,7 @@ def _fills(rows, out_dir=None):
 
 def _apply_stages(rows, board, out_dir=None, selection_signature=None, feedback_signatures=None, checked=None):
     """把這一輪的履歷判斷落到看板,只接受這一輪交付時勾選、有該語言檔的履歷。
-    交件單經安檢門(_fills):對不上的那一張不推進、不標關閉,卡上寫出哪一格、agent 說什麼、實際是什麼。"""
+    交件單經安檢門(_fills):欄位對不上的那一張不推進,卡上記錄問題;agent 跳過的原因照原文保留。"""
     checked = checked if checked is not None else _fills(rows, out_dir)
     fills = {u: f for u, (f, _bad) in checked.items()}
     wrong = {u: bad for u, (_f, bad) in checked.items() if bad}
@@ -337,18 +310,13 @@ def _apply_stages(rows, board, out_dir=None, selection_signature=None, feedback_
                 continue
             if u in wrong:
                 moved['skipped'] += 1
-            elif f.get('skip') and str(f.get('reason', '')).startswith('職缺已關'):
-                _techerr(fb, u)
-                closed.add(u)
-                moved['closed'] += 1
             elif u not in ok:
                 moved['skipped'] += 1
             elif e.get('app') == 'prep':
                 e['app'] = 'ready'
                 moved['ready'] += 1
 
-    moved = {'ready': 0, 'skipped': 0, 'closed': 0}
-    closed = set()
+    moved = {'ready': 0, 'skipped': 0}
     bd.set_fb(mut, live=board, by='cut_tailor 收尾')
 
     def card(data, fb):
@@ -359,13 +327,6 @@ def _apply_stages(rows, board, out_dir=None, selection_signature=None, feedback_
                 continue
             if u in wrong:
                 j['prep_note'] = ('agent 交的判斷對不上,這一輪不推進:' + '；'.join(wrong[u]))[:300]
-                continue
-            if u in closed:
-                j['dead'] = True
-                # agent 判斷(程式核對不了職缺真的關了,只核對它抄的那一句在 JD 原文裡):標明、附原文;
-                # 卡標成出錯了,他按放回原處就復原
-                j['prep_note'] = (f'agent 判斷職缺已關,頁面原文:「{str(f.get("quote") or "").strip()}」'
-                                  f'({str(f.get("reason") or "").strip()})')[:300]
                 continue
             if f.get('skip'):
                 j['prep_note'] = str(f.get('reason') or '這一輪沒有判斷履歷與語言').strip()[:200]
@@ -429,11 +390,8 @@ def apply_real_titles(rows, board, out_dir=None, checked=None):
 
 def _report(msg, need, board, info=False):
     """要他知道的事寫進看板最上面的「📣 agent 回報」(見 agent_report)。info:程式自己的錯,不列進「要你處理」。"""
-    try:
-        import agent_report
-        agent_report.report('跑準備區', msg, need=need, live=board, info=info)
-    except Exception as e:  # noqa: BLE001 — 回報寫不進看板:至少印進這一輪的紀錄(看板上「看紀錄」看得到)
-        print(f'⚠ 這則回報寫不進看板({str(e)[:120]}):{msg} → {need}')
+    import agent_report
+    agent_report.tell('跑準備區', msg, need=need, live=board, info=info)
 
 
 def run_finish(board, out_dir=None):
@@ -568,22 +526,6 @@ def main():
     if not rows: _stop('要跑的都被標成他認可過了,沒有東西要跑。要重跑就先把 fill.json 的 approved 拿掉。')
     stop_previous()
     _status({'phase':'fetching_pages','pid':os.getpid(),'n':len(rows)})
-    # 直連 404/410 由程式收掉;其他關閉語意由 agent 依附上的頁面原文判斷。
-    import page_fetch   # 好幾個缺一起抓(page_fetch.fetch_many)
-    verdicts={u:('dead' if f.status=='closed' else f.status, f) for (u,_t),f in zip(rows,page_fetch.fetch_many([u for u,_ in rows]))}
-    closed=[(u,t) for u,t in rows if verdicts[u][0] in ('closed','dead')]
-    if closed:
-        cids = {u for u, _ in closed}
-        # 寫入走 set_fb / set_data:在鎖裡重讀現行看板(檢查期間使用者可能在手機上標記),
-        # 而且標記的改動會進流水帳。
-        bd.set_fb(lambda ff:[_techerr(ff,u) for u in cids], live=a.board, by='cut_tailor 閘門:直連回 404/410')
-        bd.set_data(lambda data, fb: [j.__setitem__('dead', True) for j in data['jobs'] if j.get('id') in cids],
-                    live=a.board)
-        print(f'閘門:{len(closed)} 個直連回 404/410 → 自動標死缺、不跑:')
-        for u, t in closed: print(f'   ✗關  {t[:40]}  {card.card_id_from_url(u)}')
-    rows = [(u,t) for u,t in rows if verdicts[u][0] not in ('closed','dead')]
-    if not rows:
-        _stop('所有職缺的來源頁都直連回 HTTP 404/410,沒有可跑的職缺。')
     notes = notes_of(FB)
     resumes = prefs.checked_resumes()
     signature = prefs.resume_selection_signature(resumes)
@@ -617,6 +559,11 @@ def main():
                  'finished_at':time.time(),'msg':msg})
         return
     rows = reselect
+    from concurrent.futures import ThreadPoolExecutor   # 要交給 agent 的職缺頁原文;好幾個缺一起抓
+    from web import listing, seen
+    from web.outside import Real
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        verdicts=dict(zip([u for u,_ in rows],pool.map(lambda u:listing.job_page(seen.fetch(Real(),u)),[u for u,_ in rows])))
     os.makedirs(OUT,exist_ok=True)
     run_out_dir=os.path.join(RUNS,uuid.uuid4().hex)
     os.makedirs(run_out_dir,exist_ok=True)

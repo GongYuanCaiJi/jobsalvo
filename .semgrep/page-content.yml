@@ -1,0 +1,62 @@
+# 頁面內容只准 web/ 核心讀(ADR-0012):拍到的頁、agent 照抄的頁上字是不透明型別,讀頁只經由瀏覽器邊界。
+# 測試:semgrep --test .semgrep/(同名的 page-content.py 範例檔)
+rules:
+  - id: page-content-field-outside-core
+    languages: [python]
+    severity: ERROR
+    message: >-
+      頁面內容(Seen、Quote 的 _seen_ 欄位)只准 web/ 核心讀。要什麼改叫核心的函式:
+      讀頁 seen.read_workspace、讀網址 seen.fetch、拍照 snap.take、比對 compare、核對 cite、顯示 listing(ADR-0012 函式表)
+    pattern-either:
+      - patterns:
+          - pattern: $X.$F
+          - metavariable-regex:
+              metavariable: $F
+              regex: ^_seen_
+      - patterns:
+          - pattern: getattr($X, "$F", ...)
+          - metavariable-regex:
+              metavariable: $F
+              regex: ^_seen_
+    paths:
+      exclude: [/tools/web/seen.py, /tools/web/snap.py, /tools/web/compare.py, /tools/web/cite.py,
+                /tools/web/listing.py, /tests/]
+
+  - id: page-content-raw-read-outside-core
+    languages: [python]
+    severity: ERROR
+    message: >-
+      瀏覽器邊界的 raw_ 讀頁方法只准 web/ 核心叫。讀工作區改叫 seen.read_workspace,讀網址改叫 seen.fetch,
+      拍照改叫 snap.take(ADR-0012)
+    patterns:
+      - pattern: $X.$M(...)
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^raw_(tabs|shot|fetch|form)$
+    paths:
+      exclude: [/tools/web/seen.py, /tools/web/snap.py, /tools/web/compare.py, /tools/web/cite.py,
+                /tools/web/listing.py, /tools/web/outside.py, /tests/]
+
+  - id: page-read-outside-boundary
+    languages: [python]
+    severity: ERROR
+    message: >-
+      直接讀頁、讀網址只准在瀏覽器邊界 web/outside.py 裡做。改經由 web.outside.Real,
+      再交給 seen.read_workspace、seen.fetch 或 snap.take(ADR-0012)
+    pattern-either:
+      - pattern: $X.read_workspace_pages(...)
+      - pattern: $X.read_page(...)
+      - pattern: $X.read_pages(...)
+      - pattern: request_page(...)
+      - pattern: read_batch(...)
+      - pattern: fetch_with_browser(...)
+      - pattern: $X.request_page(...)
+      - pattern: $X.read_batch(...)
+      - pattern: $X.fetch_with_browser(...)
+      - pattern: import page_fetch
+      - pattern: from page_fetch import $Y
+      - pattern: from web.fetch import $Y
+      - pattern: from web import fetch
+      - pattern: import web.fetch
+    paths:
+      exclude: [/tools/web/outside.py, /tools/web/fetch.py, /tools/chrome_door.py, /tests/]

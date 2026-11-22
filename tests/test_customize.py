@@ -50,9 +50,9 @@ class Customization(unittest.TestCase):
               for url in (self.url, self.other_url)}
         _env.make_board(self.board, fb, jobs=jobs)
         # 職缺頁由程式先抓好給 agent(#287);測試不連網、不開瀏覽器
-        import page_fetch
+        import web.fetch as page_fetch
         self.page = page_fetch.PageResult(self.url, 'ok', text='JD-TEXT: build secure systems', via='direct')
-        fetch = mock.patch.object(page_fetch, 'fetch', side_effect=lambda _url: self.page)
+        fetch = mock.patch.object(page_fetch, 'request_page', side_effect=lambda _url, **_: self.page)
         self.fetch = fetch.start()
         self.addCleanup(fetch.stop)
 
@@ -191,15 +191,28 @@ class Customization(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertFalse(seen[0].get('chrome'))
         self.assertIsNone(seen[0].get('browser'))
-        self.fetch.assert_called_once_with(self.url)
+        self.assertEqual([call.args[0] for call in self.fetch.call_args_list], [self.url])
         prompts = []
         self._run(['resume:general:zh'], prompts)
         self.assertIn('JD-TEXT: build secure systems', prompts[0])
         self.assertNotIn('Chrome', prompts[0])
 
+    def test_customize_agent_gets_the_unread_boundary_for_a_partial_jd(self):
+        import web.fetch as page_fetch
+        boundary = '其餘內容未提供，是否繼續由 agent 判斷'
+        self.page = page_fetch.PageResult(
+            self.url, 'partial', text='JD prefix', via='direct',
+            errors=(boundary,))
+
+        result, prompts = self._run(['resume:general:zh'])
+
+        self.assertTrue(result['ok'], result)
+        self.assertIn('JD prefix', prompts[0])
+        self.assertIn(boundary, prompts[0])
+
     def test_unreadable_jd_page_reports_instead_of_opening_a_browser(self):
         # 抓不到(要登入、擋程式):不派 agent、不去開任何 Chrome,卡上和 📣 照實講
-        import page_fetch
+        import web.fetch as page_fetch
         self.page = page_fetch.PageResult(self.url, 'unknown', errors=('direct: HTTP 401',))
         captured = []
         with mock.patch.object(customize.agent_report, 'report') as report:

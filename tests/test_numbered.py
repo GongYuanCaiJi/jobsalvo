@@ -9,9 +9,14 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401
-from numbered import ROW, Accept, Cited, Miscited, Numbered, pick  # noqa: E402
+from numbered import Accept, Cited, Miscited, Numbered, pick  # noqa: E402
 
 J1, J2 = SimpleNamespace(key='J1'), SimpleNamespace(key='J2')
+
+
+def ROW(row, truth):
+    """自己這一列的,加整批共用的。"""
+    return {truth.key, None}
 
 
 def two_jobs():
@@ -66,6 +71,13 @@ class Picking(unittest.TestCase):
         self.assertEqual(got, '資料工程師\n負責排程')
         self.assertEqual([p.n for p in got.parts], [3, 4])
         self.assertEqual(copy.deepcopy(got).parts, got.parts)
+
+    def test_a_value_counts_only_as_written_spaces_included(self):
+        accept = Accept(frozenset({'jd'}), ROW, value='text')
+        self.assertEqual(pick(self.numbered, [3], accept, truth=J1, item={'text': '資料工程師'}), '資料工程師')
+        for respaced in ('資料工程師 ', ' 資料工程師', '資料 工程師'):
+            with self.subTest(respaced=respaced), self.assertRaises(Miscited):
+                pick(self.numbered, [3], accept, truth=J1, item={'text': respaced})
 
     def test_an_empty_list_is_nothing_cited(self):
         got = pick(self.numbered, [], Accept(frozenset({'jd'}), ROW), truth=J1)

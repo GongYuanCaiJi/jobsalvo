@@ -1,0 +1,2 @@
+def download_parts(self, tab_id, page, picks, directory):
+    pass

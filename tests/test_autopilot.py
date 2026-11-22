@@ -8,13 +8,14 @@ import _env  # noqa: F401
 import chrome_door
 import autopilot as ap
 import board_doc as bd
+import board_status
 import delivery_state as ds
 import demo
 import next_step
 
 CFG = {'auto_prep': True, 'auto_advance': True, 'auto_fill': True, 'replies_at': '09:00'}
 NOW = datetime.datetime(2026, 1, 5, 10, 0)
-OKST = {'schema_version': 2, 'checked_links': True, 'issues': []}
+OKST = {'schema_version': board_status.SCHEMA_VERSION, 'issues': []}
 
 
 def data(*ids, **kw):
@@ -97,7 +98,7 @@ class PlanTest(unittest.TestCase):
         fb = {'__auto__': auto(seen={'a': 0, 'b': 0}), 'a': {'app': 'ready'},
               'b': {'app': 'ready', 'resume_id': 'general',
                     'custom_docs': {'resume:general:zh': {'status': 'review', 'name': '履歷'}}}}
-        st = {'schema_version': 2, 'checked_links': True, 'issues': [{'jid': 'a', 'msg': '職缺已下架'}]}
+        st = {'schema_version': board_status.SCHEMA_VERSION, 'issues': [{'jid': 'a', 'msg': '職缺已下架'}]}
         self.assertEqual(run(data('a', 'b', status=st), fb, built=1)['advance'], [])
         self.assertEqual(run(data('a', 'b', status=None), fb, built=1)['advance'], [])
 
@@ -115,11 +116,12 @@ class PlanTest(unittest.TestCase):
         url = 'https://jobs.lever.co/acme/example'
         fb = {'__auto__': auto(seen={url: 0}), '__block__': ['Acme, Inc.'],
               url: {'app': 'ready'}}
-        self.assertEqual(run(data(url), fb, built=1)['advance'], [])
+        job = {url: {'target': 'Engineer · Acme, Inc.'}}
+        self.assertEqual(run(data(url, **job), fb, built=1)['advance'], [])
 
     def test_unverified_link_hint_does_not_block_auto_advance(self):
         fb = {'__auto__': auto(seen={'a': 0}), 'a': {'app': 'ready'}}
-        st = {'schema_version': 2, 'checked_links': True,
+        st = {'schema_version': board_status.SCHEMA_VERSION,
               'issues': [{'jid': 'a', 'stage': 'ready', 'kind': 'unverified', 'soft': True,
                           'msg': '職缺頁擷取失敗,狀態未知'}]}
         self.assertEqual(run(data('a', status=st), fb, built=1)['advance'], ['a'])

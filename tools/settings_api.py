@@ -575,6 +575,10 @@ def _check(settings):
         cap = fl.get('fill_max')
         if cap not in (None, '') and not re.fullmatch(r'[0-9]{1,3}', str(cap).strip()):
             bad.append('自動填表最多停幾張要寫數字(0 是不限,空的照預設 5)')
+        parallel = fl.get('fill_parallel')
+        if parallel not in (None, '') and not (re.fullmatch(r'[0-9]{1,2}', str(parallel).strip())
+                                               and 1 <= int(str(parallel).strip()) <= 10):
+            bad.append('同時填幾張要寫 1 到 10 的數字(空的照預設 3)')
     if find_minutes_problem((settings.get('search') or {}).get('find_minutes')):
         bad.append(find_minutes_problem((settings.get('search') or {}).get('find_minutes')))
     import find_terms
@@ -588,6 +592,10 @@ def _check(settings):
     if mail_url and not re.match(r'https://[^\s/]+', mail_url):
         bad.append('信箱網址要是 https:// 開頭的完整網址')
     b = settings.get('board') or {}
+    risk_days = b.get('risk_days')
+    if risk_days is not None and (not isinstance(risk_days, int) or isinstance(risk_days, bool)
+                                  or not 1 <= risk_days <= 3650):
+        bad.append('可能已關天數要寫 1~3650 的整數')
     for key in ('categories', 'tags'):
         for c in b.get(key) or []:
             if not isinstance(c, dict) or not str(c.get('name') or '').strip():
@@ -694,20 +702,14 @@ def delete_file(rel):
 
 def pdf_pages(full):
     """讀取 PDF 頁數;full 由程式從設定或卡片資料解析,不是網頁傳入的路徑。"""
-    r = subprocess.run([sys.executable, '-c', 'import sys,pypdf;print(len(pypdf.PdfReader(sys.argv[1]).pages))', full],
-                       capture_output=True, text=True, timeout=120)
-    if r.returncode:
-        raise ValueError((r.stderr or 'PDF 無法讀取')[-300:])
-    return int(r.stdout.strip())
+    import pdf_text
+    return pdf_text.pages(full)
 
 
 def pdf_text(full):
     """抽取 PDF 文字;full 由程式解析,可指向使用者資料夾外的原檔。"""
-    r = subprocess.run([sys.executable, '-c', 'import sys,pypdf;print("\\n".join((p.extract_text() or "") for p in pypdf.PdfReader(sys.argv[1]).pages))', full],
-                       capture_output=True, text=True, timeout=120)
-    if r.returncode:
-        raise ValueError((r.stderr or 'PDF 無法讀取')[-300:])
-    return re.sub(r'\n{3,}', '\n\n', r.stdout).strip()
+    import pdf_text
+    return pdf_text.extract(full)
 
 
 def text_of(rel):

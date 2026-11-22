@@ -219,8 +219,8 @@ def refresh(manifest, check_only=False, board=None, diagnostics=None):
             manifest.pop(preview_attempt_key(entry), None)
         if is_markdown:
             try:
-                import settings_api
-                manifest[page_key(entry)] = settings_api.pdf_pages(output)
+                import pdf_text
+                manifest[page_key(entry)] = pdf_text.pages(output)
             except Exception as exc:  # noqa: BLE001 — 讀不了的原因照實寫進這一份的錯誤清單
                 manifest.pop(page_key(entry), None)
                 errors.append(f'{os.path.basename(entry["path"])}:PDF 頁數讀取失敗({str(exc)[:80]})')

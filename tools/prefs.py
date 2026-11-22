@@ -76,11 +76,6 @@ def note_sections(path=None):
 
 
 
-def save_custom_text(custom, path=None):
-    old_custom, agent = note_sections(path)
-    _write_note(custom, agent, path)
-
-
 def apply_agent_note(candidate, path=None, base=None):
     """接受 agent 的假設更新,但逐字保留使用者自訂區。回:agent 有沒有動自訂區。
     base:交給 agent 的那一份筆記。整理跟找缺同時跑、可以跑很久,這段時間他在看板上改的以現在的為準:
@@ -201,8 +196,7 @@ def valid_resume_pick(resume_id, lang, resumes=None):
 
 # 卡上「原因」那格有些被 agent 接著寫了投遞紀錄(表單怎麼填、送出頁長怎樣),甚至整格都是。
 # 那不是他的反應。從紀錄開頭的固定字樣切掉,只留前面他的話;只切不改,切錯頂多少一句。
-AGENT_LOG=re.compile(r'送出頁|表單送出|頁面顯示|(?:Lever|Greenhouse|Ashby|104) ?表單|投的時候|Apply with LinkedIn|'
-                     r'有連 LinkedIn|連結欄|之前被標已投遞|20\d\d-\d\d 投的|實際送出的是')
+AGENT_LOG=re.compile(r'送出頁|表單送出|頁面顯示|投的時候|連結欄|之前被標已投遞|20\d\d-\d\d 投的|實際送出的是')
 
 def his_words(note):
     note = (note or '').strip()
@@ -221,15 +215,13 @@ def company_of(j):
     return '' if co == '其他' else co
 
 
-def company_segment(j):
-    """卡名裡寫公司的那一段(原字,不正規化):找「同一個缺換了網址」要拿它回去對卡名。"""
-    t = card.name(j)
-    segs = [x.strip() for x in re.split(r'[·・]', t) if x.strip()]
-    if len(segs) < 2:
-        return ''
-    if TITLE_KW.search(segs[-1]) and not TITLE_KW.search(segs[0]):
-        return segs[0][:40]          # 公司·職稱
-    return segs[-1][:40]             # 職稱·公司
+def checked_summary(j):
+    """卡片摘要拿去比相似度、排序的那段字:只留程式核對過的值和沒有紀錄的舊卡原字(#569 US11)。"""
+    summary = j.get('sum') if isinstance(j.get('sum'), dict) else {}
+    recorded = card.claims(j)
+    kept = {key: value for key, value in summary.items()
+            if (recorded.get(key) or {}).get('state') in (card.VERIFIED, None)}
+    return json.dumps(kept, ensure_ascii=False)
 
 
 def cards(fb, jobs):
@@ -250,13 +242,12 @@ def cards(fb, jobs):
         if v.get('app'):
             mark = (mark + '、' if mark else '') + '加進準備區'
         note = his_words(v.get('n'))
-        summary = j.get('sum') if isinstance(j.get('sum'), dict) else {}
         src = j.get('src') if isinstance(j.get('src'), dict) else {}
         out.append({'id': j['id'], 'title': card.name(j), 'company': company_of(j), 'cat': j.get('cat') or '',
-                    'mark': mark, 'pos': pos, 'note': note, 'summary': summary,
+                    'mark': mark, 'pos': pos, 'note': note, 'summary': card.claims(j),
                     'angle': src.get('angle') or '',
                     'match': ' '.join([card.name(j), j.get('cat') or '', note,
-                                       json.dumps(summary, ensure_ascii=False)[:1500]])})
+                                       checked_summary(j)[:1500]])})
     return out
 
 
@@ -313,30 +304,37 @@ def neighbors(cand_title, cand_text, cand_company, cs, k=12, exclude=()):
     return [(f'c{i}', c) for i, c in chosen[:k]]
 
 
+def field_lines(label, values, pad=''):
+    """交給 agent 的材料一欄一段:欄名一行,每一項自己一行,項目裡換行的續行再縮排;字裡的標點不會被讀成分隔。"""
+    out = [f'{pad}- {label}:']
+    for value in values:
+        first, *rest = str(value).split('\n')
+        out += [f'{pad}  - {first}'] + [f'{pad}    {line}' for line in rest]
+    return out
+
+
 def render(nb):
-    """挑出來的卡,一張一行:編號、表態、職稱·公司、公司內容、門檻與原話。"""
+    """挑出來的卡,一張一段:編號、表態、職稱·公司、公司內容、門檻與原話,一欄一段(field_lines)。"""
     lines = []
     for cid, c in nb:
         summary = c.get('summary') or {}
-        company = summary.get('co') or '查無'
-        threshold = summary.get('bar') or '查無'
-        line = f"[{cid}] {c['mark']}｜{c['title']}｜公司在做什麼：{company}｜門檻：{threshold}"
+        lines += [f"[{cid}] 表態={c['mark']}", *field_lines('職稱·公司', [c['title']], '  ')]
+        for key, label in (('co', '公司在做什麼'), ('bar', '門檻')):
+            lines += field_lines(label, card.said_each(summary.get(key)) or ['查無'], '  ')
         if c['note']:
-            line += f"｜他說「{c['note']}」"
-        lines.append(line)
+            lines += field_lines('他說', [c['note']], '  ')
     return '\n'.join(lines)
 
 
 def like_scores(fb, jobs):
     """每張職缺「像他喜歡過的程度 − 像他不喜歡過的程度」,換成 0-100 的百分位。不用 agent,算一次不到一秒。
-    比的是職稱(去掉公司名)加卡片摘要。拿他表過態的 145 張驗過(每次拿掉一張當成沒看過):
-    AUC 0.82,只比職稱是 0.63。看板「最可能喜歡」那個排法,沒被判斷過的缺照這個排。"""
+    比的是職稱(去掉公司名)加卡片摘要裡核對過的值(checked_summary)。看板「最可能喜歡」那個排法,沒被判斷過的缺照這個排。"""
     byid = {j['id']: j for j in jobs}
     cs = cards(fb, jobs)
 
     def text(j):
         title, company = card.legacy_score_name_parts(j, TITLE_KW)
-        return _role_text(title, company) + ' ' + json.dumps(j.get('sum') or {}, ensure_ascii=False)[:800]
+        return _role_text(title, company) + ' ' + checked_summary(j)[:800]
     P = [text(byid[c['id']]) for c in cs if c['pos'] and c['id'] in byid]
     N = [text(byid[c['id']]) for c in cs if not c['pos'] and c['id'] in byid]
     if not P or not N:
@@ -380,5 +378,5 @@ if __name__ == '__main__':
     byid = {j['id']: j for j in jobs}
     for u in sys.argv[1:]:
         j = byid.get(u, {'target': u})
-        print(render(neighbors(card.name(j), json.dumps(j.get('sum') or {}, ensure_ascii=False),
+        print(render(neighbors(card.name(j), checked_summary(j),
                                company_of(j), cs, exclude={u})))

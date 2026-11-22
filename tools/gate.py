@@ -4,14 +4,14 @@
 gate —— 安檢門(GLOSSARY「安檢門」「交件單」):agent 交回來的事實進到程式的唯一入口。
 
 每一種會叫 agent 的流程,agent 交一張交件單(幫你填表:填表、修改的 fill.json、
-送出的 submit.json;其他 7 種流程各自的一份,見 FILES)。單子本身不是證據:程式只准用這裡核對過的格子。
+送出的 submit.json;其他流程各自的一份,見 FILES)。單子本身不是證據:程式只准用這裡核對過的格子。
 
-  read(out, kind)              唯一打開交件單的地方(其他地方直接讀,tests/test_gate.py 的結構測試就失敗)
+  read(out, kind)              FILES 裡每一種交件單唯一打開的地方(其他地方直接讀,tests/test_gate.py 的結構測試就失敗)
   inspect(kind, sheet, truth)  每一格跟程式自己看到的真相(Truth:頁面、紀錄、檔案、程式自己的設定)比;
                                回 Verdict:problems 每一條講「哪一格、agent 說什麼、實際是什麼」,facts 只有登記過的格子
   page_changes(seen, page)     按確認送出前、送出前:程式讀到的那一頁跟驗收時核對過的樣子比,哪一格從什麼變成什麼
 
-每一格都登記核對方式(SHEETS;幫你填表的在 gate_apply,其他 7 種流程的在 gate_flows,型別在 gate_cells),四種:
+每一格都登記核對方式(SHEETS;型別在 gate_flows,gate_cells),四種:
   核對       跟程式看到的比,對不上就擋
   程式決定   程式已經知道答案的事(用哪一份平台履歷、固定版還是客製版):agent 不用寫;寫了就要跟程式決定的一樣
   agent 的話 agent 自己的觀察(卡住的地方、筆記):照原文給人看,標明是 agent 說的,程式不拿它當事實、不拿它放行
@@ -25,34 +25,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import evidence  # noqa: E402
-# 用的地方只 import gate:幫你填表的頁面判斷、型別從這裡拿(F401:這幾個是給別處用的)
-from gate_apply import (FILL, SUBMIT,  # noqa: E402,F401
-                        page_changes, seen)
-from gate_profile_choice import PROFILE_CHOICE  # noqa: E402
 from gate_cells import (CHECK, DECIDED, JUDGED, UNUSED, WORDS, Row, RowTruth, Truth,  # noqa: E402,F401
                         Verdict, short)
-from gate_flows import (CUSTOMIZE, LINK_STATUS, POSTED_AT, PREPARE, REPLY, RESEARCH_JUDGE,  # noqa: E402
-                        RESEARCH_SEARCH, SUGGEST_CATS)
+from gate_flows import CUSTOMIZE, PREPARE, SUGGEST_CATS  # noqa: E402
 from numbered import Accept, Miscited, pick  # noqa: E402
 
 # 每一種交件單的檔名(* 是每一輪、每一批不一樣的那一段)。程式裡別處打開這些檔,tests/test_gate.py 的結構測試就失敗
-FILES = {'fill': 'fill.json', 'submit': 'submit.json', 'profile_choice': 'profile-choice.json',
-         'posted_at': 'posted_age_results.json', 'link_status': 'verdicts.json',
-         'suggest_cats': 'suggest.json', 'customize': 'feedback_reports.json', 'prepare': 'fill.json',
-         'research_search': 'search_*.json', 'research_judge': 'judge_*.json', 'reply': 'replies.json'}
-# 整張就是一個清單的交件單(找缺交的候選、判斷):讀進來當成 {清單名: 清單}
-LIST_SHEETS = {'research_search': 'candidates', 'research_judge': 'jobs'}
+FILES = {'suggest_cats': 'suggest.json', 'customize': 'feedback_reports.json', 'prepare': 'fill.json'}
 NESTED = ('posting', 'profile', 'delivery')   # 交件單裡這幾格底下還有格子,一格一格登記
-# 一列一列的交件單(其他 7 種流程:每一列是一張卡、一個來源):{種類: {清單名: 那一列用哪一格認是誰}}。
+# 一列一列的交件單(每一列是一張卡、一個來源):{種類: {清單名: 那一列用哪一格認是誰}}。
 # 每一列各自核對:對不上的那一列不收、原因寫出是哪一列,別列照收
-ROWS = {'posted_at': {'dates': 'url', 'inaccessible': 'url'}, 'link_status': {'jobs': 'id'},
-        'suggest_cats': {'categories': 'name', 'tags': 'name'}, 'customize': {'reports': 'issue'},
-        'research_search': {'candidates': 'url'}, 'research_judge': {'jobs': 'id'},
-        'reply': {'findings': 'url', 'job_ids': 'platform', 'inaccessible': 'source'}}
+ROWS = {'suggest_cats': {'categories': 'name', 'tags': 'name'}, 'customize': {'reports': 'issue'}}
 
-SHEETS = {'fill': FILL, 'submit': SUBMIT, 'profile_choice': PROFILE_CHOICE, 'posted_at': POSTED_AT,
-          'link_status': LINK_STATUS, 'suggest_cats': SUGGEST_CATS, 'customize': CUSTOMIZE, 'prepare': PREPARE,
-          'research_search': RESEARCH_SEARCH, 'research_judge': RESEARCH_JUDGE, 'reply': REPLY}
+SHEETS = {'suggest_cats': SUGGEST_CATS, 'customize': CUSTOMIZE, 'prepare': PREPARE}
 
 
 def cells(sheet):
@@ -144,8 +129,19 @@ def _rows(kind, head, value, truth, numbered=None, stale=None):
             problems.append(f'交件單「{head}」裡有一列不是物件:{short(row)}')
             continue
         key = str(row.get(by) or '')
-        facts, judged, _said, bad, unregistered = _check(table, row, row, RowTruth(truth, key), f'({short(key, 80)})',
-                                                         numbered, stale)
+        fields = dict(row)
+        row_stale = stale
+        if 'material_id' in fields:
+            row_stale = None
+            if numbered is not None:
+                try:
+                    numbered.check_id(fields.pop('material_id'))
+                except Miscited as error:
+                    row_stale = str(error)
+            else:
+                fields.pop('material_id')
+        facts, judged, _said, bad, unregistered = _check(table, fields, row, RowTruth(truth, key), f'({short(key, 80)})',
+                                                         numbered, row_stale)
         rows.append(Row(key, row, facts, judged, bad))
         problems += [p for p in bad if p not in problems]
         loose += [f'{head}.{n}' for n in unregistered if f'{head}.{n}' not in loose]
@@ -184,10 +180,8 @@ def inspect(kind, sheet, truth, numbered=None):
 
 
 def _evidence(kind, verdict, truth):
-    """其他 7 種流程:安檢門的比對結果記進開著的那一輪證據(幫你填表那幾種 apply_run 自己記,講得更細)。
+    """安檢門的比對結果記進開著的那一輪證據。
     有卡的(準備履歷一張一張核對)只記進那一張;一列一列的記每一列是誰、收下沒、判斷了什麼。"""
-    if kind in ('fill', 'submit'):
-        return
     rnd = evidence.active()
     if rnd is None:
         return
@@ -219,15 +213,6 @@ def read(out, kind, where=None):
             sheet, end = None, 0
         if sheet is None or text.lstrip()[end:].strip(' \t\r\n}]'):
             return None, f'{FILES[kind]} 寫壞了,不是合法 JSON:{e}'
-    if kind in LIST_SHEETS and isinstance(sheet, list):
-        sheet = {LIST_SHEETS[kind]: sheet}
     if not isinstance(sheet, dict):
         return None, f'{FILES[kind]} 不是一個物件'
     return sheet, ''
-
-
-def claimed_tab(out, kind):
-    """agent 說它留著的是哪一個分頁(還沒核對):程式拿它去讀、去截,讀得到才算核對過(見 Cell 分頁)。"""
-    sheet, _ = read(out, kind)
-    tid = (sheet or {}).get('tab_id')
-    return str(tid) if tid not in (None, '') else None

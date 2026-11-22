@@ -1,0 +1,8 @@
+def _card_url(said, sheet, truth):
+    """同一張職缺:路徑相同,卡片網址原有的參數都在(職缺編號可能就在參數裡);agent 多帶的參數不算換了職缺。"""
+    from urllib.parse import urlsplit, parse_qsl
+    if same_url(said, truth.url):
+        return None
+    a, b = urlsplit(str(said or '').split('#')[0]), urlsplit(str(truth.url or '').split('#')[0])
+    same_page = (a.netloc, a.path.rstrip('/')) == (b.netloc, b.path.rstrip('/'))
+    return None if same_page and set(parse_qsl(b.query)) <= set(parse_qsl(a.query)) else truth.url

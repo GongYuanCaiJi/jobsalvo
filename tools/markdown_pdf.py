@@ -4,33 +4,13 @@ import os
 import subprocess
 import sys
 import tempfile
+from pdf_paths import is_markdown as is_markdown, output_path as output_path, sent_file as sent_file
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class RenderError(RuntimeError):
     pass
-
-
-def output_path(source_path):
-    """排出來的 PDF 放哪:<資料夾>/.rendered/<原稿在資料夾裡的相對路徑>.pdf,從原稿就推得出來。
-    原稿在資料夾外面的,照它的完整路徑放在 .rendered/_外部/ 底下。"""
-    import config as cf
-    source_path = os.path.abspath(os.path.expanduser(source_path))
-    relative = os.path.relpath(source_path, cf.HOME)
-    if relative.startswith(os.pardir + os.sep):
-        relative = os.path.join('_外部', source_path.lstrip(os.sep))
-    return os.path.join(cf.HOME, '.rendered', os.path.splitext(relative)[0] + '.pdf')
-
-
-def is_markdown(path):
-    return bool(path) and path.lower().endswith(('.md', '.markdown'))
-
-
-def sent_file(path):
-    """設定的這份原稿,卡片實際寄出的是哪個檔:Markdown 寄它排好的 PDF(可能還沒排出來),其他就是它自己。
-    不排版、不碰磁碟;要位元組的人自己確認檔在不在。"""
-    return output_path(path) if is_markdown(path) else path
 
 
 def render(source_path, destination, style_path=None, lang=''):
