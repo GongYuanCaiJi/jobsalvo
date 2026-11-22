@@ -17,7 +17,7 @@ repos:
         pass_filenames: false
   # 模組歸屬:卡片編號、名字清理、找可投遞夾各自只准在一支程式裡做(規則與測試在 .semgrep/,semgrep --test .semgrep/)
   - repo: https://github.com/semgrep/pre-commit
-    rev: v1.178.0
+    rev: v1.185.0
     hooks:
       - id: semgrep
         # 暫時:semgrep 把堆疊軟上限設成「硬上限 ÷ 3」,Python 3.15 起無上限是 2⁶⁴−1,算出約 6EB,semgrep-core 一啟動就當掉
