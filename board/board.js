@@ -619,6 +619,7 @@
         if(op==='open'){var w=window.open('','_blank'); if(w){w.document.title='PR #'+n+' 預覽'; w.document.body.textContent='準備 PR #'+n+' 的預覽中…'; wins[n]=w;}}
         render();
         fetch('/api/pr-previews',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:op,number:n})}).then(function(r){return r.json();}).then(function(j){
+          x=prs.filter(function(y){return y.number===n;})[0];   // 清單可能在這段時間重抓過,改新的那筆
           if(x)x.preview=j.ok?{state:j.state,port:j.port,sha:j.sha,msg:j.msg}:{state:'failed',msg:j.msg}; render();});});});})();
   var _nb=$('notes');
   if(_nb){ _nb.addEventListener('input',function(e){var ta=e.target.closest('.note-t'); if(!ta)return; autogrow(ta); var id=ta.closest('.note-card').getAttribute('data-nid'); var n=FB['__notes__'].filter(function(x){return x.id===id;})[0]; if(n){n.t=ta.value; markNotesDirty();}});

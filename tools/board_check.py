@@ -4702,6 +4702,82 @@ CHECKS.append((
 ))
 
 
+# PR 預覽(#809/#811):副本不是正式看板,伺服器不給這個入口,所以頁面重寫成「正式看板」的樣子,GitHub 那邊用假的
+# (PR 清單、開關預覽都由頁面裡這個假回應答,不碰 GitHub、也不真的起預覽看板);看使用者會看到的:
+# 開預覽 → 打開預覽的連結、關掉 → 回到開預覽、推了新的 → 換成最新推送、開不起來 → 寫原因而且是醒目的顏色。
+CHECKS.append((
+    'PR 預覽:開預覽、換成最新推送、關掉、開不起來都看得到結果',
+    r"""
+      var bad=[], of=window.fetch, oo=window.open, ops=[], pend=0, sha='a1', st={state:'off'}, failNext=true, port=4321;
+      var orig=await (await of.call(window,location.href,{cache:'no-store'})).text();
+      var html=orig.replace(/"pr_previews":\s*false/,'"pr_previews": true');
+      if(html===orig)throw new Error('頁面資料裡找不到 pr_previews');
+      window.open=function(){return null;};
+      window.fetch=function(u,o){
+        if(String(u).indexOf('/api/pr-previews')!==0)return of.apply(this,arguments);
+        var out, body=o&&o.body?JSON.parse(o.body):null;
+        if(body){ops.push(body.op);
+          if(body.op==='close'){st={state:'off'}; out={ok:true,state:'off'};}
+          else if(failNext){failNext=false; out={ok:false,msg:'開不起來:假的原因'};}
+          else{st={state:'ready',port:port,sha:sha}; out={ok:true,state:'ready',port:port,sha:sha};}}
+        else if(String(u).indexOf('status=1')>=0)out={ok:true,states:{'815':st}};
+        else out={ok:true,prs:[{number:815,title:'假的 PR',branch:'claude/815-x',updated:'2026-11-23T00:00:00Z',
+          url:'https://example.test/pull/815',diff:'https://example.test/pull/815/files',sha:sha,summary:'假的摘要',preview:st}]};
+        pend++;   // 假回應也算「還在路上」:面板打開時讀清單的那次沒回來之前不往下按,不然它晚到會把按下去的結果蓋掉
+        return new Promise(function(r){setTimeout(function(){pend--; r(new Response(JSON.stringify(out),{status:200,headers:{'Content-Type':'application/json'}}));},0);});};
+      var settle=async function(){await T.until(function(){return pend===0;},5000); await T.frame();};
+      var list=function(){return document.getElementById('prvlist');};
+      var has=function(sel){return !!(list()&&list().querySelector(sel));};
+      var btn=function(op){return list()&&list().querySelector('[data-prv="'+op+'"]');};
+      var label=function(op){var b=btn(op); return b?b.textContent.trim():'';};
+      // document.write 換內容不換 window:先停掉前一份 board.js 排的計時(每 20 秒同步),不然兩份看板一起打 API
+      var swap=function(h){var last=setTimeout(function(){},0); for(var i=1;i<=last;i++){clearTimeout(i); clearInterval(i);}
+        document.open(); document.write(h); document.close();};
+      try{
+      swap(html);
+      await T.until(function(){return document.getElementById('ptog');},8000);
+      if(!document.getElementById('ptog'))bad.push('正式看板上沒有「PR 預覽」');
+      else{
+        T.press('#ptog');
+        await T.until(function(){return has('.prv-row');},5000); await settle();
+        if(!/#815/.test(list().textContent))bad.push('清單沒列出開著的 PR');
+        if(label('open')!=='開預覽')bad.push('還沒開的 PR 沒有「開預覽」');
+        // 開不起來:寫原因、換成「再試一次」,原因要醒目(跟旁邊的字不同色)
+        T.press('#prvlist [data-prv="open"]');
+        await T.until(function(){return has('.prv-bad');},5000);
+        var m=has('.prv-bad')&&list().querySelector('.prv-bad');
+        if(!m||!/假的原因/.test(m.textContent))bad.push('開不起來沒有寫原因');
+        else if(getComputedStyle(m).color===getComputedStyle(m.parentNode).color)bad.push('開不起來的原因跟旁邊的字同色,看不出出錯');
+        if(label('open')!=='再試一次')bad.push('開不起來後沒有「再試一次」');
+        // 再試一次 → 好了:有打開預覽的連結、有關掉、還沒有新推送就沒有「換成最新推送」
+        T.press('#prvlist [data-prv="open"]');
+        await T.until(function(){return has('.prv-go');},5000);
+        var go=has('.prv-go')&&list().querySelector('.prv-go');
+        if(!go||!/:4321\//.test(go.href))bad.push('開好了沒有指向預覽看板的連結');
+        if(!btn('close'))bad.push('開好了沒有「關掉」');
+        if(btn('open'))bad.push('沒有新推送卻出現「換成最新推送」');
+        // PR 又推了新的:收起再打開面板重讀清單,出現「換成最新推送」,按了換成新的
+        sha='b2'; T.press('#ptog'); await settle(); T.press('#ptog'); await settle();
+        await T.until(function(){return label('open')==='換成最新推送';},5000);
+        if(label('open')!=='換成最新推送')bad.push('PR 有新推送卻沒有「換成最新推送」');
+        else{T.press('#prvlist [data-prv="open"]');
+          await T.until(function(){return has('.prv-go');},5000);
+          if(btn('open')||!has('.prv-go'))bad.push('換成最新推送後按鈕還在');}
+        // 關掉 → 回到「開預覽」,打開預覽的連結不見
+        T.press('#prvlist [data-prv="close"]');
+        await T.until(function(){return label('open')==='開預覽';},5000);
+        if(label('open')!=='開預覽'||has('.prv-go'))bad.push('關掉後沒有回到「開預覽」');
+        if(ops.join()!=='open,open,open,close')bad.push('送給伺服器的動作不對:'+ops.join());
+      }
+      }finally{window.fetch=of; window.open=oo; swap(orig);}
+      await T.until(function(){var a=document.getElementById('app'); return a&&a.children.length;},8000);
+      await T.resync();
+      return bad.join('；');
+    """,
+    'no_setup', {'fresh_page': True},
+))
+
+
 CHECKS.append((
     '可投遞頁:卡片排在參考資料(母版)前面,驗收總表收成一行,不擋在卡片前面',
     r"""

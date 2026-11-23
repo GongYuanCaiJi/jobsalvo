@@ -1865,4 +1865,4 @@ button.iv-st:hover{border-color:var(--accent)}
 .prv-row{padding:var(--space-8) 0;border-top:1px solid var(--line)}
 .prv-br,.prv-s,.prv-m{color:var(--ink-dim);font-size:var(--text-sm)}
 .prv-a{display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:center;margin-top:var(--space-4);font-size:var(--text-sm)}
-.prv-bad{color:var(--bad)}
+.prv-bad{color:var(--warn)}
