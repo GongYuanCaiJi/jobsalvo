@@ -6,6 +6,7 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
   iv.py show                         有在準備的每一場:什麼時候面、幾題、出處分佈
   iv.py show 萬蕙昇                  一場的面試時間和每一題(題目、出處、為什麼;行尾 [ ] 是內部 id)
   iv.py find 薪水                    題庫裡找題(先找,有了就 link,不要再寫一題一樣的)
+  iv.py cats                         現有的大類 · 小類和各幾題
   iv.py get  薪水 > q.json           拿一題現在的 json(含 rev);改一題一定先 get,改完再 put
                                      題目參數(get/link/unlink)寫 id 或題目文字的一段都行,對到唯一一題才動;
                                      對使用者說話一律講題目,不講 id(他在看板上看不到 id)
@@ -30,12 +31,25 @@ iv —— agent 寫「🎤 面試準備」的唯一入口。規則都在 intervi
 逐字稿裡可以放表格(| a | b | 加 |---|---|)和圖(![說明](fig:檔名.svg),檔放資料夾的 figures/)。
 
 卡片可以寫網址、網址的一段或公司名,對到唯一一張就好。
-題目 json 的欄位:t 題目、cat 大類、sub 小類、ask 題面(只放對方怎麼問)、focus 考點(含答壞的樣子)、
-ref 準備材料、script 逐字稿(## 開頭是小標,只放同一個答案的段落或版本)、stage todo/first/wip/ok、lim 限時秒數、
-parent 追問哪一題:對方聽完回答接著問的另一題,一律另寫一題帶 "parent": "原題 id",不寫進原題逐字稿。
-  例:{"t": "曲線下面積是什麼？", "parent": "ML-1", "cat": "技術基本功", "sub": "機器學習", "stage": "wip", "script": "…"}
+題目 json 的欄位就是看板上這一場的這棵樹(iv.py show <卡> 照看板的順序印同一棵):
+  分區        --src 決定:共有 → 我被問過 → 這家考過 → 別家考過 → 預想的
+  分組標題    cat 大類 · sub 小類。iv.py cats 列出現有的,沿用現有寫法
+  一行        t 題目。列表照大類排、不照寫入順序,每一行單獨看就懂在問什麼
+  縮在底下    parent 追問(填原題 id):對方聽完原題接著問的那一題。只有一層,原題那行標「追問 N」。\n              原題也在這場:收在原題底下、跟著原題的分區;原題不在這場:自己一行,標「追問自」
+  收合區      ask 題面(對方怎麼問)、focus 考點(對方在看什麼、答壞的樣子)、ref 準備材料(答之前要先讀的東西)
+  展開內容    script 逐字稿;## 小標是完整回答裡的段落標題
+  行尾        stage 走到哪 todo/first/wip/ok、lim 限時秒數(念超過標紅)
+  標記        共有:每一場自動帶上,改一次全部更新,它底下的追問也一起到每一場。這場版:variant 換掉的逐字稿和考點
+  例:{"t": "曲線下面積是什麼？", "parent": "ML-1", "cat": "技術基本功", "sub": "機器學習", "ask": "…", "focus": "…", "stage": "wip", "script": "…"}
+挑功能:
+  一串接著問的題                     原題一題,其餘掛成它的追問
+  一串接在共有題後面、只屬於這一場  這串的第一題當這場自己的原題,其餘掛在它底下(掛在共有題底下會跟到每一場)
+  同一題這場想講得不一樣              variant,題目不複製
+  同一題幾種講法                      同一份逐字稿,每種講法一個 ## 小標
 出處 --src:me 我被問過 / this 這家考過 / other 別家考過 / guess 預想的(要 --why)。
 this、other 要 --cite 那一篇的網址(點了直接開那一篇,不是公司頁)和 --quote 原文(那一篇怎麼寫就貼怎麼寫)。
+put / link / variant 存完會印出這題落在那一場的哪裡,和看板上會空著的格子。
+全部寫完跑 iv.py show <卡>,照印出來的順序讀一遍:每一行單獨看懂、追問縮在對的原題底下、分區和分組對。
 """
 import argparse, json, os, re, sys
 
@@ -124,6 +138,62 @@ def memo_show(script):
     print('  要點:' + (kw.replace('<br>', ' / ') or '(沒有)'))
 
 
+def tree(bank, job):
+    """這一場在看板上的樣子(board.js ivJobPageHTML):[(分區, [(大類 · 小類, [(原題, [追問…])…])…])…]。
+    追問的原題也在這一區的同一批裡,就收在原題底下、跟著原題的分區;原題不在這場,追問自己佔一行。"""
+    bank = ib.normalize(bank)
+    sh = set(ib.shared_ids(bank))
+    qs = [it for it in (ib.effective(bank, job, q) for q in ib.job_qids(bank, job)) if it]
+    src = {q: v.get('src') for q, v in (bank['links'].get(job) or {}).items()}
+    own = [it for it in qs if it['id'] not in sh]
+    secs = [('共有', [it for it in qs if it['id'] in sh], [it for it in qs if it['id'] in sh])]
+    secs += [(name, [it for it in own if src.get(it['id']) == s], own) for s, name in ib.SRCS.items()]
+    out = []
+    for name, rows, pool in secs:
+        ids = {it['id'] for it in pool}
+        kids = {}
+        for it in pool:
+            if it.get('parent') in ids:
+                kids.setdefault(it['parent'], []).append(it)
+        tops = [it for it in rows if it.get('parent') not in ids]
+        cats = list(bank['cats']) + [c for c in dict.fromkeys(it.get('cat') or '其他' for it in tops) if c not in bank['cats']]
+        groups = {}
+        for c in cats:
+            for it in tops:
+                if (it.get('cat') or '其他') == c:
+                    groups.setdefault(' · '.join(x for x in (c, it.get('sub')) if x), []).append((it, kids.get(it['id'], [])))
+        if groups:
+            out.append((name, list(groups.items())))
+    return out
+
+
+def landing(bank, job, qid):
+    """這題在看板上落在哪裡,和看板上會空著的格子。回要印的幾行。"""
+    bank = ib.normalize(bank)
+    items = {it['id']: it for it in bank['items']}
+    it, path = items[qid], None
+    for name, groups in tree(bank, job) if job else []:
+        for g, rows in groups:
+            for top, kids in rows:
+                if top['id'] == qid:
+                    it, path = top, [name, g, top.get('t', '')]
+                for k in kids:
+                    if k['id'] == qid:
+                        it, path = k, [name, g, top.get('t', ''), f"追問「{k.get('t', '')}」"]
+    if path is None:
+        path = ['題庫', ' · '.join(x for x in (it.get('cat'), it.get('sub')) if x), it.get('t', '')]
+    out = ['落在:' + ' › '.join(path) + ('  〔這場版〕' if it.get('ov') else '')]
+    pa = items.get(it.get('parent'))
+    if job and pa and len(path) == 3:
+        out.append(f"  看板上單獨一行,標「追問自「{pa.get('t', '')}」」:要收在原題底下,原題也要記進這場")
+    if pa and pa['id'] in ib.shared_ids(bank):
+        out.append(f"  這題跟著共有題「{pa.get('t', '')}」出現在每一場")
+    empty = [n for k, n in (('ask', '題面'), ('focus', '考點')) if not ib._plain(it.get(k))]
+    if empty:
+        out.append('  看板上這題的' + '、'.join(empty) + '空著')
+    return out
+
+
 def link_form(a):
     if a.src not in ib.SRCS:
         raise SystemExit('--src 只能是 ' + ' / '.join(f'{k}({v})' for k, v in ib.SRCS.items()))
@@ -157,22 +227,24 @@ def show(a, data, fb):
     print(f"{label(j)}  {j['id']}")
     for r in bank['rounds'].get(j['id'], []):
         print('  面試 ' + when(r) + (' · ' + r['note'] if r.get('note') else ''))
-    qs = bank['links'].get(j['id'], {})
-    sh = ib.shared_ids(bank)
-    groups = [('共有', [(q, qs.get(q, {})) for q in sh])] + [
-        (name, [(q, v) for q, v in qs.items() if v['src'] == s and q not in sh]) for s, name in ib.SRCS.items()]
-    for name, rows in groups:
-        if rows:
-            print(f'  【{name}】')
-        for q, v in rows:
-            it = items.get(q, {})
-            st = ib.to_form(it).get('stage') if it else '?'
-            up = f"  ↳ 追問「{items.get(it['parent'], {}).get('t', it['parent'])}」" if it.get('parent') else ''
-            up += f'  ({kl})' if (kl := ib.kids_line(bank['items'], q)) else ''
-            print(f"    {st:5} {it.get('t', '(題庫裡沒有)')}{up}{'  〔這場版〕' if v.get('ov') else ''}  [{q}]")
-            for k in ('cite', 'quote', 'why'):
-                if v.get(k):
-                    print(f'{"":10}{k}: {v[k]}')
+    links = bank['links'].get(j['id'], {})
+    def row(it, pad):
+        st = ib.to_form(items.get(it['id'], it)).get('stage')
+        print(f"{pad}{st:5} {it.get('t', '')}{'  〔這場版〕' if it.get('ov') else ''}  [{it['id']}]")
+        pa = items.get(it.get('parent'))
+        if pa and pad == '      ':
+            print(f"{pad}      ↳ 追問自「{pa.get('t', '')}」")
+        for k in ('cite', 'quote', 'why'):
+            if (links.get(it['id']) or {}).get(k):
+                print(f"{pad}      {k}: {links[it['id']][k]}")
+    for name, groups in tree(bank, j['id']):
+        print(f'  【{name}】')
+        for g, rows in groups:
+            print(f'    {g}')
+            for top, kids in rows:
+                row(top, '      ')
+                for k in kids:
+                    row(k, '        ↳ ')
 
 
 def main():
@@ -182,6 +254,7 @@ def main():
     p = sub.add_parser('find'); p.add_argument('word')
     p = sub.add_parser('get'); p.add_argument('qid')
     p = sub.add_parser('check')
+    p = sub.add_parser('cats')
     for name in ('put', 'link'):
         p = sub.add_parser(name)
         if name == 'put':
@@ -212,6 +285,12 @@ def main():
                 kl = ib.kids_line(ib.normalize(data.get('bank'))['items'], f['id'])
                 print(f"{f['stage']:5} {f['cat']}/{f['sub']}  {f['t']}" + (f'  ({kl})' if kl else '') + f"  [{f['id']}]")
         return
+    if a.cmd == 'cats':
+        import collections
+        n = collections.Counter((it.get('cat'), it.get('sub') or '') for it in ib.normalize(data.get('bank'))['items'] if not it.get('parent'))
+        for (c, sb), k in sorted(n.items()):
+            print(f"{c}{' · ' + sb if sb else ''}  {k}")
+        return
     if a.cmd == 'get':
         print(json.dumps(ib.to_form(qref(a.qid, data)), ensure_ascii=False, indent=1))
         return
@@ -238,9 +317,10 @@ def main():
         bank = write('put', form)
         qid = form.get('id') or next(it['id'] for it in bank['items'] if it['id'] not in before)
         if job:
-            write('link', lf, qid, job, 'asked' if a.src == 'me' else 'prep')
+            bank = write('link', lf, qid, job, 'asked' if a.src == 'me' else 'prep')
         print(f"寫好了:「{form.get('t') or qref(qid, {'bank': bank})['t']}」[{qid}]" + (f'(記進 {job})' if job else ''))
         memo_show(form.get('script'))
+        print('\n'.join(landing(bank, job, qid)))
         return
     if a.cmd in ('share', 'unshare'):
         it = qref(a.qid, data)
@@ -260,15 +340,17 @@ def main():
             if ib.to_form(it)['stage'] in ('wip', 'ok') and (m := memo_check(read(a.script_file), it['t'])):
                 raise SystemExit('沒寫進去:' + m)
             old = ib.effective(ib.normalize(data.get('bank')), job, it['id'])
-            write('variant', {'script': read(a.script_file), 'focus': read(a.focus_file) if a.focus_file else ib._plain(old.get('focus'))},
+            bank = write('variant', {'script': read(a.script_file), 'focus': read(a.focus_file) if a.focus_file else ib._plain(old.get('focus'))},
                   it['id'], job)
             print(f"這場版寫好了:「{it['t']}」→ {job}")
             memo_show(read(a.script_file))
+            print('\n'.join(landing(bank, job, it['id'])))
         return
     if a.cmd == 'link':
         it = qref(a.qid, data)
-        write('link', link_form(a), it['id'], job, 'asked' if a.src == 'me' else 'prep')
+        bank = write('link', link_form(a), it['id'], job, 'asked' if a.src == 'me' else 'prep')
         print(f"記好了:「{it['t']}」→ {job}({ib.SRCS[a.src]})")
+        print('\n'.join(landing(bank, job, it['id'])))
     elif a.cmd == 'unlink':
         it = qref(a.qid, data, loose=True)
         write('link', None, it['id'], job, None)
