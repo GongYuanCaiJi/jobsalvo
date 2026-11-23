@@ -46,6 +46,11 @@ class IvSheetTest(unittest.TestCase):
         self.assertLess(md.index('#### 什麼是 AOI'), md.index('##### 打光為什麼重要'))
         self.assertLess(md.index('### 自我介紹'), md.index('### 技術基本功'))
 
+    def test_card_without_company_and_title_fields_is_named_from_its_target(self):
+        data = _data()
+        data['jobs'][0] = {'id': 'J', 'target': '工程師 · 某某公司'}   # 從應徵紀錄同步進來的卡只有 target
+        self.assertEqual(iv_sheet.build(data, 'J')[1], '工程師 · 某某公司')
+
     def test_glance_table_uses_the_one_liner_or_short_script_and_never_prints_ids(self):
         md, _ = iv_sheet.build(_data(), 'J')
         self.assertIn('| 什麼是 AOI | 一句話答案。 | ① 取像<br>② 判斷 |', md)

@@ -40,7 +40,7 @@ this、other 要 --cite 那一篇的網址(點了直接開那一篇,不是公司
 import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import board_doc as bd, interview_bank as ib, config as cf
+import board_doc as bd, card as cd, interview_bank as ib, config as cf
 
 
 def _load():
@@ -48,12 +48,17 @@ def _load():
     return d['data'], (json.loads(d['fb']) if isinstance(d['fb'], str) else d['fb'])
 
 
+def label(j):
+    """卡片給人看的名字:有公司和職稱就用,沒有(例如從應徵紀錄同步進來的卡)就用卡名。"""
+    return f"{j.get('company') or ''} {j.get('title') or ''}".strip() or cd.name(j)
+
+
 def card(q, data):
     jobs = [j for j in data.get('jobs') or [] if isinstance(j, dict)]
     exact = [j for j in jobs if j.get('id') == q]
-    hit = exact or [j for j in jobs if q in str(j.get('id')) or q in str(j.get('company') or '')]
+    hit = exact or [j for j in jobs if q in str(j.get('id')) or q in label(j)]
     if len(hit) != 1:
-        names = '、'.join(f"{j.get('company')} {j.get('title')} ({j.get('id')})" for j in hit[:6]) or '沒有'
+        names = '、'.join(f"{label(j)} ({j.get('id')})" for j in hit[:6]) or '沒有'
         raise SystemExit(f'「{q}」要對到唯一一張卡,現在對到:{names}')
     return hit[0]
 
@@ -143,13 +148,13 @@ def show(a, data, fb):
             srcs = {s: sum(1 for q, v in qs.items() if v['src'] == s and q not in ib.shared_ids(bank)) for s in ib.SRCS}
             nsh = len(ib.shared_ids(bank))
             rs = bank['rounds'].get(jid, [])
-            print(f"{j.get('company')} {j.get('title')}  [{(fb.get(jid) or {}).get('oc') or '—'}]  {jid}")
+            print(f"{label(j)}  [{(fb.get(jid) or {}).get('oc') or '—'}]  {jid}")
             print('   面試:' + ('; '.join(when(r) for r in rs) if rs else '還沒記時間'))
             print(f'   {len(ib.job_qids(bank, jid))} 題 · ' + ' · '.join(
                 [f'共有 {nsh}'] * bool(nsh) + [f'{ib.SRCS[s]} {n}' for s, n in srcs.items() if n]))
         return
     j = card(a.card, data)
-    print(f"{j.get('company')} {j.get('title')}  {j['id']}")
+    print(f"{label(j)}  {j['id']}")
     for r in bank['rounds'].get(j['id'], []):
         print('  面試 ' + when(r) + (' · ' + r['note'] if r.get('note') else ''))
     qs = bank['links'].get(j['id'], {})

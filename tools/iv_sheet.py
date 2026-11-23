@@ -13,7 +13,7 @@
 import glob, os, re, sys, threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import interview_bank as ib
+import card, interview_bank as ib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STYLE = os.path.join(HERE, 'interview_sheet.css')
@@ -83,7 +83,7 @@ def build(data, job_id):
     tops = [items[q] for q in ids if items[q].get('parent') not in asked]
     rank = {c: i for i, c in enumerate(bank['cats'])}
     tops.sort(key=lambda it: rank.get(it.get('cat'), len(rank)))
-    title = f"{job.get('company') or ''} {job.get('title') or ''}".strip()
+    title = f"{job.get('company') or ''} {job.get('title') or ''}".strip() or card.name(job)
 
     is_ask = lambda it: '反問' in str(it.get('cat') or '')
     asks = [it for it in tops if is_ask(it)]
