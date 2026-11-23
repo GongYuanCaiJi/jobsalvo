@@ -55,6 +55,9 @@ DEFAULTS = {
             {'name': '遠端', 'match': r'remote|遠端|在家工作'},
         ],
     },
+    'updates': {
+        'auto': True,                    # 開機服務每小時自動跟上 main
+    },
     'paths': {
         'summaries': 'card-summaries',  # 每個職缺研究到什麼,<sha1(url)前12碼>.json
         'company_cache': 'company-cache',

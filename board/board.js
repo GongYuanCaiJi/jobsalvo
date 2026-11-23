@@ -165,6 +165,7 @@
     THEME=b.getAttribute('data-themeset'); try{localStorage.setItem(THEME_KEY,THEME);}catch(e2){} applyTheme();});
   applyTheme();
   var D=JSON.parse($('data-jobs').textContent);
+  var SERVER_VERSION=D.server_version||null, SERVER_RELOAD_PENDING=false;
   var FB=JSON.parse($('data-fb').textContent||'{}');
   var jobs=D.jobs, catIcon=D.catIcon, catOrder=D.catOrder;
   var masters=D.masters||[];   // 原始履歷的預覽改在設定頁「你的履歷」看;這裡只剩彈窗查不到職缺時的後備
@@ -3249,6 +3250,7 @@
         refreshAllCards(); refreshBar('ok');
         if(acts.length||moved||JSON.stringify(NEXT)!==nx0)renderAll();
         if(unsavedCount()>0)scheduleSave(900);      // 途中又改的,再送一次
+        else maybeReloadForServerVersion();
         // 清掉答案:後台改了常用答案和表單,拿回來才講是清掉還是刪掉
         sentAns.forEach(function(x){var f=x.redo!==undefined&&REDO_DONE[x.redo]; if(f){delete REDO_DONE[x.redo]; f(undos[cmds.indexOf(x)]||[]);}});
         // 不是按鈕帶的(直接改被擋,例如正在送出時換檔):照它講的原因說,重拿伺服器的版本
@@ -3780,7 +3782,7 @@
             if(r.status===422&&st.paste_resume){askResumeText(st.msg,function(text){
               startRun(kind,Object.assign({},body||{},{resume_text:text}),btn);},back,
               kind==='suggest'?'繼續建議':'繼續找缺');return;}
-            if(r.status===409){snack(st.needs_browser||st.other?st.msg:(kind==='apply'?AGENT+' 還在跑上一輪,跑完再按卡上的「▶ 送出」':'正在跑,等它跑完')); back(); return;}
+            if(r.status===409){snack(st.needs_browser||st.other||/正在更新/.test(st.msg||'')?st.msg:(kind==='apply'?AGENT+' 還在跑上一輪,跑完再按卡上的「▶ 送出」':'正在跑,等它跑完')); back(); return;}
             var v={}; v[kind]=st; takeRuns(v);
             if(kind==='research')renderFind();});});   // 按鈕字從「送出中…」換回來
     }).catch(function(){snack('沒送出去，再按一次'); back();});
@@ -3832,6 +3834,13 @@
     // 哪一包拿到了才記哪一包的版本;沒拿到(或還沒輪到)的那包版本不動,下一輪只重拿它,不連拿到的一起重抓
     // back:他剛切回這個分頁(可能剛在別的程式改完母稿),請伺服器順便比對原稿、變了就在背景先建材料
     syncPromise=fetch(back?'/api/rev?sync=1':'/api/rev').then(function(r){return r.json();}).then(function(v){
+      if(v&&v.server_version){
+        if(SERVER_VERSION&&SERVER_VERSION!==v.server_version)SERVER_RELOAD_PENDING=true;
+        SERVER_VERSION=v.server_version;
+        if(SERVER_RELOAD_PENDING&&!hasUnsavedEdits()){
+          syncing=false; location.reload(); return false;
+        }
+      }
       if(v&&v.err==='tampered'){takeTampered(v.msg); syncing=false;
         if(waitForCurrent)throw new Error(v.msg||'看板版本驗證失敗'); return false;}
       if(tampered){if(saveErr===tampered)saveErr=''; tampered=''; refreshBar();}   // 他處理好了
@@ -3866,6 +3875,13 @@
       if(waitForCurrent)throw err; return false;});
     return syncPromise;
   }
+  function hasUnsavedEdits(){
+    var el=document.activeElement, editing=!!(el&&el.isConnected&&(/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)||el.isContentEditable));
+    return saving||unsavedCount()>0||!!(typeof CFGDIRTY!=='undefined'&&CFGDIRTY)||editing;
+  }
+  function maybeReloadForServerVersion(){
+    if(SERVER_RELOAD_PENDING&&!hasUnsavedEdits())location.reload();
+  }
   // 跑完的那一下:等卡片資料拉下來之後才講,「去看」點下去才看得到東西。
   function runDoneNote(){
     if(_runDone.prep){ _runDone.prep=false; var p=PREP||{};
@@ -3897,6 +3913,8 @@
   // 平常每 20 秒對一次;分頁切回前景時立刻對一次(手機擱著回來就是最新的)。
   setInterval(syncFromServer,20000);
   document.addEventListener('visibilitychange',function(){if(!document.hidden)syncFromServer(true);});
+  window.addEventListener('focus',function(){syncFromServer(true);});
+  document.addEventListener('focusout',function(){setTimeout(maybeReloadForServerVersion,0);});   // 換版等他打完字:離開輸入框就重新整理
   syncFromServer();
 
   var buildGen=null, watching=false;
@@ -5045,9 +5063,9 @@
     tt.appendChild(b);
     function fill(){fetch('/api/update').then(function(r){return r.json();}).then(function(u){
       if(!u.new){b.hidden=true; return;}
-      b.hidden=false; b.disabled=false; b.blocked=!!u.blocked;
+      b.hidden=false; b.disabled=false; b.blocked=!!(u.blocked||u.busy);
       b.innerHTML=ic('circle-arrow-up')+'<span class="upd-txt"> 更新</span>';
-      b.title=u.blocked?('有新版,但'+u.blocked):('有新版,按了更新到 '+(u.latest||'最新版'));
+      b.title=(u.blocked||u.busy)?('有新版,但'+(u.busy||u.blocked)):('有新版,按了更新到 '+(u.latest||'最新版'));
       b.setAttribute('aria-label',b.title);}).catch(function(){});}
     b.addEventListener('click',function(){
       if(b.blocked){cfgGo('cfg:sys'); return;}
@@ -5064,8 +5082,13 @@
       if(u.latest===null)t=esc(cur)+' · 查不到最新版(沒網路?)';
       else if(!u.new)t=esc(cur)+(u.latest?' · 已經是最新'+(u.checked?'('+new Date(u.checked*1000).toTimeString().slice(0,5)+' 查的)':''):'');
       else t=esc(cur)+' → 有新版 <b>'+esc(u.latest)+'</b>';
-      var btn=u.new&&!u.blocked?'<button class="cfg-b" type="button" data-cfupdate="1">更新到 '+esc(u.latest)+'</button>':'';
-      row.innerHTML='<label class="cfg-k">版本</label><span class="cfg-file">'+t+(u.blocked&&u.new?'<br>'+esc(u.blocked):'')+'</span>'+btn+
+      var auto=CFGW&&CFGW.updates&&CFGW.updates.auto!==false;
+      var checked=u.auto_status||{}, last=checked.at?'<br>上次更新：'+esc(new Date(checked.at*1000).toLocaleString())+' · '+esc(checked.version||'')+(checked.msg?' · '+esc(checked.msg):''):'',
+        failure=checked.failure?'<br>最近一次更新失敗：'+esc(new Date(checked.failure.at*1000).toLocaleString())+' · '+esc(checked.failure.msg||''):'';
+      var autoRow='<label class="cfg-file"><input type="checkbox" data-cfb="updates.auto"'+(auto?' checked':'')+'> 自動更新(開機自動啟動時每小時檢查)</label>';
+      var btn=u.new&&!u.blocked&&!u.busy?'<button class="cfg-b" type="button" data-cfupdate="1">更新到 '+esc(u.latest)+'</button>':'';
+      row.innerHTML='<label class="cfg-k">版本</label><span class="cfg-file">'+t+(u.blocked?'<br>'+esc(u.blocked):'')+'</span>'+btn+
+        (u.busy?'<br>'+esc(u.busy):'')+(u.automatic_blocked?'<br>'+esc(u.automatic_blocked):'')+last+failure+autoRow+
         (u.new?'':'<button class="cfg-b" type="button" data-cfupcheck="1">'+ic('refresh-cw')+' 現在檢查</button>');
     }).catch(function(){row.querySelector('.cfg-file').textContent='查不到版本';});}
   document.addEventListener('click',function(e){var c=e.target.closest&&e.target.closest('[data-cfupcheck]'); if(!c)return;
@@ -5561,7 +5584,7 @@
   window.addEventListener('resize',cfgKeepFocusVisible);
   function cfgMark(){CFGDIRTY=cfgSnap()!==CFG0; refreshBar(); var st=$('cfg-st'); if(st)st.textContent=CFGDIRTY?'● 有改動還沒存':'沒有改動';
     var sv=$('cfg-save'); if(sv)sv.classList.toggle('dirty',CFGDIRTY);
-    var dc=$('cfg-discard'); if(dc)dc.hidden=!CFGDIRTY; cfgKeepFocusVisible();}
+    var dc=$('cfg-discard'); if(dc)dc.hidden=!CFGDIRTY; cfgKeepFocusVisible(); maybeReloadForServerVersion();}
   function cfgSave(reload){
     // 規則寫錯(分類、標籤的關鍵字):後台照它真的會拒絕的那幾條回原因(settings_api),設定頁照著顯示,不自己先擋
     // 只送改過的:欄位表(config.FIELDS)裡跟打開時那一份不一樣的欄,和改過的文字
@@ -5573,7 +5596,7 @@
         // 別處改過設定(409):存檔列多一顆「重新讀取」,他自己決定要不要丟掉這頁沒存的改動
         if(r.status===409){CFGD.conflict=true; renderCfg();}
         if(!r.ok||!d.ok)throw new Error(d.msg||('http '+r.status));
-        CFGDIRTY=false; CFGD.version=d.version; CFG0=cfgSnap(); refreshBar();
+        CFGDIRTY=false; CFGD.version=d.version; CFG0=cfgSnap(); refreshBar(); maybeReloadForServerVersion();
         refreshShip();   // 換了原始檔、勾選、語言:每張卡的要寄的檔案照新的設定重拿,不用重新整理
         if(reload){snack('設定存好了,重新載入看板…'); setTimeout(function(){location.reload();},700);}
         return d;});});

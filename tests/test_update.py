@@ -49,6 +49,12 @@ class Update(unittest.TestCase):
         shutil.copytree(self.base, self.root, symlinks=True)
         self.addCleanup(shutil.rmtree, self.root, True)
         self.work, self.clone = os.path.join(self.root, 'maintainer'), os.path.join(self.root, 'app')
+        self.fake_uv = os.path.join(self.root, 'uv-success')
+        with open(self.fake_uv, 'w', encoding='utf-8') as script:
+            script.write('#!/bin/sh\nexit 0\n')
+        os.chmod(self.fake_uv, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+        uv = mock.patch.object(update.shutil, 'which', return_value=self.fake_uv)
+        uv.start(); self.addCleanup(uv.stop)
 
     def push_new_commit(self):
         with open(os.path.join(self.work, 'f.txt'), 'w') as f:
@@ -107,11 +113,72 @@ class Update(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertIn('還沒提交的變更', r['msg'])
 
+    def test_untracked_files_also_block_updates(self):
+        with open(os.path.join(self.clone, 'local-note.txt'), 'w', encoding='utf-8') as output:
+            output.write('keep this file')
+        r = update.apply(self.clone)
+        self.assertFalse(r['ok'])
+        self.assertIn('還沒提交的變更', r['msg'])
+
     def test_unreachable_origin_reports_unknown(self):
         git(self.clone, 'remote', 'set-url', 'origin', '../missing.git')
         c = update.check(self.clone, cache=False)
         self.assertIsNone(c['latest'])
         self.assertFalse(c['new'])
+
+    def test_package_install_failure_restores_the_old_program_and_dependencies(self):
+        self.push_new_commit()
+        before = subprocess.check_output(['git', '-C', self.clone, 'rev-parse', 'HEAD'], text=True).strip()
+        counter = os.path.join(self.root, 'uv-calls')
+        fake_uv = os.path.join(self.root, 'uv')
+        with open(fake_uv, 'w', encoding='utf-8') as script:
+            script.write('#!/usr/bin/env python3\n'
+                         'import pathlib, sys\n'
+                         f'p = pathlib.Path({counter!r})\n'
+                         'n = int(p.read_text() if p.exists() else "0") + 1\n'
+                         'p.write_text(str(n))\n'
+                         'raise SystemExit(1 if n == 1 else 0)\n')
+        os.chmod(fake_uv, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+        with mock.patch.object(update.shutil, 'which', return_value=fake_uv), \
+                mock.patch.dict(os.environ, {'JOBSALVO_LAUNCHD': '1'}):
+            result = update.apply(self.clone)
+        after = subprocess.check_output(['git', '-C', self.clone, 'rev-parse', 'HEAD'], text=True).strip()
+        self.assertFalse(result['ok'], result)
+        self.assertFalse(result.get('restart', False))
+        self.assertEqual(after, before)
+        with open(os.path.join(self.clone, 'f.txt'), encoding='utf-8') as source:
+            self.assertEqual(source.read(), '1')
+        with open(counter, encoding='utf-8') as source:
+            self.assertEqual(source.read(), '2')
+        self.assertIn('套件', result['msg'])
+
+    def test_merge_timeout_after_fast_forward_restores_the_old_program_and_dependencies(self):
+        self.push_new_commit()
+        before = subprocess.check_output(['git', '-C', self.clone, 'rev-parse', 'HEAD'], text=True).strip()
+        original_git = update._git
+        uv_calls = os.path.join(self.root, 'uv-rollback-args')
+        with open(self.fake_uv, 'w', encoding='utf-8') as script:
+            script.write('#!/usr/bin/env python3\n'
+                         'import pathlib, sys\n'
+                         f'pathlib.Path({uv_calls!r}).write_text(" ".join(sys.argv[1:]))\n')
+        os.chmod(self.fake_uv, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+
+        def merge_then_timeout(*args, **kwargs):
+            result = original_git(*args, **kwargs)
+            if args and args[0] == 'merge' and result.returncode == 0:
+                raise subprocess.TimeoutExpired(['git', 'merge'], 60)
+            return result
+
+        with mock.patch.object(update, '_git', side_effect=merge_then_timeout):
+            result = update.apply(self.clone)
+        after = subprocess.check_output(['git', '-C', self.clone, 'rev-parse', 'HEAD'], text=True).strip()
+        self.assertFalse(result['ok'], result)
+        self.assertEqual(after, before)
+        with open(os.path.join(self.clone, 'f.txt'), encoding='utf-8') as source:
+            self.assertEqual(source.read(), '1')
+        with open(uv_calls, encoding='utf-8') as source:
+            self.assertEqual(source.read(), 'sync --frozen --no-dev --inexact')
+        self.assertIn('退回原本版本', result['msg'])
 
 
 if __name__ == '__main__':

@@ -84,6 +84,15 @@ class SettingsSave(unittest.TestCase):
         import board_server
         self.assertEqual(board_server.page_cfg()['risk_days'], 365)
 
+    def test_automatic_updates_default_on_and_can_be_turned_off(self):
+        self.assertTrue(cf.C.get('updates', {}).get('auto', False))
+        page = self.page()
+        self.assertTrue(page['effective']['updates']['auto'])
+        self.assertEqual(sa.save({'set': {'updates.auto': False}, 'version': page['version']}), [])
+        self.assertFalse(cf.C['updates']['auto'])
+        self.assertEqual(self.saved()['updates']['auto'], False)
+        self.assertEqual(sa._check({'updates': {'auto': 'false'}}), ['自動更新設定格式不對'])
+
     def test_both_supported_agents_can_use_the_shared_browser_sequentially(self):
         settings = {'agent': {'agents': [
             {'id': 'a', 'runtime': 'codex', 'model': '', 'effort': 'high', 'browser': True},

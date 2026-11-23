@@ -28,7 +28,7 @@ var document={activeElement:input,documentElement:{style:{setProperty:(k,v)=>var
   querySelectorAll:()=>[],querySelector:()=>null,addEventListener(){}};
 var window={innerHeight:1208,getComputedStyle:el=>el.style,addEventListener(){}};
 function $(id){return id==='cfg-save'?save:null;}
-var CFGDIRTY=false,CFG0='before';function cfgSnap(){return 'after';}function refreshBar(){}
+var CFGDIRTY=false,CFG0='before';function cfgSnap(){return 'after';}function refreshBar(){}function maybeReloadForServerVersion(){}
 '''
         check = r'''
 cfgMark();assert.equal(dirty,true);assert.equal(CFGDIRTY,true);

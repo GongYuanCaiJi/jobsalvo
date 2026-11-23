@@ -46,6 +46,11 @@ LOCK=threading.Lock()
 _SAVE_ORDER={}  # 同一分頁的每欄存檔序號；離頁 keepalive 可能比舊自動存先到。
 STATE=None  # board html 檔路徑
 RUNNING_VERSION=''
+_UPDATE_CONDITION=threading.Condition()
+_UPDATE_IN_PROGRESS=False
+_BUILD_AFTER_UPDATE=False
+_RESTART_AFTER_UPDATE=False  # 更新成功就重開,不管改到的是程式、套件清單還是別的檔
+AUTO_UPDATE_INTERVAL=3600
 
 
 def code_version(root=None):
@@ -80,7 +85,12 @@ def _watch(servers, version, launchd, interval=10):
     import install_service
     while True:
         time.sleep(interval)
-        if code_version()!=version if launchd else os.path.exists(install_service.plist_path()):
+        with _UPDATE_CONDITION:   # 更新途中不判斷:快轉後才失敗退回的話,中途看到的新版不算
+            if _UPDATE_IN_PROGRESS:
+                continue
+            restart=(launchd and (_RESTART_AFTER_UPDATE or code_version()!=version)) or (
+                not launchd and os.path.exists(install_service.plist_path()))
+        if restart:
             break
     for server in servers:
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -238,7 +248,7 @@ def serve_doc(snap, build_n=0):
     build_n:讀檔之前記下的建包次數,跟這份內容一起組成頁面手上的版本(sig)。"""
     try:
         d=snap['parts']
-        data=dict(d['data']); data['cfg']=page_cfg()
+        data=dict(d['data']); data['cfg']=page_cfg(); data['server_version']=RUNNING_VERSION or code_version()
         # 這一份是哪一版(跟 /api/rev 同一種算法):頁面載入後第一次輪詢對得上,就不再把剛送來的大包抓一次(#606)
         data['sig']={'rev':snap['rev']+registry_mark(),'gen':'%s.%d'%(snap['data_sig'],build_n)}
         import zhconv
@@ -576,10 +586,15 @@ def trigger_build():
     以前在沙箱(shot.py、board_check、board_sandbox 起的副本)上存一次「可投遞」相關的改動,
     背景就真的跑一輪 reconcile,CPU 被吃滿,頁面一直輪詢等一個跟這份副本無關的建置。"""
     if os.path.abspath(STATE)!=os.path.abspath(bd.LIVE): return
-    with _BUILD_LOCK:
-        if _build_state['running']:
-            _build_state['again']=True; return
-        _build_state['running']=True
+    global _BUILD_AFTER_UPDATE
+    with _UPDATE_CONDITION:
+        if _UPDATE_IN_PROGRESS:
+            _BUILD_AFTER_UPDATE=True
+            return
+        with _BUILD_LOCK:
+            if _build_state['running']:
+                _build_state['again']=True; return
+            _build_state['running']=True
     def _run():
         try:
             import reconcile
@@ -912,6 +927,162 @@ def run_status(kind):
                                'graceful','finishing','pending','found','dropped','timeup','minutes','unadded')
             if st.get(k) is not None}
 
+
+def _update_busy_reason():
+    for kind in RUNS:
+        if run_status(kind).get('running'):
+            return '看板工作正在跑，等工作結束後再更新'
+    with _BUILD_LOCK:
+        if _build_state['running']:
+            return '看板背景重建正在跑，等重建結束後再更新'
+    return ''
+
+
+def update_in_progress():
+    with _UPDATE_CONDITION:
+        return _UPDATE_IN_PROGRESS
+
+
+def _auto_update_status_path():
+    return os.path.join(cf.TMP, 'auto-update.json')
+
+
+def _read_auto_update_status():
+    try:
+        with open(_auto_update_status_path(), encoding='utf-8') as source:
+            value=json.load(source)
+        if not isinstance(value,dict): return {}
+        # 舊格式曾把「查過但沒有新版」記成上次更新。保留真正的舊版成功紀錄;
+        # 其他舊結果移到失敗欄,不能冒充上次成功更新時間與版本。
+        if value.get('at') and value.get('msg') == '已經是最新版本': return {}
+        if value.get('at') and value.get('msg') and 'failure' not in value and not value.get('msg','').startswith('更新到 '):
+            return {'failure':{'at':value['at'],'msg':value['msg']}}
+        return value
+    except (OSError,ValueError):
+        return {}
+
+
+def _write_auto_update_status(value):
+    path=_auto_update_status_path()
+    try:
+        os.makedirs(os.path.dirname(path),exist_ok=True)
+        temp=path+'.tmp'
+        with open(temp,'w',encoding='utf-8') as output:
+            json.dump(value,output,ensure_ascii=False)
+        os.replace(temp,path)
+    except OSError:
+        pass
+
+
+def _deferred_build_path():
+    return os.path.join(cf.TMP, 'deferred-build-after-update')
+
+
+def _resume_deferred_build():
+    """新程式啟動後補跑更新期間延後的背景重建。"""
+    path=_deferred_build_path()
+    if not os.path.isfile(path): return
+    trigger_build()
+    with contextlib.suppress(OSError): os.remove(path)
+
+
+def _record_auto_update(result, updated=False, cwd=None):
+    if result.get('ok') and updated:
+        import update
+        _write_auto_update_status({'at':time.time(),'version':result.get('version') or update.current(cwd),
+                                   'msg':result.get('msg',''),'failure':None})
+    elif not result.get('ok'):
+        status=_read_auto_update_status()
+        status['failure']={'at':time.time(),'msg':result.get('msg','更新失敗')}
+        _write_auto_update_status(status)
+
+
+def update_status(cwd=None,force=False):
+    """設定頁讀到的遠端版本、更新限制和上次自動更新結果。副本不碰遠端。"""
+    if not is_real():
+        return {'current':'','latest':'','new':False,'blocked':'副本不檢查更新',
+                'auto':False,'auto_status':{}}
+    import update
+    result=update.check(cwd or update.APP,force=force)
+    result.update(auto=bool((cf.C.get('updates') or {}).get('auto',True)),
+                  launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1',
+                  auto_status=_read_auto_update_status())
+    busy=_update_busy_reason()
+    if busy:
+        result['busy']=busy
+    with _UPDATE_CONDITION:
+        if _UPDATE_IN_PROGRESS:
+            result['busy']='正在更新'
+    if not result['launchd']:
+        result['automatic_blocked']='打開開機自動啟動才會自動更新'
+    return result
+
+
+def _perform_update(automatic=False,cwd=None):
+    """在工作與背景重建都停止時，獨占程式資料夾完成檢查及換版。"""
+    global _UPDATE_IN_PROGRESS,_BUILD_AFTER_UPDATE,_RESTART_AFTER_UPDATE
+    import update
+    cwd=cwd or update.APP
+    if automatic and (not is_real() or os.environ.get('JOBSALVO_LAUNCHD')!='1' or
+                      not (cf.C.get('updates') or {}).get('auto',True)):
+        return {'ok':False,'skipped':True,'msg':'自動更新目前不適用'}
+    with _UPDATE_CONDITION:
+        if _UPDATE_IN_PROGRESS:
+            return {'ok':False,'skipped':True,'msg':'正在更新'}
+        why=_update_busy_reason()
+        if why:
+            return {'ok':False,'skipped':True,'msg':why}
+        _UPDATE_IN_PROGRESS=True
+    applied=False
+    try:
+        if automatic:
+            checked=update.check(cwd,force=True)
+            if checked.get('blocked'):
+                result={'ok':False,'msg':checked['blocked']}
+            elif checked.get('latest') is None:
+                result={'ok':False,'msg':'連不到程式的來源，查不到最新版；等網路恢復，下一小時會自己再試'}
+            elif not checked.get('new'):
+                result={'ok':True,'new':False,'version':checked.get('current'),'msg':'已經是最新版本'}
+            else:
+                result=update.apply(cwd)
+                applied=bool(result.get('ok'))
+        else:
+            result=update.apply(cwd)
+            applied=bool(result.get('ok'))
+        _record_auto_update(result,updated=applied,cwd=cwd)
+        return result
+    except Exception as error:  # noqa: BLE001 — 更新失敗要留在舊版並讓服務繼續回應
+        result={'ok':False,'msg':f'更新失敗:{type(error).__name__}: {str(error)[:160]}'}
+        _record_auto_update(result,cwd=cwd)
+        return result
+    finally:
+        with _UPDATE_CONDITION:
+            if applied:
+                _RESTART_AFTER_UPDATE=True
+            _UPDATE_IN_PROGRESS=False
+            deferred=_BUILD_AFTER_UPDATE
+            _BUILD_AFTER_UPDATE=False
+            _UPDATE_CONDITION.notify_all()
+        if deferred:
+            if applied and os.environ.get('JOBSALVO_LAUNCHD')=='1':
+                path=_deferred_build_path()
+                try:
+                    os.makedirs(os.path.dirname(path),exist_ok=True)
+                    with open(path,'w',encoding='utf-8') as marker: marker.write('pending')
+                except OSError:
+                    # 重啟前已完成更新;若無法寫標記,至少在目前服務開始重建。
+                    trigger_build()
+            else:
+                trigger_build()
+
+
+def _automatic_update_loop(stop_event=None,interval=None,cwd=None):
+    """伺服器自己的每小時檢查，不依賴任何頁面開著。"""
+    stop_event=stop_event or threading.Event()
+    interval=AUTO_UPDATE_INTERVAL if interval is None else interval
+    while not stop_event.wait(interval):
+        _perform_update(automatic=True,cwd=cwd)
+
 def control_run(kind,act):
     """⏸ 暫停 / ▶ 繼續 / ⏹ 停止 正在跑的那一輪(見 jobrun.control)。回 (HTTP 狀態碼, 現在的進度)。"""
     if act not in ('pause','resume','stop'): return 400,{'msg':'不知道要暫停、繼續還是停止'}
@@ -932,6 +1103,9 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
     按兩下等於把跑到一半的 agent 砍掉重來;找缺兩輪同時跑,兩隻 agent 會撈同一批。
     回 (HTTP 狀態碼, 內容)。"""
     import time
+    with _UPDATE_CONDITION:
+        if _UPDATE_IN_PROGRESS:
+            return 409, {'msg':'正在更新，等更新結束再開始工作'}
     if kind in ('prep', 'customize', 'apply'):
         problem = _source_preflight()
         if problem:
@@ -1074,25 +1248,28 @@ def start_run(kind,args,approval_id=_APPROVAL_UNSET):
             ego = chrome_door.settings_status()['ego']
             return 409, {'needs_browser':True,
                          'msg':f'這個動作需要 agent 的瀏覽器(ego):{ego["reason"]}。到「⚙ 設定 → 🤖 Agent 與瀏覽器」按「檢查 ego」看怎麼補。'}
-    with _RUN_LOCK:
-        st=run_status(kind)
-        if st.get('running'): return 409,st
-        # 用 agent 瀏覽器的工作一次只跑一個(jobrun.BROWSER_JOBS)
-        other=kind in jobrun.BROWSER_JOBS and next((k for k in jobrun.BROWSER_JOBS if k!=kind and run_status(k).get('running')),None)
-        if other:
-            return 409,{'other':True,'msg':{'replies':'查應徵進度','apply':'幫你填表','sync':'全部同步'}[other]+'正在用 agent 的瀏覽器,等它跑完再按'}
-        env=run_env(kind,args); sp=run_sp(kind)
-        with open(os.path.join(sp,kind+'_launch.out'),'w') as log:
-            p=subprocess.Popen(run_argv(kind,args),cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,
-                               start_new_session=True)
-        _PROC[kind]=p
-        # 先落啟動證據再開等待執行緒;跟 Popen 同在 _RUN_LOCK 裡,重開後 run_status 仍看得到這次派工。
-        jobrun.write(os.path.join(sp,RUNS[kind]['status']),
-                     {'phase':'start','pid':p.pid,'t0':time.time(),'mode':args.get('mode',''),
-                      'direction':args.get('text',''),'stage':args.get('stage',''),'url':args.get('url','')})
-        if PILOT:   # 這一輪跑完,自動流程接著看下一步(不另開輪詢)
-            threading.Thread(target=lambda: (p.wait(), PILOT.kick()),daemon=True).start()
-        return 200,run_status(kind)
+    with _UPDATE_CONDITION:
+        if _UPDATE_IN_PROGRESS:
+            return 409, {'msg':'正在更新，等更新結束再開始工作'}
+        with _RUN_LOCK:
+            st=run_status(kind)
+            if st.get('running'): return 409,st
+            # 用 agent 瀏覽器的工作一次只跑一個(jobrun.BROWSER_JOBS)
+            other=kind in jobrun.BROWSER_JOBS and next((k for k in jobrun.BROWSER_JOBS if k!=kind and run_status(k).get('running')),None)
+            if other:
+                return 409,{'other':True,'msg':{'replies':'查應徵進度','apply':'幫你填表','sync':'全部同步'}[other]+'正在用 agent 的瀏覽器,等它跑完再按'}
+            env=run_env(kind,args); sp=run_sp(kind)
+            with open(os.path.join(sp,kind+'_launch.out'),'w') as log:
+                p=subprocess.Popen(run_argv(kind,args),cwd=REPO,env=env,stdout=log,stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+            _PROC[kind]=p
+            # 先落啟動證據再開等待執行緒;跟 Popen 同在 _RUN_LOCK 裡,重開後 run_status 仍看得到這次派工。
+            jobrun.write(os.path.join(sp,RUNS[kind]['status']),
+                         {'phase':'start','pid':p.pid,'t0':time.time(),'mode':args.get('mode',''),
+                          'direction':args.get('text',''),'stage':args.get('stage',''),'url':args.get('url','')})
+            if PILOT:   # 這一輪跑完,自動流程接著看下一步(不另開輪詢)
+                threading.Thread(target=lambda: (p.wait(), PILOT.kick()),daemon=True).start()
+            return 200,run_status(kind)
 
 
 # ---- 流程自動往下跑(tools/autopilot.py):替他按「跑準備區／可投遞／讓 agent 填表／查回音」,不會替他送出 ----
@@ -1312,6 +1489,7 @@ class H(BaseHTTPRequestHandler):
             # 等於他手機上每分鐘白流 3.8MB、還要解析同樣大小的 JSON。
             with _BUILD_LOCK: building=_build_state['running']
             self._json(200,{'rev':content_sig()[0],'gen':cur_gen(),'building':building,
+                                        'server_version':RUNNING_VERSION or code_version(),
                                         'prep':run_status('prep'),'research':run_status('research'),
                                         'customize':run_status('customize'),
                                         'apply':run_status('apply'),'replies':run_status('replies'),
@@ -1331,10 +1509,8 @@ class H(BaseHTTPRequestHandler):
         elif self.path in ('/api/update','/api/update?now=1'):
             # 設定頁「⚙ 其他」的版本那一列:現在哪一版、遠端 main 有沒有新的、能不能從這裡更新(tools/update.py)。副本不問遠端。
             # ?now=1:他按了「現在檢查」,不等每小時那一次
-            if not is_real():
-                return self._json(200,{'current':'','latest':'','new':False,'blocked':'副本不檢查更新'})
-            import update
-            return self._json(200,update.check(force=self.path.endswith('?now=1')))
+            result=update_status(force=self.path.endswith('?now=1'))
+            return self._json(200,result)
         elif self.path.startswith('/api/settings/website_notes'):
             import website_notes
             self._json(200, {'notes': website_notes.all_notes()})
@@ -1742,9 +1918,8 @@ class H(BaseHTTPRequestHandler):
                 return self._json(502,{'ok':False,'msg':str(e)[:300]})
         if self.path=='/api/update':
             if not is_real():return self._json(400,{'ok':False,'msg':'副本不更新'})
-            import update
-            r=update.apply()
-            return self._json(200 if r.get('ok') else 400,r)
+            r=_perform_update()
+            return self._json(409 if r.get('skipped') else 200 if r.get('ok') else 400,r)
         if self.path=='/api/bank':
             return self.do_POST_bank()
         if self.path=='/api/customize':
@@ -1920,7 +2095,10 @@ def main():
         start_pilot()  # 所有埠先綁好，首次盤點仍在開始接受 HTTP 前完成
         RUNNING_VERSION=code_version()
         launchd=os.environ.get('JOBSALVO_LAUNCHD')=='1'
+        if launchd and is_real(): _resume_deferred_build()
         threading.Thread(target=_watch,args=(srvs,RUNNING_VERSION,launchd),daemon=True).start()
+        if launchd and is_real():
+            threading.Thread(target=_automatic_update_loop,daemon=True).start()
         for h in hosts:
             if h == '::1' and not any(server.server_address[0] == h for server in srvs):
                 continue

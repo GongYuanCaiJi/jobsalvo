@@ -134,7 +134,7 @@ def get(board=None):
     render_warnings = markdown_warnings()
     return {
         'settings': cf.user_settings(),
-        'effective': {k: C[k] for k in ('board', 'agent', 'resume', 'search', 'research', 'replies', 'flow')},
+        'effective': {k: C[k] for k in ('board', 'agent', 'resume', 'search', 'research', 'replies', 'flow', 'updates')},
         'fields': cf.FIELDS,
         'texts': {'preferences_custom': preferences_custom, 'preferences_agent': preferences_agent,
                   'apply_rules': _read(cf.APPLY_RULES)},
@@ -468,6 +468,10 @@ def _check(settings):
     """擋掉會讓程式壞掉的設定;回問題清單。"""
     bad = []
     normalized = copy.deepcopy(settings)
+    updates = normalized.get('updates')
+    if updates is not None and (not isinstance(updates, dict) or
+                                ('auto' in updates and not isinstance(updates['auto'], bool))):
+        bad.append('自動更新設定格式不對')
     agent = normalized.get('agent')
     if agent is not None and not isinstance(agent, dict):
         bad.append('Agent 設定格式不對')

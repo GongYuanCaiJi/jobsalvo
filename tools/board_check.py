@@ -549,6 +549,16 @@ window.T={
     return false;},
   // 跟伺服器對一次:先等存檔送完(存檔中的頁面不會去拿),再叫它拿,等拿完。
   resync:async function(){await T.idle(); T.sync(); await T.idle();},
+  // 把伺服器版本改成新的一版,供兩條未存修改檢查共用同一個 /api/rev 攔截。
+  changedServerVersion:function(){var original=window.fetch, probe={calls:0};
+    window.fetch=function(url,options){
+      if(String(url).split('?')[0]!=='/api/rev')return original.apply(this,arguments);
+      probe.calls++;
+      return original.apply(this,arguments).then(async function(response){
+        var data=await response.json(); data.server_version=(data.server_version||'v')+'-changed';
+        return new Response(JSON.stringify(data),{status:200,headers:{'Content-Type':'application/json'}});
+      });};
+    probe.restore=function(){window.fetch=original;}; return probe;},
   // 每一串檢查開頭:看板資料已經換回示範那份,上一串在設定頁沒存的改動也一起丟掉(不然切分頁會先跳「沒存就切走」的對話框)
   clean:async function(){var m=document.querySelector('#rzmodal [data-cfleave="stay"]'); if(m)m.click();
     var d=document.getElementById('cfg-discard'); if(d&&!d.hidden){d.click(); await T.until(function(){var x=document.getElementById('cfg-discard'); return !x||x.hidden;},5000);}},
@@ -7628,6 +7638,69 @@ def checks_for_run(only='', fast=False):
     return todo
 
 
+CHECKS += [
+ ('版本列保留上次成功更新並顯示最近失敗', r"""
+   await T.idle();
+   var original=window.fetch;
+   window.fetch=function(url,options){
+     if(String(url).split('?')[0]==='/api/update')return Promise.resolve({json:function(){return Promise.resolve({
+       current:'current',latest:'current',new:false,blocked:'',auto:true,launchd:true,
+       auto_status:{at:1700000000,version:'last-good',msg:'更新到 last-good 了',
+         failure:{at:1700000100,msg:'新版套件安裝失敗'}}});}});
+     return original.apply(this,arguments);};
+   document.querySelector('[data-tab="cfg"]').click(); await T.idle(); window.fetch=original;
+   var row=document.querySelector('#cfg-update');
+   if(!row)return '設定頁沒有版本列';
+   var text=row.textContent;
+   return text.indexOf('last-good')>=0&&text.indexOf('新版套件安裝失敗')>=0?'':'版本列沒有同時保留上次成功版本和失敗原因:'+text;
+ """, 'no_setup', {'viewports':['wide']}),
+ ('更新中開工時顯示伺服器回覆的原因', r"""
+   document.querySelector('[data-tab="prep"]').click(); await T.idle();
+   var button=await T.until(function(){return document.querySelector('[data-prep]:not([disabled])');},10000);
+   if(!button)return '找不到可按的準備履歷按鈕';
+   var original=window.fetch;
+   window.fetch=function(url,options){
+     if(String(url)==='/api/run/prep')return Promise.resolve({status:409,json:function(){
+       return Promise.resolve({msg:'正在更新，等更新結束再開始工作'});}});
+     return original.apply(this,arguments);};
+   button.click(); await T.idle(); window.fetch=original;
+   return T.snack().indexOf('正在更新')===0?'':'更新中開工提示不正確:'+T.snack();
+ """, 'no_setup', {'viewports':['wide']}),
+ ('伺服器換版時輸入期間延後、輸入結束後重新整理', r"""
+   await T.idle();
+   var input=document.createElement('input'); input.id='server-version-unsaved-check';
+   document.body.appendChild(input);
+   var probe=T.changedServerVersion();
+   input.focus(); input.value='還沒存的字'; input.dispatchEvent(new Event('input',{bubbles:true}));
+   await T.resync();
+   if(!probe.calls){probe.restore(); return '沒有詢問伺服器版本';}
+   if(document.activeElement!==input)return '伺服器版本變了時輸入欄失去焦點';
+   sessionStorage.setItem('jobsalvo-800-input-safe','yes');
+   input.remove();
+   document.dispatchEvent(new Event('focusout'));
+   await T.resync(); probe.restore();
+   return '輸入結束後沒有重新整理:'+JSON.stringify({calls:probe.calls,active:document.activeElement&&document.activeElement.tagName});
+ """, 'no_setup', {'expected_reload':True,'expected_reload_marker':'jobsalvo-800-input-safe','viewports':['wide']}),
+ ('設定有未存改動時延後、改回原值後重新整理', r"""
+   document.querySelector('[data-tab="cfg"]').click();
+   var box=await T.until(function(){return document.querySelector('[data-cfb="updates.auto"]');},10000);
+   if(!box)return '設定頁沒有自動更新開關';
+   window.__autoUpdateBefore=box.checked;
+   box.checked=!box.checked; box.dispatchEvent(new Event('change',{bubbles:true}));
+   var probe=T.changedServerVersion(); await T.resync();
+   if(!probe.calls){probe.restore(); return '沒有詢問伺服器版本';}
+   box=document.querySelector('[data-cfb="updates.auto"]');
+   if(!box)return '設定未存時頁面已經重新整理';
+   if(box.checked===window.__autoUpdateBefore)return '設定變更沒有留在未存工作副本';
+   sessionStorage.setItem('jobsalvo-800-settings-safe','yes');
+   box.checked=window.__autoUpdateBefore; box.dispatchEvent(new Event('change',{bubbles:true}));
+   await T.resync(); probe.restore();
+   return '設定改回原值後沒有重新整理';
+ """, 'no_setup', {'fresh_page':True,'expected_reload':True,
+                     'expected_reload_marker':'jobsalvo-800-settings-safe','viewports':['wide']}),
+]
+
+
 def clean_sandbox(page, board, home):
     """開一份看板副本,網址要是這個瀏覽器沒存過東西的。
     ego 的瀏覽器資料跨次留著,也不准清(tests/test_ego_door.py);macOS 的埠照順序發,繞一圈會撞回
@@ -7748,7 +7821,20 @@ def main():
                     msg=page.run("(async function(P){%s%s})(%s)"%('await T.clean(); await T.resync();' if first else '',body,json.dumps(arg)),
                                  prelude,profile,fresh)
                 except Exception as e:  # noqa: BLE001 — 檢查本身出錯算這一條沒過,照實列進失敗清單
-                    msg='檢查本身出錯:'+str(e)[:120]
+                    options=item[3] if len(item)>3 else {}
+                    expected=bool(options.get('expected_reload'))
+                    if expected and '頁面在檢查途中重新載入了' in str(e):
+                        marker=options.get('expected_reload_marker')
+                        if marker:
+                            try:
+                                seen=page.run('sessionStorage.getItem('+json.dumps(marker)+')')
+                            except Exception:  # noqa: BLE001 — 頁面已重載時 CDP 可能無法再讀 sessionStorage
+                                seen=''
+                            msg='' if seen=='yes' else '重整前沒有完成延後刷新條件'
+                        else:
+                            msg=''
+                    else:
+                        msg='檢查本身出錯:'+str(e)[:120]
                 report=name+(f' ({profile})' if profile is not None and len(profiles)>1 else '')
                 if name.startswith('步數:'):
                     try:

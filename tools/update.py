@@ -65,7 +65,7 @@ def blocker(cwd=APP):
         return '這份程式不是用 git 裝的,重新跑一次安裝指令來更新'
     try:
         branch = _git('rev-parse', '--abbrev-ref', 'HEAD', cwd=cwd).stdout.strip()
-        dirty = _git('status', '--porcelain', '--untracked-files=no', cwd=cwd).stdout.strip()
+        dirty = _git('status', '--porcelain', cwd=cwd).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return '讀不到程式資料夾的 git 狀態'
     if branch != BRANCH:
@@ -73,6 +73,21 @@ def blocker(cwd=APP):
     if dirty:
         return '程式資料夾有還沒提交的變更,先處理再更新'
     return ''
+
+
+def _restore(cwd, old_sha):
+    """把程式和依賴退回更新前的版本;回傳兩步各自的結果。"""
+    try:
+        reset = _git('reset', '--hard', old_sha, cwd=cwd)
+    except (OSError, subprocess.TimeoutExpired):
+        reset = None
+    uv = shutil.which('uv')
+    rollback = None
+    if reset is not None and reset.returncode == 0 and uv:
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            rollback = subprocess.run([uv, 'sync', '--frozen', '--no-dev', '--inexact'], cwd=cwd,
+                                      capture_output=True, text=True, timeout=1800)
+    return reset, rollback
 
 
 def _cache_path():
@@ -91,7 +106,8 @@ def check(cwd=APP, cache=True, now=None, force=False):
     sha, fresh, checked = None, False, now
     if path and not force and os.path.isfile(path):
         try:
-            saved = json.load(open(path, encoding='utf-8'))
+            with open(path, encoding='utf-8') as source:
+                saved = json.load(source)
             if now - saved.get('at', 0) < CHECK_EVERY and saved.get('cwd') == cwd:
                 sha, fresh, checked = saved.get('sha'), True, saved.get('at', now)
         except (OSError, ValueError):   # 快取壞了就當沒有,底下直接問遠端
@@ -101,7 +117,8 @@ def check(cwd=APP, cache=True, now=None, force=False):
         if path and sha:
             try:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
-                json.dump({'sha': sha, 'at': now, 'cwd': cwd}, open(path, 'w', encoding='utf-8'))
+                with open(path, 'w', encoding='utf-8') as output:
+                    json.dump({'sha': sha, 'at': now, 'cwd': cwd}, output)
             except OSError:   # 快取寫不進去只是下次多問一次遠端,結果照樣回給畫面
                 pass
     new = bool(sha) and not _has(cwd, sha)
@@ -115,25 +132,61 @@ def apply(cwd=APP):
     why = blocker(cwd)
     if why:
         return {'ok': False, 'msg': why}
+    old = _git('rev-parse', 'HEAD', cwd=cwd)
+    if old.returncode != 0:
+        return {'ok': False, 'msg': '讀不到目前版本,沒有更新'}
+    old_sha = old.stdout.strip()
     try:
         r = _git('fetch', 'origin', BRANCH, cwd=cwd)
         if r.returncode != 0:
             return {'ok': False, 'msg': '連不到程式的來源,等一下再試:' + (r.stderr.strip()[:160] or '沒有訊息')}
         r = _git('merge', '--ff-only', f'origin/{BRANCH}', cwd=cwd)
         if r.returncode != 0:
-            return {'ok': False, 'msg': '沒辦法直接快轉到新版(這份程式有自己的 commit,跟來源分岔了):' + r.stderr.strip()[:160]}
+            reason = '沒辦法直接快轉到新版(這份程式有自己的 commit,跟來源分岔了):' + r.stderr.strip()[:160]
+            reset, rollback = _restore(cwd, old_sha)
+            if reset is None or reset.returncode != 0:
+                reason += '；程式也沒能退回原本版本'
+            elif rollback is not None and rollback.returncode != 0:
+                reason += '；舊版套件也沒能重新對齊'
+            else:
+                reason += '；程式已退回原本版本'
+                if rollback is not None:
+                    reason += '，舊版套件也已對齊'
+            return {'ok': False, 'msg': reason}
     except (OSError, subprocess.TimeoutExpired):
-        return {'ok': False, 'msg': '更新逾時,等一下再試'}
-    # 新版的套件照 uv.lock 對齊(https://docs.astral.sh/uv/concepts/projects/sync/)。還沒裝 uv 就講清楚要裝
-    need_uv = False
+        reset, rollback = _restore(cwd, old_sha)
+        reason = '更新逾時,等一下再試'
+        if reset is None or reset.returncode != 0:
+            reason += '；程式也沒能退回原本版本'
+        elif rollback is not None and rollback.returncode != 0:
+            reason += '；舊版套件也沒能重新對齊'
+        else:
+            reason += '；程式已退回原本版本'
+            if rollback is not None:
+                reason += '，舊版套件也已對齊'
+        return {'ok': False, 'msg': reason}
+    # 新版套件也屬於更新的一部分。套件沒裝好時退回原版,並把環境對回舊鎖檔。
     uv = shutil.which('uv')
+    installed = False
     if uv:
         try:
-            subprocess.run([uv, 'sync', '--frozen', '--no-dev', '--inexact'], cwd=cwd, capture_output=True, timeout=1800)
+            result = subprocess.run([uv, 'sync', '--frozen', '--no-dev', '--inexact'], cwd=cwd,
+                                    capture_output=True, text=True, timeout=1800)
+            installed = result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
-            need_uv = True
-    else:
-        need_uv = True
+            pass
+    if not installed:
+        reset, rollback = _restore(cwd, old_sha)
+        detail = '新版套件安裝失敗' if uv else '找不到 uv,沒有安裝新版套件'
+        if reset is None or reset.returncode != 0:
+            detail += '；程式也沒能退回原本版本'
+        if rollback is not None and rollback.returncode != 0:
+            detail += '；舊版套件也沒能重新對齊'
+        if reset is not None and reset.returncode == 0:
+            detail += '，程式已退回原本版本'
+        if rollback is not None and rollback.returncode == 0:
+            detail += '，舊版套件也已對齊'
+        return {'ok': False, 'msg': detail}
     for old in ('venv', 'venv-test', 'pdf-venv', 'shot-venv', 'fetch-venv'):   # 以前自己建的環境用不到了
         shutil.rmtree(os.path.expanduser(f'~/.cache/jobsalvo/{old}'), ignore_errors=True)
     path = _cache_path()
@@ -143,8 +196,6 @@ def apply(cwd=APP):
     version = current(cwd)
     restart = os.environ.get('JOBSALVO_LAUNCHD') != '1'
     msg = f'更新到 {version or "最新版"} 了' + (',重新啟動看板才會生效(怎麼重新啟動看 README「停止、重新啟動」;打開開機自動啟動之後,更新完會自己重新啟動)' if restart else ',看板會自己重新啟動')
-    if need_uv:
-        msg += '。轉 PDF、截圖要用的套件還沒準備好:先裝 uv(brew install uv),再重新整理看板'
     return {'ok': True, 'msg': msg, 'version': version, 'restart': restart}
 
 

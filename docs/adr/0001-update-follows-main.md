@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0013
+---
+
 # 更新跟 main,不發版
 
 裝好的 jobsalvo 就是 main 的一份 clone,設定頁的「更新」按鈕發現遠端 main 比較新就顯示「有新版」,按下去 = fetch + 快轉 main(tools/update.py);安裝指令重跑時的 `git pull --ff-only` 是同一件事。不打版本 tag、不另開 `stable` 分支:使用者是維護者邀請的幾個朋友,每個 PR 合進 main 前都跑過 CI,main 本身就夠穩;多一條「發版」的步驟,維護者每次都得記得做,朋友才拿得到。
