@@ -137,7 +137,13 @@ def page_cfg():
     # 這裡只給名字(統計表、設定頁摘要用)
     resume_rows = [{'id': item['id'], 'name': item.get('name') or item['id'], 'when': item.get('when', '')}
                    for item in C['resume'].get('resumes', []) if item.get('enabled', True)]
+    preview_of = None
+    if not is_real():
+        with contextlib.suppress(ValueError):   # 預覽看板:正式那邊交來的「這是哪個 PR」(pr_preview.py)
+            preview_of = json.loads(os.environ.get('JOBSALVO_PREVIEW') or 'null')
     return {'agent': cf.AGENT, 'langs': cf.LANGS,
+            'pr_previews': is_real(),   # 正式看板在背景問一次能不能預覽(能推送開發 repo 才有),不拖慢開頁
+            'preview_of': preview_of,
             'resumes': resume_rows,
             'categories': C['board']['categories'], 'tags': C['board']['tags'],
             'company_alias': {str(k).lower(): v for k, v in (C['board'].get('company_alias') or {}).items()},
@@ -1313,6 +1319,15 @@ class H(BaseHTTPRequestHandler):
                                        'sync':run_status('sync')})
         elif self.path.startswith('/api/prompt'):
             self.do_GET_prompt()
+        elif self.path in ('/api/pr-previews','/api/pr-previews?status=1'):
+            import pr_preview
+            if not (is_real() and pr_preview.enabled()):
+                return self._json(404,{'ok':False,'msg':'沒有這個功能'})
+            if self.path.endswith('status=1'):
+                return self._json(200,{'ok':True,'states':pr_preview.states()})
+            try: return self._json(200,{'ok':True,'prs':pr_preview.list_prs()})
+            except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as e:
+                return self._json(502,{'ok':False,'msg':str(e)[:300]})
         elif self.path in ('/api/update','/api/update?now=1'):
             # 設定頁「⚙ 其他」的版本那一列:現在哪一版、遠端 main 有沒有新的、能不能從這裡更新(tools/update.py)。副本不問遠端。
             # ?now=1:他按了「現在檢查」,不等每小時那一次
@@ -1709,6 +1724,22 @@ class H(BaseHTTPRequestHandler):
                                   'msg':'已交給你接手這張卡的頁面;處理完按「修改」繼續'})
         if self.path=='/api/settings' or self.path.startswith('/api/settings/'):
             return self.do_POST_settings()
+        if self.path=='/api/pr-previews':
+            import pr_preview
+            if not (is_real() and pr_preview.enabled()):
+                return self._json(404,{'ok':False,'msg':'沒有這個功能'})
+            body=self._json_body()
+            if body is None: return
+            n=body.get('number')
+            if not isinstance(n,int) or isinstance(n,bool) or body.get('op') not in ('open','close'):
+                return self._json(400,{'ok':False,'msg':'不知道要做什麼'})
+            if body['op']=='close':
+                pr_preview.close_preview(n)
+                return self._json(200,{'ok':True,'state':'off'})
+            try: return self._json(200,{'ok':True,**pr_preview.open_preview(n)})
+            except ValueError as e: return self._json(400,{'ok':False,'msg':str(e)})
+            except (RuntimeError,OSError,subprocess.TimeoutExpired) as e:
+                return self._json(502,{'ok':False,'msg':str(e)[:300]})
         if self.path=='/api/update':
             if not is_real():return self._json(400,{'ok':False,'msg':'副本不更新'})
             import update

@@ -1859,3 +1859,10 @@ button.iv-st:hover{border-color:var(--accent)}
   body.reviewing #snack{top:auto;bottom:calc(130px + var(--dock-h));left:var(--space-12);right:var(--space-12);width:auto;max-width:none;justify-content:space-between;transform:translateY(30%)}
   body.reviewing #snack.on{transform:none}
 }
+
+/* PR 預覽(#809) */
+.prv-banner{position:fixed;right:var(--space-16);bottom:var(--space-16);z-index:900;max-width:calc(100vw - 2 * var(--space-16));padding:var(--space-8) var(--space-12);border-radius:var(--radius-md);background:var(--accent-soft);color:var(--accent-ink);font-size:var(--text-sm);box-shadow:var(--shadow-lg)}
+.prv-row{padding:var(--space-8) 0;border-top:1px solid var(--line)}
+.prv-br,.prv-s,.prv-m{color:var(--ink-dim);font-size:var(--text-sm)}
+.prv-a{display:flex;flex-wrap:wrap;gap:var(--space-8);align-items:center;margin-top:var(--space-4);font-size:var(--text-sm)}
+.prv-bad{color:var(--bad)}

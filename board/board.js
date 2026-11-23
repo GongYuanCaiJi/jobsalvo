@@ -575,6 +575,51 @@
   // 「我的想法」是打字:跟卡片上的心得一樣,停 2 秒或離開輸入框才存,也不在每個鍵重寫整份標記
   function markNotesDirty(){dirty['__notes__']=true; if(typeof refreshBar==='function')refreshBar(); scheduleSave(2000);}
   if($('ntog')){$('ntog').addEventListener('click',function(){notesOpen=!notesOpen; applyNotesUI(); if(notesOpen){var t=$('noteswrap').querySelector('.note-t'); if(t)t.focus();}});}
+  // ---- PR 預覽(#809,tools/pr_preview.py):每個 PR 另開一個看板,跑那個 PR 的程式和真實資料的副本 ----
+  // 預覽看板自己:上方寫著是哪個 PR,免得跟正式看板搞混(只有包含這段的分支會顯示)
+  (function(){var p=(D.cfg||{}).preview_of; if(!p||!document.body)return;
+    var bar=document.createElement('div'); bar.className='prv-banner';
+    bar.innerHTML='預覽 PR #'+esc(p.number)+':'+esc(p.title||'')+' · 這是真實資料的副本,在這裡改的不會寫回正式看板 · <a href="'+escA(p.url||'')+'" target="_blank" rel="noopener">PR 頁面</a>';
+    document.body.insertBefore(bar,document.body.firstChild);})();
+  // 正式看板:在背景問一次;這台電腦登入的 GitHub 帳號能推送開發 repo 才出現「PR 預覽」,其他人什麼都看不到
+  (function(){if(!(D.cfg||{}).pr_previews)return;
+    var open=false, prs=[], timer=null, wins={};   // wins:按「開預覽」當下先開好的分頁,好了再導過去(之後才開會被瀏覽器擋)
+    function url(port){return location.protocol+'//'+location.hostname+':'+port+'/';}
+    function act(x){var v=x.preview||{};
+      if(v.state==='ready')return '<a class="prv-go" href="'+escA(url(v.port))+'" target="_blank" rel="noopener">打開預覽</a><button type="button" data-prv="close" data-n="'+x.number+'">關掉</button>'+(v.sha&&v.sha!==x.sha?'<button type="button" data-prv="open" data-n="'+x.number+'">換成最新推送</button>':'');
+      if(v.state==='preparing')return '<span class="prv-m">'+esc(v.msg||'準備中…')+'</span>';
+      return '<button type="button" data-prv="open" data-n="'+x.number+'">'+(v.state==='failed'?'再試一次':'開預覽')+'</button>'+(v.state==='failed'?'<span class="prv-m prv-bad">'+esc(v.msg||'')+'</span>':'');}
+    function render(){var box=$('prvlist'); if(!box)return;
+      box.innerHTML=prs.length?prs.map(function(x){return '<div class="prv-row"><div class="prv-h"><b>#'+x.number+'</b> '+esc(x.title)+' <span class="prv-br">'+esc(x.branch)+' · '+esc(new Date(x.updated).toLocaleString())+'</span></div>'+
+        (x.summary?'<div class="prv-s">'+esc(x.summary)+'</div>':'')+
+        '<div class="prv-a">'+act(x)+'<a href="'+escA(x.url)+'" target="_blank" rel="noopener">PR 頁面</a><a href="'+escA(x.diff)+'" target="_blank" rel="noopener">跟 main 的差別</a></div></div>';}).join(''):'<div class="prv-s">現在沒有開著的 PR。</div>';
+      var st=$('ptogst'); if(st)st.textContent=(prs.length&&!open)?String(prs.length):'';
+      prs.forEach(function(x){var v=x.preview||{}, w=wins[x.number]; if(!w||v.state==='preparing')return;
+        if(v.state==='ready'&&!w.closed)w.location=url(v.port); else if(!w.closed)w.close();
+        delete wins[x.number];});
+      var busy=prs.some(function(x){return (x.preview||{}).state==='preparing';});
+      clearTimeout(timer); if(busy)timer=setTimeout(poll,2000);}
+    function poll(){fetch('/api/pr-previews?status=1').then(function(r){return r.json();}).then(function(j){if(!j.ok)return;
+      prs.forEach(function(x){x.preview=j.states[String(x.number)]||{state:'off'};}); render();}).catch(function(){timer=setTimeout(poll,4000);});}
+    // 回 false = 這個看板沒有 PR 預覽(404);其他錯誤照樣出現入口,面板裡寫原因
+    function load(){return fetch('/api/pr-previews').then(function(r){return r.json().then(function(j){
+      if(r.status===404)return false;
+      if(!j.ok){prs=[]; render(); var box=$('prvlist'); if(box)box.innerHTML='<div class="prv-s prv-bad">'+esc(j.msg||'讀不到 PR 清單')+'</div>'; return true;}
+      prs=j.prs; render(); return true;});}).catch(function(){return false;});}
+    load().then(function(ok){if(!ok)return;
+      var row=document.querySelector('.toolrow'), wrap=$('noteswrap'); if(!row||!wrap)return;
+      var b=document.createElement('button'); b.type='button'; b.id='ptog'; b.className='tool-b'; b.setAttribute('aria-expanded','false');
+      b.innerHTML='<span>PR 預覽</span><span class="st" id="ptogst"></span>'; row.appendChild(b);
+      var w=document.createElement('div'); w.className='notes-wrap'; w.id='prvwrap'; w.style.display='none';
+      w.innerHTML='<div class="scratch-lbl">開著的 PR。開預覽會另開一個看板,跑那個 PR 最新推上去的程式和一份真實資料的副本;在預覽裡改的不會寫回這裡,填表、同步、找缺不做真的事。</div><div id="prvlist"></div>';
+      wrap.parentNode.insertBefore(w,wrap.nextSibling); render();
+      b.addEventListener('click',function(){open=!open; w.style.display=open?'':'none'; b.classList.toggle('on',open); b.setAttribute('aria-expanded',open?'true':'false'); if(open)load(); else render();});
+      w.addEventListener('click',function(e){var t=e.target.closest('[data-prv]'); if(!t)return; var n=+t.getAttribute('data-n'), op=t.getAttribute('data-prv');
+        var x=prs.filter(function(y){return y.number===n;})[0]; if(x)x.preview={state:op==='open'?'preparing':'off',msg:op==='open'?'準備中…':''};
+        if(op==='open'){var w=window.open('','_blank'); if(w){w.document.title='PR #'+n+' 預覽'; w.document.body.textContent='準備 PR #'+n+' 的預覽中…'; wins[n]=w;}}
+        render();
+        fetch('/api/pr-previews',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:op,number:n})}).then(function(r){return r.json();}).then(function(j){
+          if(x)x.preview=j.ok?{state:j.state,port:j.port,sha:j.sha,msg:j.msg}:{state:'failed',msg:j.msg}; render();});});});})();
   var _nb=$('notes');
   if(_nb){ _nb.addEventListener('input',function(e){var ta=e.target.closest('.note-t'); if(!ta)return; autogrow(ta); var id=ta.closest('.note-card').getAttribute('data-nid'); var n=FB['__notes__'].filter(function(x){return x.id===id;})[0]; if(n){n.t=ta.value; markNotesDirty();}});
     _nb.addEventListener('click',function(e){ if(e.target.closest('.note-save')){doSave();return;} var d=e.target.closest('.note-del'); if(d){var id=d.closest('.note-card').getAttribute('data-nid'), L=FB['__notes__'], i=L.findIndex(function(x){return x.id===id;}); if(i<0)return;
