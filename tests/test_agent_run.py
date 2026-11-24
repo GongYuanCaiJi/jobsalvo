@@ -399,7 +399,7 @@ class OrderedDispatch(unittest.TestCase):
 
 
 class ClaudeCodeRuntime(unittest.TestCase):
-    """Claude Code(claude -p)當 agent:找缺、判斷、準備都能用;還不能開瀏覽器、不能接續對話。"""
+    """Claude Code(claude -p)當 agent:找缺、判斷、準備、填表都能用。"""
     entry = staticmethod(OrderedDispatch.entry)
     settings = OrderedDispatch.settings
     dispatch = OrderedDispatch.dispatch
@@ -551,7 +551,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
         self.assertNotEqual(kept, 'TASK BODY')
 
     def test_claude_code_with_chrome_can_take_browser_work(self):
-        # 代投:勾了「可使用 Chrome」的 Claude Code 也接得了要開瀏覽器的工作(Claude in Chrome)
+        # 代投:勾了「用它操作 ego」的 Claude Code 也接得了要開瀏覽器的工作(終端機的 ego-browser)
         seen = []
 
         def launch(_prompt, outfile, _repo, agent, **kwargs):

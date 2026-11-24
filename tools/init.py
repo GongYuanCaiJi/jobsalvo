@@ -38,7 +38,7 @@ def installed_agents(which=None):
     if not found:
         return []
     pick = next((rt for rt, path in found if doctor._logged_in(rt, path) is not False), found[0][0])
-    # 幫你填表要 Sonnet 或 Opus(Claude 的 Chrome 擴充功能會擋 Haiku);模型留空用帳號預設。Command Code 不能開瀏覽器
+    # 模型留空用帳號預設。Command Code 不能開瀏覽器
     return [{'id': 'primary', 'runtime': pick, 'model': '', 'effort': 'max', 'speed': 'standard',
              'browser': pick != 'command-code'}]
 

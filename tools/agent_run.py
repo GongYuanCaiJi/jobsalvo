@@ -6,9 +6,9 @@ agent_run —— 派 agent + 等它完成的唯一入口。找職缺、判斷、
 每個 agent 脫離 session(start_new_session)、可寫檔、web 可用。
 
 三種 runtime(設定的 agent):
-  codex        → codex exec(預設;唯一能操作瀏覽器、能代投的)
+  codex        → codex exec(預設)
   command-code → command-code -p(找缺用網路搜尋、判斷、準備)
-  claude-code  → claude -p(同上;做法照 codex:過程即時寫進紀錄、只關使用者自己裝的東西、可以接續對話)
+  claude-code  → claude -p(做法照 codex,一樣能用 ego-browser 填表、查應徵進度:過程即時寫進紀錄、只關使用者自己裝的東西、可以接續對話)
 
 完成判定:直接 poll 自己派出去的 Popen。
   - 不用 os.kill(pid,0):PID 會被回收再利用,假成功卡死。

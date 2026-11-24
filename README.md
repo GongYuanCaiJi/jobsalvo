@@ -30,7 +30,7 @@
 - 至少一個裝好、登入好的 agent:Codex CLI(`codex`)、Claude Code(`claude`)或 Command Code(`command-code`)。
   環境檢查只讀本機的登入紀錄,不送請求、不查額度。
 - 三種都能找缺、判斷、準備履歷;這些工作都不操作 Chrome(網頁由程式抓,要登入才看得到的頁會回報給你)。Command Code 不能用瀏覽器。會碰瀏覽器的只有兩件事:
-  - **幫你填表**:Codex,或 Claude Code(模型要 Sonnet 或 Opus,Haiku 會被 Claude 的擴充功能擋)。兩種都一樣由程式自己讀回那一頁核對、截圖;只裝其中一種就好。用 Claude 時「Apply with LinkedIn」這類網頁自己開的授權小視窗做不到(Claude 看不到),改填一般表單。
+  - **幫你填表**:Codex 或 Claude Code。兩種都一樣由程式自己讀回那一頁核對、截圖;只裝其中一種就好。
   - **查應徵進度**:Codex 或 Claude Code 都可以,agent 在自己的瀏覽器找信和應徵紀錄,程式再讀分頁並核對引用。
   - 同一時間只讓一個 agent 用瀏覽器(設定裡只能勾一個)。
 - 幫你填表與查應徵進度要一個 agent 專用的瀏覽器 ego lite(裝一個 app、匯入一次),步驟見 [設定幫你填表用的瀏覽器](docs/agent-browser.md)。沒有時仍可找缺(只有要跑 JS 才有字的職缺頁讀不到)。
