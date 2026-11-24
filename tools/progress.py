@@ -15,7 +15,7 @@ from web import cite, listing, seen, snap
 from web.brief import EGO, Brief
 from web.numbered import Numbered
 from web.outside import Real
-from web.round import NEEDS_USER_PAGE, End, RoundRecord, continue_with, run as run_round
+from web.round import NEEDS_USER_PAGE, End, RoundRecord, continue_with, end_label, run as run_round, stuck
 from web.sheet import Field, How, Schema
 
 STATUS = 'reply_status.json'
@@ -27,7 +27,7 @@ KIND_WORD = {'confirm': '確認信', 'reject': '拒絕', 'interview': '面試或
 KIND_OF_WORD = {word: kind for kind, word in KIND_WORD.items()}
 KIND_TO_OC = {'reject': 'rej', 'interview': 'iv', 'offer': 'offer'}
 NOT_SENT = '查過信箱和可讀的應徵紀錄,沒有送出的證據(沒有確認信、回音或應徵紀錄):判定沒送出,要重填'
-UNCLEAR = '送出結果不明:查到可能是這張的信或紀錄,但程式核實不了(引的原文沒在程式讀到的頁上)'
+UNCLEAR = '送出結果不明'
 UNCLEAR_NEED = '點開附的那一頁看是不是這張:是就在卡上按「其實送出了」,不是就按「確認沒送出,可以重送」'
 NOTES = Field('website_notes', How.WORDS, '這一輪實際看到、下次有用的網站筆記', many=True, sub=(
     Field('url', How.WORDS, '來源網址', required=True), Field('note', How.WORDS, '下次有用的一句', required=True)))
@@ -50,6 +50,7 @@ CITE_SHEET = Schema('progress_replies', (
         Field('reason', How.WORDS, '你讀不到的原因', required=True),)),
     NOTES,
     Field('needs_user', How.WORDS, '需要使用者本人處理的事;沒有就空'),
+    *NEEDS_USER_PAGE,
     Field('stopped', How.WORDS, '沒做完就停下:停在哪、為什麼'),
 ))
 
@@ -134,23 +135,38 @@ def brief_cite(urls: list[str], registered: list[dict], read: str) -> Brief:
                  (), ('只引材料裡的段落。',), CITE_SHEET)
 
 
-def check(cards: list[str], jobs: dict, fb: dict, browser, board) -> tuple[RoundRecord, dict]:
-    """兩個回合:開來源頁、程式讀一次工作區、同一個 agent 引段。任一回合沒交件或交件單壞掉,卡不動(P-14)。"""
+def check(cards: list[str], jobs: dict, fb: dict, browser, board) -> tuple[RoundRecord, dict, tuple]:
+    """兩個回合:開來源頁、程式讀一次工作區、同一個 agent 引段。任一回合沒交件或交件單壞掉,卡不動(P-14)。
+    第三個回兩個回合沒乾淨收尾的原因(round.stuck)。"""
     registered = sources()
     names = frozenset(row['name'] for row in registered)
     first = run_round('progress', brief_nav({url: fb[url] for url in cards}, jobs, registered), browser,
                       timeout_s=TIMEOUT, board=board, read_at_handoff=True)
     if first.end is not End.HANDED or first.sheet.broken is not None:
-        return first, {}
+        return first, {}, stuck(first)
     pages = first.handoff or ()
     material = Numbered()
     seen.number(material, pages)
     second = continue_with(first, brief_cite(cards, registered, snap.render('交件時', pages, material)),
                            browser, timeout_s=TIMEOUT, board=board, materials=(material,),
                            known={'cards': frozenset(cards), 'sources': names})
+    trouble = (*stuck(first), *stuck(second))
     if second.end is not End.HANDED or second.sheet.broken is not None:
-        return second, {}
-    return second, save(cards, jobs, first, second, registered, board)
+        return second, {}, trouble
+    return second, save(cards, jobs, first, second, registered, board), trouble
+
+
+REPORT_NEED = '照上面處理好，再按查應徵進度'
+
+
+def _report(trouble: tuple, stopped: bool, board) -> None:
+    """要不要打斷他照 agent_report.settle(#807):沒做完明天照排程重查;他自己停掉的不算一輪。"""
+    if stopped:
+        return
+    import agent_report
+    import board_doc
+    board_doc.set_fb(lambda data: agent_report.settle(data, FROM, 'progress', trouble, head=FROM, need=REPORT_NEED),
+                     live=board, by=FROM)
 
 
 def save(cards: list[str], jobs: dict, first: RoundRecord, second: RoundRecord, registered: list[dict], board) -> dict:
@@ -213,11 +229,8 @@ def save(cards: list[str], jobs: dict, first: RoundRecord, second: RoundRecord, 
             else:
                 _outcome(m, new + replay, when, today, result)
                 _ghost(m, checked, today, result)
-        agent_report.apply_resolve(data, None, '這一輪重查過了', src=FROM)     # 舊回報收掉(P-17);這一輪的回報在後面才開
-        for name, rows in unread.items():
-            for row in rows[:1]:
-                agent_report.apply_report(data, FROM, f'{name}這一輪沒查到:{row["reason"]},影響 {len(cards)} 張卡',
-                                          need=f'打開{name}看看是不是要登入或網址換了', url=by_name[name]['url'])
+        # 舊回報收掉(P-17);沒查過的來源照實列在每張卡上(unchecked_sources),要不要打斷他由 _report 管(#807)
+        agent_report.apply_resolve(data, None, '這一輪重查過了', src=FROM, only=lambda item: 'parts' not in item)
     board_doc.set_fb(write, live=board, by=FROM)
     website_notes.remember([row for sheet in (first.sheet, second.sheet) for row in sheet.rows('website_notes')])
     return dict(result, complete=all(url in result['checked'] for url in cards))
@@ -328,10 +341,13 @@ def main(argv=None, browser=None) -> int:
     fb = json.loads(doc['fb'])
     cards = [url for url in to_check(fb) if url in jobs and url == (args.url or url)][:args.limit or None]
     jobrun.write(status, {'phase': 'run', 'pid': os.getpid(), 't0': started, 'n': len(cards), 'done': 0})
-    record, result = check(cards, jobs, fb, browser or Real(), board) if cards else (None, {})
+    record, result, trouble = check(cards, jobs, fb, browser or Real(), board) if cards else (None, {}, ())
+    if cards:
+        _report(trouble, record.end is End.STOPPED_BY_USER, board)
     finished = bool(result)
     phase = ('nothing' if not cards else 'failed' if not finished else 'done' if result['complete'] else 'incomplete')
-    message = ('沒有要查的卡' if not cards else f'這一輪{record.end.value},卡沒有改' if not finished else
+    message = ('沒有要查的卡' if not cards else f'這一輪{end_label(record.end)},卡沒有改'
+               if not finished else
                f'查了 {len(cards)} 張,查完 {len(result["checked"])} 張;新回音 {result["new"]} 則;改了狀態 {result["moved"]} 張')
     jobrun.write(status, {'phase': phase, 'pid': os.getpid(), 't0': started, 'n': len(cards),
                           'done': len(result.get('checked') or ()), 'msg': message,

@@ -692,6 +692,7 @@ a.att-pill:hover{border-color:var(--accent-ink)}
   transform:rotate(-45deg);transition:transform .15s ease}
 #topbars .cuts-d:not(.cuts-d .cuts-d)[open]>.cuts-sum::after{transform:rotate(45deg)}
 #topbars .cuts-sum .fl-sum{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#topbars .cuts-sum{white-space:nowrap}   /* 三格擠在一排時標題不折成「Agent 回 / 報」,後面的計數自己省略 */
 #topbars .cuts{background:transparent;border:0;border-radius:0;padding:var(--space-4) var(--space-4) var(--space-12) var(--space-24)}
 #topbars .findbody{padding:var(--space-4) var(--space-4) var(--space-12) var(--space-24)}
 body.reviewing #topbars{display:none!important}
@@ -834,6 +835,11 @@ body.reviewing #topbars{display:none!important}
 .iv-addt{flex:none;display:inline-flex;align-items:center;gap:var(--space-4);font-size:var(--text-sm)}
 .ivlist+.applyhd{margin-top:var(--space-24)}
 .iv-oc{padding:0 var(--space-12) var(--space-8)}
+/* 一場一個框:列本身、旁邊的「記時間」、底下的結果那一排都在框裡 */
+.iv-box{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-md)}
+.iv-box:has(>.iv-jrow:hover){border-color:var(--accent)}
+.iv-box>.iv-jrow{border:0;background:transparent}
+.iv-jw.iv-box{align-items:center;padding-right:var(--space-8)}
 details.ivrow{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-md)}
 details.ivrow>summary{min-height:44px;box-sizing:border-box;padding:var(--space-8) var(--space-12)}
 details.ivrow[open]{border-color:var(--accent)}
@@ -1234,6 +1240,14 @@ footer{margin-top:var(--space-32);padding-top:var(--space-16);border-top:1px sol
 .prepbar.run{border-color:var(--line)}
 .prep-go:disabled{opacity:.55;cursor:default;filter:none}
 .prep-st{font-size:var(--text-sm);line-height:var(--leading-normal);color:var(--ink-dim);flex:1 1 220px;min-width:0}
+/* 跑那一列分兩行:上面一行只放要按的(跑幾張、主按鈕、自動、指示),下面一行放上一輪怎樣、要先做什麼的說明字。
+   以前說明字跟按鈕擠同一行,各自撐開,右邊的自動與指示被擠成高低不齊的一疊 */
+.prepbar:has(>.prep-st,>.ap-hint,.auto-take){row-gap:var(--space-4)}
+.prepbar:has(>.prep-st,>.ap-hint,.auto-take)::before{content:'';order:9;flex-basis:100%;height:0}
+.prepbar>.prep-st,.prepbar>.ap-hint,.prepbar>[data-showlog],.prepbar .auto-take{order:10;flex:0 1 auto}
+.prepbar>.auto-grp{display:contents}
+.prepbar .auto-chip{margin-left:auto}
+.prepbar>.auto-grp~.pv-b{margin-left:0}
 .prep-st.run{color:var(--ink-dim);font-weight:var(--weight-semibold)}
 .prep-st.ok{color:var(--ink-dim)}
 .prep-st.bad{color:var(--warn);font-weight:var(--weight-semibold)}
@@ -1332,7 +1346,9 @@ footer{margin-top:var(--space-32);padding-top:var(--space-16);border-top:1px sol
 .todo{margin:var(--space-8) 0 var(--space-16);padding:var(--space-8) var(--space-12);box-shadow:var(--shadow-mark-warn)}
 .todo-h{display:block;margin-bottom:var(--space-4);color:var(--warn);font-size:var(--text-sm);font-weight:var(--weight-semibold)}
 .todo ul{margin:0;padding:0;list-style:none}
-.todo li{display:flex;flex-wrap:wrap;gap:var(--space-4) var(--space-8);align-items:baseline;padding:var(--space-4) 0;border-top:1px solid var(--line)}
+.todo li{display:flex;flex-wrap:wrap;gap:var(--space-6) var(--space-12);align-items:center;justify-content:space-between;padding:var(--space-6) 0;border-top:1px solid var(--line)}
+.todo-main{flex:1 1 280px;min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2)}
+.todo-acts{display:flex;flex-wrap:wrap;gap:var(--space-6);justify-content:flex-end}
 .todo li:first-child{border-top:0}
 .todo-go{border:0;background:none;padding:0;font:inherit;font-weight:var(--weight-semibold);color:var(--ink);text-decoration:underline;cursor:pointer;text-align:left}
 .todo-why{font-size:var(--text-sm);color:var(--ink-dim)}
@@ -1340,7 +1356,7 @@ footer{margin-top:var(--space-32);padding-top:var(--space-16);border-top:1px sol
 .todo-steps{margin:var(--space-4) 0;padding-left:var(--space-24);color:var(--ink);line-height:var(--leading-normal)}
 .todo .todo-steps li{display:list-item;padding:var(--space-2) 0;border:0}
 .todo-how>summary{min-height:32px;font-size:var(--text-xs);color:var(--ink-dim)}
-.todo-why .stage-b.todo-b{min-height:32px;padding:var(--space-4) var(--space-8);font-size:var(--text-xs);margin-left:var(--space-6)}
+.todo-acts .stage-b.todo-b{min-height:32px;padding:var(--space-4) var(--space-8);font-size:var(--text-xs)}
 /* 已投遞卡上的回音 */
 .rp-auto{color:var(--ink-dim)}
 /* 字很長的兩種(agent 照哪一句改的、可能是這封):整行照文字排、自己折行,圖示跟著字;flex 會把整段字當一塊擠到下一行,圖示落單 */
@@ -1441,7 +1457,7 @@ label.cfg-row:has(>.cfg-ck){align-items:baseline}   /* 字折成幾行,勾選框
 .cfg-sync-pair pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:var(--space-4) 0;padding:var(--space-8);border-radius:var(--radius-md);background:var(--surface-2);
   font-family:var(--mono);font-size:var(--text-xs);line-height:var(--leading-normal)}
 .cfg-sync-shot{margin:var(--space-4) 0;min-width:0}
-.cfg-sync-shot img{display:block;width:100%;max-width:640px;height:auto;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--paper)}
+.cfg-sync-shot img{display:block;width:100%;max-width:640px;height:auto;max-height:180px;object-fit:cover;object-position:top;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--paper)}
 .cfg-sync-shot figcaption{font-size:var(--text-xs);color:var(--ink-dim);margin:var(--space-2) 0}
 /* 平台履歷卡住那一份:狀態格裡「卡住 · 看回報」,看回報是文字連結,不另起一行 */
 .cfg-ib{color:inherit}
@@ -1873,6 +1889,22 @@ button.iv-st:hover{border-color:var(--accent)}
   body.reviewing #snack{top:auto;bottom:calc(130px + var(--dock-h));left:var(--space-12);right:var(--space-12);width:auto;max-width:none;justify-content:space-between;transform:translateY(30%)}
   body.reviewing #snack.on{transform:none}
 }
+/* 值旁的來源小標籤:程式讀到 / 程式沒比到 / agent 說的(#807 第 1 點);句子收在「看證據」裡 */
+.src-tag{display:inline-block;padding:0 var(--space-4);border:1px solid var(--line);border-radius:var(--radius-sm);font-size:var(--text-xs);color:var(--ink-dim);white-space:nowrap}
+.src-tag[data-src="程式核對過"]{color:var(--fit);border-color:currentColor}
+.src-tag[data-src="程式讀到"]{color:var(--ink);border-color:var(--ink-dim)}
+.src-tag[data-src="程式沒比到"]{color:var(--warn);border-color:currentColor}
+.ev-fold>summary .ev-open{color:var(--ink-dim);font-size:var(--text-xs);text-decoration:underline}
+.fact-unverified{white-space:nowrap;flex-shrink:0;margin-left:var(--space-4)}
+/* 每格旁的「agent 說的」是註腳,不是按鈕:不框、淡字,一張卡四格也不吵 */
+.fact-unverified .src-tag{border:0;padding:0;color:var(--ink-mute)}
+.fact-unverified .src-tag::before{content:'· '}
+.fb-foot{display:flex;align-items:flex-start;gap:var(--space-8)}
+.fb-foot>.cmore,.fb-foot.mood>:first-child{flex:1;min-width:0}
+.fb-foot.mood{align-items:center}
+.fb-foot.mood>.stage-row.solo{padding-top:0;margin-left:auto}   /* 手機讀卡時表態列固定在底下:⋯ 照樣靠右,選單才不會往左開出畫面 */
+.fb-foot>.stage-row.solo{flex:none;padding-top:var(--space-4)}
+.card:not(.compact) .fb-t.idle{display:none}
 
 /* PR 預覽(#809) */
 .prv-banner{position:fixed;right:var(--space-16);bottom:var(--space-16);z-index:900;max-width:calc(100vw - 2 * var(--space-16));padding:var(--space-8) var(--space-12);border-radius:var(--radius-md);background:var(--accent-soft);color:var(--accent-ink);font-size:var(--text-sm);box-shadow:var(--shadow-lg)}

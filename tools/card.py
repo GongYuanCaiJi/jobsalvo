@@ -225,9 +225,18 @@ def said_each(record):
     claim = str(record.get('claim') or '')
     if record.get('state') == VERIFIED:
         return [claim] if claim else []
-    marks = [mark['text'] for mark in record.get('marks') or [record.get('mark')]
+    marks = [mark for mark in record.get('marks') or [record.get('mark')]
              if isinstance(mark, dict) and mark.get('text')]
-    return marks or ([f'agent 說：{claim}'] if claim else [])
+    agent_marks = [str((mark.get('params') or {}).get('words') or mark['text'].removeprefix('agent 說：'))
+                   for mark in marks if mark.get('code') == 'AGENT_WORDS']
+    if agent_marks:
+        return [f"agent 說：{'、'.join(agent_marks)}"]
+    for mark in marks:
+        if mark.get('code') in ('SAID_VS_ACTUAL', 'FIELD_SIDE_BY_SIDE', 'CLAIM_MISMATCH', 'ROW_FIELD_BAD'):
+            said = (mark.get('params') or {}).get('said')
+            if said:
+                return [f'agent 說：{said}']
+    return [mark['text'] for mark in marks] or ([f'agent 說：{claim}'] if claim else [])
 
 
 def said(record):

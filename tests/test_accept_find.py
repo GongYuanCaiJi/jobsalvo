@@ -15,7 +15,7 @@ from unittest import mock
 import acceptance_expect as E
 import acceptance_inputs as I
 from acceptance_home import Home
-from fake_browser import SHOT_FAIL, FakeBrowser, Script
+from fake_browser import FakeBrowser, Script
 import add_job
 import config as cf
 import delivery_state
@@ -27,7 +27,7 @@ URL2 = 'https://jobs.example/jobs/12'
 TITLE, COMPANY = 'Backend Engineer', 'Acme Robotics'
 PARTS = (TITLE, COMPANY, 'Posted 2026-11-01', '12 applicants', 'Apply by 2026-12-01')
 FIELD_TEXT = {'title': TITLE, 'company': COMPANY, 'posted_at': '2026-11-01', 'applicants': '12', 'status': 'Apply by'}
-UNREAD = '頁面讀不到，欄位由 agent 判斷'
+UNREAD = ('讀不到', '讀不出字', '太長沒讀完', '沒有截圖')
 
 
 def expect(test, behavior, actual, wanted, case=()):
@@ -127,13 +127,16 @@ class ReadTest(FindCase):
             verification = card['src']['verification']
             expect(self, 'J-09' if read == 'partial' else 'J-03', verification['page_status'],
                    {'ok': 'ok', 'partial': 'partial'}.get(read, 'unknown'), case)
-            unread = read in ('unknown', 'http_404')
+            unread = read != 'ok' or not shot
             marks = [m['text'] for m in verification.get('marks') or []]
-            expect(self, 'J-03', any(text.startswith(UNREAD) for text in marks), unread, case)
+            expect(self, 'J-03', any(any(word in text for word in UNREAD) for text in marks), unread, case)
             if read == 'http_404':
-                expect(self, 'J-03', any('404' in text for text in marks), True, case)
+                import evidence
+                with open(evidence.path(URL, verification['page_file'], self.home.board), encoding='utf-8') as source:
+                    page = json.load(source)
+                expect(self, 'J-03', ('404' in ' '.join(marks), page['why']), (False, 'HTTP 404'), case)
             expect(self, 'J-10', (bool(verification.get('screenshot_file')), verification.get('screenshot_error')),
-                   (shot, None if shot else f'OSError: {SHOT_FAIL}'), case)
+                   (shot, None if shot else True), case)
             expect(self, 'J-09', card['title'], TITLE if read in ('ok', 'partial') else '', case)
             if read == 'ok':                       # 卡名照共用卡名規則(看板、填表同一個),找缺不另組字
                 expect(self, 'J-04', card['target'], f'{TITLE} · {COMPANY}', case)
@@ -149,18 +152,32 @@ class FieldTest(FindCase):
         self.home.write_board([other])
         self.configure(terms={'applicants_max': 50})
         parts = (*PARTS, 'NT$100k')
-        rows = lambda m: [row(m, URL, salary=m.cite('NT$100k'), applicants=m.cite(TITLE, text='30'),  # noqa: E731
-                              deadline=m.cite(TITLE, text='2026-12-01'))]
-        find.main(['--board', self.home.board, '--mode', 'both'],
-                  browser=FakeBrowser(search(URL), judge(rows), fetched={URL: fetched(URL, 'ok', parts)}))
+        said = {}
+        def rows(m):
+            salary = m.cite('NT$100k')     # agent 交的引用:材料代號加它引的段號(頁上多幾段時段號跟著變)
+            said['salary'] = f"agent 說：{m.material_id}、{salary['ids'][0]}"
+            return [row(m, URL, salary=salary, applicants=m.cite(TITLE, text='30'),
+                        deadline=m.cite(TITLE, text='2026-12-01'))]
+        browser = FakeBrowser(search(URL), judge(rows), fetched={URL: fetched(URL, 'ok', parts)})
+        find.main(['--board', self.home.board, '--mode', 'both'], browser=browser)
         card = self.card()
         verification = card['src']['verification']
-        bad = 'agent 引的段落無法核對：text 要寫頁面上那幾個字(字串),agent 寫的是 (沒寫)'
         expect(self, 'J-06', (card['sum'], 'applicants' in card, 'deadline' in card, 'repost_hint' in card['src'],
                               verification['marks'], verification['state']),
-               ({'salary': bad, 'deadline': '2026-12-01'}, False, False, False,
-                [{'code': 'TERM_UNCHECKED', 'source': E.PROGRAM, 'params': {'term': '應徵人數'}, 'text': '條件「應徵人數」沒有核對到'}],
+               ({'salary': said['salary'], 'deadline': '2026-12-01'}, False, False, False,
+                [{'code': 'TERM_UNCHECKED', 'source': E.PROGRAM, 'params': {'term': '應徵人數'},
+                  'text': '條件「應徵人數」沒有核對到'}],
                 'review'))
+        import evidence
+        for name, quote in (('applicants', TITLE), ('deadline', TITLE)):
+            field = (verification['fields'].get(name) or
+                     verification['summary']['fields'][name])
+            screenshot = field.get('shot')
+            expect(self, 'J-06', (bool(screenshot),
+                                  os.path.isfile(evidence.path(URL, screenshot, self.home.board) or ''),
+                                  any(request[0] == 'url' and request[1] == URL and request[2] == quote
+                                      for request in browser.shot_requests)),
+                   (True, True, True), name)
 
     def test_a_cite_written_in_the_wrong_shape(self):
         """引段寫成字串、text 寫成數字:不當 agent 說的值,照核對結果標無法核對;引得到的段照列。"""
@@ -168,11 +185,15 @@ class FieldTest(FindCase):
         self.go(search(URL), judge(lambda m: [row(m, URL, title=TITLE, applicants=m.cite('12 applicants', text=12))]),
                 reads={URL: 'ok'})
         fields = self.card()['src']['verification']['fields']
-        bad = 'agent 引的段落無法核對：'
         expect(self, 'A-29', [(fields[name]['claim'], fields[name]['raw'], fields[name]['state'],
-                               [mark['text'] for mark in fields[name]['marks']]) for name in ('title', 'applicants')],
-               [('', '', '沒核對到', [bad + '引用格式不是物件']),
-                ('', '12 applicants', '沒核對到', [bad + 'text 要寫頁面上那幾個字(字串),agent 寫的是 12'])])
+                               [mark['code'] for mark in fields[name]['marks']]) for name in ('title', 'applicants')],
+               [('', '', '沒核對到', ['CITE_BAD', 'AGENT_WORDS']),
+                ('', '12 applicants', '沒核對到', ['CITE_BAD', 'AGENT_WORDS', 'AGENT_WORDS', 'AGENT_WORDS'])])
+        expect(self, 'A-29', [mark['text'] for mark in fields['title']['marks']],
+               ['agent 交代的讀不了', 'agent 說：Backend Engineer'])
+        self.assertEqual(fields['applicants']['marks'][0]['text'], 'agent 交代的讀不了')
+        self.assertTrue(all(mark['text'].startswith('agent 說：')
+                            for mark in fields['applicants']['marks'][1:]))
 
     def test_a_cite_of_several_paragraphs_keeps_each_line(self):
         self.home.write_board()
@@ -206,7 +227,9 @@ class FieldTest(FindCase):
         n = PARTS.index(COMPANY) + 1
         last = len(PARTS) + 2 + 1
         bad = '段落編號無效:'
-        expect(self, 'A-29', {name: [mark['params']['why'] for mark in fields[name]['marks']]
+        expect(self, 'A-29', {name: [(mark['params'].get('why') or mark['params'].get('actual'))
+                                    for mark in fields[name]['marks']
+                                    if mark['params'].get('why') or mark['params'].get('actual')]
                               for name in ('title', 'company', 'posted_at', 'applicants', 'status', 'loc')},
                {'title': [f"{bad}要寫整數清單(沒有可引的寫 []),agent 寫的是 ['1']"],
                 'company': [f'{bad}9999 不在這一次給的 1-{last} 裡; {bad}{n} 重複'],
@@ -223,18 +246,29 @@ class FieldTest(FindCase):
             self.go(search(URL), judge(lambda m, cites=cites: [row(m, URL, cites=cites)]), reads={URL: 'ok'})
             card = self.card()
             expect(self, 'J-07', card is not None, True, cites)
-            fields = card['src']['verification']['fields']
+            verification = card['src']['verification']
+            fields = verification['fields']
             for name, text in FIELD_TEXT.items():      # 看板畫的:agent 說的、程式讀到的原文、核對狀態、標記
                 shown = (fields[name]['claim'], fields[name]['raw'], fields[name]['state'],
-                         [(mark['code'], mark['params']) for mark in fields[name]['marks']])
+                         [(mark['code'], {key: value for key, value in mark['params'].items()
+                                          if key in ('said', 'quote')}) for mark in fields[name]['marks']])
                 want = {'verified': (text, next(part for part in PARTS if text in part), '程式核對過', [('CLAIM_MATCH', {})]),
                         'not_on_page': (f'{text} 以外的字', TITLE, '沒核對到',
                                         [('FIELD_SIDE_BY_SIDE', {'said': f'{text} 以外的字', 'quote': TITLE})]),
                         'missing': ('', '', '沒核對到', [('FIELD_NOT_ON_PAGE', {})])}[cites]
                 expect(self, {'verified': 'J-04', 'not_on_page': 'J-05', 'missing': 'J-06'}[cites], shown, want,
                        (cites, name))
+                if cites == 'not_on_page':
+                    expect(self, 'J-05', bool(fields[name]['marks'][0]['params'].get('why')), True, name)
                 for mark in fields[name]['marks']:
                     expect(self, 'A-27', mark['source'], E.source_of(mark['code']), (cites, name))
+            if cites in ('not_on_page', 'missing'):
+                title = fields['title']
+                expect(self, 'J-06', (bool(title.get('shot')), title.get('shot_cropped')),
+                       (True, True) if cites == 'not_on_page' else
+                       (True, False), cites)
+                if cites == 'missing':
+                    expect(self, 'J-06', title['shot'], verification.get('screenshot_file'), cites)
             summary = card['src']['verification']['summary']['fields']     # 沒寫的摘要欄:agent 說頁上沒寫
             expect(self, 'J-06', {(row['claim'], row['raw'], row['state'], tuple(m['code'] for m in row['marks']))
                                   for row in summary.values()}, {('', '', '沒核對到', ('FIELD_NOT_ON_PAGE',))}, cites)
@@ -263,7 +297,9 @@ class CiteTest(FindCase):
             card = self.card()
             fields = card['src']['verification']['fields']
             codes = [mark['code'] for mark in fields['title']['marks']]
-            expect(self, 'A-29', codes, {'good': ['CLAIM_MATCH'], 'none': ['CITE_NONE']}.get(shape, ['CITE_BAD']), shape)
+            expect(self, 'A-29', codes, {'good': ['CLAIM_MATCH'], 'none': ['CITE_NONE', 'AGENT_WORDS']}.get(shape,
+                                                                                                       ['CITE_BAD', 'AGENT_WORDS',
+                                                                                                        'AGENT_WORDS', 'AGENT_WORDS']), shape)
             expect(self, 'A-29', [mark['code'] for mark in fields['company']['marks']], ['CLAIM_MATCH'], shape)
 
 
@@ -569,26 +605,29 @@ class RowTest(FindCase):
             expect(self, 'J-08', card['src']['verification']['state'],
                    'verified' if handed and clean else 'review', case)
             if handed and shape == 'stranger':      # 對不上任何候選的列照實回報,其他列照收(A-29)
-                expect(self, 'A-29', '另有 1 列' in self.home.status_file('converge')['msg'], True, case)
+                expect(self, 'A-29', '另有 1 項沒比到' in self.home.status_file('converge')['msg'], True, case)
 
 
 class RowIssueTest(FindCase):
     """J-08、J-11、A-29:判斷沒交齊時,卡上記的原因、狀態檔那一句、每輪紀錄判了幾張,逐字照實。"""
 
     def test_what_an_incomplete_judge_leaves(self):
-        unread = 'agent 說「每一列」，程式讀到「必須提供清單」'
-        keep = 'agent 說「maybe」，程式讀到「true、false」'
+        unread = '必須提供清單'
+        keep = 'true、false'
         cases = {
-            ('handed', 'not_list'): (lambda m: '每一列', {'code': 'SHEET_BROKEN', 'source': E.PROGRAM, 'params': {'why': unread},
-                                                       'text': f'交件單無法讀取：{unread}'}, '有 2 張候選的判斷交件未完整，已列為待確認', 0),
+            ('handed', 'not_list'): (lambda m: '每一列', {'code': 'SHEET_BROKEN', 'source': E.PROGRAM,
+                                                         'params': {'why': unread, 'said': '每一列'},
+                                                         'text': 'agent 交代的讀不了'}, '有 2 張候選核對不了，已列出', 0),
             ('handed', 'bad_keep'): (lambda m: [row(m, URL, keep='maybe'), row(m, URL2)],
-                                     {'code': 'ROW_FIELD_BAD', 'source': E.PROGRAM, 'params': {'field': 'keep', 'why': keep},
-                                      'text': f'這一列的 keep 欄無法核對：{keep}'}, '有 1 張候選的判斷交件未完整，已列為待確認', 1),
+                                     {'code': 'ROW_FIELD_BAD', 'source': E.PROGRAM,
+                                      'params': {'field': 'keep', 'why': '只能填：' + keep, 'said': 'maybe',
+                                                 'actual': '不在可選的值裡'},
+                                      'text': 'agent 說「maybe」，程式讀到「不在可選的值裡」'}, '有 1 張候選核對不了，已列出', 1),
             ('handed', 'stranger'): (lambda m: [row(m, URL), row(m, URL2), row(m, 'https://jobs.example/jobs/99')], None,
-                                     '另有 1 列判斷交件無法配對候選', 2),
+                                     '另有 1 項沒比到', 2),
             ('timeout', 'one'): (lambda m: [row(m, URL), row(m, URL2)],
                                  {'code': 'ENDED', 'source': E.PROGRAM, 'params': {'end': '逾時'}, 'text': '這一輪逾時'},
-                                 '有 2 張候選的判斷交件未完整，已列為待確認（判斷 agent 逾時）', 0)}
+                                 '有 2 張候選核對不了，已列出；agent 沒交代', 0)}
         for (end, shape), (rows, issue, msg, judged) in cases.items():
             case = (end, shape)
             self.home.write_board()
@@ -629,6 +668,19 @@ class JudgeRowTest(FindCase):
 
 class RoundTest(FindCase):
     """J-01、J-13、J-18、J-20、J-22、J-23:範圍照使用者選的;時間上限照設定;狀態檔與每輪紀錄照實;agent 說不投的不成卡。"""
+
+    def test_where_an_agent_stopped_is_in_the_round_message(self):
+        """搜尋或判斷 agent 說它停下:那句話照實寫進這一輪的結果(看板找新職缺那一列),不吞掉(#783)。"""
+        for who, end in itertools.product(('search', 'judge'), (I.HANDED, I.NO_SHEET)):
+            case = (who, end)
+            self.home.write_board()
+            found = search(URL)
+            if who == 'search':
+                found = Script(found.events, dict(found.sheet, stopped='搜尋網站要登入'), end)
+            self.go(found, judge(lambda m: [row(m, URL)], end=end if who == 'judge' else I.HANDED,
+                                 stopped='判斷停在第二頁' if who == 'judge' else ''), reads={URL: 'ok'})
+            said = ('agent 停下：搜尋網站要登入' if who == 'search' else 'agent 停下：判斷停在第二頁')
+            expect(self, '#783', said in self.home.status_file('converge')['msg'], end == I.HANDED, case)
 
     def test_scope_limits_status_and_history(self):
         self.home.write_board(research=[{'round': str(n)} for n in range(25)])
@@ -702,7 +754,7 @@ class ClockTest(FindCase):
                 expect(self, 'J-18', [55 <= t <= 60 for t in browser.timeouts], [True, True] if left else [True], case)
                 status = self.home.status_file('converge')
                 expect(self, 'J-18', status['msg'],
-                       '' if left else '有 1 張候選的判斷交件未完整，已列為待確認（判斷 agent 沒有啟動）', case)
+                       '' if left else '有 1 張候選核對不了，已列出；agent 沒交代', case)
                 expect(self, 'J-18', (status['took'], status['notes']), (took - (paused - 100), '往後端找'), case)
 
 
@@ -916,11 +968,11 @@ class EmptyRoundTest(RoundCase):
         expect(self, 'J-03', judge_prompt, listed([
             *ask, ('使用者的判斷 skill', self.skill('judge')), *shared.items(), ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'),
             ('交付代號', f'material_id={material}'),
-            ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', f'=== {URL} ===\n{URL}讀不到：要登入\n{UNREAD}'),
+            ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', f'=== {URL} ===\n{URL}讀不到'),
             ('看板上的舊卡與當時表態', none)]))
         source = self.card()['src']
         expect(self, 'J-03', (source['why'], source['verification']['state'], self.card()['target']),
-               ('頁面無法讀取', 'review', '職缺頁待確認'))
+               ('頁面讀不到', 'review', URL))      # 沒核對到職稱的卡用自己的網址當名字,幾張待確認才分得出來(#783)
 
     def test_no_candidates(self):
         code, _browser, printed = self.go_empty(Script((), {'candidates': [], 'notes': '', 'stopped': ''}))
@@ -948,7 +1000,7 @@ class FindNotesTest(FindCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             _code, browser = self.go(found, judge(lambda m: [row(m, URL)]), reads={URL: 'ok', URL2: 'ok'})
-        msg = '有 1 張候選的判斷交件未完整，已列為待確認；agent 試圖移除 1 則使用者網站筆記，程式已保留；請到網站筆記設定確認'
+        msg = '有 1 張候選核對不了，已列出；agent 試圖移除 1 則使用者網站筆記，程式已保留；請到網站筆記設定確認'
         expect(self, 'A-39', out.getvalue().splitlines()[-2], f'找缺：{msg}')
         agent = [(n['text'], n['card_id'], bool(n['round_id'])) for n in website_notes.for_url(URL) if n['author'] == 'agent']
         expect(self, 'A-38', (agent, any(n['id'] == user_id for n in website_notes.for_url(URL)),
@@ -960,12 +1012,9 @@ class SearchEndTest(FindCase):
     """J-18、J-20:搜尋 agent 逾時照這一輪讀到的收尾(沒找到);沒交件、交件單壞掉照實寫進狀態檔;看板讀不了不停在進行中。"""
 
     def test_search_endings(self):
-        said = '搜尋 agent 沒交件（{}）：{}'
-        messages = {I.HANDED: '', I.TIMEOUT: '時間到，這輪沒找到',
-                    I.NO_SHEET: said.format('沒有交件單', '假 agent:no_sheet'),
-                    I.BROKEN_SHEET: said.format('交件', "交件單無法讀取：JSONDecodeError: Expecting ',' delimiter: line 1 column 6 (char 5)"),
-                    I.CRASHED: said.format('當掉', '假 agent:crashed'), I.STOPPED_BY_USER: said.format('被停止', '假 agent:stopped_by_user'),
-                    I.UNAVAILABLE: said.format('沒有啟動', '假瀏覽器:沒有可用的 agent')}
+        messages = {I.HANDED: '', I.TIMEOUT: '這一輪逾時', I.NO_SHEET: 'agent 沒交代',
+                    I.BROKEN_SHEET: 'agent 交代的讀不了', I.CRASHED: '這一輪當掉',
+                    I.STOPPED_BY_USER: '這一輪被停止', I.UNAVAILABLE: '這一輪沒有啟動'}
         for end in I.ENDS:
             self.home.write_board()
             out = io.StringIO()
@@ -991,16 +1040,22 @@ class SearchEndTest(FindCase):
             expect(self, 'J-20', (self.card() is not None, browser.fetches), (handed, [URL] if handed else []), end)
 
     def test_unreadable_board(self):
+        import evidence
         missing = os.path.join(self.home.dir, 'gone.html')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = find.main(['--board', missing, '--mode', 'both'], browser=FakeBrowser())
         status = self.home.status_file('converge')
-        msg = f"看板讀不了,這一輪沒做:[Errno 2] No such file or directory: '{missing}'"
+        msg = '看板讀不到，這一輪沒做'
+        folder = evidence.flow_dir('find', missing)
+        logs = [os.path.join(folder, name, 'events.jsonl') for name in os.listdir(folder)]
+        with open(logs[-1], encoding='utf-8') as source:
+            reasons = [json.loads(line).get('reason', '') for line in source]
         expect(self, 'J-20', (code, out.getvalue(), status['finished_at'] >= status['t0'],
-                              {key: value for key, value in status.items() if key not in ('t0', 'at', 'finished_at')}),
+                              {key: value for key, value in status.items() if key not in ('t0', 'at', 'finished_at')},
+                              any(missing in reason for reason in reasons)),
                (1, msg + '\n', True, {'msg': msg, 'phase': 'failed', 'pid': os.getpid(), 'mode': 'both', 'direction': '',
-                                      'minutes': None, 'graceful': True}))
+                                      'minutes': None, 'graceful': True}, True))
 
     def test_the_judge_skill_he_selected_or_the_built_in_one_when_it_cannot_be_read(self):
         builtin = RoundCase.skill('judge')
@@ -1073,10 +1128,10 @@ class PreferenceTest(FindCase):
             with open(cf.PREFERENCE_NOTE, encoding='utf-8') as source:
                 expect(self, 'J-19', source.read(), case == 'updated' and
                        f'# 偏好筆記\n\n{prefs.NOTE_CUSTOM}\n\n不要外包\n\n{prefs.NOTE_AGENT}\n\n- 不愛外包\n' or note, case)
-            unattributed = '偏好筆記未更新(交件)：有 1 張新表態沒有完整歸屬'
+            unattributed = '偏好筆記有 1 張新表態還沒完整歸屬，沒有更新'
             expect(self, 'J-19', self.home.status_file('converge')['msg'], {
                 'unattributed': unattributed, 'not_in_note': unattributed, 'twice': unattributed, 'updated': '',
-                'no_sections': '偏好筆記未更新：偏好筆記缺少使用者自訂或 Agent 假設區'}[case], case)
+                'no_sections': '偏好筆記沒有更新'}[case], case)
 
     def test_what_he_writes_in_his_section_during_the_note_round_stays(self):
         import board_doc
@@ -1217,9 +1272,11 @@ class AddJobTest(FindCase):
             stored = json.load(source)
         expect(self, 'J-16', (stored.pop('shot'), stored), ('', dict(page, shot_why='待寫期間讀頁那一刻的截圖不見了')))
         gone = '待寫期間讀頁那一刻的截圖不見了'
-        expect(self, 'J-10', (verification.get('screenshot_file'), verification['screenshot_error'], verification['marks']),
-               (None, gone, [{'code': 'SHOT_MISSING', 'source': E.NOT_COMPARED, 'params': {'where': URL, 'why': gone},
-                              'text': f'{URL}截圖沒取得：{gone}'}]))
+        visible_marks = [{key: mark[key] for key in ('code', 'source', 'params', 'text')}
+                         for mark in verification['marks']]
+        expect(self, 'J-10', (verification.get('screenshot_file'), verification.get('screenshot_error'), visible_marks),
+               (None, None, [{'code': 'SHOT_MISSING', 'source': E.NOT_COMPARED, 'params': {'where': URL, 'why': gone},
+                              'text': f'{URL}沒有截圖'}]))
         expect(self, 'J-16', (self.card(URL2)['title'], self.card(URL2)['src']['verification']['state']), ('', 'review'))
 
     def test_pasted_urls_always_become_cards(self):
@@ -1234,12 +1291,15 @@ class AddJobTest(FindCase):
                    {'ok': 'ok', 'partial': 'partial'}.get(read, 'unknown'), case)
 
     def test_every_route_that_failed_is_named(self):
-        result = dict(fetched(URL, 'unknown'), errors=['direct: HTTP 403', 'reader: 要登入'])     # 讀取那一側每條路的原因
+        result = dict(fetched(URL, 'unknown'), errors=['direct: HTTP 403', 'reader: 要登入'])     # 證據保留讀取那一側每條路的原因
         find.main(['--board', self.home.board, '--mode', 'both'],
                   browser=FakeBrowser(search(URL), judge(lambda m: [row(m, URL, cites='missing')]), fetched={URL: result}))
         verification = self.card()['src']['verification']
-        expect(self, 'J-03', (verification['page_status'], [m['text'] for m in verification['marks']]),
-               ('unknown', [URL + '讀不到：direct: HTTP 403; reader: 要登入', '頁面讀不到，欄位由 agent 判斷']))
+        import evidence
+        with open(evidence.path(URL, verification['page_file'], self.home.board), encoding='utf-8') as source:
+            page = json.load(source)
+        expect(self, 'J-03', (verification['page_status'], [m['text'] for m in verification['marks']], page['why']),
+               ('unknown', [URL + '讀不到'], 'direct: HTTP 403; reader: 要登入'))
 
     def test_pages_wait_when_no_agent_can_run_and_are_written_next_time(self):
         for shot in I.SHOTS:
@@ -1251,7 +1311,7 @@ class AddJobTest(FindCase):
             verification = self.card()['src']['verification']
             expect(self, 'J-16', (second.fetches, self.card()['title'], add_job.waiting()), ([], TITLE, 0), shot)
             expect(self, 'J-10', (bool(verification.get('screenshot_file')), verification.get('screenshot_error')),
-                   (shot, None if shot else f'OSError: {SHOT_FAIL}'), shot)
+                   (shot, None), shot)
 
     def test_held_pages_in_a_format_it_cannot_read_are_read_again(self):
         self.home.write_board()
@@ -1295,7 +1355,6 @@ class AddJobTest(FindCase):
         status = self.home.status_file('add')
         expect(self, 'J-16', (status['phase'], status['msg'], status['finished_at'] > 0),
                ('failed', f"沒加成:[Errno 2] No such file or directory: '{gone}'", True))
-
 
 
 class PageFetchTest(FindCase):

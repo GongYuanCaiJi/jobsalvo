@@ -27,6 +27,18 @@ class Snapshot:
     marks: tuple[Mark, ...] = ()
 
 
+def field_shot(browser, tab: str, path: str, quote: str) -> dict:
+    """以 agent 引的原字定位截圖;瀏覽器負責逐字找位置與整頁退回。"""
+    file = browser.raw_shot(tab, path, quote)
+    return {'file': file, 'cropped': bool(browser.last_shot_cropped)}
+
+
+def field_shot_url(browser, url: str, path: str, quote: str) -> dict:
+    """按讀頁網址截原字所在位置;沒有引文或無法裁切時回報整頁截圖。"""
+    file = browser.raw_shot_url(url, path, quote)
+    return {'file': file, 'cropped': bool(browser.last_shot_cropped)}
+
+
 def take(browser, phase: str, directories) -> Snapshot:
     """叫了拍照就一定留一筆紀錄:工作區讀不到也記成一筆沒有分頁編號的頁(C-01)。"""
     dirs = [os.fspath(path) for path in directories]

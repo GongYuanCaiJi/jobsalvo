@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from web.marks import Mark, say, say_each
+from web.marks import Mark, joined, say, say_each
 from web.numbered import Accept, Miscited, Numbered, pick
 
 
@@ -117,7 +117,10 @@ class Sheet:
 
 
 def _listed(field: Field, raw: Any, code: str, said: Any = None, **params) -> Cell:
-    marks = say_each(code, said, 'said', **params) or (say(code, said='', **params),)
+    details = dict(params)
+    if said is not None:
+        details['said'] = joined(said)
+    marks = (say(code, **details), *say_each('AGENT_WORDS', said, 'words'))
     return Cell(field.name, raw, raw, Verdict.LISTED, marks)
 
 
@@ -131,62 +134,66 @@ def _read_field(field: Field, raw: Any, context: Context, row: dict | None = Non
         if field.how is How.CITE:
             return _listed(field, raw, 'CITE_NONE')
         if field.required:
-            return _listed(field, raw, 'SAID_VS_ACTUAL', said='(缺少)', actual='必填欄位')
+            return _listed(field, raw, 'CITE_NONE')
         raw = ''
     if field.how is How.WORDS:
         return Cell(field.name, raw, raw, Verdict.WORDS)
     if field.how is How.ENUM:
         if raw in field.one_of:
             return Cell(field.name, raw, raw, Verdict.PARSED)
-        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='、'.join(field.one_of))
+        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='不在可選的值裡',
+                       why='只能填：' + '、'.join(field.one_of))
     if field.how is How.NUMBER:
         text = str(raw) if isinstance(raw, int) and not isinstance(raw, bool) else raw
         if isinstance(text, str) and re.fullmatch('[0-9]+', text) and (not field.one_of or str(int(text)) in field.one_of):
             return Cell(field.name, raw, int(text), Verdict.PARSED)
-        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='、'.join(field.one_of) or '整數')
+        actual = '不是數字' if not isinstance(text, str) or not re.fullmatch('[0-9]+', text) else '不在可選的數字裡'
+        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual=actual,
+                       why='必須是整數' if not field.one_of else '只能填：' + '、'.join(field.one_of))
     if field.how is How.KNOWN:
         known = context.known.get(field.known or '', frozenset())
         if raw == '' and not field.required:
             return Cell(field.name, raw, raw, Verdict.PARSED)
         if isinstance(raw, str) and raw in known:
             return Cell(field.name, raw, raw, Verdict.VERIFIED)
-        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='不在你的清單')
+        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='不在給 agent 的清單裡', why='不在你的清單')
     if field.how is How.CITE:
         if not isinstance(raw, dict):
-            return _listed(field, raw, 'CITE_BAD', why='引用格式不是物件')
+            return _listed(field, raw, 'CITE_BAD', said=raw, why='引用格式不是物件')
         if 'ids' not in raw:            # 只寫了字、沒給段落編號:該引沒引(A-29)
-            return _listed(field, raw, 'CITE_NONE')
+            return _listed(field, raw, 'CITE_NONE', said=raw)
         material = next((item for item in context.materials if item.material_id == raw.get('material_id')), None)
         if material is None:
-            return _listed(field, raw, 'CITE_BAD', why='交付代號不是這次提供的材料')
+            return _listed(field, raw, 'CITE_BAD', said=raw, why='交付代號不是這次提供的材料')
         accept = field.accept or Accept()
         try:
             cited = pick(material, raw.get('ids'), accept, row=row, item=raw)
         except (Miscited, TypeError, ValueError) as error:
-            mark = say('CITE_BAD', why=str(error))
+            marks = (say('CITE_BAD', why=str(error)), *say_each('AGENT_WORDS', raw, 'words'))
             try:
                 evidence = pick(material, raw.get('ids'), dataclasses.replace(accept, value=None), row=row, item=raw)
             except (Miscited, TypeError, ValueError):
                 evidence = None
             if accept.value is not None and evidence is not None and evidence.parts:
-                return Cell(field.name, raw, evidence, Verdict.LISTED, (mark,))
-            return Cell(field.name, raw, raw, Verdict.LISTED, (mark,))
+                return Cell(field.name, raw, evidence, Verdict.LISTED, marks)
+            return Cell(field.name, raw, raw, Verdict.LISTED, marks)
         if not cited.parts:
             return _listed(field, raw, 'CITE_NONE')
         return Cell(field.name, raw, cited, Verdict.VERIFIED)
-    return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='未知核對方式')
+    return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='程式不認得這種核對方式', why='未知核對方式')
 
 
 def _read_many(field: Field, raw: Any, context: Context) -> Cell | list[dict[str, Cell]]:
     if not isinstance(raw, list):
-        if raw is None and not field.required:
+        if raw is None:
+            if field.required:
+                return _listed(field, raw, 'CITE_NONE')
             raw = []
         else:
-            return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw if raw is not None else '(缺少)',
-                           actual='必須提供清單')
+            return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='不是清單', why='必須提供清單')
     if not all(isinstance(item, dict) for item in raw):
         # 有一項不是物件:整格照 agent 原字列,不當資料讀(A-30)
-        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='每一項必須是物件')
+        return _listed(field, raw, 'SAID_VS_ACTUAL', said=raw, actual='清單裡有不是物件的項目', why='每一項必須是物件')
     return [{child.name: _read_many(child, item.get(child.name), context) if child.many
              else _read_field(child, item.get(child.name), context, item) for child in field.sub} for item in raw]
 

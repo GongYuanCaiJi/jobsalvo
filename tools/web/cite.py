@@ -4,7 +4,7 @@ from __future__ import annotations
 import dataclasses
 
 from web import seen
-from web.marks import Mark, say
+from web.marks import Mark, Source, say
 
 
 def hand_over(browser, tab: str, quote: str) -> tuple[str, tuple[Mark, ...]]:
@@ -12,17 +12,19 @@ def hand_over(browser, tab: str, quote: str) -> tuple[str, tuple[Mark, ...]]:
     分頁不在、交不出去才是沒有交接(A-28、C-11、C-24)。回 (交出的分頁標籤, 標記)。"""
     pages = seen.read_workspace(browser)
     if not seen.has_tab(pages, tab):
-        return '', (say('HANDOFF_UNVERIFIED', why=f'分頁 {tab or "(沒寫)"} 不在工作區'),)
-    try:
-        label = browser.hand_to_user(tab)
-    except Exception as error:  # noqa: BLE001 - a failed handover is listed with its reason
-        return '', (say('HANDOFF_UNVERIFIED', why=str(error)[:160] or type(error).__name__),)
+        return '', (say('HANDOFF_UNVERIFIED', page='那一頁'),)
     page = next(page for page in pages if page._seen_tab == str(tab))
+    try:
+        tab_label = browser.hand_to_user(tab)
+    except Exception as error:  # noqa: BLE001 - a failed handover is listed with its reason
+        return '', (say('HANDOFF_UNVERIFIED', page='那一頁', why=str(error)[:160] or type(error).__name__),)
+    page_label = page._seen_url or '那一頁'   # 交接訊息只寫網址(#662 第四點):標題是網站自己會換的字,不拿來指那一頁
     if page._seen_status is not seen.Status.READ:
-        return label, (say('HANDED_QUOTE_UNMATCHED', page=label, why=page._seen_why or '那一頁讀不到'),)
+        return tab_label, (say('HANDED_QUOTE_UNMATCHED', page=page_label, quote=quote, actual='那一頁讀不到'),)
     if not quote or not any(quote in part for part in page._seen_parts):
-        return label, (say('HANDED_QUOTE_UNMATCHED', page=label, why='頁上沒有一字不差的這段字'),)
-    return label, (say('HANDED_OVER', page=label),)
+        return tab_label, (say('HANDED_QUOTE_UNMATCHED', page=page_label, quote=quote,
+                               actual='頁上沒有一字不差的這段字'),)
+    return tab_label, (say('HANDED_OVER', page=page_label, quote=quote, url=page._seen_url),)
 
 
 def fixed_profile(record, url: str):
@@ -54,6 +56,7 @@ def source_unread(pages, name: str, *, labels=(), url: str = '') -> tuple[Mark, 
                                         bool(page._seen_tab) and page._seen_tab.partition(':')[2] in labels)]
     if not found:
         why = '應徵紀錄頁不在程式讀到的工作區' if url else '交件單沒有把工作區的分頁標成這個來源'
-        return (say('SOURCE_UNREAD', name=name, why=why, url=url),)
-    return tuple(say('SOURCE_UNREAD', name=name, why=page._seen_why or page._seen_status.value,
-                     url=page._seen_url) for page in found if page._seen_status is not seen.Status.READ)
+        return (say('SOURCE_UNREAD', source=Source.NOT_COMPARED, name=name, why=why, url=url),)
+    return tuple(say('SOURCE_UNREAD', source=Source.NOT_COMPARED, name=name,
+                     why=page._seen_why or page._seen_status.value, url=page._seen_url)
+                 for page in found if page._seen_status is not seen.Status.READ)

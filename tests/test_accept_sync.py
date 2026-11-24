@@ -17,7 +17,8 @@ import acceptance_expect as E
 import acceptance_inputs as I
 from acceptance_home import LANG, PLATFORM, PROFILE_URL, Home
 import fake_browser
-from fake_browser import OPEN_FAIL, FakeBrowser, Script, Tab
+from fake_browser import OPEN_FAIL, FakeBrowser, Script, Tab, shown
+import agent_report
 import evidence
 import form_record
 import profile_sync
@@ -25,13 +26,15 @@ import sync
 import sync_material
 
 VARIANT = 'one'
+HOST = PROFILE_URL.split('/')[2]
 SLOT = f'{LANG}/{VARIANT}'
 OLD, NEW = '舊的一行', '新的一行'
 PAGE_CODES = {'PAGE_UNREADABLE', 'PAGE_TOO_LONG', 'PAGE_NO_TEXT', 'SHOT_MISSING'}
 HANDOVER_CODES = {'HANDED_OVER', 'HANDED_QUOTE_UNMATCHED', 'HANDOFF_UNVERIFIED'}
-NO_CAPTURE = {'before': '沒有拍改前', 'after': '沒有拍改後,程式沒比對改後'}
+NO_CAPTURE = {'before': '沒有拍改前', 'after': '沒有拍改後，沒比到改後'}
 ON_PAGE = '原稿在頁上一字不差讀到，那一頁沒逐處比'
-RESTORE_REFUSED = {'stale_version': '同步清單已更新,請重新載入', 'unknown_change': '恢復清單已更新,請重新載入後選取',
+RESTORE_REFUSED = {'stale_version': '同步清單已更新,請重新載入',
+                   'unknown_change': '恢復清單已更新,請重新載入後選取',
                    'unregistered': '平台履歷未登記', 'evidence_gone': '恢復清單已更新,請重新載入後選取'}
 EXAMPLES = int(os.environ.get('JOBSALVO_ACCEPT_EXAMPLES', 200))
 
@@ -55,8 +58,26 @@ def rows_of(visual):
 
 
 def expected_rows(before, after):
-    return Counter((tab_id, url, compared, code, True, sides)
-                   for _side, tab_id, url, compared, code, sides in E.pairing(before, after))
+    def pages(tabs):
+        return tabs if isinstance(tabs, (tuple, list)) else ()
+
+    old = {(tab.tab_id, tab.url): tab for tab in pages(before)}
+    new = {(tab.tab_id, tab.url): tab for tab in pages(after)}
+
+    def page_mark(tab):
+        if tab is None:
+            return ()
+        return E.page_marks(tab)
+
+    rows = []
+    for _side, tab_id, url, compared, code, sides in E.pairing(before, after):
+        shown = {}
+        for tabs, page_id, page_url in ((old, sides[0], sides[1]), (new, sides[2], sides[3])):
+            for mark in page_mark(tabs.get((page_id, page_url))):
+                shown.setdefault(page_url, set()).add(mark)
+        rows.append((tab_id, url, compared, code, True,
+                     (*sides[:-1], tuple(sorted({mark for marks in shown.values() for mark in marks})))))
+    return Counter(rows)
 
 
 def changes_by_tab(visual):
@@ -101,6 +122,12 @@ class SyncCase(unittest.TestCase):
     def evidence_dir(self, visual):
         return evidence.flow_round_dir('sync', visual['evidence'])
 
+    def forget(self):
+        """同一個測試跑好幾種情況:前一種留下的回報與連續輪數清掉,每一種都從第一輪算。"""
+        import board_doc
+        board_doc.set_fb(lambda fb: [fb.pop(key, None) for key in (agent_report.KEY, agent_report.RETRY)],
+                         live=self.home.board)
+
     def assert_sources(self, visual, case):
         for mark in [*visual['marks'], *visual['list_marks'],
                      *(mark for row in visual['pages_compared'] for mark in row['marks'])]:
@@ -136,14 +163,22 @@ class PairingTest(SyncCase):
             urls = {tab_id: url for _s, tab_id, url, _c, _r, _p in pairs}
             folder = self.evidence_dir(visual)
             for row in visual['page_changes']:
-                shown = {key: row.pop(key) for key in ('change_id', 'before_shot', 'after_shot')}
+                shown = {key: row.pop(key) for key in ('change_id', 'before_shot', 'after_shot',
+                                                       'before_title', 'after_title')}
                 expect(self, 'A-14', (row, bool(shown['change_id']),
                                       [os.path.isfile(os.path.join(folder, shown[side])) for side in ('before_shot', 'after_shot')]),
                        ({'page_tab_id': row['page_tab_id'], 'page_url': urls[row['page_tab_id']], 'before_parts': ['甲'],
                          'after_parts': ['乙'], 'before_text': '甲', 'after_text': '乙', 'item': '頁面段落',
                          'verdicts': ['頁面內容有變動'], 'restorable': True}, True, [before[0].shot, after[0].shot]), case)
+            for row in visual['pages_compared']:      # 沒逐處比的那一頁也附程式拍到的截圖,不叫他自己去找(#783)
+                if row['compared']:
+                    continue
+                for side, tabs in (('before', before), ('after', after)):
+                    tab = next((t for t in tabs if (t.tab_id, t.url) == (row[side + '_tab_id'], row[side + '_url'])), None)
+                    shot = row.get(side + '_shot', '')
+                    expect(self, '#783', bool(shot) and os.path.isfile(os.path.join(folder, os.path.basename(shot))),
+                           bool(tab and 'SHOT_MISSING' not in E.page_marks(tab)), (case, side))
             self.assert_sources(visual, case)
-
 
     def test_several_pages_each_keep_every_relation(self):
         self.register()
@@ -154,14 +189,13 @@ class PairingTest(SyncCase):
                  Tab('p4', u + '1', parts=('乙',)), Tab('p2', u + '5', parts=('乙',)))
         _code, visual, _b = self.run_sync(Script((('before', before), ('after', after)), sheet={}))
         expect(self, 'A-08 A-09 A-10 A-11', rows_of(visual), expected_rows(before, after))
-        why = f'工作區分頁 {fake_browser.WORKSPACE}:p3（{u}3）讀取失敗：{fake_browser.READ_FAIL}'
         expect(self, 'A-12', [(row['page_tab_id'], row['reason']) for row in visual['pages_compared']
                               if row.get('reason_code') == 'SIDE_UNREADABLE'],
-               [(f'{fake_browser.WORKSPACE}:p3', f'有一邊讀不到，沒逐處比：{why}；{why}')] * 2)
+               [(f'{fake_browser.WORKSPACE}:p3', '有一邊讀不到，沒逐處比')] * 2)
         for side, moments in (('改前', (None, after)), ('改後', (before, None))):
             _code, visual, _b = self.run_sync(Script((('before', moments[0]), ('after', moments[1])), sheet={}))
             expect(self, 'A-05', [row['reason'] for row in visual['pages_compared'] if row.get('reason_code') == 'WORKSPACE_UNREAD'],
-                   [f'{side}整個工作區程式沒比到：工作區讀取失敗:{fake_browser.UNREAD_WHY}'], side)
+                   [f'{side}整個工作區沒比到'], side)
 
 
 class MomentTest(SyncCase):
@@ -195,7 +229,7 @@ class MomentTest(SyncCase):
 class EndTest(SyncCase):
     """A-16、A-18、A-20、A-21、A-28、A-35、S-21、S-24:一輪怎麼結束、停下、要本人處理、拍改前之前的步驟。"""
 
-    ENDED = {I.HANDED: '交件', I.NO_SHEET: '沒有交件單', I.BROKEN_SHEET: '交件', I.TIMEOUT: '逾時',
+    ENDED = {I.HANDED: '交件', I.NO_SHEET: '沒交件', I.BROKEN_SHEET: '交件', I.TIMEOUT: '逾時',
              I.CRASHED: '當掉', I.STOPPED_BY_USER: '被停止'}
     HAND = {'none': (), 'quote_on_page': ('HANDED_OVER',), 'quote_not_on_page': ('HANDED_QUOTE_UNMATCHED',),
             'tab_gone': ('HANDOFF_UNVERIFIED',)}
@@ -205,6 +239,7 @@ class EndTest(SyncCase):
         page = Tab('p1', PROFILE_URL, parts=('請輸入驗證碼', '其他'))
         for case in itertools.product(I.ENDS, I.STOPS, I.NEEDS_USER, I.STEPS_BEFORE_FIRST, I.STEP_SHOTS):
             end, stop, needs, early_step, step_shot = case
+            self.forget()
             sheet = {'stopped': '卡在驗證碼' if stop else ''}
             if needs != 'none':
                 sheet.update(needs_user='要你輸入驗證碼', needs_user_tab='7:p9' if needs == 'tab_gone' else page.tab_id,
@@ -215,7 +250,12 @@ class EndTest(SyncCase):
             status = self.home.status_file('sync')
             expect(self, 'S-24', status['phase'], 'done', case)
             if end == I.UNAVAILABLE:
-                expect(self, 'A-35', any('假瀏覽器:沒有可用的 agent' in row['msg'] for row in status['results']), True, case)
+                folder = self.evidence_dir(visual)
+                with open(os.path.join(folder, 'events.jsonl'), encoding='utf-8') as source:
+                    events = [json.loads(line) for line in source]
+                expect(self, 'A-35', (any(row['msg'] == '這一輪沒有啟動' for row in status['results']),
+                                      any(row.get('kind') == 'round_end' and '假瀏覽器:沒有可用的 agent'
+                                          in row.get('reason', '') for row in events)), (True, True), case)
                 continue
             marks = codes(visual['list_marks'])
             expect(self, 'A-16', [m['text'] for m in visual['list_marks'] if m['code'] == 'ENDED'],
@@ -229,6 +269,10 @@ class EndTest(SyncCase):
             expect(self, 'S-21', browser.handed, [page.tab_id] if want and want[0] != 'HANDOFF_UNVERIFIED' else [],
                    case)
             expect(self, 'A-18', codes(visual['marks'])['STEPS_BEFORE_FIRST'], int(early_step), case)
+            # 只有交接成立(引句核對到)才當輪進要你做;其他沒做完的照實留在清單上,下次按全部同步重做(#807)
+            expect(self, '#807', [(r['msg'].splitlines()[0], '要你輸入驗證碼' in r['msg'], r.get('url'))
+                                  for r in agent_report.todo(self.home.fb())],
+                   [(f'{HOST} 要你本人處理：', True, PROFILE_URL)] if want == ('HANDED_OVER',) else [], case)
             steps = visual['agent_steps']
             expect(self, 'A-20', [s['action'] for s in steps], (['打開設定頁'] if early_step else []) + ['改經歷'], case)
             for step in steps:
@@ -248,7 +292,7 @@ class EndTest(SyncCase):
                             ('step', '關掉', True)),
                            [('打開設定頁', '拍改前之前', False), ('點經歷', '拍改前之前', False), ('改經歷', between, True),
                             ('再看一次', between, True), ('關掉', '拍改後之後', False)],
-                           ['拍改前之前的瀏覽器步驟：打開設定頁；點經歷']),
+                           ['agent 說：打開設定頁；點經歷']),
             'no after': ((('before', (page,)), ('step', '改經歷', True)), [('改經歷', '拍改前之後、拍改後之前', False)], [])}
         for case, (events, steps, early) in runs.items():
             _code, visual, _b = self.run_sync(Script(events, sheet=sheet))
@@ -257,13 +301,15 @@ class EndTest(SyncCase):
                    (steps, early), case)
             # 要他處理的那幾格另有標記,不再當 agent 說的列一次;交件單多寫的欄照原字列
             expect(self, 'A-28 A-30', [m['text'] for m in visual['list_marks'] if m['code'] == 'AGENT_WORDS'],
-                   ['agent 說：{"note": "順便說"}'], case)
+                   ['agent 說：順便說'], case)
 
 
 class SheetTest(SyncCase):
     """A-22、A-30:交件單一格寫成什麼樣子都不中斷,那一格照 agent 原字列;說的改動對照程式讀到的。"""
 
-    VALUES = {'list': ['甲', '乙'], 'object': {'哪裡': '丙'}, 'number': 7, 'true': True}
+    VALUES = {'list': ['甲', {'欄': ['乙', None, '', []]}],
+              'object': {'哪裡': '丙', '裡面': [{'子項': '丁'}, 8], '空': []},
+              'number': 7, 'true': True}
     CLAIMS = {'match': ((OLD,), (NEW,), OLD, NEW), 'mismatch': ((OLD,), (NEW,), OLD, '別的字'),
               'unchecked': ((OLD,), None, OLD, NEW)}
 
@@ -285,9 +331,14 @@ class SheetTest(SyncCase):
             _code, visual, _b = self.run_sync(Script(events, sheet=sheet))
             marks = codes(visual['list_marks'])
             expect(self, 'A-16', marks['ENDED'], 1, case)
-            if shape in self.VALUES:
-                words = ' '.join(m['text'] for m in visual['list_marks'] if m['source'] == E.AGENT)
-                expect(self, 'A-30', json.dumps(self.VALUES[shape], ensure_ascii=False) in words, True, case)
+            if field == 'registered' and shape in self.VALUES:
+                words = [m['params'].get('words', '') for m in visual['list_marks'] if m['code'] == 'AGENT_WORDS']
+                expected = {'list': ['agent 說：甲', 'agent 說：乙'],
+                            'object': ['丙', '丁', '8'], 'number': ['7'], 'true': ['true']}[shape]
+                found = ' '.join(words)
+                expect(self, 'A-30', all(word.removeprefix('agent 說：') in found for word in expected), True, case)
+                if shape in ('list', 'object'):
+                    expect(self, 'A-30', json.dumps(self.VALUES[shape], ensure_ascii=False) in found, False, case)
             claims = Counter({c: n for c, n in marks.items() if c.startswith('CLAIM_')})
             if field == 'changes' and shape != 'words':
                 expect(self, 'A-22', claims, Counter(), case)
@@ -296,7 +347,8 @@ class SheetTest(SyncCase):
             expect(self, 'A-22', claims, Counter({want: 1}), case)
             if claim == 'mismatch':
                 text = next(m['text'] for m in visual['list_marks'] if m['code'] == 'CLAIM_MISMATCH')
-                expect(self, 'A-22', (f'{OLD} → 別的字' in text, f'{OLD} → {NEW}' in text), (True, True), case)
+                expect(self, 'A-22', (f'agent 說「{OLD} → 別的字」' in text,
+                                      f'程式讀到「{OLD} → {NEW}」' in text), (True, True), case)
             self.assert_sources(visual, case)
 
 
@@ -309,7 +361,23 @@ class SheetTest(SyncCase):
         _code, visual, _b = self.run_sync(Script(events, sheet=sheet))
         match = 'agent 說的改動與程式讀到的相符'
         expect(self, 'A-22', [m['text'] for m in visual['list_marks'] if m['code'].startswith('CLAIM_')],
-               [match, match, match, 'agent 說「乙 → 丁」，程式讀到「甲、丙 → 丁、戊」', 'agent 說「 → 」，程式讀到「甲、丙 → 丁、戊」'])
+               [match, match, match, 'agent 說「乙 → 丁」，程式讀到「甲、丙 → 丁、戊」',
+                'agent 說「沒填改前或改後文字」，程式讀到「甲、丙 → 丁、戊」'])
+
+    def test_second_round_claim_with_no_new_change_names_what_the_program_read(self):
+        """A-22：第二輪頁面已是前輪改後內容時，不把空差異寫成空箭頭。"""
+        self.register()
+        changed = (Tab('p1', PROFILE_URL, parts=('舊內容',)),)
+        updated = (Tab('p1', PROFILE_URL, parts=('Email：新的聯絡方式',)),)
+        self.run_sync(Script((('before', changed), ('after', updated)), sheet={}))
+
+        sheet = {'changes': [{'item': '聯絡方式', 'before': '', 'after': 'Email：新的聯絡方式'}]}
+        _code, visual, _browser = self.run_sync(
+            Script((('before', updated), ('after', updated)), sheet=sheet))
+        claim = next(mark for mark in visual['list_marks'] if mark['code'] == 'CLAIM_MISMATCH')
+        self.assertEqual(claim['text'],
+                         'agent 說「沒填改前，改後是 Email：新的聯絡方式」，程式讀到「這一處沒有改動」')
+        self.assertNotIn(' → ', claim['text'])
 
 
 class SavedTest(SyncCase):
@@ -359,7 +427,7 @@ class StandingTest(SyncCase):
             if source == 'comment_only' and review_first:
                 expect(self, 'S-04', browser.prompts, [], case)
                 expect(self, 'S-04', [m['text'] for m in second['list_marks'] if m['code'] == 'NOT_STARTED'],
-                       ['這一輪沒有啟動：原始履歷沒有可同步的文字變更，沒派 agent'], case)
+                       ['這一輪沒有啟動'], case)
                 expect(self, 'S-04', (codes(second['list_marks'])['SHEET_BROKEN'], second['capture_status']),
                        (0, NO_CAPTURE), case)
             else:
@@ -395,19 +463,21 @@ class IntendedTest(SyncCase):
             _code, visual, _b = self.run_sync(Script((('before', before), ('after', after)), sheet={}))
             marks = {row['item']: row['marker'] for row in visual['intended_changes']}
             paired = removed != 'unpaired'
-            want = {'added': '原稿一字不差找到' if paired else ON_PAGE, 'already': '原本就有' if paired else ON_PAGE,
-                    'unpaired_read': ON_PAGE, 'unpaired_unread': '程式沒比到',
+            want = {'added': '原稿一字不差找到' if paired else ON_PAGE,
+                    'already': '原本就有' if paired else ON_PAGE,
+                    'unpaired_read': ON_PAGE, 'unpaired_unread': '沒比到',
                     'nowhere': '原稿沒在頁上一字不差找到'}[where]
             expect(self, 'S-05' if where in ('added', 'already', 'nowhere') else 'S-06',
                    marks[f'{VARIANT}: 經歷[0]'], want, case)
-            # 句子照 TEMPLATES 的 REMOVED_READ:讀得到、沒讀到、沒比到
             after_read = '讀得到' if removed == 'still' else '沒比到' if where == 'unpaired_unread' else '沒讀到'
-            gone = '原稿沒在頁上一字不差找到' if removed == 'never' else f'刪除內容改前讀得到、改後{after_read}'
+            gone = ('原稿沒在頁上一字不差找到' if removed == 'never' else
+                    f'刪除內容改前讀得到、改後{after_read}')
             expect(self, 'S-07', marks[f'{VARIANT}: 技能[1]'], gone, case)
-            reads = {} if after_read == '沒比到' or removed == 'never' else {'before_read': True, 'after_read': after_read == '讀得到'}
             expect(self, 'S-05 S-07', sorted(visual['intended_changes'], key=lambda row: row['item']), [   # 看板畫的:改前改後原文、頁面標記
                 {'item': f'{VARIANT}: 技能[1]', 'before': '要刪的一行', 'after': '',
-                 'marker': gone, **reads},
+                 'marker': gone,
+                 **({'before_read': True, 'after_read': after_read == '讀得到'}
+                    if removed != 'never' and after_read != '沒比到' else {})},
                 {'item': f'{VARIANT}: 經歷[0]', 'before': OLD, 'after': NEW, 'marker': want}], case)
 
 
@@ -488,7 +558,7 @@ class RestoreTest(SyncCase):
                     'elsewhere': (first_after, Tab('p2', 'https://jobs.example/x', parts=(OLD,))),
                     'unread': (Tab('p1', PROFILE_URL, state=I.UNREADABLE),), 'gone': ()}
         # 工作區空了是程式沒比到(A-05、S-06),不是每一頁都讀到了還沒有
-        marker = {'back': '原稿一字不差找到', 'elsewhere': ON_PAGE, 'unread': '程式沒比到', 'gone': '程式沒比到'}
+        marker = {'back': '原稿一字不差找到', 'elsewhere': ON_PAGE, 'unread': '沒比到', 'gone': '沒比到'}
         # S-18:恢復那一輪開始時的頁跟清單那一版(first_after)一樣、或已經被改過
         starts = {'as_listed': first_after, 'changed': Tab('p1', PROFILE_URL, parts=('別段', '後來改的'))}
         for picks, outcome, start in itertools.product(I.RESTORE_PICKS, outcomes, starts):
@@ -529,13 +599,11 @@ class RestoreTest(SyncCase):
             expect(self, 'S-16', rows_of(restored), expected_rows((starts[start],), after), case)
             expect(self, 'S-17', [row['marker'] for row in restored['intended_changes']], [marker[outcome]], case)
             expect(self, 'S-20', self.status()['sync_review']['reviewed'], False, case)
-            handed = '要你本人處理的那一頁(p1)'
-            over = f'{handed}程式重讀核對到 agent 引的原文，交給你的是這一頁'
+            over = f'要你本人處理的這一頁「{PROFILE_URL}」已交給你；agent 說：別段'
             expect(self, 'S-19', [m['text'] for m in restored['list_marks'] if m['code'] in HANDOVER_CODES], [{
                 'back': over, 'elsewhere': over,
-                'unread': f'{handed}交給你了，程式重讀沒核對到 agent 引的原文：'
-                          f'工作區分頁 7:p1（{PROFILE_URL}）讀取失敗：假瀏覽器:讀頁失敗',
-                'gone': '要你本人處理的那一頁沒有交接：分頁 7:p1 不在工作區'}[outcome]], case)
+                'unread': f'要你本人處理的這一頁「{PROFILE_URL}」已交給你；agent 說「別段」，那一頁讀不到',
+                'gone': '要你本人處理的那一頁沒有交接：那一頁'}[outcome]], case)
             texts = ' '.join(m['text'] for m in restored['list_marks'])
             expect(self, 'S-20', ('已恢復' in texts, '沒做成' in texts), (False, False), case)
 
@@ -546,14 +614,37 @@ class HandOverTest(SyncCase):
     def test_quote_missing_or_handover_failing(self):
         self.register()
         tab = Tab('p1', PROFILE_URL, parts=('甲',))
-        for fail, wanted in (('', '要你本人處理的那一頁(p1)交給你了，程式重讀沒核對到 agent 引的原文：頁上沒有一字不差的這段字'),
-                             ('ego 叫不到前景', '要你本人處理的那一頁沒有交接：ego 叫不到前景')):
+        for fail, wanted in (('', f'要你本人處理的這一頁「{PROFILE_URL}」已交給你；agent 說「乙」，頁上沒有一字不差的這段字'),
+                             ('ego 叫不到前景', '要你本人處理的那一頁沒有交接：那一頁')):
             browser = FakeBrowser(Script((('before', (tab,)), ('after', (tab,))),
                                          sheet={'needs_user': '要你登入', 'needs_user_tab': '7:p1', 'needs_user_quote': '乙'}))
             browser.hand_fail = fail
             _code, visual, _b = self.run_sync(browser=browser)
             expect(self, 'S-19 A-28', ([m['text'] for m in visual['list_marks'] if m['code'] in HANDOVER_CODES], browser.handed),
                    ([wanted], [] if fail else ['7:p1']), fail)
+
+
+class AttentionTest(SyncCase):
+    """#807 第 2、3 點:沒做完不進要你做,連續 3 輪沒做完才開一則寫出試了幾輪、卡在哪;被停止的那一輪不算;乾淨收尾就收掉。"""
+
+    def round(self, sheet, end=I.HANDED):
+        page = Tab('p1', PROFILE_URL, parts=('甲',))
+        self.run_sync(Script((('before', (page,)), ('after', (page,))), sheet=sheet, end=end))
+        return [(r['msg'].splitlines()[0], bool(r.get('need'))) for r in agent_report.todo(self.home.fb())]
+
+    def test_three_unfinished_rounds_in_a_row_open_one_item(self):
+        self.register()
+        stuck = {'stopped': '卡在驗證碼'}
+        head = f'{PLATFORM} {SLOT} 平台履歷同步連續 3 輪沒做完：'
+        expect(self, '#807', [self.round(stuck) for _ in range(3)], [[], [], [(head, True)]])
+        expect(self, '#807', 'agent 停下：卡在驗證碼' in agent_report.todo(self.home.fb())[0]['msg'], True)
+        expect(self, '#807', self.round({}), [])
+
+    def test_a_round_the_user_stopped_does_not_count(self):
+        self.register()
+        stuck = {'stopped': '卡在驗證碼'}
+        rounds = [self.round(stuck), self.round(stuck), self.round(stuck, end=I.STOPPED_BY_USER), self.round(stuck)]
+        expect(self, '#807', [len(r) for r in rounds], [0, 0, 0, 1])
 
 
 class RegisterTest(SyncCase):
@@ -617,10 +708,15 @@ class PromptTest(SyncCase):
                 expect(self, 'A-35', ('平台履歷未登記' in messages, browser.prompts), (True, []), case)
                 continue
             if master == 'missing':
-                expect(self, 'A-35', ('找不到可讀的指定履歷原稿' in messages, browser.prompts), (True, []), case)
+                expect(self, 'A-35', ('這一輪沒完成' in messages, browser.prompts), (True, []), case)
                 continue
             if not can_open:
-                expect(self, 'A-35', (OPEN_FAIL in messages, browser.prompts), (True, []), case)
+                folder = self.evidence_dir(self.visual())
+                with open(os.path.join(folder, 'events.jsonl'), encoding='utf-8') as source:
+                    events = [json.loads(line) for line in source]
+                expect(self, 'A-35', ('這一輪沒有啟動' in messages, browser.prompts,
+                                      any(row.get('kind') == 'program_error' and OPEN_FAIL in row.get('reason', '')
+                                          for row in events)), (True, [], True), case)
                 continue
             prompt = browser.prompts[0]
             expect(self, 'S-02', (PROFILE_URL in prompt, NEW in prompt), (True, True), case)
@@ -629,7 +725,6 @@ class PromptTest(SyncCase):
             recorded = ''.join(open(os.path.join(folder, name), encoding='utf-8').read()
                                for name in os.listdir(folder) if name.startswith('instruction'))
             expect(self, 'A-32', prompt in recorded, True, case)
-
 
 
 class PrintedTest(SyncCase):
@@ -647,19 +742,16 @@ class PrintedTest(SyncCase):
         expect(self, 'A-02 C-04', (before.text.splitlines(), after.text.splitlines()), ([
             f'before material_id={before.material_id}', f'[7:p1] {PROFILE_URL} (read)',
             f'[7:p2] {url}2 (read)', '截圖沒取得：假瀏覽器:截圖失敗',
-            f'[7:p3] {url}3 (unreadable)', f'工作區分頁 7:p3（{url}3）讀取失敗：假瀏覽器:讀頁失敗',
-            f'[7:] {url}4 (unreadable)', f'工作區分頁 7:（{url}4）讀取失敗：{no_label}', f'截圖沒取得：{no_label}',
-            f'[7:p5] {url}5 (no_text)', f'工作區分頁 7:p5（{url}5）沒有可讀文字',
-            f'[7:p6] {url}6 (too_long)', f'工作區分頁 7:p6（{url}6）的讀取材料超過 100000 字元上限', '1. 甲', '2. 乙'],
+            f'[7:p3] {url}3 (unreadable)', f'{shown("p3", url + "3")}讀取失敗：假瀏覽器:讀頁失敗',
+            f'[7:] {url}4 (unreadable)', f'{shown("", url + "4")}讀取失敗：{no_label}', f'截圖沒取得：{no_label}',
+            f'[7:p5] {url}5 (no_text)', f'{shown("p5", url + "5")}沒有可讀文字',
+            f'[7:p6] {url}6 (too_long)', f'{shown("p6", url + "6")}的讀取材料超過 100000 字元上限', '1. 甲', '2. 乙'],
             [f'after material_id={after.material_id}', '工作區沒有可拍的分頁']))
         # 清單上每一頁自己的標記照證據夾存的那一刻寫(A-04、A-06)
         expect(self, 'A-04 A-06', [(m['code'], m['text']) for m in visual['marks'] if m['code'] in PAGE_CODES], [
-            ('SHOT_MISSING', f'{url}2截圖沒取得：假瀏覽器:截圖失敗'),
-            ('PAGE_UNREADABLE', f'{url}3讀不到：工作區分頁 7:p3（{url}3）讀取失敗：假瀏覽器:讀頁失敗'),
-            ('PAGE_UNREADABLE', f'{url}4讀不到：工作區分頁 7:（{url}4）讀取失敗：{no_label}'),
-            ('SHOT_MISSING', f'{url}4截圖沒取得：{no_label}'),
-            ('PAGE_NO_TEXT', f'{url}5讀不出字：工作區分頁 7:p5（{url}5）沒有可讀文字'),
-            ('PAGE_TOO_LONG', f'{url}6超過讀取上限：工作區分頁 7:p6（{url}6）的讀取材料超過 100000 字元上限')])
+            ('SHOT_MISSING', f'{shown("p2", url + "2")}沒有截圖'), ('PAGE_UNREADABLE', f'{shown("p3", url + "3")}讀不到'),
+            ('PAGE_UNREADABLE', f'{shown("", url + "4")}讀不到'), ('SHOT_MISSING', f'{shown("", url + "4")}沒有截圖'),
+            ('PAGE_NO_TEXT', f'{shown("p5", url + "5")}讀不出字'), ('PAGE_TOO_LONG', f'{shown("p6", url + "6")}太長沒讀完')])
 
 
 class SnapCommandTest(unittest.TestCase):

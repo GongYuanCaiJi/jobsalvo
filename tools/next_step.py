@@ -21,6 +21,7 @@ import json
 import math
 import re
 
+import agent_report
 import config as cf
 import delivery_state as ds
 import form_record as fr
@@ -92,6 +93,7 @@ def prep_why(fb, job, flow, tried, auto):
 UNSURE_LINE = '{agent} 會去信箱和平台的應徵紀錄查到底送出沒有'
 
 HANDED_LINE = '你處理好了,{agent} 會接著重填這張,填好停在送出前'
+REDO_LINE = '這一輪沒做完，{agent} 下一輪會自動重做（已連續 {n} 輪沒做完，{limit} 輪才找你）'
 
 
 def handed(fb, i):
@@ -102,7 +104,8 @@ def handed(fb, i):
     if ds.state(m) not in ds.HANDBACK:
         return None
     at = str((m.get('apply') or {}).get('at') or '')
-    done = [it for it in fb.get('__inbox__') or [] if isinstance(it, dict) and it.get('job') == i
+    done = [it for it in fb.get('__inbox__') or [] if isinstance(it, dict)
+            and i in (it.get('job'), *(p.get('job') for p in (it.get('parts') or {}).values()))
             and it.get('done') and not it.get('res') and str(it.get('done_at') or '') > at]
     return max(done, key=lambda it: (it['done_at'], str(it.get('at'))))['id'] if done else None
 
@@ -115,9 +118,12 @@ def _fill(fb, job, flow, tried, full):
     s = ds.state(m)
     back = None if m.get('rm') or ds.company_blocked(fb, job) else handed(fb, i)
     a = m.get('apply') or {}
+    # 上一輪 agent 沒做完、還沒連續 RETRY_ROUNDS 輪:自動重填,不等他(#807;要求不符那幾步歸 _requirement)
+    tries = (fb.get(agent_report.RETRY) or {}).get('fill:' + i, 0)
+    again = tries if 0 < tries < agent_report.RETRY_ROUNDS and s in ds.HANDBACK and not a.get('unmet') else 0
     # 擋住它的是職缺或網站的事實(職缺關了、要登入):重填只會撞同一面牆,等他處理好交回來(handed)才填
     if (not flow.get('auto_fill') or m.get('app') != 'ship'
-            or not (back or s in ds.AUTO_FILL and mine(fb, job) and not blocked(m))):
+            or not (back or (s in ds.AUTO_FILL or again) and mine(fb, job) and not blocked(m))):
         return None
     # 「🔁 再投一次」把上一次的表單和填表紀錄收進 tries:第幾次投要算進記號,不然跟第一次一樣是 fill:<id>:new
     n = len(m.get('tries') or []) + len(m.get('history') or [])
@@ -125,8 +131,8 @@ def _fill(fb, job, flow, tried, full):
             'fill:' + i + ':' + str(a.get('at') or 'new') + (':' + str(n) if n else ''))
     if mark in tried or (full and not ds.held(fb, i, job)):
         return None
-    line = HANDED_LINE if back else ds.AUTO_FILL[s]
-    return {'do': 'fill', 'mark': mark, 'line': line.format(agent=cf.AGENT, stale=a.get('stale') or '要寄的檔案換過了')}
+    line = HANDED_LINE if back else REDO_LINE if again else ds.AUTO_FILL[s]
+    return {'do': 'fill', 'mark': mark, 'line': line.format(agent=cf.AGENT, n=again, limit=agent_report.RETRY_ROUNDS, stale=a.get('stale') or '要寄的檔案換過了')}
 
 
 def _requirement(fb, job, flow, tried):
@@ -299,20 +305,19 @@ def card(fb, url, status=None, auto=None, stop=None, ctx=None, job=None):
                     intended = [] if row.get('task') == 'fill' else row.get('intended_changes') or []
                     for change in intended:
                         marker = str(change.get('marker') or '')
-                        reads = 'before_read' in change or 'after_read' in change
-                        label = str(change.get('item') or item) + '：' + (marker or ('' if reads else '沒比到'))
-                        if reads:
-                            label += ('；' if marker else '') + '改前讀得到：' + (
-                                '是' if change.get('before_read') else '否') + '；改後讀得到：' + (
-                                '是' if change.get('after_read') else '否')
+                        # 有讀到改前改後的結果就照列,不再另寫「沒比到」;兩樣都沒有才寫沒比到
+                        read = ('改前讀得到：' + ('是' if change.get('before_read') else '否') + '；改後讀得到：'
+                                + ('是' if change.get('after_read') else '否')
+                                if 'before_read' in change or 'after_read' in change else '')
+                        label = (str(change.get('item') or item) + '：'
+                                 + ('；'.join(part for part in (marker, read) if part) or '沒比到'))
                         lines.append(['idle', label, {'sync': True}])
                     if not intended and isinstance(row.get('verdicts'), list):
                         lines.append(['idle', item + '：' + ('、'.join(row['verdicts']) or '沒比到'),
                                       {'sync': True}])
-                    for reason in dict.fromkeys(
-                            shot['screenshot_error'] for step in row.get('agent_steps') or []
-                            for shot in step.get('screenshots') or [] if shot.get('screenshot_error')):
-                        lines.append(['idle', '瀏覽器操作沒截到圖：' + reason, {'sync': True}])
+                    if any(shot.get('screenshot_error') for step in row.get('agent_steps') or []
+                           for shot in step.get('screenshots') or []):
+                        lines.append(['idle', '這一頁沒有截圖', {'sync': True}])
                     changes = row.get('page_changes') or []
                     for change in changes:
                         verdict = '、'.join(change.get('verdicts') or []) or '沒比到'
@@ -545,6 +550,7 @@ def view(fb, url, status, nx):
                  else ({'kind': 'wait', 'text': '⚠ ' + str(wait_why)[:60]} if wait_why
                        else {'kind': 'ok', 'text': '✅ 你已確認,等送出' if s == 'confirmed' else '✅ 填好了,等你確認送出'}) if done and ok
                  else {'kind': 'gone', 'text': '📄 ' + GONE_SHORT} if s == 'gone'
+                 else {'kind': 'redo', 'text': autoline[1]} if done and auto_do == 'fill'     # 沒做完、下一輪自動重做:不算沒填成
                  else {'kind': 'bad', 'text': '❌ ' + str(issue or '沒填成')[:60]} if done
                  else {'kind': 'todo'})
     block = blocked(m)
@@ -568,43 +574,54 @@ def view(fb, url, status, nx):
     elif s in ('gone', 'nopage') and not auto_do:
         # 只是頁面沒了或那一輪沒跑完:重填是程式的事,不算要你處理;填表進度算在還沒填
         todo, fill_cell = '', {'kind': 'todo'}
-    if done:
-        for observation in a.get('field_observations') or []:
-            if isinstance(observation, dict):
-                line.append(['idle', str(observation.get('q') or '欄位') + '：'
-                             + str(observation.get('marker') or '沒比到')])
-        for page in a.get('unreadable_pages') or []:
-            if isinstance(page, dict):
-                label = str(page.get('url') or '工作區分頁') + (
-                    '：截圖沒取得' if page.get('kind') == 'screenshot' else '：讀不到')
-                if page.get('reason'):
-                    label += '（' + str(page['reason']) + '）'
-                line.append(['idle', label])
-        report = (a.get('fill_changes') or a.get('page_changes_since_fill') or
-                  (a.get('submit_fail') or {}).get('changes_since_fill') or
-                  (a.get('sent') or {}).get('changes_since_fill'))
-        if isinstance(report, dict):
-            for mark in report.get('marks') or []:
-                if isinstance(mark, dict) and mark.get('text'):
-                    line.append(['idle', str(mark['text'])])
-            for page in report.get('pages') or []:
-                if not isinstance(page, dict):
-                    continue
-                label = str(page.get('page_url') or page.get('page_tab_id') or '工作區分頁')
-                if page.get('compared'):
-                    for change in page.get('changes') or []:
-                        before = '\n'.join(str(x) for x in change.get('before_parts') or []) or '（沒有原文）'
-                        after = '\n'.join(str(x) for x in change.get('after_parts') or []) or '（沒有新原文）'
-                        full = '改前：' + before + '\n改後：' + after
-                        short = full.replace('\n', ' ⏎ ')
-                        if len(short) > 180:
-                            short = short[:177] + '…'
-                        line.append(['idle', label + '：' + short, {'sync': True, 'full': full}])
-                else:
-                    line.append(['idle', label + '：' + str(page.get('reason') or '程式沒比到')])
+    evidence = _evidence(a) if done else []
     return _icons({'locked': False, 'busy': working, 'stage': stage, 'line': line, 'shots': shots, 'why': why,
+                   'evidence': evidence,
                    'buttons': [b for b in main + side if b], 'todo': todo, 'fill': fill_cell, 'up': up, 'eye': eye, 'rf': rf,
                    'soon': s == 'confirmed' and not prob, 'review': s == 'parked' and bool(a.get('session'))})
+
+
+def _evidence(a):
+    """填表這一輪的證據:每一格的核對、讀不到的頁、頁面紀錄的每一則與每一頁,各帶誰說的(marks.SOURCE)。
+    卡上第一層只掛來源標籤與則數,句子、原文、截圖收在「看證據」(#807 第 1 點);每一則都在,不各佔一行。"""
+    from web.marks import SOURCE, Source
+    out = []
+    for observation in a.get('field_observations') or []:
+        if isinstance(observation, dict):
+            detail = str(observation.get('q') or '那一格') + '：' + str(observation.get('marker') or '沒比到')
+            row = {'source': SOURCE.get(observation.get('code'), Source.NOT_COMPARED).value, 'text': detail}
+            if observation.get('code') in ('NOT_FOUND_VERBATIM', 'SAID_VS_ACTUAL'):
+                if observation.get('said'):
+                    row['text'] += '；agent 說：' + str(observation['said'])
+                if observation.get('shot'):
+                    row['shots'] = [[observation['shot'], '這一格的截圖' if observation.get('shot_cropped') else '那一頁的截圖']]
+            out.append(row)
+    for page in a.get('unreadable_pages') or []:
+        if isinstance(page, dict):
+            url = str(page.get('url') or '')
+            out.append({'source': Source.NOT_COMPARED.value, 'text': (url + '：' if url else '')
+                        + ('那一頁沒有截圖' if page.get('kind') == 'screenshot' else '那一頁讀不到')})
+    report = (a.get('fill_changes') or a.get('page_changes_since_fill') or
+              (a.get('submit_fail') or {}).get('changes_since_fill') or (a.get('sent') or {}).get('changes_since_fill'))
+    if not isinstance(report, dict):
+        return out
+    out += [{'source': str(mark.get('source') or Source.PROGRAM.value), 'text': str(mark['text'])}
+            for mark in report.get('marks') or [] if isinstance(mark, dict) and mark.get('text')]
+    for page in report.get('pages') or []:
+        if not isinstance(page, dict):
+            continue
+        title, url = str(page.get('page_title') or page.get('title') or ''), str(page.get('page_url') or '')
+        label = f'{title}（{url}）' if title and url else url or '那一頁'
+        if page.get('compared'):
+            for change in page.get('changes') or []:
+                before = '\n'.join(str(x) for x in change.get('before_parts') or []) or '（沒有原文）'
+                after = '\n'.join(str(x) for x in change.get('after_parts') or []) or '（沒有新原文）'
+                out.append({'source': Source.PROGRAM.value, 'text': label, 'full': '改前：' + before + '\n改後：' + after})
+        else:       # 沒逐處比的那一頁也附程式拍到的截圖(listing._page_row,#783)
+            out.append({'source': Source.NOT_COMPARED.value, 'text': label + '：' + str(page.get('reason') or '沒比到'),
+                        'shots': [[page[side + '_shot'], word] for side, word in (('before', '改前截圖'), ('after', '改後截圖'))
+                                  if page.get(side + '_shot')]})
+    return out
 
 
 # 卡上的圖示跟看板其他地方同一套線條圖示(看板的 ic() 名字):字開頭的表情符號拆出來成 ic,字本身不帶符號

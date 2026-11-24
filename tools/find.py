@@ -27,14 +27,14 @@ from web.brief import FETCH, Brief
 from web.marks import joined, say
 from web.numbered import Numbered
 from web.outside import Real
-from web.round import End, record_unstarted, run as run_round
-from web.sheet import Field, How, Schema, Verdict
+from web.round import End, end_label, record_unstarted, run as run_round, stops
+from web.sheet import Cell, Field, How, Schema, Verdict
 
 STATUS = 'converge_status.json'
 ROUND_HISTORY_LIMIT = 20
 NO_WORKSPACE = {'id': 0, 'name': ''}        # 找缺的 agent 不用瀏覽器工作區:搜尋用網路搜尋與 page_fetch,判斷只看材料
 MODE_LABEL = {'both': '更深＋更廣', 'deep': '更深', 'wide': '更廣', 'dir': '指定方向', 'add': '使用者自己貼的網址'}
-PAGE_WHY = {'partial': '部分頁面', 'unknown': '頁面無法讀取'}
+PAGE_WHY = {'partial': '頁面太長沒讀完', 'unknown': '頁面讀不到'}
 PAGE_FIELDS = (('title', '職稱'), ('company', '公司'), ('posted_at', '刊登日期'),
                ('applicants', '應徵人數(text 寫最多幾人的整數,或「沒有上限」)'), ('status', '招募狀態'))
 SUMMARY_FIELDS = (('fit', '為什麼適合你'), ('co', '公司在做什麼'), ('loc', '地點'), ('salary', '薪資'),
@@ -275,6 +275,8 @@ def read_urls(browser, urls, review_round):
         row = review_round.page(record, record['why'] or record['status'], shot=record['shot'] or None)
         shots[url] = {key: review_round.rel(row[name]) for key, name in
                       (('page_file', 'file'), ('screenshot_file', 'shot')) if row.get(name)}
+        if record.get('shot_why'):
+            shots[url]['screenshot_error'] = True
         with contextlib.suppress(OSError):
             os.remove(record['shot'])
         os.rmdir(directory)
@@ -294,10 +296,15 @@ def _ok(cell):
 def rows_by_url(record, urls):
     """每個候選對到恰好一列(J-11、C-16);判斷沒交件、交件單壞掉,每個候選都帶著原因照「沒核對到」進待評估(J-08)。
     回 ({網址: (那一列, 問題)}, 對不上候選的列數)。"""
-    issue = (record.sheet.broken or (say('ENDED', end=record.end.value) if record.end is not End.HANDED else None))
+    issue = (record.sheet.broken or (say('ENDED', end=end_label(record.end))
+                                     if record.end is not End.HANDED else None))
     cells = record.sheet.cells.get('candidates')
     if issue or not isinstance(cells, list):
-        issue = issue or say('SHEET_BROKEN', why=cells.marks[0].text)
+        cell = cells if isinstance(cells, Cell) else None
+        cell_marks = cell.marks if cell is not None else ()
+        detail = dict(cell_marks[0].params) if cell_marks else {}
+        issue = issue or say('SHEET_BROKEN', why=detail.get('why') or detail.get('actual') or '',
+                             said=joined(cell.said if cell is not None else None))
         return {url: ({}, issue) for url in urls}, 0
     listed = {}
     good = [row for row in cells if _ok(row['url'])]
@@ -307,10 +314,63 @@ def rows_by_url(record, urls):
     for url in urls:
         found = listed.get(url) or []
         row = found[0] if len(found) == 1 else {}
-        out[url] = (row, say('ROW_UNLISTED') if not found else say('ROW_TWICE') if len(found) > 1 else
-                    None if 'keep' not in row or _ok(row['keep']) else
-                    say('ROW_FIELD_BAD', field='keep', why=row['keep'].marks[0].text))
+        if not found:
+            problem = say('ROW_UNLISTED')
+        elif len(found) > 1:
+            problem = say('ROW_TWICE')
+        elif 'keep' not in row or _ok(row['keep']):
+            problem = None
+        elif row['keep'].said is None:
+            problem = say('ROW_UNLISTED')
+        else:
+            detail = dict(row['keep'].marks[0].params) if row['keep'].marks else {}
+            problem = say('ROW_FIELD_BAD', field='keep', why=detail.get('why') or detail.get('actual') or '',
+                          said=joined(row['keep'].said), actual=detail.get('actual') or '不是可選的值')
+        out[url] = (row, problem)
     return out, len(cells) - len(good)
+
+
+def _field_shots(browser, rows, urls, shots, review_round, *, include_all=False):
+    """每個無法核對的欄位附它引用原文的位置;找不到原字時瀏覽器退回整頁截圖。"""
+    from web.sheet import quote as sheet_quote
+    from web.snap import field_shot_url as capture_field
+
+    out = {url: {} for url in urls}
+    for url in urls:
+        row, issue = rows[url]
+        keep = row.get('keep')
+        if (not include_all and not issue and keep is not None and _ok(keep) and keep.said != 'true'):
+            continue
+        for name, _label in PAGE_FIELDS + SUMMARY_FIELDS:
+            cell = row.get(name)
+            if cell is not None and _ok(cell):
+                continue
+            quoted = sheet_quote(cell) if cell is not None else ''
+            fallback = (shots.get(url) or {}).get('screenshot_file')
+            if not quoted:
+                if fallback:
+                    out[url][name] = {'file': fallback, 'cropped': False}
+                continue
+            directory = tempfile.mkdtemp(prefix='jobsalvo-find-field-')
+            path = os.path.join(directory, 'field.png')
+            try:
+                capture = capture_field(browser, url, path, quoted)
+            except Exception as error:  # noqa: BLE001 - use the page screenshot captured with the read as fallback
+                event = review_round.note('field_shot_failed', card=url, field=name, quote=quoted,
+                                          reason=str(error))
+                if fallback:
+                    out[url][name] = {'file': fallback, 'cropped': False}
+            else:
+                event = review_round.file('field_shot', path, 'field-' + name, card=url,
+                                          field=name, quote=quoted, cropped=capture['cropped'])
+                if event.get('file'):
+                    out[url][name] = {'file': review_round.rel(event['file']),
+                                      'cropped': capture['cropped']}
+            finally:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
+                    os.rmdir(directory)
+    return out
 
 
 def _applicants(record):
@@ -337,11 +397,16 @@ def term_values(row, rates):
     return values
 
 
-def card_of(url, candidate, page, row, shot, run, issue, jobs, terms, rates):
+def card_of(url, candidate, page, row, shot, field_shots, run, issue, jobs, terms, rates):
     """一列交件 → 一張卡;沒交的列是空的,每一欄照核對結果標,沒核對到的值不拿來決定(J-04–J-07、J-14、J-15、J-17、J-21)。"""
     import prefs
     fields = {name: listing.claim(row.get(name)) for name, _label in PAGE_FIELDS}
     summary = {name: listing.claim(row.get(name)) for name, _label in SUMMARY_FIELDS}
+    for name, field_shot in (field_shots or {}).items():
+        claim_row = fields.get(name) or summary.get(name)
+        if claim_row is not None and field_shot:
+            claim_row['shot'] = field_shot['file']
+            claim_row['shot_cropped'] = bool(field_shot.get('cropped'))
     records = {**fields, **summary}
     facts = {name: record['claim'] for name, record in records.items() if record['state'] == cards.VERIFIED}
     claims = [record for name, record in records.items() if row.get(name) is not None and row[name].said is not None]
@@ -367,7 +432,7 @@ def card_of(url, candidate, page, row, shot, run, issue, jobs, terms, rates):
     choice = resume_choices().get(row['resume'].said) if row and row['resume'].verdict is Verdict.VERIFIED else None
     today = time.strftime('%Y-%m-%d')
     deadline = summary['deadline']['claim'] if summary['deadline']['state'] == cards.VERIFIED else ''
-    entry = {'id': url, 'target': cards.name(facts.get('title') or '職缺頁待確認', facts.get('company')),
+    entry = {'id': url, 'target': cards.name(facts.get('title') or url, facts.get('company')),
              'title': facts.get('title', ''), 'company': facts.get('company', ''),
              'cat': joined(said['cat']), 'chan': '官方', 'ammo': '', 'note': str(score), 'bk': False, 'dead': False,
              'added': today, 'src': source,
@@ -505,11 +570,11 @@ def _update_preference_note(current):
     covered = {row['card'].said for row in rows if counts[row['card'].said] == 1
                and (row['unclear'].said or joined(row['hypothesis'].said) and joined(row['hypothesis'].said) in agent_part)}
     if len(covered) < len(listed):
-        return f'偏好筆記未更新({record.end.value})：有 {len(listed) - len(covered)} 張新表態沒有完整歸屬'
+        return f'偏好筆記有 {len(listed) - len(covered)} 張新表態還沒完整歸屬，沒有更新'
     try:
         changed_custom = prefs.apply_agent_note(note, cf.PREFERENCE_NOTE, base=base)
-    except ValueError as error:
-        return f'偏好筆記未更新：{error}'
+    except ValueError:
+        return '偏好筆記沒有更新'
     feedback_dump.save_feedback_checkpoint(journal_lines, cf.PREFERENCE_NOTE)
     return '偏好筆記的使用者自訂區未變；agent 嘗試修改的內容已忽略' if changed_custom else ''
 
@@ -530,7 +595,9 @@ def run(ask, board, browser, limit, minutes):
     try:
         bd.load(board)
     except (bd.BoardError, OSError) as error:
-        message = f'看板讀不了,這一輪沒做:{error}'
+        import evidence
+        evidence.Round('find', 'error', board=board).note('program_error', reason=str(error))
+        message = '看板讀不到，這一輪沒做'
         status('failed', msg=message, finished_at=time.time())
         print(message)
         return 1
@@ -559,12 +626,15 @@ def run(ask, board, browser, limit, minutes):
     notes = joined(search.sheet.said('notes'))
     if search.end is not End.HANDED or search.sheet.broken:
         timeup = search.end is End.TIMEOUT
-        why = search.sheet.broken.text if search.sheet.broken else search.end_why
-        finish([], 0, notes, ['時間到，這輪沒找到' if timeup else f'搜尋 agent 沒交件（{search.end.value}）：{why}'],
-               phase='done' if timeup else 'failed', found=0, timeup=timeup)
+        why = (search.sheet.broken.text if search.sheet.broken else
+               'agent 沒交代' if search.end is End.NO_SHEET else
+               '這一輪沒有啟動' if search.end is End.NOT_STARTED else
+               say('ENDED', end=end_label(search.end)).text)
+        finish([], 0, notes, [why], phase='done' if timeup else 'failed', found=0, timeup=timeup)
         return 0 if timeup else 1
     status('agent', step='整理新表態偏好')
-    messages = [_save_website_notes(search.sheet, search.id), _update_preference_note(current)]
+    messages = [*(mark.text for mark in stops(search)), _save_website_notes(search.sheet, search.id),
+                _update_preference_note(current)]
     candidates = {}
     for row in search.sheet.rows('candidates'):
         candidates.setdefault(joined(row['url']), {key: joined(value) for key, value in row.items()})
@@ -586,11 +656,13 @@ def run(ask, board, browser, limit, minutes):
     judged = current.agent(judge_brief(ask, shared, material, urls, pages, feedback, jobs),
                            {'urls': frozenset(urls), 'resumes': frozenset(resume_choices())}, 3600, materials=(material,))
     rows, unmatched = rows_by_url(judged, urls)
+    field_shots = _field_shots(browser, rows, urls, shots, review_round)
     run_fields = {'round': stamp, 'mode': ask['mode'], 'direction': ask['direction']}
     terms, rates, entries, rejected = round_terms(ask), browser.exchange_rates(), [], []
     for url, page in zip(urls, pages):
         row, issue = rows[url]
-        entry = card_of(url, candidates[url], page, row, shots[url], run_fields, issue, jobs, terms, rates)
+        entry = card_of(url, candidates[url], page, row, shots[url], field_shots[url], run_fields, issue, jobs,
+                        terms, rates)
         rule, why, missed = (None, '', []) if issue else dropped(row, entry, feedback, terms, rates)
         if rule is None:
             entries.append(entry)
@@ -605,11 +677,11 @@ def run(ask, board, browser, limit, minutes):
     incomplete = sum(issue is not None for _row, issue in rows.values())
     problems = []
     if incomplete:
-        problems.append(f'有 {incomplete} 張候選的判斷交件未完整，已列為待確認'
-                        + ('' if judged.end is End.HANDED else f'（判斷 agent {judged.end.value}）'))
+        problems.append(f'有 {incomplete} 張候選核對不了，已列出'
+                        + ('' if judged.end is End.HANDED else '；agent 沒交代'))
     if unmatched:
-        problems.append(f'另有 {unmatched} 列判斷交件無法配對候選')
-    messages[:0] = problems
+        problems.append(f'另有 {unmatched} 項沒比到')
+    messages[:0] = [*problems, *(mark.text for mark in stops(judged))]
     finish(entries, len(urls) - incomplete, notes, messages, gone_rows, found=len(candidates), over=len(fresh) - len(urls))
     return 0
 

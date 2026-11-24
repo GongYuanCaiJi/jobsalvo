@@ -394,6 +394,23 @@ CHECKS=[
  # 「留在原地」只對心情標記成立。他按了加入準備,卡片就該離開待評估——
  # 漏掉這半條的時候,他在待評估頁上看到一張掛著「正在準備履歷」的卡,
  # 以為沒生效又按一次。這裡兩半一起驗。
+ ('新職缺卡還沒表態:第一層只有表態那一排,送去準備與外部送出在 ⋯;按「我已在外部送出…」才攤開挑履歷那一塊(#807 第 5 點)',"""
+   document.querySelector('[data-tab="none"]').click(); await T.idle();
+   var h=document.querySelectorAll('#app .cohead')[0]; if(h&&!h.parentNode.open)h.click(); await T.idle();
+   var card=[...document.querySelectorAll('#app article[data-fid]')].filter(function(a){return !a.querySelector('.fb-b.on');})[0];
+   if(!card)return '找不到還沒表態的卡';
+   var bad=[], fid=card.getAttribute('data-fid');
+   if(card.querySelector('.sr-l button'))bad.push('還沒表態的卡第一層還有別的按鈕:'+card.querySelector('.sr-l button').textContent.trim());
+   var more=card.querySelector('.sr-r');
+   if(!more||!more.querySelector('[data-adv="prep"]'))bad.push('⋯ 裡沒有「送去準備履歷」');
+   var sn=card.querySelector('details.sentnow');
+   if(sn&&!sn.hidden)bad.push('還沒按,挑履歷那一塊就攤在卡上');
+   T.press('[data-sentopen]',card); await T.idle();
+   var again=document.querySelector('#app article[data-fid="'+CSS.escape(fid)+'"]');
+   var opened=again&&again.querySelector('details.sentnow');
+   if(!opened||opened.hidden||!opened.open||!opened.querySelector('[data-adv="sent"]'))bad.push('按了「我已在外部送出…」沒有攤開挑履歷與送出鈕');
+   return bad.join('；');
+ """),
  ('標完心情卡片留在原地,按了加入準備就離開',"""
    document.querySelector('[data-tab="none"]').click(); await T.idle();
    var h=document.querySelectorAll('#app .cohead')[0]; if(h)h.click();
@@ -727,6 +744,7 @@ OUTCOME_CHECKS=[
    document.querySelectorAll('#app details.cogrp:not([open]) > summary.cohead').forEach(function(h){h.click();}); await T.idle();
    T.press('#app article[data-fid="'+fid+'"] [data-oc="iv"]'); await T.idle();
    document.querySelector('#tabs [data-tab="iv"]').click(); await T.idle();
+   var v=document.querySelector('#app [data-ivview="iv"]:not(.on)'); if(v){v.click(); await T.idle();}   // 前面的檢查可能停在題庫、共有題(這台裝置記得)
    // 前面的面試檢查點進過某一場(看板記得),先回到面試清單
    var back=document.querySelector('#app [data-ivopen=""]'); if(back){back.click(); await T.idle();}
    var row=document.querySelector('#app .iv-oc[data-fid="'+fid+'"]'), hd=[...document.querySelectorAll('#app > h2.applyhd')].filter(function(h){return h.textContent.indexOf('面完了,記結果')===0;})[0];
@@ -755,6 +773,7 @@ OUTCOME_CHECKS=[
    document.querySelectorAll('#app details.cogrp:not([open]) > summary.cohead').forEach(function(h){h.click();}); await T.idle();
    T.press('#app article[data-fid="'+fid+'"] [data-oc="iv"]'); await T.idle();
    document.querySelector('#tabs [data-tab="iv"]').click(); await T.idle();
+   var v=document.querySelector('#app [data-ivview="iv"]:not(.on)'); if(v){v.click(); await T.idle();}   // 前面的檢查可能停在題庫、共有題(這台裝置記得)
    var back=document.querySelector('#app [data-ivopen=""]'); if(back){back.click(); await T.idle();}
    var sel='#app .iv-oc[data-fid="'+fid+'"]';
    T.press(sel+' [data-oc="offer"]'); await T.idle();
@@ -1485,7 +1504,7 @@ ANS_CHECKS = [
    if(!B.querySelector('[data-runone^="apply|"]')&&!/自動重填/.test(B.textContent))bad.push('頁面不見了,卡上沒有重填(也沒寫會自動重填)');
    var fl=document.getElementById('filllistbar');
    if(fl&&[].slice.call(fl.querySelectorAll('[data-livego]')).some(function(x){return x.getAttribute('data-livego')===ids[1];}))bad.push('「🚀 填表進度」上頁面不見了的那張還有 👀');
-   if([].slice.call(document.querySelectorAll('.todo-why [data-livego]')).some(function(x){return x.getAttribute('data-livego')===ids[1];}))bad.push('要你處理的那一條還有 👀');
+   if([].slice.call(document.querySelectorAll('.todo [data-livego]')).some(function(x){return x.getAttribute('data-livego')===ids[1];}))bad.push('要你處理的那一條還有 👀');
    return await done();
  """, 'ans_cards'),
  ('代投修改:agent 填好的卡有「👀 看現在的頁面」和「✏️ 要 agent 改」;答案改過、網頁待重打時藏起核准;寫一句話交給同一隻 agent,改好了才又能核准', SEED + r"""
@@ -3370,13 +3389,14 @@ CHECKS.append((
 
 
 CHECKS.append((
-    '設定頁「你的履歷」收著時寫每一份履歷的名稱,平台履歷寫實際狀態:回報裡同步卡在登入的算卡住,那一份旁邊「看回報」打開那一則',
+    '設定頁「你的履歷」收著時寫每一份履歷的名稱,平台履歷寫實際狀態:回報裡同步交接給你的那一份算卡住,那一份旁邊「看回報」打開那一則',
     r"""
-      // 回報寫了是哪一份(平台 語言/履歷)就對到那一份;示範資料沒登記平台履歷時,對不上的卡住也要單獨列出來
+      // 回報記著卡住的是哪一份(agent_report.settle 的 parts)就對到那一份;示範資料沒登記平台履歷時,對不上的卡住也要單獨列出來
       var bad=[], cf=await fetch('/api/settings').then(function(r){return r.json();}), ps=(cf.profile_status||[])[0]||{platform:'示範平台',lang:'zh',variant:'board-check'};
-      var keep=(await T.state()).__inbox__||[];
-      await T.put('__inbox__',[{id:'rzs1',at:'2026-01-01T09:00:00',from:'平台履歷同步',msg:ps.platform+' '+ps.lang+'/'+ps.variant+' 測試:要登入 '+Date.now(),
-        need:'在該頁完成登入',n:1,url:'https://example.com/login'}]);
+      var keep=(await T.state()).__inbox__||[], parts={};
+      parts['sync:'+ps.platform+'/'+ps.lang+'/'+ps.variant]={line:'測試:要登入 '+Date.now(),job:'',url:'https://example.com/login'};
+      await T.put('__inbox__',[{id:'rzs1',at:'2026-01-01T09:00:00',from:'平台履歷同步',key:'handoff:example.com',parts:parts,
+        msg:'example.com 要你本人處理：\n測試:要登入',need:'在該頁完成登入',n:1,url:'https://example.com/login'}]);
       await T.resync();
       document.querySelector('[data-tab="cfg"]').click();
       await T.until(function(){return document.querySelector('#app details[data-fold="cfg:resumes"]');},8000);
@@ -3733,7 +3753,7 @@ CHECKS.append((
 
 
 CHECKS.append((
-    '已投出的卡記成「我不去了」(動作列沒有按鈕):⋯ 在狀態那一行右邊,不自己空一排;記回等回音照舊',
+    '已投出的卡記成「我不去了」(動作列沒有按鈕):⋯ 在狀態那一行右邊,不自己空一排;記回等回音後退回回到 ⋯',
     r'''
       var bad=[]; document.querySelector('[data-tab="sent"]').click(); await T.idle();
       var g=document.querySelector('#app details.cogrp'); if(g&&!g.open){g.querySelector('summary').click(); await T.idle();}
@@ -3758,7 +3778,8 @@ CHECKS.append((
       var w=a&&a.querySelector('[data-oc=""]'); if(!w)bad.push('記成我不去了之後找不到「等回音」');
       else{w.click(); await T.idle(); a=document.querySelector('#app article[data-fid="'+id+'"]');
         if(!a||!a.querySelector('[data-oc=""].on'))bad.push('按「等回音」沒記回去');
-        else if(!a.querySelector('.stage-row:not(.sub) .sr-l>button'))bad.push('記回等回音之後動作列沒有按鈕(退回那顆不見了)');}
+        // 退回、沒送成是罕用的,收在 ⋯(#807 第 5 點):記回等回音後要回到 ⋯ 裡
+        else if(!a.querySelector('.stage-row:not(.sub) .sr-r [data-back],.stage-row:not(.sub) .sr-r [data-undosent]'))bad.push('記回等回音之後 ⋯ 裡沒有退回或沒送成');}
       return bad.join('；');
     ''',
     'no_setup', {'viewports': ['mobile', 'narrow', 'wide'], 'fresh_page': True},
@@ -5312,16 +5333,19 @@ def claimed_closed_case(board):
 
 PRE['claimed_closed_case'] = claimed_closed_case
 CHECKS.append((
-    '待你決定:找缺 agent 說職缺關了,卡上照它的話標明是 agent 說的、附頁面原文;不擋、由你決定',
+    '待你決定:找缺 agent 說職缺關了,卡上標 agent 說的、看證據裡照它的話附頁面原文;不擋、由你決定',
     r"""
       var bad=[]; await T.resync();
       document.querySelector('[data-tab="ready"]').click(); await T.idle();
       [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
       await T.idle();
       var c=T.card(P.id); if(!c){document.querySelector('[data-tab="none"]').click(); return '待你決定頁找不到那張卡';}
-      var rows=[].slice.call(c.querySelectorAll('.verification-note > div')).filter(function(d){
-        return (d.querySelector('strong')||{}).textContent==='招募狀態 · 沒核對到';});
-      if(rows.length!==1)bad.push('卡上沒有「招募狀態 · 沒核對到」那一項');
+      // 第一層是來源標籤計數,每一欄在「看證據」裡:欄名旁掛 agent 說的(#807 第 1 點)
+      var ev=c.querySelector('.verification-note details.ev-fold');
+      if(!ev||!ev.querySelector('summary .src-tag[data-src="agent 說的"]'))bad.push('核對不了那一塊第一層沒有「agent 說的」標籤計數');
+      var rows=[].slice.call(c.querySelectorAll('.verification-note .ev-fold > div')).filter(function(d){
+        var h=d.querySelector('strong'); return !!h&&/^招募狀態/.test(h.textContent)&&!!h.querySelector('.src-tag[data-src="agent 說的"]');});
+      if(rows.length!==1)bad.push('看證據裡沒有標 agent 說的「招募狀態」那一項');
       else{var said=[].slice.call(rows[0].children).slice(1).map(function(d){return d.textContent;});
         if(said[0]!==P.mark)bad.push('沒照 agent 的話標明是它說的:'+said[0]);
         if(said[1]!=='程式讀到：'+P.raw)bad.push('沒附頁面原文:'+said[1]);}
@@ -6600,6 +6624,37 @@ def ask_auto_case(board):
     return _seed(board, [_filled('gone', tab_id='', issues=[GONE]), _filled('gone', tab_id='', issues=[GONE])], extra)
 
 
+def decision_case(board):
+    """卡住的一張:填表紀錄三種來源各一則、一頁沒逐處比(#807)。"""
+    marks = [{'code': 'ENDED', 'source': '程式讀到', 'text': 'UI807-交件'},
+             {'code': 'NO_AFTER', 'source': '程式沒比到', 'text': 'UI807-沒拍改後'},
+             {'code': 'AGENT_STOPPED', 'source': 'agent 說的', 'text': 'UI807-agent 停下'}]
+    changes = {'marks': marks, 'pages': [{'compared': False, 'reason': 'UI807-只有改前', 'page_url': 'https://jobs.example/apply'}]}
+    return _seed(board, [_filled('stuck', issues=['agent 停下:UI807'], fill_changes=changes)])
+
+
+APPLY_PRE['decision_case'] = decision_case
+APPLY_CHECKS.append((
+    '代投卡第一層只有一個主按鈕,其他動作在 ⋯;填表紀錄每一則只掛來源標籤與則數,句子收在「看證據」(#807)',
+    OPEN_SHIP + r"""
+      var I=P.ids, bad=[];
+      var c=await openShip(I[0]); if(!c)return '找不到那張可投遞卡';
+      var shown=[].slice.call(c.querySelectorAll('button.stage-b,button.cust-b')).filter(function(b){
+        return b.offsetParent&&!b.closest('.more-m')&&!b.closest('details:not([open])>:not(summary)');});
+      if(shown.length!==1)bad.push('第一層該只有一個主按鈕,有 '+shown.length+' 個:'+shown.map(function(b){return b.textContent.trim();}).join('、'));
+      var menu=c.querySelector('.more-m'); if(!menu||!/外部送出/.test(menu.textContent)||!/退回/.test(menu.textContent))bad.push('外部送出、退回沒收進 ⋯');
+      var ev=c.querySelector('details.ev-fold'); if(!ev)return bad.concat(['卡上沒有「看證據」']).join('；');
+      var head=ev.querySelector('summary').textContent;
+      ['程式讀到 1','程式沒比到 2','agent 說的 1','看證據'].forEach(function(t){if(head.indexOf(t)<0)bad.push('看證據那一列沒寫「'+t+'」:'+head);});
+      if(/UI807-/.test(head))bad.push('句子不該攤在第一層:'+head);
+      ev.querySelector('summary').click(); await T.idle();
+      ['UI807-交件','UI807-沒拍改後','UI807-agent 停下','UI807-只有改前'].forEach(function(t){if(ev.textContent.indexOf(t)<0)bad.push('看證據打開後少了「'+t+'」');});
+      return bad.join('；');
+    """,
+    'decision_case', {'fresh_page': True},
+))
+
+
 APPLY_PRE['ask_auto_case'] = ask_auto_case
 APPLY_CHECKS.append((
     '代投:頁面不見又有待確認答案,自動重填會接手的不給手動重填鈕、「要你處理」寫答案那件事;改檔流程在接的照樣給重填鈕',
@@ -7144,9 +7199,15 @@ CHECKS.append((
         if(st.join('|')!==want.join('|'))bad.push(w+' 那一行「'+st.join('|')+'」,下一步「'+want.join('|')+'」');
         var why=(line.querySelector('.ap-why')||{}).textContent||'';
         if(why!==(v.why||''))bad.push(w+' 擋住的原因「'+why+'」,下一步「'+v.why+'」');
-        var bs=[].slice.call(line.querySelectorAll('.ap-acts button')).map(function(b){return b.textContent+(b.disabled?' ⛔'+b.title:'');});
+        // 第一層只有一顆(下一步算的主按鈕,沒有就第一顆按得下去的),其他照順序在卡上的 ⋯(#807 第 5 點)
+        var txt=function(b){return b.textContent+(b.disabled?' ⛔'+b.title:'');};
+        var bs=[].slice.call(line.querySelectorAll('.ap-acts button')).map(txt);
         var wb=v.buttons.map(function(b){return b.label+(b.off?' ⛔'+b.off:'');});
-        if(bs.join('|')!==wb.join('|'))bad.push(w+' 按鈕「'+bs.join('|')+'」,下一步「'+wb.join('|')+'」');
+        var pick=v.buttons.filter(function(b){return b.main;})[0]||v.buttons.filter(function(b){return !b.off;})[0];
+        var top=pick?[pick.label+(pick.off?' ⛔'+pick.off:'')]:[];
+        if(bs.join('|')!==top.join('|'))bad.push(w+' 第一層按鈕「'+bs.join('|')+'」,該是「'+top.join('|')+'」');
+        var more=[].slice.call(c.querySelectorAll('.sr-r button')).map(txt), rest=wb.filter(function(b){return b!==top[0];}), at=0;
+        rest.forEach(function(b){var k=more.indexOf(b,at); if(k<0)bad.push(w+' ⋯ 裡沒有「'+b+'」(或順序不對)'); else at=k+1;});
         var tr=todo&&todo.querySelector('[data-todogo="'+CSS.escape(id)+'"]'), tt=tr?tr.closest('li').querySelector('.todo-why').textContent:'';
         if(!v.busy&&v.todo&&tt.indexOf(v.todo)!==0)bad.push(w+' 要你處理的「'+tt+'」,下一步「'+v.todo+'」');
         if((!v.todo||v.busy)&&tr)bad.push(w+' 下一步沒有要你處理,卻列在要你處理的');

@@ -103,6 +103,13 @@ def read_workspace(browser) -> tuple[Seen, ...]:
     return tuple(_from_row(row if isinstance(row, dict) else {}) for row in rows or ())
 
 
+def record_reads(pages: tuple[Seen, ...], evidence_round) -> None:
+    """把交件時讀到的頁面狀態留在本輪紀錄,包括失敗原因(P-17)。"""
+    for page in pages:
+        evidence_round.note('page_read', tab=page._seen_tab, url=page._seen_url, title=page._seen_title,
+                            status=page._seen_status.value, reason=page._seen_why)
+
+
 def fetch(browser, url: str, shot: str = '') -> Seen:
     """讀 agent 交回的網址(直接抓、閱讀代理、瀏覽器依序退,公開網址檢查在邊界那一側,C-02、C-03);
     給了 shot 就同時截圖存到那裡,截圖的任何失敗都記成截圖沒取得(J-10)。"""

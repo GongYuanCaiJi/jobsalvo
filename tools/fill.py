@@ -16,17 +16,19 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import card_title
 import config as cf
 from web import cite, compare, listing, snap
 from web.brief import AFTER, BEFORE, EGO, FORM_PLAN, SHELL, Brief
 from web.changelist import Intended, build, since
 from web.marks import Source, joined, say
 from web.outside import Real
-from web.round import NEEDS_USER_PAGE, End, RoundRecord, run as run_round
+from web.round import NEEDS_USER_PAGE, End, RoundRecord, run as run_round, stuck
 from web.sheet import Accept, Cell, Field, How, Schema, Verdict, quote
 
 TIMEOUT = 40 * 60
 OTHER_JOB = 'agent 說這一頁不是卡片上那個職缺'
+FILL_NEED = '照上面處理好，再按「幫你填表」'      # 看板照 GLOSSARY 換成卡上那顆鈕的名字(board.js ibText)
 START = {'fill': 'fill_start', 'fix': 'fix_start'}      # 送出的開始事件由 form_record.start_submit 送(run)
 LINE = Accept(kinds=('line',), owner=None, value=None)
 
@@ -204,7 +206,10 @@ def run(stage: str, card_id: str, browser, board, note: str, approval_id) -> Rou
                        resume_runtime=prior.get('runtime'),    # 只在接回對話時看
                        workspace=prior.get('workspace') if again else None,
                        on_workspace=None if again else remember)
-    (_save_submit if stage == 'submit' else _save_fill)(stage, card_id, record, board, job=job, checked=checked)
+    if stage == 'submit':
+        _save_submit(stage, card_id, record, board, job=job, checked=checked)
+    else:
+        _save_fill(stage, card_id, record, board, job=job, checked=checked, browser=browser)
     return record
 
 
@@ -216,7 +221,7 @@ def _intents(record: RoundRecord) -> tuple[Intended, ...]:
     return fields + uploads
 
 
-def _save_fill(stage: str, card_id: str, record: RoundRecord, board, *, job: dict, checked: dict) -> None:
+def _save_fill(stage: str, card_id: str, record: RoundRecord, board, *, job: dict, checked: dict, browser) -> None:
     """checked:這一輪開始時答案庫每條的值;這一輪跑的時候他又改的答案,頁上還是舊字,重打標記留著(F-21)。"""
     import agent_report
     import board_doc
@@ -248,13 +253,46 @@ def _save_fill(stage: str, card_id: str, record: RoundRecord, board, *, job: dic
     apply['unmet'] = unmet
     apply['problems'] = [joined(row['text']) for row in sheet.rows('problems')]
     apply['needs_user'], apply['stopped'] = joined(sheet.said('needs_user')), joined(sheet.said('stopped'))
-    apply['issues'] = [text for text in (*apply['problems'], apply['needs_user'], apply['stopped'],
+    trouble = stuck(record)
+    ended = [mark.text for mark in trouble if mark.code in ('ENDED', 'NOT_STARTED', 'SHEET_BROKEN')]
+    agent_stops = [mark.text for mark in trouble
+                   if mark.code in ('AGENT_STOPPED', 'NEEDS_USER', 'HANDED_OVER',
+                                    'HANDED_QUOTE_UNMATCHED', 'HANDOFF_UNVERIFIED')]
+    apply['issues'] = [text for text in (*ended, *apply['problems'], *agent_stops,
                                          OTHER_JOB if sheet.said('same_job') == 'false' else '') if text]
     intents = _intents(record)
     changes = build(record, intents)
     if decision['profile_kind'] == 'fixed' and decision.get('fixed_url'):
         _publish_fixed(decision, record, intents, card_id)
-    apply['field_observations'] = [{'q': row.item, 'marker': row.mark.text} for row in changes.intended]
+    said_by_question = {joined(row['q']): joined(row['value']) for row in sheet.rows('fields')}
+    said_by_question.update({f'上傳檔:{joined(row["name"])}': joined(row['name']) for row in sheet.rows('uploaded')})
+    observations = []
+    for index, row in enumerate(changes.intended, 1):
+        observation = {'q': row.item, 'code': row.mark.code, 'marker': row.mark.text}
+        if row.mark.code in ('NOT_FOUND_VERBATIM', 'SAID_VS_ACTUAL'):
+            observation['said'] = said_by_question.get(row.item, '')
+            name = f'field-{index}.png'
+            path = os.path.join(record.evidence_dir, name)
+            try:
+                if tab:
+                    from web.snap import field_shot
+                    capture = field_shot(browser, tab, path, row.item)
+                else:
+                    raise OSError('這一輪沒有可截圖的那一頁')
+            except Exception as error:  # noqa: BLE001 - screenshot failure falls back to the existing whole-page shot
+                observation['shot'] = shot
+                observation['shot_cropped'] = False
+                import evidence as evidence_store
+                evidence_store.record_external([record.evidence_dir], 'field_shot_failed', question=row.item,
+                                               reason=str(error))
+            else:
+                observation['shot'] = f'{record.id}/{name}'
+                observation['shot_cropped'] = capture['cropped']
+                import evidence as evidence_store
+                evidence_store.record_external([record.evidence_dir], 'field_shot', file=name, tab=tab,
+                                               question=row.item, cropped=observation['shot_cropped'])
+        observations.append(observation)
+    apply['field_observations'] = observations
     apply['fill_changes'] = listing.report(
         changes, tuple(page for snapshot in (*record.befores, *record.afters) for page in snapshot.pages),
         since_fill=False)
@@ -282,9 +320,20 @@ def _save_fill(stage: str, card_id: str, record: RoundRecord, board, *, job: dic
         try:
             candidate = record_form(copy.deepcopy(data)) if event != 'fill_nopage' else None
         except ValueError as error:      # 記不進去(例如新答案沒附翻譯):照列在卡上,這一輪算卡住(A-21)
-            result = dict(apply, issues=[*apply['issues'], '表單欄位紀錄未寫入:' + str(error)])
+            import evidence as evidence_store
+            evidence_store.record_external([record.evidence_dir], 'program_error', reason=str(error))
+            result = dict(apply, issues=[*apply['issues'], '這一輪沒完成'])
             happened = 'fill_bad'
-        if not (ds.try_fire(data, card_id, happened, apply=result, evidence=evidence) and candidate):
+        fired = ds.try_fire(data, card_id, happened, apply=result, evidence=evidence)
+        if fired:
+            agent_report.apply_resolve(data, card_id, '這張重新填好了,結果看卡上', src=agent_report.FROM_APPLY,
+                                       only=lambda item: 'parts' not in item)     # 要不要打斷他由 settle 管
+            if record.end is not End.STOPPED_BY_USER:     # 沒做完自動流程下一輪重填(next_step)
+                agent_report.settle(data, agent_report.FROM_APPLY, 'fill:' + card_id, trouble, job=card_id,
+                                    head=f'填表「{card_title.name(job) or card_id}」', need=FILL_NEED)
+            else:       # 他自己停掉的:不算一輪,也不自動重填,他要接手;之後再沒做完從頭數
+                (data.get(agent_report.RETRY) or {}).pop('fill:' + card_id, None)
+        if not (fired and candidate):
             return
         bank = {e.get('k'): e.get('v') for e in data.get('__ans__') or []}   # 看板現在的答案:他這一輪改的,或別張卡重翻寫的
         typed = {x['k']: x['value'] for x in rows if x.get('k')}         # 這一輪實際打在頁上的值
@@ -294,7 +343,6 @@ def _save_fill(stage: str, card_id: str, record: RoundRecord, board, *, job: dic
             if row.get('k') in checked and bank.get(row['k']) not in (checked[row['k']], typed.get(row['k'])):
                 row['refill'] = 1
         ship.take_unmet(data, card_id, job, [row for row in unmet if row['source'] == Source.PROGRAM.value])
-        agent_report.apply_resolve(data, card_id, '這張重新填好了,結果看卡上', src=agent_report.FROM_APPLY)    # 這一輪的回報在存檔後才開
     board_doc.set_fb(write, live=board, by='fill')
 
     notes = [{key: joined(row[key]) for key in ('url', 'note')} for row in sheet.rows('website_notes')]
@@ -326,7 +374,6 @@ def _publish_fixed(decision: dict, record: RoundRecord, intents: tuple[Intended,
 def _rename(card_id: str, title: str, company: str, board) -> None:
     """卡名照核對過的職稱、公司改;可投遞夾跟著改名(F-18)。"""
     import board_doc
-    import card_title
     import ship
     new = card_title.name(title, company)
 
@@ -379,14 +426,17 @@ def confirm(card_id: str, browser, board) -> dict:
     return report
 
 
-def _halt(data: dict, card_id: str, why: str) -> None:
+def _halt(data: dict, card_id: str, why: str, board=None) -> None:
     """這一輪在卡上開始之後出錯:正在填的回卡住、正在送出的算結果不明,原因照這次的錯寫在卡上;還沒開始的不動。"""
     import delivery_core as ds
+    import evidence
+    evidence.Round('fill', 'error', [card_id], board).note('program_error', reason=why)
     state = ds.state(data.get(card_id) or {})
     if state == 'running':
-        ds.fire(data, card_id, 'fill_bad', apply={'issues': [why]}, evidence={'at': _now()})
+        ds.fire(data, card_id, 'fill_bad', apply={'issues': ['這一輪沒完成']}, evidence={'at': _now()})
     elif state == 'sending':
-        ds.fire(data, card_id, 'submit_unsure', evidence={'at': _now(), 'said': '', 'needs_user': '', 'stopped': why})
+        ds.fire(data, card_id, 'submit_unsure', evidence={'at': _now(), 'said': '', 'needs_user': '',
+                                                          'stopped': '送出結果不明'})
 
 
 def main(argv=None, browser=None) -> int:
@@ -425,8 +475,9 @@ def main(argv=None, browser=None) -> int:
         try:
             record = run(args.stage, url, browser_of(url), board, args.note, pinned.get(url))
         except Exception as error:   # noqa: BLE001 - 一張出什麼錯都只算這張,寫在那張卡上,別張照跑
-            record = f'這一輪出錯停下:{type(error).__name__}:{str(error)[:200]}'
-            board_doc.set_fb(lambda data, why=record: _halt(data, url, why), live=board, by='fill')
+            why = f'{type(error).__name__}: {error}'
+            record = '這一輪沒完成'
+            board_doc.set_fb(lambda data, why=why: _halt(data, url, why, board), live=board, by='fill')
         row = ({'url': url, 'ok': False, 'msg': record} if isinstance(record, str)     # 確認作廢或出錯,這張不算
                else {'url': url, 'ok': record.end is End.HANDED, 'round': record.id})
         with guard:

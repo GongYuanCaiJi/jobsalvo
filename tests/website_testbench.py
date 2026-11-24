@@ -20,6 +20,18 @@ import apply_tab
 from chrome_door import PROFILE_FN
 import dev_browser
 
+
+def _crop_quote(page, path, quote):
+    try:
+        clip = page.evaluate(dev_browser.chrome_door._quote_clip_function(), quote)
+        if not clip:
+            return False
+        page.screenshot(path=os.path.abspath(path), clip=clip, type='png')
+        return True
+    except Exception:  # noqa: BLE001 - a failed crop falls back to the full-page screenshot
+        return False
+
+
 # 假的 door 用來量產品讀頁材料多大(read_workspace_pages)。
 MATERIAL_SIZE = f"""() => {{
                 try {{ return JSON.stringify(({PROFILE_FN})()).length; }} catch (error) {{ return -1; }}
@@ -245,8 +257,8 @@ class ChromeTestDoor(dev_browser.chrome_door.EgoDoor):
         page_id = self._page_id(tab_id)
         self.bench.reload_page(page_id, url or self.bench._page_urls[page_id])
 
-    def shot(self, tab_id, path):
-        return self.bench.screenshot(self._page_id(tab_id), path)
+    def shot(self, tab_id, path, quote=''):
+        return self.bench.screenshot(self._page_id(tab_id), path, quote)
 
     def release(self, _tab_id=None):
         self.workspace_pages = self._open_pages()
@@ -526,7 +538,7 @@ class WebsiteTestBench:
             raise RuntimeError('ego 模式的截圖由 ego 自己拍,測試台造不出截圖失敗')
         self._broken_screenshots[page_id] = str(reason)
 
-    def screenshot(self, page_id, path):
+    def screenshot(self, page_id, path, quote=''):
         if page_id not in self._page_labels:
             raise ValueError('測試台找不到這個分頁')
         if page_id in self._broken_screenshots:
@@ -534,13 +546,14 @@ class WebsiteTestBench:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         if isinstance(self.browser, dev_browser.Ego):
             label = json.dumps(self._page_labels[page_id])
-            target = json.dumps(os.path.abspath(path))
             dev_browser.chrome_door._ego(self.browser.door._task(page=False) +
                                          f'const page = task.page({label});\n'
-                                         f'return await page.screenshot({{path:{target},fullPage:true}});')
+                                         + dev_browser.chrome_door._screenshot_script(path, quote))
         else:
             page = self._page_refs[page_id] or self.browser.page
-            page.screenshot(path=os.path.abspath(path), full_page=True, type='png')
+            cropped = quote and _crop_quote(page, path, quote)
+            if not cropped:
+                page.screenshot(path=os.path.abspath(path), full_page=True, type='png')
         return path
 
     def run_agent_script(self, page_id, script, *, finish_after=False):

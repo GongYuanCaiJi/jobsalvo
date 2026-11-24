@@ -20,6 +20,8 @@ import acceptance_expect as E
 import acceptance_inputs as I
 from acceptance_home import LANG, PLATFORM, PROFILE_URL, Home
 from fake_browser import FakeBrowser, Script, Tab
+import agent_report
+import evidence
 import board_status
 import form_record
 import profile_sync
@@ -42,7 +44,8 @@ FORM_ROWS = [{'q': 'Full name', 'src': 'rz', 'v': 'Ann'}, {'q': QUESTION, 'src':
 PAGE_CODES = {'PAGE_UNREADABLE', 'PAGE_TOO_LONG', 'PAGE_NO_TEXT', 'SHOT_MISSING'}
 CHANGED = '填好後頁面有變化，列出供你查看'
 FOUND, ALREADY, ON_PAGE, NOT_FOUND, NOT_COMPARED = (
-    '原稿一字不差找到', '原本就有', '原稿在頁上一字不差讀到，那一頁沒逐處比', '原稿沒在頁上一字不差找到', '程式沒比到')
+    '原稿一字不差找到', '原本就有', '原稿在頁上一字不差讀到，那一頁沒逐處比',
+    '原稿沒在頁上一字不差找到', '沒比到')
 
 
 def expect(test, behavior, actual, wanted, case=()):
@@ -127,8 +130,10 @@ class StateTest(FillCase):
     FILL = {'clean': {}, 'problem': {'problems': [{'text': '填不了這格'}]}, 'needs_user': {'needs_user': '要本人登入'},
             'stopped': {'stopped': '停在驗證碼'}, 'other_job': {'same_job': 'false'}, 'submitted': {'submitted': 'true'},
             'untranslated': {'fields': [{'q': 'Visa', 'src': 'bank', 'value': 'No', 'why': '照履歷推的'}]}}
-    SAID = {'problem': '填不了這格', 'needs_user': '要本人登入', 'stopped': '停在驗證碼',
-            'other_job': 'agent 說這一頁不是卡片上那個職缺', 'untranslated': '表單欄位紀錄未寫入'}
+    SAID = {'problem': '填不了這格', 'needs_user': 'agent 說要你本人處理：要本人登入',
+            'stopped': 'agent 停下：停在驗證碼',
+            'other_job': 'agent 說這一頁不是卡片上那個職缺',
+            'untranslated': '這一輪沒完成'}
 
     def test_fill_rounds_end_where_the_state_table_says(self):
         for end, outcome in itertools.product(I.ENDS, self.FILL):
@@ -136,6 +141,12 @@ class StateTest(FillCase):
             self.start('todo')
             self.go('fill', filled(lambda _p, cells=self.FILL[outcome]: sheet(**cells), end=end))
             got = self.state()
+            fb = self.home.fb()
+            reports = [r for r in agent_report.open_items(fb) if r['from'] == agent_report.FROM_APPLY and r.get('job') == URL]
+            # 沒交出核對得到的那一頁,都算 agent 沒做完:原因照實留在卡上,第一輪不進要你做(#807)
+            expect(self, '#807', reports, [], case)
+            if end != I.HANDED:
+                expect(self, '#783', bool(fb[URL]['apply']['issues']), True, case)
             if end == I.UNAVAILABLE or end not in (I.HANDED, I.BROKEN_SHEET):
                 expect(self, 'F-22', got, 'nopage', case)
                 expect(self, 'F-22', form_record.approval_problem(self.home.fb(), URL, None) is None, False, case)
@@ -224,8 +235,15 @@ class ApplyRecordTest(FillCase):
                 'uploaded': ['report.pdf'] if first else [], 'unmet': [],
                 'problems': [] if quiet else ['填不了這格'], 'needs_user': '' if quiet else '要本人登入',
                 'stopped': '' if quiet else '停在驗證碼',
-                'issues': [] if quiet else ['填不了這格', '要本人登入', '停在驗證碼', fill.OTHER_JOB],
-                'field_observations': [{'q': QUESTION, 'marker': ON_PAGE}, {'q': '上傳檔:report.pdf', 'marker': NOT_FOUND}]   # 改後拍在另一個分頁:沒逐處比
+                'issues': [] if quiet else ['填不了這格', 'agent 停下：停在驗證碼',
+                                            'agent 說要你本人處理：要本人登入',
+                                            f'要你本人處理的這一頁「{URL}/apply」已交給你；agent 說：Work authorization',
+                                            fill.OTHER_JOB],
+                'field_observations': [{'q': QUESTION, 'code': 'ON_PAGE_NOT_COMPARED', 'marker': ON_PAGE},
+                                       {'q': '上傳檔:report.pdf', 'code': 'NOT_FOUND_VERBATIM',
+                                        'marker': NOT_FOUND, 'said': 'report.pdf',
+                                        'shot': f'{round_id}/field-2.png', 'shot_cropped': False}]
+                # 改後拍在另一個分頁:沒逐處比
                 if first else [],
                 **({'ev': apply.get('ev')} if first else {'stale': 1, 'submit_fail': {'at': 'T-1'}})}
             expect(self, 'I-09 F-23', apply, wanted, how)
@@ -250,7 +268,7 @@ class ApplyRecordTest(FillCase):
         late = self.card()['history'][-1]
         expect(self, 'F-16', (self.state(), late['event'], late['late'], late['evidence'], late['apply']['issues']),
                ('sent', 'fill_bad', 1, {'at': late['evidence']['at'], 'said': 'false', 'needs_user': '要本人登入',
-                                        'stopped': '停在驗證碼'}, ['要本人登入', '停在驗證碼']))
+                                        'stopped': '停在驗證碼'}, ['agent 停下：停在驗證碼', 'agent 說要你本人處理：要本人登入']))
 
     def test_submitting_releases_the_page_the_fill_stopped_on(self):
         self.run_round('first')
@@ -303,8 +321,8 @@ class FieldTest(FillCase):
                    'said': {'q': q, 'src': 'bank', 'value': value, 'why': '照履歷推的', 'zh': '也許'},
                    'unknown': {'q': q, 'src': 'skip', 'value': '', 'why': '不知道'}}[src]
             after = (form_tab(f'{TITLE} at {COMPANY}', q, *((value,) if on_page and value else ()), shot=shot),)
-            self.go('fill', filled(lambda _p, row=row: sheet(fields=[row]), before=(form_tab(f'{TITLE} at {COMPANY}', q),),
-                                   after=after))
+            _code, browser = self.go('fill', filled(lambda _p, row=row: sheet(fields=[row]),
+                                                     before=(form_tab(f'{TITLE} at {COMPANY}', q),), after=after))
             fb = self.home.fb()
             form = fb[URL]['form']['f']
             expect(self, 'F-25', [(r['q'], r['src']) for r in form], [(q, 'bank' if src != 'unknown' else 'skip')], case)
@@ -319,6 +337,15 @@ class FieldTest(FillCase):
                 expect(self, 'F-08', bool(linked.get('noev')), not shot, case)
             observed = {row['q']: row['marker'] for row in fb[URL]['apply']['field_observations']}
             expect(self, 'F-05', observed[q], FOUND if on_page else NOT_FOUND, case)
+            if src != 'unknown' and not on_page and shot:
+                import evidence
+                field = next(row for row in fb[URL]['apply']['field_observations'] if row['q'] == q)
+                expect(self, 'F-05', (field.get('shot'),
+                                      os.path.isfile(evidence.path(URL, field.get('shot'), self.home.board) or ''),
+                                      any(request[0] == 'tab' and request[2] == q and request[3]
+                                          for request in browser.shot_requests),
+                                      field.get('said'), field.get('shot_cropped')),
+                       (field.get('shot'), True, True, value, True), case)
 
 
 class FormRecordTest(FillCase):
@@ -355,7 +382,7 @@ class FormRecordTest(FillCase):
         self.go('fill', filled(lambda _p: sheet(delivery='')))
         marks = self.home.fb()[URL]['apply']['fill_changes']['marks']
         expect(self, 'A-30', [m['text'] for m in marks if m['code'] == 'SAID_VS_ACTUAL'],
-               ['agent 說「」，程式讀到「direct_upload、no_profile、platform_profile」'])
+               ['agent 說「」，程式讀到「不在可選的值裡」'])
 
     def test_the_last_after_snapshot_decides_the_evidence(self):
         rows = [{'q': 'Why us', 'src': 'bank', 'value': 'Robots', 'why': '履歷', 'zh': '機器人', 'kind': 'txt'},
@@ -400,8 +427,82 @@ class FormRecordTest(FillCase):
         card = self.card()
         expect(self, 'A-21', (self.state(), card['apply']['issues'], card['apply']['session'], 'form' in card,
                               self.home.fb()['__ans__']),
-               ('stuck', ["表單欄位紀錄未寫入:kind 要是 ('txt', 'op', 'pick', 'val', 'ck') 其中之一:'Why us'"], 'fake-session',
+               ('stuck', ['這一輪沒完成'], 'fake-session',
                 False, BANK))
+
+
+class AttentionTest(FillCase):
+    """#807 第 2–4 點:交接成立當輪進要你做,同一個網站卡住幾張只開一則、寫出幾張卡,不同網站各一則;
+    沒做完自動流程下一輪自己重填,連續 3 輪才開一則。"""
+    OTHER, ELSEWHERE = 'https://jobs.example/jobs/2', 'https://careers.example/jobs/3'
+
+    def seed(self, *urls):
+        import board_doc
+        self.start('todo')
+        board_doc.set_data(lambda data, _fb: data['jobs'].extend({'id': url, 'target': url} for url in urls
+                                                                  if url not in {j['id'] for j in data['jobs']}),
+                           live=self.home.board)
+        board_doc.set_fb(lambda fb: fb.update({url: {'app': 'ship', 'ds': 'todo'} for url in urls}, __auto__={}),
+                         live=self.home.board)     # 自動流程開著
+
+    def fill(self, url, cells, end=I.HANDED):
+        page = form_tab('請先登入才能填表', url=url + '/apply')
+        fill.main(['--stage', 'fill', '--url', url, '--board', self.home.board],
+                  browser=FakeBrowser(filled(lambda _p: sheet(**cells), before=(page,), after=(page,), end=end)))
+
+    def test_handoffs_on_one_website_become_one_item(self):
+        self.seed(self.OTHER, self.ELSEWHERE)
+        login = {'needs_user': '要你登入', 'needs_user_tab': '7:p1', 'needs_user_quote': '請先登入才能填表'}
+        for url in (URL, self.OTHER, self.ELSEWHERE):
+            self.fill(url, login)
+        items = agent_report.todo(self.home.fb())
+        expect(self, '#807', sorted((r['msg'].splitlines()[0], r['url']) for r in items),
+               [('careers.example 要你本人處理：', self.ELSEWHERE + '/apply'),
+                ('jobs.example 要你本人處理，卡住 2 張卡：', URL + '/apply')])
+        self.fill(URL, {})
+        expect(self, '#807', sorted(r['msg'].splitlines()[0] for r in agent_report.todo(self.home.fb())),
+               ['careers.example 要你本人處理：', 'jobs.example 要你本人處理：'])
+
+    def test_a_card_handled_elsewhere_leaves_the_merged_item(self):
+        """併成一則的兩張卡,一張你在外部送出了:那一則只剩另一張,不再寫卡住 2 張卡。"""
+        self.seed(self.OTHER)
+        login = {'needs_user': '要你登入', 'needs_user_tab': '7:p1', 'needs_user_quote': '請先登入才能填表'}
+        for url in (URL, self.OTHER):
+            self.fill(url, login)
+        agent_report.resolve(URL, '你標了已在外部送出', live=self.home.board)
+        expect(self, '#807', [(r['msg'].splitlines()[0], r.get('job')) for r in agent_report.todo(self.home.fb())],
+               [('jobs.example 要你本人處理：', self.OTHER)])
+
+    def test_different_things_on_one_website_stay_apart(self):
+        """併的鍵是網站加交件單的原字(#807 第 4 點):同一網站、要做的事不同,各一則。"""
+        self.seed(self.OTHER)
+        for url, why in ((URL, '要你登入'), (self.OTHER, '要你通過驗證碼')):
+            self.fill(url, {'needs_user': why, 'needs_user_tab': '7:p1', 'needs_user_quote': '請先登入才能填表'})
+        expect(self, '#807', sorted(r['msg'].splitlines()[1].rpartition('：')[2] for r in agent_report.todo(self.home.fb())),
+               ['要你登入', '要你通過驗證碼'])
+
+    def test_an_unfinished_round_is_refilled_by_the_next_round(self):
+        import next_step
+        self.seed()
+        lines = []
+        for _ in range(3):
+            self.fill(URL, {'stopped': '停在驗證碼'})
+            fb = self.home.fb()
+            nx = next_step.of(fb, list(self.home.jobs().values()), flow={'auto_fill': True})[URL]
+            lines.append(((nx['auto'] or {}).get('line'), nx['view']['fill']['kind'], len(agent_report.todo(fb))))
+        # 填表進度那一列:會自動重做的放「會自動重做」,不算沒填成;第 3 輪才回到沒填成、進要你做
+        expect(self, '#807', lines, [('這一輪沒做完，Agent 下一輪會自動重做（已連續 1 輪沒做完，3 輪才找你）', 'redo', 0),
+                                     ('這一輪沒做完，Agent 下一輪會自動重做（已連續 2 輪沒做完，3 輪才找你）', 'redo', 0), (None, 'bad', 1)])
+
+    def test_a_round_the_user_stopped_is_not_refilled_by_itself(self):
+        """他自己停掉的那一輪:不算一輪,自動流程也不接著重填(停了就是他要接手)。"""
+        import next_step
+        self.seed()
+        self.fill(URL, {'stopped': '停在驗證碼'})
+        self.fill(URL, {'stopped': '停在驗證碼'}, end=I.STOPPED_BY_USER)
+        nx = next_step.of(self.home.fb(), list(self.home.jobs().values()), flow={'auto_fill': True})[URL]
+        expect(self, '#807', (nx['auto'], nx['view']['fill']['kind'], len(agent_report.todo(self.home.fb()))),
+               (None, 'todo', 0))
 
 
 class FormPlanTest(FillCase):
@@ -669,7 +770,7 @@ class ListedNameTest(FillCase):
             profile_sync.remember(PLATFORM, LANG, 'one', PROFILE_URL, name='英文履歷')
             self.go('fill', filled(lambda _p, u=upload, p=profile: sheet(uploaded=[{'name': u}], profile=p)))
             said = [m['params']['said'] for m in self.card()['apply']['fill_changes']['marks']
-                    if m['code'] == 'SAID_VS_ACTUAL' and m['params']['actual'] == '不在你的清單']
+                    if m['code'] == 'SAID_VS_ACTUAL' and m['params']['actual'] == '不在給 agent 的清單裡']
             expect(self, 'F-15', said, [name for name in (upload, profile) if name not in ('report.pdf', '英文履歷')], case)
 
 
@@ -701,10 +802,16 @@ class ConfirmTest(FillCase):
             tab, url = last.tab_id, last.url
             side = {'page_tab_id': tab, 'page_url': url, 'before_tab_id': tab, 'before_url': url, 'compared': False}
             expect(self, 'F-14', (report['heading'], [{key: value for key, value in row.items()
-                                                       if key not in ('marks', 'reason', 'changes')} for row in report['pages']]),
+                                                       if key not in ('marks', 'reason', 'changes', 'before_shot', 'after_shot',
+                                                                      'page_title', 'title', 'before_title', 'after_title')}
+                                                      for row in report['pages']]),
                    ('填好後到送出前的頁面紀錄', {'same': [], 'changed': [{'page_tab_id': tab, 'page_url': url, 'compared': True}],
                                                 'unread': [dict(side, after_tab_id=tab, after_url=url)] * 2,
                                                 'gone': [dict(side, after_tab_id='', after_url='')]}[page]), page)
+            for row in report['pages']:         # 沒逐處比的那一頁也附程式拍到的截圖,看板開得到(#783)
+                if not row['compared']:
+                    expect(self, '#783', [bool(row.get(side + '_tab_id')) == bool(evidence.path(URL, row.get(side + '_shot'), self.home.board))
+                                          for side in ('before', 'after')], [True, True], page)
             codes = [m['code'] for m in report['marks']]
             expect(self, 'F-14', codes.count('PAGE_CHANGED_SINCE_FILL'), int(page == 'changed'), page)
             if page == 'changed':
@@ -712,7 +819,7 @@ class ConfirmTest(FillCase):
                 expect(self, 'F-14', [(c['before_parts'], c['after_parts']) for p in report['pages'] if p['compared']
                                       for c in p['changes']], [([ANSWER], ['No'])], page)
             reasons = sorted(p.get('reason', '') for p in report['pages'] if not p['compared'])
-            want = {'same': [], 'changed': [], 'unread': ['有一邊讀不到，沒逐處比：' + self.why(report)] * 2,
+            want = {'same': [], 'changed': [], 'unread': ['有一邊讀不到，沒逐處比'] * 2,
                     'gone': ['只有改前，沒比到']}[page]
             expect(self, 'F-09' if page == 'unread' else 'F-14', reasons, want, page)
             status = form_record.board_status(self.home.board)
@@ -840,6 +947,17 @@ class FormPageTest(FillCase):
         code, _browser = self.go('confirm', browser=FakeBrowser())
         expect(self, 'F-20', (code, self.state()), (0, 'parked'))
 
+
+    def test_a_page_the_program_did_not_compare_still_opens_from_the_card(self):
+        """#783:改後才出現的那一頁沒逐處比,卡上照樣附它的截圖、點得開,不叫他自己去工作區找。"""
+        import next_step
+        self.start('todo')
+        login = form_tab('請先登入', label='p2', url=URL + '/login')
+        self.go('fill', filled(after=(form_tab(TITLE, COMPANY, QUESTION, ANSWER), login)))
+        view = next_step.card(self.home.fb(), URL)['view']
+        opened = [(row['source'], word) for row in view['evidence'] if URL + '/login' in row['text']
+                  for shot, word in row.get('shots', ()) if evidence.path(URL, shot, self.home.board)]
+        expect(self, '#783 #807', opened, [('程式沒比到', '改後截圖')])     # 在「看證據」裡,標程式沒比到
 
     def test_a_workspace_with_no_known_form_page_is_still_closed_after_the_card_leaves(self):
         """F-20:不知道是哪一頁時 workspace.page 是空的;卡離開排進收尾後,收尾只核對工作區身分,工作區照樣關掉,不留在清單裡重試。"""
@@ -1211,7 +1329,6 @@ class PromptTest(FillCase):
                    ([browser.prompts[0]], [fill.TIMEOUT], False), how)
 
 
-
 class ApprovalIdTest(FillCase):
     """#739:送出綁在派出那一刻的那一次確認;派出之後取消又確認,舊的那一輪不送、卡留在你已確認。"""
 
@@ -1306,7 +1423,7 @@ class OneCardErrorTest(FillCase):
             with mock.patch.object(fill, 'run_round', side_effect=broken_first):
                 code = fill.main(['--stage', stage, '--board', self.home.board], browser=FakeBrowser(script))
             first, after = self.card(), self.home.fb()[second]
-            why = '這一輪出錯停下:RuntimeError:ego 斷線'
+            why = '送出結果不明' if stage == 'submit' else '這一輪沒完成'
             said = first['apply']['submit_fail']['stopped'] if stage == 'submit' else first['apply'].get('issues')
             expect(self, 'F-16 F-17', (code, delivery_core.state(first), said,
                                         delivery_core.state(after)),
@@ -1414,7 +1531,8 @@ class ParallelTest(FillCase):
             handoff = pathlib.Path(evidence.flow_round_dir('fill', apply['round_id'], self.home.board), 'handoff.json')
             said.append((self.state_of(fb[url]), apply['issues'], json.loads(handoff.read_text(encoding='utf-8'))['problems']))
         expect(self, 'F-29', (code, flight.peak, said),
-               (0, 3, [('stuck', ['填不了 0'], [{'text': '填不了 0'}]), ('stuck', ['要本人登入 1'], []),
+               (0, 3, [('stuck', ['填不了 0'], [{'text': '填不了 0'}]),
+                       ('stuck', ['agent 說要你本人處理：要本人登入 1'], []),
                        ('parked', [], [])]), 'identical pages')
 
     def state_of(self, card):
@@ -1434,7 +1552,7 @@ class ParallelTest(FillCase):
             return real(task, what, browser, **kwargs)
         with mock.patch.object(fill, 'run_round', broken_second):
             code = fill.main(['--stage', 'fill', '--board', self.home.board], browser=browsers.__getitem__)
-        fb, why = self.home.fb(), '這一輪出錯停下:RuntimeError:ego 斷線'
+        fb, why = self.home.fb(), '這一輪沒完成'
         expect(self, 'F-16 F-17', (code, [delivery_core.state(fb[url]) for url in self.URLS], fb[self.URLS[1]]['apply']['issues'],
                                    flight.peak, sorted((row['url'], row['ok']) for row in self.home.status_file('apply')['results'])),
                (1, ['parked', 'stuck', 'parked'], [why], 2, [(url, url != self.URLS[1]) for url in self.URLS]), 'one broken')
@@ -1498,7 +1616,7 @@ class ParallelTest(FillCase):
             return real(task, what, browser, **kwargs)
         with mock.patch.object(fill, 'run_round', broken_second):
             code = fill.main(['--stage', 'fill', '--board', self.home.board], browser=browsers.__getitem__)
-        fb, why = self.home.fb(), '這一輪出錯停下:TypeError:程式寫錯'
+        fb, why = self.home.fb(), '這一輪沒完成'
         status = self.home.status_file('apply')
         expect(self, 'F-16 F-17', (code, [delivery_core.state(fb[url]) for url in self.URLS], fb[self.URLS[1]]['apply']['issues'],
                                    status['phase'], sorted((row['url'], row['ok']) for row in status['results'])),

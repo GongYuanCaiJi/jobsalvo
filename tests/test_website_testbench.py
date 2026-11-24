@@ -1,4 +1,6 @@
 import os
+import struct
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +9,25 @@ import dev_browser
 
 
 class WebsiteTestBenchContract(unittest.TestCase):
+
+    def test_field_screenshot_crops_the_exact_quote_and_falls_back_to_the_page(self):
+        page = ('<!doctype html><html><head><title>Crop test</title><style>'
+                'body{margin:0;font:18px sans-serif}#quote{margin:24px}#long{height:1800px}'
+                '</style></head><body><p id="quote">Exact field prompt</p><div id="long"></div></body></html>')
+        with WebsiteTestBench(pages={'/crop': page}) as bench, tempfile.TemporaryDirectory() as folder:
+            page_id = bench.open_page('/crop')
+            cropped, whole = os.path.join(folder, 'cropped.png'), os.path.join(folder, 'whole.png')
+            bench.screenshot(page_id, cropped, 'Exact field prompt')
+            bench.screenshot(page_id, whole, 'text that is not on this page')
+
+            def size(path):
+                with open(path, 'rb') as image:
+                    header = image.read(24)
+                self.assertEqual(header[:8], b'\x89PNG\r\n\x1a\n')
+                return struct.unpack('>II', header[16:24])
+
+            self.assertLess(size(cropped)[1], size(whole)[1])
+            self.assertGreater(size(whole)[1], 1000)
 
     def test_the_fake_site_keeps_a_record_of_every_page_it_served(self):
         import web.fetch as page_fetch

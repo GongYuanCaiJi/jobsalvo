@@ -8,7 +8,7 @@ import os
 
 from web import cite, seen, snap
 from web.brief import Brief
-from web.marks import Mark, say_each
+from web.marks import Mark, say, say_each
 from web.sheet import Context, Field, How, Sheet, read as read_sheet
 from web.snap import Snapshot
 
@@ -20,6 +20,11 @@ class End(enum.Enum):
     STOPPED_BY_USER = '被停止'
     NO_SHEET = '沒有交件單'
     NOT_STARTED = '沒有啟動'
+
+
+def end_label(end: End) -> str:
+    """給使用者看的輪次結束方式;不把內部的交件單名稱帶上看板。"""
+    return '沒交件' if end is End.NO_SHEET else end.value
 
 
 # 交件單裡要本人處理的那一頁:程式重讀同一分頁、引文一字不差在頁上才交接(ADR-0009)
@@ -126,6 +131,7 @@ def run(task: str, brief: Brief, browser, *, timeout_s: int, board=None, read_at
         if on_workspace:
             on_workspace({'id': workspace, 'name': str(opened.get('name') or ''), 'page': 'p1'})
     except Exception as error:  # noqa: BLE001 - a round that cannot start is listed with its reason
+        evidence_round.note('program_error', reason=str(error) or type(error).__name__)
         return _record(brief, task, directory, end=End.NOT_STARTED, why=str(error) or type(error).__name__)
 
     brief_text = brief.render(workspace=workspace)
@@ -141,15 +147,24 @@ def run(task: str, brief: Brief, browser, *, timeout_s: int, board=None, read_at
     else:
         end = _end(result.status, os.path.join(directory, 'handoff.json'))
         why, session, used_agent = result.why, result.session, result.agent_id or agent_id
+    if end is not End.HANDED and why:
+        evidence_round.note('round_end', end=end.value, reason=str(why))
 
     handoff_path = os.path.join(directory, 'handoff.json')
     if os.path.isfile(handoff_path):
         evidence_round.handoff(handoff_path)
     pages = seen.read_workspace(browser) if read_at_handoff and end is End.HANDED else None
+    if pages is not None:
+        seen.record_reads(pages, evidence_round)
     record = _record(brief, task, directory, workspace=workspace, end=end, why=str(why), handoff=pages,
                      session=session, agent_id=used_agent, runtime=_runtime(used_agent), known=known,
                      materials=materials)
-    if end is not End.HANDED:
+    return _hand_over(record, browser)
+
+
+def _hand_over(record: RoundRecord, browser) -> RoundRecord:
+    """交件單寫了要本人處理的那一分頁:交到他面前,記下交接標記(cite.hand_over);兩個回合都一樣(C-11)。"""
+    if record.end is not End.HANDED:
         return record
     tab, quote = (str(getattr(record.sheet.cells.get(name), 'said', '') or '')
                   for name in ('needs_user_tab', 'needs_user_quote'))
@@ -196,6 +211,18 @@ def stops(record: RoundRecord) -> tuple[Mark, ...]:
     return tuple(marks)
 
 
+def stuck(record: RoundRecord) -> tuple[Mark, ...]:
+    """這一輪沒乾淨收尾的原因:不是交件結束、交件單讀不了、agent 停下、要本人處理與交接(#783)。
+    同步、填表、查應徵進度照它決定要不要打斷他(agent_report.settle)。"""
+    if record.end is End.HANDED:
+        ended = ()
+    else:
+        ended = (say('NOT_STARTED', why=record.end_why) if record.end is End.NOT_STARTED
+                 else say('ENDED', end=end_label(record.end)),)
+    return (*ended, *((record.sheet.broken,) if record.sheet.broken else ()), *stops(record))
+
+
+
 def continue_with(record: RoundRecord, brief: Brief, browser, *, timeout_s: int, board=None, materials=(),
                   known=None) -> RoundRecord:
     """同一個 agent session 的下一回合(查應徵進度第二回合):不開新工作區,交件單另存一個夾;
@@ -212,11 +239,16 @@ def continue_with(record: RoundRecord, brief: Brief, browser, *, timeout_s: int,
             result = browser.run_agent(prompt, directories=evidence_round.dirs, timeout=timeout_s,
                                        resume=record.session, agent_id=record.agent_id)
     except (OSError, RuntimeError, ValueError) as error:
+        evidence_round.note('round_end', end=End.CRASHED.value, reason=str(error))
         return _record(brief, record.task, directory, workspace=record.workspace, end=End.CRASHED, why=str(error),
                        session=record.session, agent_id=record.agent_id, runtime=record.runtime)
+    if result.why:
+        evidence_round.note('round_end', end=_end(result.status, os.path.join(directory, 'handoff.json')).value,
+                            reason=str(result.why))
     handoff_path = os.path.join(directory, 'handoff.json')
     if os.path.isfile(handoff_path):
         evidence_round.handoff(handoff_path)
-    return _record(brief, record.task, directory, workspace=record.workspace,
-                   end=_end(result.status, handoff_path), why=str(result.why), session=record.session,
-                   agent_id=record.agent_id, runtime=record.runtime, known=known, materials=materials)
+    return _hand_over(_record(brief, record.task, directory, workspace=record.workspace,
+                              end=_end(result.status, handoff_path), why=str(result.why), session=record.session,
+                              agent_id=record.agent_id, runtime=record.runtime, known=known, materials=materials),
+                      browser)

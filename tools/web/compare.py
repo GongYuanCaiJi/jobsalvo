@@ -177,6 +177,23 @@ class Claim:
     after: str
 
 
+def _change_words(before: str, after: str, *, reported: bool = False) -> str:
+    """把已填內容或實際差異說清楚；空欄不印空箭頭。"""
+    if before and after:
+        return f'{before} → {after}'
+    if reported:
+        if before:
+            return f'改前有填 {before}，沒填改後'
+        if after:
+            return f'沒填改前，改後是 {after}'
+        return '沒填改前或改後文字'
+    if before:
+        return f'改前有移除 {before}，沒有新增文字'
+    if after:
+        return f'沒有移除文字，改後有新增 {after}'
+    return '這一處沒有改動'
+
+
 def check_claim(claim: Claim, pairs: Pairs) -> Mark:
     compared, _ = pairs
     actual_before = tuple(part for page in compared for part in page.removed)
@@ -190,5 +207,6 @@ def check_claim(claim: Claim, pairs: Pairs) -> Mark:
             return say('CLAIM_MATCH')
     if not compared:
         return say('CLAIM_UNCHECKED')
-    actual = f'{"、".join(actual_before)} → {"、".join(actual_after)}'
-    return say('CLAIM_MISMATCH', said=f'{claim.before} → {claim.after}', actual=actual)
+    actual = _change_words('、'.join(actual_before), '、'.join(actual_after))
+    said = _change_words(claim.before, claim.after, reported=True)
+    return say('CLAIM_MISMATCH', said=said, actual=actual)

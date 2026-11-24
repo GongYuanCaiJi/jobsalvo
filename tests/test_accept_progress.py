@@ -4,6 +4,7 @@
 """
 import contextlib
 import copy
+import dataclasses
 import datetime
 import io
 import itertools
@@ -143,7 +144,7 @@ class SourceTest(ProgressCase):
         missing = [{'source': name, 'url': check, 'by': 'program',
                     'reason': '應徵紀錄頁不在程式讀到的工作區' if check else '交件單沒有把工作區的分頁標成這個來源'}]
         unread = [{'source': name, 'url': url, 'by': 'program',
-                   'reason': f'工作區分頁 {fake_browser.WORKSPACE}:{label}（{url}）讀取失敗：{fake_browser.READ_FAIL}'}
+                   'reason': f'{fake_browser.shown(label, url)}讀取失敗：{fake_browser.READ_FAIL}'}
                   for label in _labels]
         return {'unreadable': unread[:1], 'twice_unreadable': unread, 'not_open': missing,
                 'other_url': missing if check else [], 'unlabeled': [] if check else missing}.get(state, [])
@@ -165,20 +166,28 @@ class SourceTest(ProgressCase):
             self.go(nav(tuple(tabs), labelled), cite(checked=(CARD, OTHER), unreadable=agent_unread))
             program = [row for name in self.SOURCES for row in self.program_rows(name, states[name])]
             said = [{'source': name, 'reason': '登入過期', 'url': self.SOURCES[name][0], 'by': 'agent'} for name in agent_unread]
+            visible_program = [{key: row[key] for key in ('source', 'url', 'by')} for row in program]
             for url in (CARD, OTHER):
-                expect(self, 'P-10 P-20', self.replies(url).get('unchecked_sources'), program + said, (case, url))
+                visible_rows = [{key: row[key] for key in ('source', 'url', 'by', 'reason') if key in row}
+                                for row in self.replies(url).get('unchecked_sources')]
+                expect(self, 'P-10 P-20', visible_rows,
+                       visible_program + said, (case, url))
                 expect(self, 'P-11', self.replies(url).get('at'), TODAY.isoformat() if not program else None, (case, url))
             expect(self, 'P-09' if 'not_open' in case else 'P-08', (self.home.status_file('reply')['phase'], self.code),
                    ('done' if not program else 'incomplete', 0), case)
             reports = self.home.fb()[agent_report.KEY]
-            first = {}
-            for row in program:
-                first.setdefault(row['source'], row)
             expect(self, 'P-17', [dict(r, id='', at='') for r in reports], [
-                dict(old, id='', at='', done=TODAY.isoformat(), res='這一輪重查過了'), dict(other, id='', at=''),
-                *({'id': '', 'at': '', 'from': '查應徵進度', 'msg': f'{name}這一輪沒查到:{row["reason"]},影響 2 張卡',
-                   'n': 1, 'need': f'打開{name}看看是不是要登入或網址換了', 'url': self.SOURCES[name][0]}
-                  for name, row in first.items())], case)
+                dict(old, id='', at='', done=TODAY.isoformat(), res='這一輪重查過了'), dict(other, id='', at='')], case)
+            if program:
+                page_reads = []
+                for root, _dirs, files in os.walk(self.home.dir):
+                    if 'events.jsonl' in files:
+                        with open(os.path.join(root, 'events.jsonl'), encoding='utf-8') as source:
+                            page_reads.extend(json.loads(line) for line in source if line.strip())
+                reasons = {row.get('reason') for row in page_reads if row.get('kind') == 'page_read'
+                           and row.get('reason')}
+                page_errors = [row['reason'] for row in program if fake_browser.READ_FAIL in row['reason']]
+                expect(self, 'P-17', all(reason in reasons for reason in page_errors), True, case)
 
 
 class ReplyTest(ProgressCase):
@@ -192,7 +201,8 @@ class ReplyTest(ProgressCase):
             verified = cited == 'verified'
             bad = {'material_id': browser.printed[-1].material_id, 'ids': [9999]}
             item = stored(kind, date) if verified else dict(
-                stored(kind, date, False, subject=json.dumps(bad), quote=json.dumps(bad)), unverified=True,
+                stored(kind, date, False, subject=f'{bad["material_id"]}、9999',
+                       quote=f'{bad["material_id"]}、9999'), unverified=True,
                 agent_said={'card': CARD, 'source': MAIL, 'kind': kind, 'subject': bad, 'quote': bad, 'date': date,
                             'todo': '', 'reason': None})
             expect(self, 'P-04 P-05 P-07', self.replies()['items'], [item], case)
@@ -506,21 +516,49 @@ class EndTest(ProgressCase):
             second = cite([(CARD, MAIL, '拒絕', SUBJECT, QUOTE, '', True)], end=end if which == 'cite' else I.HANDED)
             self.go(first, second)
             finished = end == I.HANDED
+            display_end = {I.HANDED: '交件', I.NO_SHEET: '沒交件', I.BROKEN_SHEET: '交件',
+                           I.TIMEOUT: '逾時', I.CRASHED: '當掉',
+                           I.STOPPED_BY_USER: '被停止', I.UNAVAILABLE: '沒有啟動'}[end]
             card = self.card()
             expect(self, 'P-14', (bool(self.replies().get('at')), bool(self.replies().get('items')), card.get('oc') or ''),
                    (True, True, 'rej') if finished else (False, False, ''), case)
-            said = {I.BROKEN_SHEET: '交件', I.NO_SHEET: '沒有交件單', I.TIMEOUT: '逾時', I.CRASHED: '當掉',
-                    I.STOPPED_BY_USER: '被停止', I.UNAVAILABLE: '沒有啟動'}
             expect(self, 'P-18', self.status(), {
                 'phase': 'done' if finished else 'failed', 'n': 1, 'done': int(finished),
-                'msg': '查了 1 張,查完 1 張;新回音 1 則;改了狀態 1 張' if finished else f'這一輪{said.get(end)},卡沒有改'},
+                'msg': '查了 1 張,查完 1 張;新回音 1 則;改了狀態 1 張' if finished else
+                       f'這一輪{display_end},卡沒有改'},
                 case)
             expect(self, 'P-18', (self.code, self.out), (0 if finished else 1, self.status()['msg'] + '\n'), case)
+            expect(self, '#807', self.stuck_reports(), [], case)        # 沒做完明天照排程重查,不打擾
             if finished:        # 看板流水帳記是誰改的
                 import board_doc
                 with open(board_doc.journal_path(self.home.board), encoding='utf-8') as marks:
                     last = json.loads(marks.readlines()[-1])
                 expect(self, 'P-18', (last['by'], CARD in last['d']), (progress.FROM, True), case)
+
+    def stuck_reports(self):
+        import agent_report
+        return [r for r in agent_report.todo(self.home.fb()) if 'progress' in r.get('parts', {})]
+
+    def test_only_a_page_handed_to_the_user_reaches_agent_report(self):
+        """agent 交出核對得到的那一頁才當輪進要你做,點下去打開那一頁;只寫要本人處理、停下都算沒做完,
+        明天照排程重查,不打擾;下一輪乾淨查完,這則收掉(#807)。回音用確認信:卡不結案,下一輪還會查。"""
+        host = MAIL_URL.split('/')[2]
+        words = {'needs_user': {'needs_user': '來源要重新登入'}, 'stopped': {'stopped': '停在登入頁'},
+                 'handed': {'needs_user': '來源要重新登入', 'needs_user_tab': '7:p1', 'needs_user_quote': SUBJECT}}
+        for which, cell in itertools.product(('nav', 'cite'), words):
+            case = (which, cell)
+            self.start({CARD: {'app': 'sent', 'ds': 'sent', 'sent_at': day(40)}})
+            first, second = nav((mail_tab(),)), cite([(CARD, MAIL, '確認信', SUBJECT, QUOTE, '', True)])
+            said = first if which == 'nav' else second
+            build = said.sheet
+            said = dataclasses.replace(said, sheet=(lambda p, build=build: dict(build(p), **words[cell]))
+                                       if callable(build) else dict(build, **words[cell]))
+            self.go(*((said, second) if which == 'nav' else (first, said)))
+            expect(self, '#807', [(r['msg'].splitlines()[0], '來源要重新登入' in r['msg'], r.get('url'))
+                                  for r in self.stuck_reports()],
+                   [(f'{host} 要你本人處理：', True, MAIL_URL)] if cell == 'handed' else [], case)
+            self.go(nav((mail_tab(),)), cite([(CARD, MAIL, '確認信', SUBJECT, QUOTE, '', True)]))
+            expect(self, '#807', self.stuck_reports(), [], case)
 
     def test_the_second_round_cannot_continue_the_same_agent(self):
         """第一回合交了件,第二回合接不上同一個 agent(沒有 session)或一叫就出錯:卡不動,照實講。"""
@@ -539,7 +577,9 @@ class EndTest(ProgressCase):
             browser.run_agent = run
             self.go(browser=browser)
             expect(self, 'P-14 P-18', (self.status(), len(calls), self.replies()),
-                   ({'phase': 'failed', 'n': 1, 'done': 0, 'msg': f'這一輪{said},卡沒有改'}, 1 if how == 'no_session' else 2,
+                   ({'phase': 'failed', 'n': 1, 'done': 0,
+                     'msg': f'這一輪{"沒有啟動" if how == "no_session" else "當掉"},卡沒有改'},
+                    1 if how == 'no_session' else 2,
                     {}), how)
 
     def status(self):
@@ -675,7 +715,7 @@ class PromptTest(ProgressCase):
                  'replies': [{'card': known, 'source': known, 'kind': '確認信', 'subject': cited, 'quote': cited,
                               'date': '原話', 'todo': '原話', 'reason': cited}],
                  'unreadable': [{'source': known, 'reason': '原話'}], 'website_notes': [{'url': '原話', 'note': '原話'}],
-                 'needs_user': '原話', 'stopped': '原話'}
+                 'needs_user': '原話', 'needs_user_tab': '原話', 'needs_user_quote': '原話', 'stopped': '原話'}
         how_to_cite = '    引段欄寫 material_id 和 ids;每段編號照這次提供的材料。'
         expect(self, 'P-02 P-04', second['交件單格式'], '\n'.join((
             '交件單格式(progress_replies):回傳完整 JSON 物件,不加 Markdown。', json.dumps(shape, ensure_ascii=False, indent=2),
@@ -687,7 +727,9 @@ class PromptTest(ProgressCase):
             '  - reason: 拒絕理由的段落編號;沒有就留空', how_to_cite, '- unreadable: 你讀不到的來源與原因',
             '  - source: 來源名稱(照材料寫) (必填)', '  - reason: 你讀不到的原因 (必填)',
             '- website_notes: 這一輪實際看到、下次有用的網站筆記', '  - url: 來源網址 (必填)', '  - note: 下次有用的一句 (必填)',
-            '- needs_user: 需要使用者本人處理的事;沒有就空', '- stopped: 沒做完就停下:停在哪、為什麼')))
+            '- needs_user: 需要使用者本人處理的事;沒有就空',
+            '- needs_user_tab: 要你本人處理的那一頁的分頁(工作區編號:Page 標籤);沒有就空',
+            '- needs_user_quote: 那一頁上要本人處理的原文,一字不差照抄;沒有就空', '- stopped: 沒做完就停下:停在哪、為什麼')))
         expect(self, 'P-01', browser.fetches, [])
         expect(self, 'P-02', (browser.reads, browser.timeouts, browser.resumed),     # 第二回合接同一個 agent
                (1, [progress.TIMEOUT] * 2, [(None, None), ('fake-session', 'fake-agent')]))

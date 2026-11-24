@@ -312,8 +312,9 @@ def workspace_pages(tabs):
     pages = []
     for tab in tabs:
         tab_id, url = str(tab['tab_id']), str(tab.get('url') or '')
-        where = f'工作區分頁 {tab_id}（{url or "網址不明"}）'
-        row = {'tab_id': tab_id, 'url': url, 'title': str(tab.get('title') or '')}
+        title = str(tab.get('title') or '')
+        where = f'{title}（{url}）' if title and url else url or '那一頁'
+        row = {'tab_id': tab_id, 'url': url, 'title': title}
         if 'error' in tab:
             pages.append(dict(row, read_status='unreadable', read_error=f'{where}讀取失敗：{tab["error"]}',
                               screenshot_error=str(tab.get('screenshot_error') or '')))
@@ -327,6 +328,45 @@ def workspace_pages(tabs):
     return pages
 
 
+def _quote_clip_function():
+    """回傳只找頁上逐字相同可見文字的座標函式。"""
+    return ('(text)=>{'
+            'const root=document.body||document.documentElement;'
+            'const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);'
+            'let node;'
+            'while((node=walker.nextNode())) {'
+            'const parent=node.parentElement;'
+            'if(!parent||parent.closest("script,style,noscript,template,svg")) continue;'
+            'const style=getComputedStyle(parent);'
+            'if(style.display==="none"||style.visibility==="hidden"||!parent.getClientRects().length) continue;'
+            'const start=(node.nodeValue||"").indexOf(text); if(start<0) continue;'
+            'const range=document.createRange(); range.setStart(node,start); range.setEnd(node,start+text.length);'
+            'if(!range.getClientRects().length) continue;'
+            'parent.scrollIntoView({block:"center",inline:"nearest"});'
+            'const box=range.getBoundingClientRect();'
+            'const left=Math.max(0,Math.floor(box.left-12)),top=Math.max(0,Math.floor(box.top-12));'
+            'const right=Math.min(innerWidth,Math.ceil(box.right+12)),bottom=Math.min(innerHeight,Math.ceil(box.bottom+12));'
+            'if(right>left&&bottom>top) return {x:left,y:top,width:right-left,height:bottom-top};'
+            '} return null;}'
+            )
+
+
+def _screenshot_script(out, quote=''):
+    """截 quote 的可見原字;找不到或區域截圖失敗時退回整頁。"""
+    target = json.dumps(os.path.abspath(out))
+    if not quote:
+        return f'return await page.screenshot({{path:{target},fullPage:true}});'
+    literal = json.dumps(str(quote), ensure_ascii=False)
+    return (
+        'let clip=null;\n'
+        f'try {{ clip=await page.evaluate({_quote_clip_function()},{literal}); }} catch(_error) {{ clip=null; }}\n'
+        'if(clip) {\n'
+        f'  try {{ await page.screenshot({{path:{target},clip}}); return {{cropped:true}}; }} catch(_error) {{}}\n'
+        '}\n'
+        f'await page.screenshot({{path:{target},fullPage:true}}); return {{cropped:false}};'
+    )
+
+
 class EgoDoor:
     """agent 的瀏覽器(ego lite)的門路。Codex、Claude 兩個 CLI 共用;runtime 只用於選 agent 和接回對話。"""
     live_refresh = 4             # 看板 👀 幾秒後自動再截
@@ -337,6 +377,7 @@ class EgoDoor:
         self.agent_id = agent_id     # 要叫的那一個 agent(修改、送出叫回填這張的那一個)
         self.runtime = runtime
         self.workspace = None
+        self.last_shot_cropped = False
 
     @staticmethod
     def workspaces():
@@ -512,16 +553,17 @@ class EgoDoor:
                     'if (receipt?.dialog || (await page.info())?.dialog) await page.acceptDialog();\n'
                     'return {url: await page.url()};')
 
-    def shot(self, tab_id, out):
+    def shot(self, tab_id, out, quote=''):
         import evidence
         out = os.path.abspath(out)
         with contextlib.suppress(FileNotFoundError):
             os.remove(out)
         record = evidence.active()
-        started, ok, reason = time.monotonic(), False, ''
+        started, ok, reason, cropped = time.monotonic(), False, '', False
         try:
-            _ego(self._task(tab_id) + f'return await page.screenshot({{path:{json.dumps(out)},fullPage:true}});',
-                 timeout=self.SHOT_TIMEOUT)
+            result = _ego(self._task(tab_id) + _screenshot_script(out, quote), timeout=self.SHOT_TIMEOUT)
+            cropped = bool(result.get('cropped')) if isinstance(result, dict) else False
+            self.last_shot_cropped = cropped
             with open(out, 'rb') as f:
                 if f.read(8) != b'\x89PNG\r\n\x1a\n':
                     raise NotNow('ego 沒有傳回有效頁面截圖')
@@ -536,9 +578,10 @@ class EgoDoor:
                     os.remove(out)
             if record:
                 record.note('shot_attempt', workspace=dict(self.workspace or {}), attempt=1,
-                            limit=1, retry_count=0, ok=ok, reason=reason,
+                            limit=1, retry_count=0, ok=ok, reason=reason, cropped=cropped,
                             seconds=round(time.monotonic() - started, 3),
                             elapsed_seconds=round(time.monotonic() - started, 3))
+
 
     def print_pdf(self, html_path, pdf_path, timeout=120):
         """本機排版只用自己的暫時工作區;斷網、印完收掉,不碰卡片的頁。"""

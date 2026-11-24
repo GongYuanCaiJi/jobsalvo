@@ -98,6 +98,13 @@ class Tab:
         return f'{WORKSPACE}:{self.label}'
 
 
+def shown(label, url):
+    """看板與材料怎麼指那一頁(#662 第四點):瀏覽器給了標題就「標題（網址）」,沒給就網址。
+    答案取自這個假瀏覽器給 _raw 的標題(Tab(label, url) 那一個分頁),不取自程式輸出;變形開關關著時沒有標題,就是網址。"""
+    title = NOISE.title(SALT + Tab(label, url).tab_id + url) if NOISE else ''
+    return f'{title}（{url}）' if title and url else url or '那一頁'
+
+
 def _raw(tab):
     """瀏覽器讀一個分頁回來的原始樣子(chrome_door.workspace_pages 的輸入)。"""
     row = {'tab_id': tab.tab_id, 'url': tab.url, 'title': NOISE.title(SALT + tab.tab_id + tab.url) if NOISE else ''}
@@ -163,6 +170,8 @@ class FakeBrowser:
         self.fetch_parts = {}                # 網址 → 程式讀網址時瀏覽器給的每一段(含變形開關加的)
         self.read_parts = []                 # 程式最近一次讀工作區,瀏覽器給的每一段(含變形開關加的)
         self.hand_fail = ''                  # 交給使用者那一步失敗的原因(空的是交得出去)
+        self.shot_requests = []              # (目標, 原字, 是否找到可裁切的位置)
+        self.last_shot_cropped = False
         self.rates = {'TWD': 1, 'USD': 0.03125}   # 一元新台幣換多少外幣(1 美元 = 32 元)
 
     # ---- 讀頁(只有 web/ 核心叫)----
@@ -184,17 +193,22 @@ class FakeBrowser:
         at = (0, len(self.tabs) // 2, len(self.tabs))[NOISE.where] if NOISE else 0
         return (*self.tabs[:at], *extra, *self.tabs[at:])
 
-    def raw_shot(self, tab_id, path):
+    def raw_shot(self, tab_id, path, quote=''):
         tab = next(tab for tab in self.seen_tabs() if tab.tab_id == tab_id)
         if not tab.shot or tab.state == I.NO_LABEL:
             raise OSError(SHOT_FAIL)
+        self.shot_requests.append(('tab', tab_id, quote, bool(quote and any(quote in part for part in tab.parts))))
+        self.last_shot_cropped = self.shot_requests[-1][3]
         with open(path, 'wb') as target:
             target.write(b'png')
         return path
 
-    def raw_shot_url(self, url, path):
+    def raw_shot_url(self, url, path, quote=''):
         if url in self.url_shot_fail:
             raise OSError(SHOT_FAIL)
+        text = str((self.fetched.get(url) or {}).get('text') or '')
+        self.shot_requests.append(('url', url, quote, bool(quote and quote in text)))
+        self.last_shot_cropped = self.shot_requests[-1][3]
         with open(path, 'wb') as target:
             target.write(b'png')
         return path

@@ -150,9 +150,10 @@ def run(urls, board, browser):
         st({'phase': 'waiting', 't0': t0, 'finished_at': time.time(), 'added': 0, 'n': n, 'msg': msg})
         return 0
     rows, _unmatched = find.rows_by_url(judged, targets)
+    field_shots = find._field_shots(browser, rows, targets, shots, review_round, include_all=True)
     run_fields = {'round': time.strftime('%Y-%m-%d %H:%M'), 'mode': 'add'}
     rates = browser.exchange_rates()
-    entries = [dict(find.card_of(url, {'via': 'manual'}, page, rows[url][0], shots[url], run_fields,
+    entries = [dict(find.card_of(url, {'via': 'manual'}, page, rows[url][0], shots[url], field_shots[url], run_fields,
                                  rows[url][1], jobs, find.round_terms(ask), rates), chan='直投')
                for url, page in zip(targets, pages)]
     added = _add(entries, board)

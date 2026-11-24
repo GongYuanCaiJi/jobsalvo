@@ -17,10 +17,10 @@ class Browser(Protocol):
     def raw_tabs(self) -> list[dict]:
         """工作區每一個分頁讀頁那一側回的一列(chrome_door.workspace_pages 的格式)。"""
 
-    def raw_shot(self, tab: str, path: str) -> str:
-        """截那一分頁存到 path;截不到就丟例外,原因在訊息裡。"""
+    def raw_shot(self, tab: str, path: str, quote: str = '') -> str:
+        """截那一分頁存到 path;有 quote 時只截頁上逐字相同的位置,找不到就截整頁。"""
 
-    def raw_shot_url(self, url: str, path: str) -> str:
+    def raw_shot_url(self, url: str, path: str, quote: str = '') -> str:
         """打開一個網址截圖存到 path;截不到就丟例外。"""
 
     def raw_fetch(self, url: str) -> dict:
@@ -52,6 +52,7 @@ class Real:
         self.door = door
         self.validate_url = validate_url
         self.browser_only = browser_only    # 只用 agent 的瀏覽器讀網址(page_fetch --browser)
+        self.last_shot_cropped = False
 
     @classmethod
     def for_workspace(cls, workspace_id: int, name: str = ''):
@@ -69,8 +70,10 @@ class Real:
     def raw_tabs(self):
         return self._ego(self.door.read_workspace_pages)
 
-    def raw_shot(self, tab, path):
-        return self._ego(self.door.shot, tab, path)
+    def raw_shot(self, tab, path, quote=''):
+        result = self._ego(self.door.shot, tab, path, quote)
+        self.last_shot_cropped = bool(self.door.last_shot_cropped)
+        return result
 
     @staticmethod
     def _ego(call, *args):
@@ -81,9 +84,11 @@ class Real:
         except chrome_door.Unreachable as error:
             raise OSError(error.why) from error
 
-    def raw_shot_url(self, url, path):
+    def raw_shot_url(self, url, path, quote=''):
         from web.fetch import screenshot
-        return screenshot(url, path, validate_url=self.validate_url)
+        result = screenshot(url, path, validate_url=self.validate_url, quote=quote, with_status=True)
+        self.last_shot_cropped = bool(result['cropped'])
+        return result['file']
 
     def raw_fetch(self, url):
         from web.fetch import fetch_with_browser, request_page

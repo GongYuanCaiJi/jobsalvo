@@ -19,7 +19,8 @@ def of_page(page: Seen) -> tuple[Mark, ...]:
     """一頁自己的標記(A-04、A-06)。沒有分頁編號的不是一頁,是整個工作區讀不到,另由 WORKSPACE_UNREAD 標。"""
     if not page._seen_tab and not page._seen_url:
         return ()
-    where = page._seen_url or page._seen_tab
+    where = (f'{page._seen_title}（{page._seen_url}）' if page._seen_title and page._seen_url
+             else page._seen_url or '那一頁')
     out = [say(CODES[page._seen_status], where=where, why=page._seen_why)] if page._seen_status in CODES else []
     if page._seen_shot_why or not page._seen_shot:
         out.append(say('SHOT_MISSING', where=where, why=page._seen_shot_why or '未提供截圖'))
@@ -31,11 +32,14 @@ def mark_row(mark: Mark) -> dict:
 
 
 def _page_row(page, before, after, **result):
-    """一種關係裡的一頁一列:沒逐處比的兩邊都照列,一頁有幾種關係就有幾列;那兩頁自己的標記附在這一列(#591 ID 第 88 行)。"""
+    """一種關係裡的一頁一列:沒逐處比的兩邊都照列,一頁有幾種關係就有幾列;那兩頁自己的標記附在這一列(#591 ID 第 88 行)。
+    兩邊程式拍到的截圖(<輪>/<檔名>)也附上:沒逐處比的那一頁看板開得到,不叫他自己去找(#783)。"""
     marks = {mark.text: mark for side in (before, after) if side is not None for mark in of_page(side)}
-    return {'page_tab_id': page._seen_tab, 'page_url': page._seen_url,
+    return {'page_tab_id': page._seen_tab, 'page_url': page._seen_url, 'page_title': page._seen_title,
             'before_tab_id': before._seen_tab if before else '', 'after_tab_id': after._seen_tab if after else '',
             'before_url': before._seen_url if before else '', 'after_url': after._seen_url if after else '',
+            'before_title': before._seen_title if before else '', 'after_title': after._seen_title if after else '',
+            'before_shot': before._seen_shot if before else '', 'after_shot': after._seen_shot if after else '',
             'marks': [mark_row(mark) for mark in marks.values()], **result}
 
 
@@ -44,6 +48,7 @@ def visual(changes: ChangeList, record: RoundRecord, intended: tuple[Intended, .
     """一輪的改動清單寫成看板格式(平台履歷「同步清單」與填表的確認清單共用)。extra:清單上另外要標的(沒有固定履歷頁)。"""
     page_changes = [
         {'change_id': change.id, 'page_tab_id': change.tab, 'page_url': change.url,
+         'before_title': pair.before._seen_title, 'after_title': pair.after._seen_title,
          'before_parts': list(change.removed), 'after_parts': list(change.added),
          'before_text': '\n'.join(change.removed), 'after_text': '\n'.join(change.added),
          'before_shot': os.path.basename(pair.before._seen_shot), 'after_shot': os.path.basename(pair.after._seen_shot),
@@ -82,7 +87,7 @@ def visual(changes: ChangeList, record: RoundRecord, intended: tuple[Intended, .
         'agent_steps': [{'at': step.at, 'phase': phase, 'command_id': step.command_id,
                          'action': step.command or '操作內容未記錄', 'compared': phase == BETWEEN,
                          'screenshots': [{'page_tab_id': shot.tab, 'page_url': shot.url, 'title': shot.title,
-                                          'shot': shot.file, 'screenshot_error': shot.why} for shot in step.shots]}
+                                          'shot': shot.file, 'screenshot_error': bool(shot.why)} for shot in step.shots]}
                         for phase, step in changes.steps],
     }
 
@@ -90,7 +95,8 @@ def visual(changes: ChangeList, record: RoundRecord, intended: tuple[Intended, .
 def report(changes: ChangeList, pages: tuple[Seen, ...], *, since_fill: bool) -> dict:
     """卡上的頁面紀錄:有變的頁逐處列、沒逐處比的兩邊各一列,加上每一頁自己的標記(F-09、F-14)。
     since_fill:填好後到現在那一份,變了就先標「填好後頁面有變化」;填表那一輪自己的紀錄不標。"""
-    rows = [{'page_tab_id': pair.after._seen_tab, 'page_url': pair.after._seen_url, 'compared': True,
+    rows = [{'page_tab_id': pair.after._seen_tab, 'page_url': pair.after._seen_url,
+             'page_title': pair.after._seen_title, 'title': pair.after._seen_title, 'compared': True,
              'changes': [{'before_parts': list(change.removed), 'after_parts': list(change.added)}
                          for change in pair.changes]}
             for pair in changes.compared if pair.changes]
@@ -167,7 +173,7 @@ def replies(sheet: Sheet, pages: tuple[Seen, ...]) -> list[dict]:
 
 def unread_rows(marks: tuple[Mark, ...]) -> list[dict]:
     """程式標的來源沒查過,寫成卡上 unchecked_sources 的一列(P-08–P-10)。"""
-    return [{'source': params['name'], 'reason': params['why'], 'url': params['url'], 'by': 'program'}
+    return [{'source': params['name'], 'url': params['url'], 'by': 'program'}
             for params in (dict(mark.params) for mark in marks)]
 
 
@@ -181,11 +187,9 @@ RISK = Field('risk_quote', How.CITE, '依據的段落(引這一頁)', accept=dat
 
 def fetched(page: Seen) -> dict:
     """讀一個網址寫上卡的樣子:讀取狀態、前段原文、這一頁的標記;讀不到加「欄位由 agent 判斷」(J-03、J-09、J-10)。"""
-    unread = page._seen_status in (Status.UNREADABLE, Status.NO_TEXT)
-    marks = (*of_page(page), *((say('FIELD_UNREAD_PAGE'),) if unread else ()))
+    marks = of_page(page)
     return {'page_status': FETCH_STATUS.get(page._seen_status, 'unknown'),
-            'page_excerpt': '\n'.join(page._seen_parts)[:EXCERPT], 'marks': [mark_row(mark) for mark in marks],
-            **({'screenshot_error': page._seen_shot_why} if page._seen_shot_why else {})}
+            'page_excerpt': '\n'.join(page._seen_parts)[:EXCERPT], 'marks': [mark_row(mark) for mark in marks]}
 
 
 PARTIAL_NOTICE = '頁面只回傳部分內容，其餘內容未提供；是否繼續由 agent 判斷'
@@ -216,8 +220,11 @@ def claim(cell) -> dict:
     raw = quote(cell)
     if cell.verdict is Verdict.VERIFIED:
         return _claim_row(text, raw, VERIFIED, (say('CLAIM_MATCH'),))
+    detail = dict(cell.marks[0].params) if cell.marks else {}
+    why = detail.get('why') or detail.get('actual') or ''
     return _claim_row(text, raw, UNCHECKED,
-                      (say('FIELD_SIDE_BY_SIDE', said=text, quote=raw),) if text and raw else cell.marks)
+                      (say('FIELD_SIDE_BY_SIDE', said=text, actual=raw, quote=raw, why=why),)
+                      if text and raw else cell.marks)
 
 
 def backed(cell, words: str) -> dict:

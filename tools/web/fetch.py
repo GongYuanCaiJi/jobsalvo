@@ -394,7 +394,7 @@ def request_page(url, *, direct_fn=None, reader_fn=None, ego_fn=None, validate_u
     return PageResult(target, 'unknown', errors=tuple(errors))
 
 
-def screenshot(url, out, validate_url=None):
+def screenshot(url, out, validate_url=None, quote='', *, with_status=False):
     """Capture the URL through the final browser route after checking its final public URL."""
     (validate_url or _assert_public_url)(url)
     import chrome_door
@@ -404,7 +404,8 @@ def screenshot(url, out, validate_url=None):
         opened = door.open_for_agent(url)
         final_url = str((opened.get('page') or {}).get('url') or url)
         (validate_url or _assert_public_url)(final_url)
-        return door.shot(opened['tab_id'], out)
+        result = door.shot(opened['tab_id'], out, quote)
+        return {'file': result, 'cropped': door.last_shot_cropped} if with_status else result
     finally:
         if opened and opened.get('tab_id'):
             door.release(opened['tab_id'])

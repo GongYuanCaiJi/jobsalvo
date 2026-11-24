@@ -6,7 +6,7 @@ import dataclasses
 from web import compare
 from web.compare import Compared, NotCompared, Verbatim
 from web.marks import Mark, say, say_each
-from web.round import End, RoundRecord, Step, stops as round_stops
+from web.round import End, RoundRecord, Step, end_label, stops as round_stops
 from web.sheet import Cell, Verdict
 
 
@@ -78,7 +78,9 @@ def build(record: RoundRecord, intended: tuple[Intended, ...]) -> ChangeList:
 
     head = []
     head.append(say('NOT_STARTED', why=record.end_why) if record.end is End.NOT_STARTED
-                else say('ENDED', end=record.end.value))
+                else say('ENDED', end=end_label(record.end)))
+    if record.task == 'sync' and not intended and record.end is End.NOT_STARTED:
+        head.append(say('NOTHING_TO_SYNC'))
     # 有沒有拍改前、拍改後看叫了沒有(有沒有拍照紀錄),不看讀到幾頁:工作區空了或讀不到另有標記。
     if not before_snapshots:
         head.append(say('NO_BEFORE'))

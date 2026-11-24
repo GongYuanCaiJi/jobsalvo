@@ -20,7 +20,7 @@ from web.brief import AFTER, BEFORE, EGO, SHELL, Brief
 from web.changelist import Intended, build, restore_intents
 from web.marks import Mark, say
 from web.outside import Real
-from web.round import NEEDS_USER_PAGE, End, RoundRecord, record_unstarted, run as run_round
+from web.round import NEEDS_USER_PAGE, End, RoundRecord, record_unstarted, run as run_round, stuck
 from web.sheet import Field, How, Schema
 
 TIMEOUT = 40 * 60
@@ -122,12 +122,27 @@ def one_round(slot: Slot, intents: tuple[Intended, ...], source: dict[str, str],
     else:
         record = record_unstarted(what, 'sync', board, say('NOTHING_TO_SYNC').text)
     sync_records.remember_version(slot.platform, slot.lang, slot.variant, record.id, target(source), source)
-    sync_records.remember_visuals(slot.platform, slot.lang, slot.variant,
-                                  [listing.visual(build(record, intents), record, intents, task=task)])
+    visual = listing.visual(build(record, intents), record, intents, task=task)
+    sync_records.remember_visuals(slot.platform, slot.lang, slot.variant, [visual])
     if record.end is End.HANDED:
         _registered(slot, record)
         _rewrites(slot, record, board)
     return record
+
+
+REPORT_FROM = '平台履歷同步'
+REPORT_NEED = '照上面處理好，再按全部同步'
+
+
+def _report(slot: Slot, record: RoundRecord, board) -> None:
+    """要不要打斷他照 agent_report.settle(#807);這一份的清單照實列出每個原因,下次按全部同步重做。他自己停掉的不算一輪。"""
+    if record.end is End.STOPPED_BY_USER:
+        return
+    import agent_report
+    import board_doc
+    board_doc.set_fb(lambda fb: agent_report.settle(
+        fb, REPORT_FROM, f'sync:{slot.platform}/{slot.lang}/{slot.variant}', stuck(record), url=slot.url,
+        head=f'{slot.platform} {slot.lang}/{slot.variant} 平台履歷同步', need=REPORT_NEED), live=board, by='sync')
 
 
 def _registered(slot: Slot, record: RoundRecord) -> None:
@@ -189,7 +204,7 @@ def main(argv=None, browser=None) -> int:
         import jobrun
         jobrun.write(os.path.join(output, 'sync_status.json'), {
             'phase': phase, 'pid': os.getpid(), 't0': started, 'n': total, 'done': len(rows),
-            'msg': '沒有要同步的' if phase == 'nothing' else f'已處理 {len(rows)}/{total} 份',
+            'msg': '原始履歷沒有可同步的文字變更，沒派 agent' if phase == 'nothing' else f'已處理 {len(rows)}/{total} 份',
             'results': [{'platform': key.partition(':')[0], 'lang': key.partition(':')[2].partition('/')[0],
                          'variant': key.partition('/')[2], 'ok': ok, 'msg': msg[:200]}
                         for key, (ok, msg) in rows.items()],
@@ -198,9 +213,16 @@ def main(argv=None, browser=None) -> int:
     def record(key, run):
         try:
             done = run()
-            rows[key] = (True, done.end_why if done.end is End.NOT_STARTED else '')
+            rows[key] = (True, '這一輪沒有啟動' if done.end is End.NOT_STARTED else '')
         except (OSError, RuntimeError, ValueError) as error:
-            rows[key] = (False, str(error))
+            import evidence
+            evidence.Round('sync', 'error', board=args.board).note('program_error', reason=str(error))
+            safe_restore_messages = {
+                '同步清單已更新,請重新載入',
+                '恢復清單已更新,請重新載入後選取',
+                '平台履歷未登記',
+            }
+            rows[key] = (False, str(error) if str(error) in safe_restore_messages else '這一輪沒完成')
 
     if args.restore_json:
         status('agent', 1)
@@ -210,6 +232,8 @@ def main(argv=None, browser=None) -> int:
 
     chosen = slots(args.platform, args.lang, args.variant)
     if args.platform and not chosen:
+        import evidence
+        evidence.Round('sync', 'error', board=args.board).note('program_error', reason='平台履歷未登記')
         rows[f'{args.platform}:{args.lang or ""}/{args.variant or ""}'] = (False, '平台履歷未登記')
         status('done', 1)
         return 1
@@ -218,7 +242,11 @@ def main(argv=None, browser=None) -> int:
     for slot in todo:
         def run(slot=slot):
             source = sync_material.source(slot, args.board)
-            return one_round(slot, intended(slot, source), source, browser, board=args.board, task='sync')
+            intents = intended(slot, source)
+            done = one_round(slot, intents, source, browser, board=args.board, task='sync')
+            if intents:     # 恢復也走 one_round,它的結果不收、不開同步的回報
+                _report(slot, done, args.board)
+            return done
         record(slot.key, run)
         status('agent', len(todo))
     status('done' if todo else 'nothing', len(todo))

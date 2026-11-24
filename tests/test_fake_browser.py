@@ -17,6 +17,7 @@ class SameArgumentsTest(unittest.TestCase):
         self.assertTrue(names)
         for name in names:
             self.assertEqual(shape(getattr(FakeBrowser, name)), shape(getattr(Real, name)), name)
+            self.assertEqual(shape(getattr(Browser, name)), shape(getattr(Real, name)), name)
 
 
 if __name__ == '__main__':
