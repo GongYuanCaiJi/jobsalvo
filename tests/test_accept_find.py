@@ -461,6 +461,8 @@ class GoneTest(FindCase):
         shown = {url: bool(evidence.path(url, row['shot'], self.home.board)) for url, row in first.items() if url in u[:5]}
         expect(self, 'J-24', (shown, first[self.ON_BOARD]['shot']),
                ({url: True for url in u[:5]}, '20260101-000000-000000-find-review/shot-1.png'))   # 板上那張卡讀頁時拍的
+        expect(self, 'J-24', self.home.status_file('converge')['dropped_by'],
+               {'agent 說不投': 1, '詐騙': 1, '硬排除': 1, '封鎖公司': 1, '不符條件': 1, '板上已經有': 1})
 
         second = self.round()           # 同樣的網址再找到一次:判過不送的照列當初那一輪 agent 的話與截圖
         stamp = self.research()[-2]['round']
@@ -642,7 +644,8 @@ class RoundTest(FindCase):
         expect(self, 'J-01', browser.fetches, [URL])          # 跑幾張:只讀前一張
         expect(self, 'J-13', (self.card() is not None, self.card(URL2) is None), (True, True))
         status = json.load(open(os.path.join(self.home.tmp['converge'], 'converge_status.json'), encoding='utf-8'))
-        expect(self, 'J-20', (status['phase'], status['added'], status['found'], status['dropped']), ('done', 1, 2, 0))
+        expect(self, 'J-20', (status['phase'], status['added'], status['found'], status['dropped'], status.get('over')),
+               ('done', 1, 2, 0, 1))
         history = self.research()
         expect(self, 'J-20', (len(history), history[-1]['added']), (20, [URL]))
         expect(self, 'J-23', (history[-1]['terms_missed'], self.card()['terms_unknown']), ({}, ['經驗']))   # 門檻沒引:經驗查不到
@@ -872,7 +875,7 @@ class WholeRoundTest(RoundCase):
         expect(self, 'J-18', 0 <= took <= clocks[5] - clocks[4], True)
         expect(self, 'J-20', (seen, final, code), ({'search': dict(running, phase='start'),
                                                     'judge': dict(running, phase='agent', step='核對 agent 引的職缺頁原文')},
-                                                   dict(running, phase='done', added=1, dropped=0, msg='', found=1,
+                                                   dict(running, phase='done', added=1, dropped=0, dropped_by={}, msg='', found=1, over=0,
                                                         notes=('往後端找' + 'x' * 600)[:600]), 0))
         expect(self, 'J-20', clocks[0] == clocks[2] == clocks[4] <= clocks[1] <= clocks[3] <= clocks[5], True)
         history = self.research()
@@ -926,7 +929,7 @@ class EmptyRoundTest(RoundCase):
             final.pop(key)
         expect(self, 'J-20', (code, final, printed.splitlines()[-2:], [dict(row, round='') for row in self.research()]), (
             0, {'pid': os.getpid(), 'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': 'done', 'added': 0,
-                'dropped': 0, 'msg': '', 'found': 0, 'notes': ''}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
+                'dropped': 0, 'dropped_by': {}, 'msg': '', 'found': 0, 'notes': ''}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
             [{'round': '', 'mode': 'both', 'direction': '', 'judged': 0, 'dropped': {}, 'gone': [], 'terms_missed': {}, 'notes': '', 'seeds': [],
               'added': []}]))
 
@@ -984,7 +987,7 @@ class SearchEndTest(FindCase):
             if not handed:
                 rest = {key: value for key, value in status.items() if key not in ('msg', 't0', 'at', 'finished_at', 'pid', 'took')}
                 expect(self, 'J-20', rest, {'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': want,
-                                            'added': 0, 'dropped': 0, 'found': 0, 'timeup': end == I.TIMEOUT, 'notes': ''}, end)
+                                            'added': 0, 'dropped': 0, 'dropped_by': {}, 'found': 0, 'timeup': end == I.TIMEOUT, 'notes': ''}, end)
             expect(self, 'J-20', (self.card() is not None, browser.fetches), (handed, [URL] if handed else []), end)
 
     def test_unreadable_board(self):

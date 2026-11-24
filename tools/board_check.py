@@ -1870,7 +1870,7 @@ FIND_CHECKS=[
 ]
 
 FIND_CHECKS.append(
- ('找新職缺:「__ 分鐘」格子預設 15、清空是不限時、改了存進設定,按找缺這輪帶著那個分鐘數,跑完講找到/清掉/進看板',"""
+ ('找新職缺:「__ 分鐘」格子預設 15、清空是不限時、改了存進設定,按找缺這輪帶著那個分鐘數,跑完講找到/丟掉/進看板',"""
    var bad=[], d=document.getElementById('finddet'); if(!d)return '頁首沒有找新職缺';
    d.open=true; await T.idle();
    var fm=document.querySelector('#findrow input[data-findmin]'); if(!fm)return '找缺那一列沒有「__ 分鐘」格子';
@@ -1899,7 +1899,7 @@ FIND_CHECKS.append(
    var result=document.getElementById('find-st').textContent;
    // 副本上的假找缺跑得很快,「正在找… / 最多找 N 分鐘」那一下常常看不到;直接看這輪的進度帶了幾分鐘
    if((rv.research||{}).minutes!==20)bad.push('這輪沒有帶著格子的 20 分鐘出發(進度裡是 '+JSON.stringify((rv.research||{}).minutes)+')');
-   else if(!/找到 3 張、清掉 1 張、進看板 2 張/.test(result))bad.push('跑完沒照實講三個數字:'+result);
+   else if(!/找到 3 張、丟掉 1 張\(照你的設定 1、agent 說的 0\)、進看板 2 張/.test(result))bad.push('跑完沒照實講三個數字,或說法跟下面清單不同:'+result);
    if(!/跑了(不到 )?\\d+ 分鐘\\(上限 20 分鐘\\)/.test(result))bad.push('跑完沒寫這輪跑了多久、上限多少:'+result);
    var why=await T.until(function(){return document.querySelector('#find-st .find-why');},8000);
    if(!why||!/沙箱:交件少的原因/.test(why.textContent))bad.push('沒列出這輪 agent 寫的交件說明');

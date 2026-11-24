@@ -3424,12 +3424,12 @@
     if(p.phase==='stopped')return '<span class="prep-st">'+ic('square')+' 上一輪你按了停止。'+w[3]+'再按一次。</span>';
     return '';}
   function findWhat(p){return (FIND_MODE[p.mode]||'')+(p.mode==='dir'&&p.direction?'「'+p.direction+'」':'');}
-  // 照實講這輪:找到幾張、清掉幾張、進看板幾張(舊版的進度只有新增幾筆)
   function findTally(p){
-    var add='進看板 '+(p.added||0)+' 張，在「新職缺」';
+    var add='進看板 '+(p.added||0)+' 張，在「新職缺」', n=p.dropped||0, by=p.dropped_by, agent=0;
     if(p.found==null)return add;
     if(!p.found&&p.timeup)return '這輪沒找到，可以把時間放寬';
-    return '找到 '+p.found+' 張、清掉 '+(p.dropped||0)+' 張、'+add;
+    if(by)Object.keys(by).forEach(function(k){if(goneSide(k)==='agent')agent+=by[k];});
+    return '找到 '+p.found+' 張、丟掉 '+n+' 張'+(n&&by?'(照你的設定 '+(n-agent)+'、agent 說的 '+agent+')':'')+'、'+add+(p.over?'；另有 '+p.over+' 張超過「跑幾張」沒判':'');
   }
   function findTook(p){
     if(p.took==null)return '';
@@ -3679,6 +3679,7 @@
   // 核對過的刊登日人數月薪。他看截圖自己判斷有沒有讀錯丟錯;丟錯的直接按「加進看板」(貼網址那一條,一律成卡)。
   var GONE_RULE={'板上已經有':['prog','已在看板上'],'判過不送':['agent','以前判過不送'],'硬排除':['prog','你設的「一定不要」'],
     '封鎖公司':['prog','你封鎖的公司'],'不符條件':['prog','不符你設的條件'],'agent 說不投':['agent','agent 說不投'],'詐騙':['agent','agent 判成詐騙']};
+  function goneSide(rule){return (GONE_RULE[rule]||['prog'])[0];}
   function goneFacts(g){var f=[];
     if(g.posted_at)f.push('刊登 '+g.posted_at);
     if(g.applicants!=null)f.push(typeof g.applicants==='number'?g.applicants+' 人應徵':'應徵人數'+g.applicants);
@@ -3701,7 +3702,7 @@
         ic('plus')+' 丟錯了,加進看板</button>')+
       '</div></div>';}
   function goneHTML(r){var gs=r.gone||[]; if(!gs.length)return '';
-    var prog=gs.filter(function(g){return (GONE_RULE[g.rule]||['prog'])[0]==='prog';}).length;
+    var prog=gs.filter(function(g){return goneSide(g.rule)==='prog';}).length;
     return fold('fgone:'+(r.round||''),'丟掉的 '+gs.length+' 張(照你的設定 '+prog+'、agent 說的 '+(gs.length-prog)+')',
       '<div class="gone-l">'+gs.map(goneRowHTML).join('')+'</div>',{cls:'find-rn gone-fold'});}
   // agent 判過不送的全部(.research/judged-no.jsonl):之後找到也不再讀,「最近幾輪」只留五輪,這裡一直看得到(J-24)。

@@ -547,7 +547,7 @@ def run(ask, board, browser, limit, minutes):
             prefs.refresh_like(board)
         message = '；'.join(value for value in messages if value)
         print(f'找缺：{message}' if message else '找缺：完成')
-        status(values.pop('phase', 'done'), added=len(added), dropped=sum(drop.values()), msg=message,
+        status(values.pop('phase', 'done'), added=len(added), dropped=sum(drop.values()), dropped_by=dict(drop), msg=message,
                finished_at=time.time(), took=current.unpaused_seconds(), notes=notes[:600], **values)
         print(f'這輪新增 {len(added)} 筆職缺(在看板「🆕 待評估」)')
 
@@ -574,7 +574,8 @@ def run(ask, board, browser, limit, minutes):
                  gone(url, '判過不送', f"{turned[url].get('at', '')} 那輪 {turned[url].get('rule', 'agent 說不投')}:{turned[url].get('why', '')}",
                       turned[url].get('target', ''), turned[url].get('shot', ''))
                  for url in candidates if url in have or url in turned]
-    urls = [url for url in candidates if url not in have and url not in turned][:limit or None]   # 跑幾張:清掉的不算
+    fresh = [url for url in candidates if url not in have and url not in turned]
+    urls = fresh[:limit or None]   # 跑幾張:清掉的不算
     if not urls:
         finish([], 0, notes, messages, gone_rows, found=len(candidates))
         return 0
@@ -609,7 +610,7 @@ def run(ask, board, browser, limit, minutes):
     if unmatched:
         problems.append(f'另有 {unmatched} 列判斷交件無法配對候選')
     messages[:0] = problems
-    finish(entries, len(urls) - incomplete, notes, messages, gone_rows, found=len(candidates))
+    finish(entries, len(urls) - incomplete, notes, messages, gone_rows, found=len(candidates), over=len(fresh) - len(urls))
     return 0
 
 

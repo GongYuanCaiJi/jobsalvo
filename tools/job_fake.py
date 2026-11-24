@@ -93,7 +93,7 @@ def research(board, sp, step, mode, direction, minutes=0):
     # agent 說不投的一張記進判過不送(看板「agent 判過不送的職缺」列得出來)
     find.turned_add([{'url': f'https://example.test/fake/{int(t0)}-4', 'at': row['round'], 'mode': mode, 'rule': 'agent 說不投',
                       'why': '沙箱:跟你要的方向無關', 'target': '(沙箱假職缺 4)測試用·沙箱公司', 'shot': ''}])
-    jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, finished_at=time.time(),
+    jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, dropped_by={'不符條件': 1}, finished_at=time.time(),
                             took=clock.unpaused_seconds(), notes=row['notes']))
 
 
