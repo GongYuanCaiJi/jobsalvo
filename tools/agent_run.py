@@ -341,6 +341,9 @@ def agent_env(board, argv=(), *said, chrome=False):
         env[REPORT_FROM_ENV] = _REPORT_FROM.get()   # 它回報時的來源由程式給(agent_report 照這個記)
     for key in ('JOBSALVO_EGO_REAL_BIN', 'JOBSALVO_EGO_EVIDENCE_DIRS', 'JOBSALVO_EGO_WORKSPACE'):
         env.pop(key, None)
+    # claude -p 交件後,背景子 agent 閒等滿 10 分鐘就被停掉,結果不會併進交件。
+    # 關掉背景:子 agent 照樣並行,主 agent 收齊才交件。只有 claude 認這個變數,不用分是哪一家。
+    env['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'] = '1'
     if chrome:
         # Codex runs commands through a login zsh; its user startup files can put
         # ~/.local/bin ahead of this repo's screenshot-recording ego-browser wrapper.

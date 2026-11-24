@@ -510,6 +510,28 @@ class ClaudeCodeRuntime(unittest.TestCase):
             self.assertEqual(ar.run('task', log, d).status, 'completed')
             self.assertEqual(ar.session_id(log), '0b1c2d3e-0000-4000-8000-000000000001')
 
+    def test_sub_agent_results_reach_the_hand_in(self):
+        with tempfile.TemporaryDirectory(prefix='agent-cc-sub-') as d:
+            fake = os.path.join(d, 'claude')
+            sent = self.result_line(result='已派出')
+            merged = self.result_line(result='{"a":"A","b":"B"}')
+            with open(fake, 'w', encoding='utf-8') as f:
+                f.write("#!/bin/sh\ncat >/dev/null\n"
+                        'if [ "$CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" = 1 ]; then\n'
+                        f"  echo '{merged}'\nelse\n  echo '{sent}'\n"
+                        "  echo 'Background tasks still running after the last turn; stopping them.' >&2\nfi\n")
+            os.chmod(fake, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+            sheet = os.path.join(d, 'sheet.txt')
+            with self.settings([self.entry('cc', 'claude-code')]), \
+                    patch.object(ar, 'claude_bin', return_value=fake), \
+                    patch.dict(os.environ, {'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': ''}):
+                result = ar.run('task', os.path.join(d, 'task.log'), d, output_last_message=sheet)
+            with open(sheet, encoding='utf-8') as f:
+                handed_in = f.read()
+
+        self.assertTrue(result.ok)
+        self.assertEqual('{"a":"A","b":"B"}', handed_in)
+
     def test_failure_reasons_come_from_the_result(self):
         cases = (
             (self.result_line(is_error=True, result='Not logged in · Please run /login'), 'authentication'),
