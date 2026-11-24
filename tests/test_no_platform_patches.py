@@ -18,7 +18,7 @@ DOMAIN = re.compile(r'(?<![\w.@-])(?:[a-z0-9-]+(?:\.|\\\.)+)+(?:[a-z]{2,24}|xn--
 # 只列專案自己安裝或呼叫的基礎設施(與保留的範例網域),從不列求職網站。
 OWN_HOSTS = re.compile(
     r'(?:^|\.)(?:example(?:\.(?:com|org|net))?|invalid|test|localhost|127\.0\.0\.1|github\.com|'
-    r'jsdelivr\.net|w3\.org|claude\.com|ts\.net|jina\.ai|astral\.sh|metadata\.google\.internal)$', re.I,
+    r'jsdelivr\.net|w3\.org|claude\.com|ts\.net|jina\.ai|er-api\.com|exchangerate-api\.com|astral\.sh|metadata\.google\.internal)$', re.I,
 )
 COMMON_TLDS = {'ai', 'app', 'biz', 'ca', 'co', 'com', 'de', 'dev', 'edu', 'fr', 'gov', 'info', 'io', 'jp',
                'me', 'net', 'org', 'tw', 'uk'}

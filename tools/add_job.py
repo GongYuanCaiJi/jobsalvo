@@ -140,7 +140,7 @@ def run(urls, board, browser):
     ask = find.ask_of('add')
     material = Numbered()
     judged = find.Run(board, browser, 0).agent(
-        find.judge_brief(ask, shared, material, targets, pages, feedback, jobs),
+        find.judge_brief(ask, shared, material, targets, pages, feedback, jobs, find.ADD_SHEET),
         {'urls': frozenset(targets), 'resumes': frozenset(find.resume_choices())}, 3600, materials=(material,))
     if judged.end is End.NOT_STARTED:
         # agent 都不能用(額度用完、限流、要重新登入):等得到,不加空卡,存成待寫,之後接著寫
@@ -151,8 +151,9 @@ def run(urls, board, browser):
         return 0
     rows, _unmatched = find.rows_by_url(judged, targets)
     run_fields = {'round': time.strftime('%Y-%m-%d %H:%M'), 'mode': 'add'}
+    rates = browser.exchange_rates()
     entries = [dict(find.card_of(url, {'via': 'manual'}, page, rows[url][0], shots[url], run_fields,
-                                 rows[url][1], jobs), chan='直投')
+                                 rows[url][1], jobs, find.round_terms(ask), rates), chan='直投')
                for url, page in zip(targets, pages)]
     added = _add(entries, board)
     problem = '' if judged.end is End.HANDED else f'判斷 agent 沒有交件({judged.end.value})'

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""找缺條件:設定裡的條件怎麼存、存之前怎麼檢查。判斷時原樣交給 agent(tools/find.py)。"""
+"""找缺條件與「一定不要」:設定怎麼存、存之前怎麼檢查,以及程式怎麼拿核對過的值比使用者的設定。
+
+agent 讀頁、引段交值(tools/find.py 的判斷交件單);值比不比得過使用者的設定由這裡判,不交給 agent(ADR-0013)。"""
+import datetime
+import re
+
+import config
 
 # 欄位 → (看板上的名字, 給 agent 看的說法)
 TERMS = {
@@ -44,3 +50,72 @@ def problem(raw):
         return '地點最多 80 個字'
     return ''
 
+
+# 應徵人數沒有上限(頁上寫「200 人以上」這種):agent 寫這幾個字,程式當成超過任何上限
+NO_CAP = '沒有上限'
+
+
+PERIODS = {'月': 1, '年': 12}
+
+
+def twd_month(amount, currency, period, rates):
+    """agent 照頁上原文交的薪資金額換成新台幣月薪:年薪除以 12,外幣照今天的匯率(rates:一元新台幣換多少外幣)。
+    幣別不認得、不是月薪或年薪(時薪、日薪)、沒有那個幣別的匯率就回 None,這一項算查不到。"""
+    currency = str(currency or '').strip().upper()     # agent 自己寫的代號(不是頁上的字):usd、 TWD 都認
+    rate = 1 if currency == 'TWD' else rates.get(currency)
+    if not rate or period not in PERIODS:
+        return None
+    return amount / rate / PERIODS[period]      # 不先取整:89,999.5 不能混過下限 90,000;看板顯示時才取整
+
+
+def crowd_max(said):
+    """agent 給的應徵人數上限:整數;NO_CAP 回無限大;其他寫法(原文、範圍)回 None(查不到),程式不從字裡挑數字。"""
+    if isinstance(said, int) and not isinstance(said, bool):
+        return said if said >= 0 else None
+    value = str(said or '').strip()
+    if value == NO_CAP:
+        return float('inf')
+    return int(value) if re.fullmatch(r'[0-9]+', value) else None
+
+
+def _days_since(day, today):
+    """只認 YYYY-MM-DD;其他寫法(20260901、2026-W40-1、後面多字)比不了,算查不到。"""
+    if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', str(day)):
+        return None
+    try:
+        return (today - datetime.date.fromisoformat(str(day))).days
+    except ValueError:
+        return None
+
+
+def check_judged(said, terms, today=None):
+    """拿核對過的值比這輪條件,回 (不符的條件, 查不到的條件),條件照看板上的名字。
+    said 只放核對過的值:posted_at(YYYY-MM-DD)、applicants(crowd_max 認得的寫法)、salary_month、exp_years、
+    location(「符合」「不符」);缺的就是查不到,不硬排除(J-07)。"""
+    said = said if isinstance(said, dict) else {}
+    today = today or datetime.date.today()
+    days = _days_since(said['posted_at'], today) if said.get('posted_at') else None
+    top = crowd_max(said.get('applicants'))
+    ok = {
+        'posted_days': lambda limit: None if days is None else days <= limit,
+        'applicants_max': lambda limit: None if top is None else top <= limit,
+        'salary_min': lambda limit: None if said.get('salary_month') is None else said['salary_month'] >= limit,
+        'exp_max': lambda limit: None if said.get('exp_years') is None else said['exp_years'] <= limit,
+        'location': lambda _place: {'符合': True, '不符': False}.get(said.get('location')),
+    }
+    verdicts = {key: ok[key](terms[key]) for key in TERMS if key in terms}
+    return ([TERMS[key][0] for key, value in verdicts.items() if value is False],
+            [TERMS[key][0] for key, value in verdicts.items() if value is None])
+
+
+def excluded(title):
+    """使用者設定的「一定不要」(search.exclude_words 一行一個字、進階 exclude_title 正規式):核對過的職稱一出現就不送。"""
+    search = config.C.get('search') or {}
+    parts = [re.escape(str(word).strip()) for word in search.get('exclude_words') or () if str(word).strip()]
+    flags = re.I
+    if (search.get('exclude_title') or '').strip():
+        from settings_api import compile_match
+        compiled = compile_match(search['exclude_title'].strip())
+        parts.append(compiled.pattern)
+        flags = compiled.flags
+    return bool(parts and title and re.search('|'.join(parts), title, flags))

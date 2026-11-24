@@ -63,7 +63,7 @@ def row(material, url, keep='true', cites='verified', **extra):
 def judge(rows=None, end=I.HANDED, **sheet):
     def build(printed):
         material = printed[0]
-        return {'candidates': rows(material) if rows else [], 'terms_missed': [], 'stopped': '', **sheet}
+        return {'candidates': rows(material) if rows else [], 'stopped': '', **sheet}
     return Script((), build, end)
 
 
@@ -96,6 +96,12 @@ class FindCase(unittest.TestCase):
             code = add_job.main(['--board', self.home.board, *argv], browser=browser)
         return code, browser
 
+    def fresh(self, jobs=(), **board):
+        """另一位使用者的第一輪:新看板、沒有判過不送的紀錄(J-13 的紀錄跨輪留著,同一個劇本換情境時要清掉)。"""
+        self.home.write_board(jobs, **board)
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(cf.RESEARCH, find.TURNED))
+
     def card(self, url=URL):
         return self.home.jobs().get(url)
 
@@ -110,7 +116,7 @@ class ReadTest(FindCase):
     def test_every_read_state_and_screenshot(self):
         for read, shot, keep in itertools.product(I.URL_READ, I.SHOTS, I.KEEP):
             case = (read, shot, keep)
-            self.home.write_board()
+            self.fresh()
             _code, browser = self.go(search(URL), judge(lambda m, keep=keep: [row(m, URL, 'true' if keep == 'keep' else 'false')]),
                                      reads={URL: read}, shots_fail=() if shot else (URL,))
             expect(self, 'J-02', browser.fetches, [URL], case)
@@ -213,7 +219,7 @@ class FieldTest(FindCase):
     def test_every_field_cite_shape(self):
         for cites in I.FIELD_CITES:
             self.home.write_board()
-            self.configure(terms={'applicants_max': 50, 'posted_days': 30})
+            self.configure(terms={'applicants_max': 50, 'posted_days': 3650})
             self.go(search(URL), judge(lambda m, cites=cites: [row(m, URL, cites=cites)]), reads={URL: 'ok'})
             card = self.card()
             expect(self, 'J-07', card is not None, True, cites)
@@ -277,29 +283,262 @@ class DeadlineCrowdTest(FindCase):
             browser = FakeBrowser(search(URL), judge(rows), fetched={URL: fetched(URL, 'ok', parts)})
             find.main(['--board', self.home.board, '--mode', 'both'], browser=browser)
             card = self.card()
+            if crowd == '沒有上限':       # 沒有上限超過使用者的上限 50 人:程式擋下,不成卡(J-15)
+                expect(self, 'J-15', (card, self.research()[-1]['terms_missed']), (None, {'應徵人數': 1}), case)
+                continue
             expect(self, 'J-14', card.get('deadline'), deadline if deadline == '2026-12-01' else None, case)
-            expect(self, 'J-15', card.get('applicants'), crowd if crowd in (12, '沒有上限') else None, case)
+            expect(self, 'J-15', card.get('applicants'), 12 if crowd == 12 else None, case)
             unchecked = [m['params'].get('term') for m in card['src']['verification'].get('marks') or []
                          if m['code'] == 'TERM_UNCHECKED']
             expect(self, 'J-15', '應徵人數' in unchecked, crowd == '很多人', case)    # 條件照看板上的名字列
 
 
 class BlockTest(FindCase):
-    """J-12:封鎖名稱跟核對過的公司欄、或使用者的公司別名一字不差相等才擋;封鎖名單交給 agent。"""
+    """J-12:封鎖名稱跟核對過的公司欄、或使用者的公司別名一字不差相等,程式就擋下不成卡;封鎖名單照交 agent(別的寫法由它判)。"""
 
     def test_block_only_on_exact_company_or_alias(self):
         names = {None: [], 'company_exact': [COMPANY], 'company_alias': ['Acme'], 'company_other_spelling': ['ACME Robotics']}
         for blocked, cited in itertools.product(I.BLOCKED, (True, False)):
             case = (blocked, cited)
             self.configure()
-            self.home.write_board(fb={'__block__': names[blocked]})
+            self.fresh(fb={'__block__': names[blocked]})
             _code, browser = self.go(search(URL), judge(lambda m, c=cited: [row(m, URL, cites='verified' if c else 'missing')]),
                                      reads={URL: 'ok'})
-            fb = self.home.fb()
             hit = cited and blocked in ('company_exact', 'company_alias')
-            expect(self, 'J-12', delivery_state.company_blocked(fb, self.card()), hit, case)
+            expect(self, 'J-12', (self.card() is None, self.research()[-1]['dropped']), (hit, {'封鎖公司': 1} if hit else {}), case)
+            if not hit:
+                expect(self, 'J-12', delivery_state.company_blocked(self.home.fb(), self.card()), False, case)
             expect(self, 'J-12', all(name in browser.prompts[-1] for name in names[blocked]), True, case)
 
+
+
+class TermTest(FindCase):
+    """J-07、J-15、J-23:程式拿核對過的值比使用者的條件;不符的不成卡、照條件計數;沒核對到或比不了的照列查不到,不擋。
+    照使用者設定擋的每輪重算,不記進判過不送(J-13)。"""
+    LIMITS = {'posted_days': (3650, 1), 'applicants_max': (50, 10), 'salary_min': (90000, 120000), 'exp_max': (5, 2),
+              'location': ('台北', '台北')}         # (符合用的上限, 不符用的上限);地點符不符由 agent 的判斷欄決定
+    PAGE = (*PARTS, 'NT$100k', '3 years', 'Remote', '12 applicants!', 'Posted 3 days ago')
+
+    def cells(self, m, term, value):
+        """這一項條件那一欄的引段與判斷;value 決定核對得到、比得了沒有。"""
+        cite, judged = {'posted_days': ('posted_at', None), 'applicants_max': ('applicants', None),
+                        'salary_min': ('salary', 'salary'), 'exp_max': ('bar', 'exp_years'),
+                        'location': ('loc', 'location')}[term]
+        quote, text = {'posted_at': ('Posted 2026-11-01', '2026-11-01'), 'applicants': ('12 applicants', '12'),
+                       'salary': ('NT$100k', 'NT$100k'), 'bar': ('3 years', '3 years'), 'loc': ('Remote', 'Remote')}[cite]
+        said = {'salary': {'salary_amount': '100000', 'salary_currency': 'TWD', 'salary_period': '月'},
+                'exp_years': {'exp_years': '3'}, 'location': {'location': '不符' if value == 'miss' else '符合'}}.get(judged)
+        if value == 'unjudged' and judged is None:      # 核對得到,卻不是日期或整數:程式不從字裡挑
+            quote, text = {'posted_at': ('Posted 3 days ago', '3 days ago'), 'applicants': ('12 applicants!', '12 applicants!')}[cite]
+        if value == 'unjudged' and judged:              # 判斷欄比不了:不認得的幣別、看不出地點、沒給年資
+            said = {'salary': dict(said, salary_currency='XYZ'), 'exp_years': {}, 'location': {'location': '看不出'}}[judged]
+        out = {} if value == 'unchecked' else {cite: m.cite(quote, text=text)}
+        out.update(said or {})          # unchecked:有判斷但引段沒核對到,不拿來比
+        return out
+
+    def test_every_term_against_a_checked_value(self):
+        for term, value in itertools.product(I.TERMS, I.TERM_VALUE):
+            case = (term, value)
+            self.fresh()
+            limit = self.LIMITS[term][value == 'miss']
+            self.configure(terms={term: limit})
+
+            def rows(m, term=term, value=value):
+                base = row(m, URL)
+                base.pop({'posted_days': 'posted_at', 'applicants_max': 'applicants'}.get(term, ''), None)
+                return [dict(base, **self.cells(m, term, value))]
+            self.go(search(URL), judge(rows), reads={URL: 'ok'})
+            label = find.find_terms.TERMS[term][0]
+            card, history = self.card(), self.research()[-1]
+            missed = value == 'miss'
+            expect(self, 'J-07', (card is None, history['terms_missed'], history['dropped']),
+                   (missed, {label: 1} if missed else {}, {'不符條件': 1} if missed else {}), case)
+            if missed:          # 拿掉條件再找一次:不符條件擋掉的沒記進判過不送,這次成卡(J-13)
+                self.configure(terms={})
+                self.go(search(URL), judge(rows), reads={URL: 'ok'})
+                expect(self, 'J-13', self.card() is not None, True, case)
+                continue
+            unknown = value in ('unchecked', 'unjudged')
+            marks = [m['params']['term'] for m in card['src']['verification']['marks'] if m['code'] == 'TERM_UNCHECKED']
+            expect(self, 'J-23', (card.get('terms_unknown'), marks), ([label], [label]) if unknown else (None, []), case)
+
+    def test_a_posted_date_not_written_as_yyyy_mm_dd_is_unknown(self):
+        # Sol 審 #812:截前十字、或日期函式認得的其他寫法(20260901、2026-W40-1)會讀成很久以前的一天而丟卡;比不了算查不到
+        for text in ('2026-09-01 [updated 2026-11-23]', '20260901', '2026-W40-1'):
+            self.fresh()
+            self.configure(terms={'posted_days': 14})
+
+            def rows(m, text=text):
+                base = row(m, URL)
+                base.pop('posted_at', None)
+                return [dict(base, posted_at=m.cite('Posted ' + text, text=text))]
+            browser = FakeBrowser(search(URL), judge(rows), fetched={URL: fetched(URL, 'ok', (*PARTS, 'Posted ' + text))})
+            find.main(['--board', self.home.board, '--mode', 'both'], browser=browser)
+            card = self.card()
+            expect(self, 'J-23', (card is not None, (card or {}).get('terms_unknown')), (True, ['上架天數']), text)
+
+    def go(self, *scripts, reads=None):
+        browser = FakeBrowser(*scripts, fetched={url: fetched(url, read, self.PAGE) for url, read in reads.items()})
+        return find.main(['--board', self.home.board, '--mode', 'both'], browser=browser), browser
+
+
+class SalaryTest(FindCase):
+    """J-07、J-15:agent 照頁上原文交薪資金額、幣別、月薪或年薪;換成新台幣月薪由程式做(年薪除以 12、外幣照今天的匯率)。
+    幣別不認得、沒有那個幣別的匯率、不是月薪或年薪(時薪、日薪)、月年沒交,這一項算查不到,不擋。"""
+    PAY = 'Pay from 96000 a year'
+
+    def test_the_program_turns_the_page_pay_into_a_monthly_twd_figure(self):
+        # 假瀏覽器的匯率:1 元新台幣 = 0.03125 美元(1 美元 = 32 元);沒有日圓
+        cases = {('50000', 'TWD', '月'): 50000, ('1200000', 'TWD', '年'): 100000, ('96000', 'USD', '年'): 256000,
+                 ('96000', ' usd ', '年'): 256000,       # 幣別是 agent 自己寫的代號,大小寫、空白不算不一樣
+                 ('100000', 'JPY', '月'): None, ('100000', 'TWD', None): None,
+                 ('1079994', 'TWD', '年'): 89999.5}      # Sol 審 #812:先取整成 90,000 會混過下限
+
+        for (amount, currency, period), month in cases.items():
+            case = (amount, currency, period)
+            self.fresh()
+            self.configure(terms={'salary_min': 90000})
+
+            def rows(m, amount=amount, currency=currency, period=period):
+                pay = {'salary': m.cite(self.PAY, text=self.PAY), 'salary_amount': amount, 'salary_currency': currency}
+                return [row(m, URL, **pay, **({'salary_period': period} if period else {}))]
+            browser = FakeBrowser(search(URL), judge(rows), fetched={URL: fetched(URL, 'ok', (*PARTS, self.PAY))})
+            find.main(['--board', self.home.board, '--mode', 'both'], browser=browser)
+            card, history = self.card(), self.research()[-1]
+            if month is None:
+                expect(self, 'J-07', (card is not None, card.get('terms_unknown')), (True, ['薪資']), case)
+            elif month < 90000:
+                expect(self, 'J-23', (card, history.get('terms_missed')), (None, {'薪資': 1}), case)
+                expect(self, 'J-24', [(g['rule'], g['salary_month']) for g in history['gone']], [('不符條件', month)], case)
+            else:
+                expect(self, 'J-23', (card is not None, card.get('terms_unknown'), history.get('terms_missed')), (True, None, {}), case)
+
+
+class GoneTest(FindCase):
+    """J-24:這一輪丟掉的每一張都照列在每輪紀錄,看板逐張列出:哪一條規則或 agent 怎麼說、程式讀到的那一頁的截圖、
+    核對過的刊登日與人數;判過不送的,列出當初那一輪 agent 的話與截圖。"""
+    PAGES = {'https://jobs.example/jobs/21': ('Data Analyst', 'Beta Labs', 'Posted 2026-11-01', '5 applicants'),
+             'https://jobs.example/jobs/22': ('Office Helper', 'Quick Cash', 'Posted 2026-11-02', '7 applicants'),
+             'https://jobs.example/jobs/23': ('Sales Intern', 'Gamma Trading', 'Posted 2026-11-03', '3 applicants'),
+             'https://jobs.example/jobs/24': ('Platform Engineer', 'Evil Inc', 'Posted 2026-11-04', '8 applicants'),
+             'https://jobs.example/jobs/25': ('QA Engineer', 'Delta Soft', 'Posted 2026-11-05', '300 applicants'),
+             'https://jobs.example/jobs/26': ('Backend Engineer', 'Acme Robotics', 'Posted 2026-11-06', '12 applicants')}
+    ON_BOARD = 'https://jobs.example/jobs/27'
+
+    def round(self):
+        def rows(m):
+            out = []
+            for url, (title, company, posted, crowd) in self.PAGES.items():
+                if f'=== {url} ===' not in m.text:
+                    continue
+                out.append({'url': url, 'score': '4', 'why': '對味', 'risk': 'none',
+                            'keep': 'false' if url.endswith('21') else 'true',
+                            **({'why': '不是我要的方向'} if url.endswith('21') else {}),
+                            **({'risk': 'scam', 'risk_why': '要先繳保證金'} if url.endswith('22') else {}),
+                            'title': m.cite(title, text=title), 'company': m.cite(company, text=company),
+                            'posted_at': m.cite(posted, text=posted.split()[1]), 'applicants': m.cite(crowd, text=crowd.split()[0])})
+            return out
+        browser = FakeBrowser(search(*self.PAGES, self.ON_BOARD), judge(rows),
+                              fetched={url: fetched(url, 'ok', parts) for url, parts in self.PAGES.items()})
+        find.main(['--board', self.home.board, '--mode', 'both'], browser=browser)
+        return {row['id']: row for row in self.research()[-1]['gone']}
+
+    def test_every_dropped_job_is_listed_with_its_reason_and_screenshot(self):
+        import card as cards
+        import evidence
+        self.fresh([{'id': self.ON_BOARD, 'target': 'Old · Old Co', 'title': 'Old', 'company': 'Old Co',
+                     'src': {'verification': {'screenshot_file': '20260101-000000-000000-find-review/shot-1.png'}}}],
+                   fb={'__block__': ['Evil Inc']})
+        self.configure(exclude_words=['Intern'], terms={'applicants_max': 50})
+        first = self.round()
+        name = {url: cards.name(title, company) for url, (title, company, _p, _c) in self.PAGES.items()}
+        u = sorted(self.PAGES)
+        expect(self, 'J-24', {url: (row['rule'], row['why'], row['target'], row.get('missed'), row.get('applicants'))
+                              for url, row in first.items()},
+               {u[0]: ('agent 說不投', '不是我要的方向', name[u[0]], None, 5), u[1]: ('詐騙', '要先繳保證金', name[u[1]], None, 7),
+                u[2]: ('硬排除', '', name[u[2]], None, 3), u[3]: ('封鎖公司', '', name[u[3]], None, 8),
+                u[4]: ('不符條件', '', name[u[4]], ['應徵人數'], 300), self.ON_BOARD: ('板上已經有', '', 'Old · Old Co', None, None)})
+        shown = {url: bool(evidence.path(url, row['shot'], self.home.board)) for url, row in first.items() if url in u[:5]}
+        expect(self, 'J-24', (shown, first[self.ON_BOARD]['shot']),
+               ({url: True for url in u[:5]}, '20260101-000000-000000-find-review/shot-1.png'))   # 板上那張卡讀頁時拍的
+
+        second = self.round()           # 同樣的網址再找到一次:判過不送的照列當初那一輪 agent 的話與截圖
+        stamp = self.research()[-2]['round']
+        expect(self, 'J-24', {url: (row['rule'], row['why'], row['shot'] == first[url]['shot'])
+                              for url, row in second.items() if url in u[:2]},
+               {u[0]: ('判過不送', f'{stamp} 那輪 agent 說不投:不是我要的方向', True),
+                u[1]: ('判過不送', f'{stamp} 那輪 詐騙:要先繳保證金', True)})
+        expect(self, 'J-24', {url: row['rule'] for url, row in second.items()},
+               {u[0]: '判過不送', u[1]: '判過不送', u[2]: '硬排除', u[3]: '封鎖公司', u[4]: '不符條件',
+                u[5]: '板上已經有', self.ON_BOARD: '板上已經有'})
+
+    def test_a_url_turned_down_before_the_upgrade_is_still_listed(self):
+        # 升級前記的判過不送只有網址、時間、agent 的話:照列,沒有卡名、截圖就照實空著
+        self.fresh()
+        url = sorted(self.PAGES)[0]
+        os.makedirs(cf.RESEARCH, exist_ok=True)
+        with open(os.path.join(cf.RESEARCH, find.TURNED), 'w', encoding='utf-8') as target:
+            target.write(json.dumps({'url': url, 'at': '2026-10-01 09:00', 'mode': 'wide', 'why': '舊的話'}, ensure_ascii=False) + '\n')
+        row = self.round()[url]
+        expect(self, 'J-24', (row['rule'], row['why'], row['target'], row['shot']),
+               ('判過不送', '2026-10-01 09:00 那輪 agent 說不投:舊的話', '', ''))
+
+
+class ExcludeTest(FindCase):
+    """J-07、J-13:使用者的「一定不要」(字或正規式)只套在核對過的職稱上,中了就不成卡;不交給 agent;每輪重算不記進判過不送。"""
+
+    def test_exclude_only_on_a_checked_title(self):
+        settings = {None: {}, 'word': {'exclude_words': ['Backend']}, 'regex': {'exclude_title': '^back'},
+                    'other_word': {'exclude_words': ['Frontend']}}
+        for exclude, cited in itertools.product(I.EXCLUDE, (True, False)):
+            case = (exclude, cited)
+            self.fresh()
+            self.configure(**{'exclude_words': [], 'exclude_title': '', **settings[exclude]})
+            _code, browser = self.go(search(URL), judge(lambda m, c=cited: [row(m, URL, cites='verified' if c else 'missing')]),
+                                     reads={URL: 'ok'})
+            hit = cited and exclude in ('word', 'regex')
+            expect(self, 'J-07', (self.card() is None, self.research()[-1]['dropped']), (hit, {'硬排除': 1} if hit else {}), case)
+            off_page = {'regex': '^back', 'other_word': 'Frontend'}.get(exclude)     # 頁上沒有的設定字:不該出現在給 agent 的材料
+            expect(self, 'J-07', bool(off_page) and any(off_page in prompt for prompt in browser.prompts), False, case)
+            if hit:
+                self.configure(exclude_words=[], exclude_title='')
+                self.go(search(URL), judge(lambda m: [row(m, URL)]), reads={URL: 'ok'})
+                expect(self, 'J-13', self.card() is not None, True, case)
+
+
+class PriorTest(FindCase):
+    """J-13、J-01:板上已有的、以前判過 agent 說不投(而且核對完整)的網址,程式在讀頁前清掉,不再讀、不再判;
+    跑幾張不算它們;狀態檔與每輪紀錄照實記清掉幾張。"""
+
+    def test_known_urls_are_dropped_before_reading(self):
+        for prior in I.PRIOR:
+            self.fresh([{'id': URL, 'target': 'Old', 'title': 'Old', 'company': 'Old Co'}] if prior == 'on_board' else ())
+            if prior.startswith('turned'):          # 前一輪:agent 說不投
+                cites = 'verified' if prior == 'turned_verified' else 'missing'
+                self.go(search(URL), judge(lambda m, c=cites: [row(m, URL, keep='false', cites=c)]), reads={URL: 'ok'})
+            _code, browser = self.go(search(URL, URL2), judge(lambda m: [row(m, URL), row(m, URL2)]),
+                                     reads={URL: 'ok', URL2: 'ok'}, argv=['--limit', '1'])
+            skipped = {'on_board': '板上已經有', 'turned_verified': '判過不送'}.get(prior)
+            status = self.home.status_file('converge')
+            expect(self, 'J-13', (browser.fetches, self.research()[-1]['dropped'], status['found'], status['dropped']),
+                   ([URL2] if skipped else [URL], {skipped: 1} if skipped else {}, 2, int(bool(skipped))), prior)
+
+
+class ScamTest(FindCase):
+    """J-21:agent 判成詐騙、而且核對完整的,程式不成卡,記進判過不送;沒核對完整的照成卡、照列 agent 說的跡象。"""
+
+    def test_scam_is_never_kept(self):
+        for cites in ('verified', 'missing'):
+            self.fresh()
+            self.go(search(URL), judge(lambda m, c=cites: [row(m, URL, cites=c, risk='scam', risk_why='要先繳錢')]),
+                    reads={URL: 'ok'})
+            card = self.card()
+            expect(self, 'J-21', card is None, cites == 'verified', cites)
+            if card is not None:
+                expect(self, 'J-21', (card['src']['risk']['kind'], card['src']['verification']['state']), ('scam', 'review'), cites)
+                continue
+            _code, browser = self.go(search(URL), judge(lambda m: [row(m, URL)]), reads={URL: 'ok'})
+            expect(self, 'J-13', (browser.fetches, self.research()[-1]['dropped']), ([], {'判過不送': 1}), cites)
 
 class RowTest(FindCase):
     """J-08、J-11:判斷 agent 每一種結束、漏列、重複列,程式讀到的候選照「沒核對到」進待評估,一張不丟。"""
@@ -362,7 +601,7 @@ class RowIssueTest(FindCase):
 
 
 class JudgeRowTest(FindCase):
-    """J-17、J-21:留不留、分數、理由、分類、角度、履歷、風險、可能重貼的舊卡都照列標 agent 說的;風險引句核對到才標程式讀到。"""
+    """J-17、J-21:留不留、分數、理由、分類、角度、履歷、風險照列標 agent 說的;風險引句核對到才標程式讀到;可能重貼的舊卡只由程式比。"""
 
     def test_judgement_cells_are_recorded_as_the_agent_said(self):
         old = {'id': 'https://jobs.example/jobs/old', 'target': f'{TITLE} - {COMPANY}', 'title': TITLE, 'company': COMPANY}
@@ -383,7 +622,7 @@ class JudgeRowTest(FindCase):
             expect(self, 'J-21', risk['marks'][0]['source'], E.PROGRAM if risk_cited else E.AGENT, risk_cited)
             expect(self, 'J-21', (card['src']['fit'], card['cat'], card['resume'].get('recommend')), (4, '後端', 'one'),
                    risk_cited)
-            expect(self, 'J-17', [r['marks'][0]['source'] for r in card['src']['reposts']], [E.PROGRAM], risk_cited)
+            expect(self, 'J-17', 'reposts' in card['src'], False, risk_cited)
 
 
 class RoundTest(FindCase):
@@ -392,8 +631,7 @@ class RoundTest(FindCase):
     def test_scope_limits_status_and_history(self):
         self.home.write_board(research=[{'round': str(n)} for n in range(25)])
         _code, browser = self.go(
-            search(URL, URL2), judge(lambda m: [row(m, URL), row(m, URL2, keep='false')],
-                                     terms_missed=[{'term': '薪資', 'count': 3}]),
+            search(URL, URL2), judge(lambda m: [row(m, URL), row(m, URL2, keep='false')]),
             reads={URL: 'ok', URL2: 'ok'},
             argv=['--mode', 'dir', '--direction', '機器人', '--seed-co', 'Acme', '--minutes', '7', '--limit', '1',
                   '--terms', '{"exp_max": 3}'])
@@ -404,10 +642,10 @@ class RoundTest(FindCase):
         expect(self, 'J-01', browser.fetches, [URL])          # 跑幾張:只讀前一張
         expect(self, 'J-13', (self.card() is not None, self.card(URL2) is None), (True, True))
         status = json.load(open(os.path.join(self.home.tmp['converge'], 'converge_status.json'), encoding='utf-8'))
-        expect(self, 'J-20', (status['phase'], status['added'], status['found']), ('done', 1, 1))
+        expect(self, 'J-20', (status['phase'], status['added'], status['found'], status['dropped']), ('done', 1, 2, 0))
         history = self.research()
         expect(self, 'J-20', (len(history), history[-1]['added']), (20, [URL]))
-        expect(self, 'J-23', history[-1]['terms_missed'], {'薪資': 3})
+        expect(self, 'J-23', (history[-1]['terms_missed'], self.card()['terms_unknown']), ({}, ['經驗']))   # 門檻沒引:經驗查不到
 
 
 class JudgeMaterialTest(FindCase):
@@ -473,7 +711,7 @@ class RoundCase(FindCase):
 
     def board(self):
         self.configure(exclude_words=['外包'], exclude_title='^Intern', flag_words=['急徵'], flag_title='Lead',
-                       terms={'posted_days': 30, 'salary_min': 90000, 'location': '台北'})
+                       terms={'posted_days': 3650, 'salary_min': 90000, 'location': '台北'})
         jobs = [{'id': self.OLD, 'target': f'{TITLE} · {COMPANY}', 'title': TITLE, 'company': COMPANY, 'src': {'angle': '後端'}},
                 {'id': self.SIDE, 'target': 'Designer · Beta', 'title': 'Designer', 'company': 'Beta', 'src': {'angle': '設計'}},
                 {'id': self.THIRD, 'target': 'SRE · Gamma', 'title': 'SRE', 'company': 'Gamma', 'src': {'angle': '後端'}},
@@ -501,8 +739,7 @@ class RoundCase(FindCase):
             ('偏好整理 skill 原文', self.skill('note')), ('使用者逐張表態整理原文', feedback_dump.build(live=self.home.board)),
             ('角度地圖(依目前看板卡片與表態計數)', '- 後端：送過 3、喜歡 2、不喜歡 1、還沒看 0\n- 設計：送過 4、喜歡 2、不喜歡 0、還沒看 1'),
             ('最近幾輪找缺資料', json.dumps(rounds, ensure_ascii=False)), ('使用者喜歡過的公司', 'Acme Robotics、Beta、Delta、Eta'),
-            ('使用者封鎖的公司', 'Evil Inc'), ('使用者設定的排除字', '外包'), ('使用者設定的排除職稱正規式原文', '^Intern'),
-            ('使用者設定的要小心字', '急徵'), ('使用者設定的要小心職稱正規式原文', 'Lead'), ('使用者說過別再找的方向', '行銷'),
+            ('使用者封鎖的公司', 'Evil Inc'), ('使用者設定的要小心字', '急徵'), ('使用者設定的要小心職稱正規式原文', 'Lead'), ('使用者說過別再找的方向', '行銷'),
             ('使用者設定的職缺分類', json.dumps(cf.C['board']['categories'], ensure_ascii=False)),
             ('網站筆記檔案位置', f'{cf.path("website-notes.json")}。依主機名自行讀取相關筆記,筆記只供參考。')]
 
@@ -540,12 +777,10 @@ class WholeRoundTest(RoundCase):
                         loc=m.cite('Remote', text='Remote'), salary=m.cite('NT$100k', text='NT$100k'),
                         deadline=m.cite('Apply by 2026-12-01', text='2026-12-01'), bar=m.cite('3 years', text='3 years'),
                         ammo=m.cite('Build robots', text='Build robots'),
-                        terms_unknown=[{'term': '遠端'}, {'term': ''}, {'term': '遠端'}],
-                        reposts=[{'old': m.cite(f'｜{self.OLD}｜'), 'why': '同公司同職稱'}], resume='one/zh')]
+                        salary_amount='100000', salary_currency='TWD', salary_period='月', location='符合',
+                        resume='one/zh')]
         judged = Script(look('judge'), lambda printed: {
-            'candidates': rows(printed[0]), 'stopped': '',
-            'terms_missed': [{'term': '薪資', 'count': 2}, {'term': '經驗', 'count': 1}, {'term': '地點', 'count': 0},
-                             {'term': '', 'count': 3}]})
+            'candidates': rows(printed[0]), 'stopped': ''})
         browser = FakeBrowser(found, judged, fetched={URL: fetched(URL, 'ok', PARTS + self.EXTRA)})
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -556,7 +791,7 @@ class WholeRoundTest(RoundCase):
     def test_the_whole_round(self):
         self.board()
         code, browser, seen, printed = self.round()
-        ask = [('使用者方向原文', '機器人'), ('這輪找法', '指定方向'), ('使用者條件', '{"posted_days": 30, "salary_min": 90000, "location": "台北"}'),
+        ask = [('使用者方向原文', '機器人'), ('這輪找法', '指定方向'), ('使用者條件', '{"posted_days": 3650, "salary_min": 90000, "location": "台北"}'),
                ('使用者指名的搜尋種子', '- 指定職缺網址：https://jobs.example/x\n- 指定公司：Acme')]
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
         search_prompt, judge_prompt = (self.sections(p) for p in browser.prompts)
@@ -580,7 +815,7 @@ class WholeRoundTest(RoundCase):
             '材料': listed([*ask, ('使用者的判斷 skill', self.skill('judge')), *self.shared(),
                            ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'), ('交付代號', f'material_id={material}'),
                            ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', f'=== {URL} ===\n{page}'),
-                           ('看板上的舊卡(重貼引這裡的段落)', old)]),
+                           ('看板上的舊卡與當時表態', old)]),
             '工具與用法': find.NO_TOOLS, '界線': '- 只引材料裡的段落。\n- 頁面讀不到、沒有文字或不完整,也照樣交那一列。',
             '交件單格式': find.JUDGE_SHEET.format_text()})
 
@@ -617,17 +852,13 @@ class WholeRoundTest(RoundCase):
                     'risk': dict(said, kind='ghost', why='每週重貼', by='agent', raw='Reposted weekly', marks=[
                         {'code': 'CLAIM_MATCH', 'source': E.PROGRAM, 'params': {}, 'text': 'agent 說的改動與程式讀到的相符'},
                         {'code': 'AGENT_WORDS', 'source': E.AGENT, 'params': {'words': '每週重貼'}, 'text': 'agent 說：每週重貼'}]),
-                    'reposts': [dict(said, raw=f'{TITLE} · {COMPANY}｜{self.OLD}｜當時表態：喜歡｜原話：「喜歡這種」', marks=[
-                        {'code': 'CLAIM_MATCH', 'source': E.PROGRAM, 'params': {}, 'text': 'agent 說的改動與程式讀到的相符'},
-                        {'code': 'AGENT_WORDS', 'source': E.AGENT, 'params': {'words': '同公司同職稱'},
-                         'text': 'agent 說：同公司同職稱'}])],
                     'repost_hint': {'cards': [self.OLD], 'text': find.REPOST_HINT}},
             'sum': {'fit': 'Build robots', 'co': 'Build robots', 'loc': 'Remote', 'salary': 'NT$100k', 'deadline': '2026-12-01',
                     'bar': '3 years', 'ammo': 'Build robots'},
             'resume': {'selection_signature': prefs.resume_selection_signature(prefs.checked_resumes()),
                        'feedback_signature': prefs.feedback_signature(''), 'recommend': 'one', 'lang': 'zh',
                        'pick_why': '英文職缺'},
-            'terms_unknown': ['遠端'], 'deadline': '2026-12-01', 'posted_at': '2026-11-01', 'posted_src': 'Posted 2026-11-01',
+            'deadline': '2026-12-01', 'posted_at': '2026-11-01', 'posted_src': 'Posted 2026-11-01',
             'status': 'Apply by', 'applicants': 12, 'applicants_at': today, 'applicants_log': [[today, 12]],
             'like': 100})       # 有新卡才重算看板的喜好分數(prefs.refresh_like)
         expect(self, 'J-20', (re.fullmatch(r'\d{4}-\d\d-\d\d \d\d:\d\d', stamp) is not None, today == stamp[:10]), (True, True))
@@ -637,11 +868,11 @@ class WholeRoundTest(RoundCase):
         clocks = [status.pop(key) for status in (*seen.values(), final) for key in ('t0', 'at')] + [final.pop('finished_at')]
         expect(self, 'J-20', (seen, final, code), ({'search': dict(running, phase='start'),
                                                     'judge': dict(running, phase='agent', step='核對 agent 引的職缺頁原文')},
-                                                   dict(running, phase='done', added=1, msg='', found=1), 0))
+                                                   dict(running, phase='done', added=1, dropped=0, msg='', found=1), 0))
         expect(self, 'J-20', clocks[0] == clocks[2] == clocks[4] <= clocks[1] <= clocks[3] <= clocks[5], True)
         history = self.research()
         expect(self, 'J-23', (len(history), history[-1]), (10, {
-            'round': stamp, 'mode': 'dir', 'direction': '機器人', 'judged': 1, 'terms_missed': {'薪資': 2, '經驗': 1},
+            'round': stamp, 'mode': 'dir', 'direction': '機器人', 'judged': 1, 'dropped': {}, 'gone': [], 'terms_missed': {},
             'notes': ('往後端找' + 'x' * 600)[:600], 'seeds': [{'k': 'job', 'v': 'https://jobs.example/x'}, {'k': 'co', 'v': 'Acme'}],
             'added': [URL]}))
         expect(self, 'J-20', printed.splitlines()[-2:], ['找缺：完成', '這輪新增 1 筆職缺(在看板「🆕 待評估」)'])
@@ -665,8 +896,7 @@ class EmptyRoundTest(RoundCase):
         none = '(目前沒有)'
         shared = dict(self.shared())
         shared.update({'角度地圖(依目前看板卡片與表態計數)': '(目前沒有角度表態)', '最近幾輪找缺資料': '[]',
-                       **{title: none for title in ('使用者喜歡過的公司', '使用者封鎖的公司', '使用者設定的排除字',
-                                                    '使用者設定的排除職稱正規式原文', '使用者設定的要小心字',
+                       **{title: none for title in ('使用者喜歡過的公司', '使用者封鎖的公司', '使用者設定的要小心字',
                                                     '使用者設定的要小心職稱正規式原文', '使用者說過別再找的方向')}})
         ask = [('使用者方向原文', '(沒有寫)'), ('這輪找法', '更深＋更廣'), ('使用者條件', '{}'), ('使用者指名的搜尋種子', none)]
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
@@ -679,7 +909,7 @@ class EmptyRoundTest(RoundCase):
             *ask, ('使用者的判斷 skill', self.skill('judge')), *shared.items(), ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'),
             ('交付代號', f'material_id={material}'),
             ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', f'=== {URL} ===\n{URL}讀不到：要登入\n{UNREAD}'),
-            ('看板上的舊卡(重貼引這裡的段落)', none)]))
+            ('看板上的舊卡與當時表態', none)]))
         source = self.card()['src']
         expect(self, 'J-03', (source['why'], source['verification']['state'], self.card()['target']),
                ('頁面無法讀取', 'review', '職缺頁待確認'))
@@ -690,9 +920,9 @@ class EmptyRoundTest(RoundCase):
         for key in ('t0', 'at', 'finished_at'):
             final.pop(key)
         expect(self, 'J-20', (code, final, printed.splitlines()[-2:], [dict(row, round='') for row in self.research()]), (
-            0, {'pid': os.getpid(), 'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': 'done', 'added': 0, 'msg': '',
-                'found': 0}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
-            [{'round': '', 'mode': 'both', 'direction': '', 'judged': 0, 'terms_missed': {}, 'notes': '', 'seeds': [],
+            0, {'pid': os.getpid(), 'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': 'done', 'added': 0,
+                'dropped': 0, 'msg': '', 'found': 0}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
+            [{'round': '', 'mode': 'both', 'direction': '', 'judged': 0, 'dropped': {}, 'gone': [], 'terms_missed': {}, 'notes': '', 'seeds': [],
               'added': []}]))
 
 
@@ -743,13 +973,13 @@ class SearchEndTest(FindCase):
                    [f'找缺：{msg}' if msg else '找缺：完成', f'這輪新增 {int(handed)} 筆職缺(在看板「🆕 待評估」)'], end)
             history = self.research()[-1]
             expect(self, 'J-23', dict(history, round=''), {
-                'round': '', 'mode': 'both', 'direction': '', 'judged': int(handed), 'terms_missed': {},
+                'round': '', 'mode': 'both', 'direction': '', 'judged': int(handed), 'dropped': {}, 'gone': [], 'terms_missed': {},
                 'notes': '往後端找' if handed else '', 'seeds': [], 'added': [URL] if handed else []}, end)
             expect(self, 'J-18', browser.timeouts, [4 * 3600, 3600] if handed else [4 * 3600], end)   # 沒給時間上限:搜尋 4 小時、判斷 1 小時
             if not handed:
                 rest = {key: value for key, value in status.items() if key not in ('msg', 't0', 'at', 'finished_at', 'pid')}
                 expect(self, 'J-20', rest, {'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': want,
-                                            'added': 0, 'found': 0, 'timeup': end == I.TIMEOUT}, end)
+                                            'added': 0, 'dropped': 0, 'found': 0, 'timeup': end == I.TIMEOUT}, end)
             expect(self, 'J-20', (self.card() is not None, browser.fetches), (handed, [URL] if handed else []), end)
 
     def test_unreadable_board(self):
@@ -889,6 +1119,25 @@ class AddJobTest(FindCase):
     def steps(n, last):
         return [{'phase': 'fold', 'n': n, 'step': '檢查網址'},
                 {'phase': 'judge', 'n': n, 'step': 'agent 讀取職缺並寫卡片摘要'}, last]
+
+    def test_a_pasted_url_is_a_card_whatever_the_settings_say(self):
+        """使用者自己貼的網址一律成卡:「一定不要」、封鎖公司、條件不符都不擋,條件查不到照列(J-16、J-07)。"""
+        self.configure(exclude_words=[TITLE], terms={'applicants_max': 1, 'salary_min': 90000})
+        self.fresh(fb={'__block__': [COMPANY]})
+        self.add(judge(lambda m: [row(m, URL)]), reads={URL: 'ok'}, argv=['--url', URL])
+        expect(self, 'J-16', (self.card() is not None, self.card()['terms_unknown']), (True, ['薪資']))
+
+    def test_a_pasted_url_is_not_asked_whether_to_keep_it(self):
+        """貼的網址一律成卡,不問 agent 送不送:交件沒有這一欄,卡也不標交件有問題(J-16)。"""
+        self.fresh()
+
+        def rows(m):
+            out = row(m, URL)
+            out.pop('keep')
+            return [out]
+        self.add(judge(rows), reads={URL: 'ok'}, argv=['--url', URL])
+        verification = self.card()['src']['verification']
+        expect(self, 'J-16', ('report_issue' in verification, verification['state']), (False, 'verified'))
 
     def test_one_paste_from_entry_to_card(self):
         """貼的網址去重、板上已有的(含已移除)不讀;給判斷 agent 的找法是「使用者自己貼的網址」;狀態檔每一版、成卡整張、印出的字。"""

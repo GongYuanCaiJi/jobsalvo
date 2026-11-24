@@ -1561,6 +1561,23 @@ class SandboxHome(unittest.TestCase):
             finally:
                 shutil.rmtree(copy, ignore_errors=True)
 
+    def test_jobs_the_agent_turned_down_are_listed_on_the_sandbox_board(self):
+        # PR 預覽與沙箱看板開的是副本:沒帶判過不送的紀錄,「agent 判過不送的職缺」那一塊永遠是空的(J-24)
+        import config as cf
+        import find
+        with tempfile.TemporaryDirectory(prefix='sandbox-turned-test-') as root:
+            home = os.path.join(root, 'home')
+            os.makedirs(os.path.join(home, '.research'))
+            with open(os.path.join(home, '.research', find.TURNED), 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'url': 'https://jobs.example/jobs/9', 'why': '不是我要的方向'}) + '\n')
+            with mock.patch.object(cf, 'HOME', home), mock.patch.object(cf, 'RESEARCH', os.path.join(home, '.research')):
+                copy = bs.sandbox_home()
+            try:
+                with mock.patch.object(cf, 'RESEARCH', os.path.join(copy, '.research')):
+                    self.assertEqual([row['why'] for row in find.turned_down().values()], ['不是我要的方向'])
+            finally:
+                shutil.rmtree(copy, ignore_errors=True)
+
     def test_failed_sandbox_copy_discards_partial_files(self):
         import config as cf
         import glob

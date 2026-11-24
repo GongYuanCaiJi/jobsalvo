@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import Protocol
 
 
+
+
 class Browser(Protocol):
     def raw_tabs(self) -> list[dict]:
         """工作區每一個分頁讀頁那一側回的一列(chrome_door.workspace_pages 的格式)。"""
@@ -38,6 +40,9 @@ class Browser(Protocol):
 
     def run_agent(self, prompt: str, *, directories, timeout: int, resume=None, agent_id=None):
         """跑一輪 agent,交件單寫在 directories[0]/handoff.json;回 status、session、why、agent_id。"""
+
+    def exchange_rates(self) -> dict:
+        """今天的匯率:{幣別三碼: 一元新台幣換多少};拿不到回空的。"""
 
 
 class Real:
@@ -102,6 +107,36 @@ class Real:
 
     def fill_form(self, tab, items):
         return self.door.fill_fields(tab, items)
+
+    def exchange_rates(self):
+        """ExchangeRate-API 的 Open Access 匯率:免金鑰、每天更新一次、准快取,要標出處(看板找缺條件旁)。
+        一天抓一次存在使用者資料夾;抓不到用上次存的,從沒抓到過就回空的(外幣薪資算查不到)。"""
+        import json
+        import time
+        import urllib.request
+
+        import config as cf
+        path = os.path.join(cf.RESEARCH, 'exchange-rates.json')
+        today = time.strftime('%Y-%m-%d')
+        try:
+            with open(path, encoding='utf-8') as source:
+                kept = json.load(source)
+        except (OSError, ValueError):
+            kept = {}
+        if kept.get('day') == today:
+            return kept.get('rates') or {}
+        try:
+            # 網址是寫死的 https(ExchangeRate-API 免金鑰版,ADR-0013),沒有外來的值能換成 file://
+            with urllib.request.urlopen('https://open.er-api.com/v6/latest/TWD', timeout=20) as response:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+                body = json.load(response)
+        except (OSError, ValueError):
+            return kept.get('rates') or {}
+        if body.get('result') != 'success' or not isinstance(body.get('rates'), dict):
+            return kept.get('rates') or {}
+        os.makedirs(cf.RESEARCH, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as target:
+            json.dump({'day': today, 'rates': body['rates']}, target)
+        return body['rates']
 
     def run_agent(self, prompt, *, directories, timeout, resume=None, agent_id=None):
         import agent_run

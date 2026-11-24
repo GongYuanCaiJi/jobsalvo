@@ -1417,6 +1417,11 @@ class H(BaseHTTPRequestHandler):
             if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',name) and os.path.splitext(name)[1].lower() in types and os.path.isfile(f):
                 with open(f,'rb') as fh: self._send(200,fh.read(),types[os.path.splitext(name)[1].lower()])
             else: self._send(404,'沒有這張圖','text/plain; charset=utf-8')
+        elif self.path=='/api/turned-down':
+            # 判過、agent 說不投或判成詐騙的網址(J-13 之後找到也不再讀):看板逐張列出,讓他檢查有沒有丟錯(J-24)
+            import find
+            rows=sorted(find.turned_down().values(),key=lambda row:str(row.get('at') or ''),reverse=True)
+            self._json(200,{'ok':True,'rows':rows})
         elif self.path.startswith('/api/evidence?'):
             # 要他確認或處理的事附的那張截圖(程式自己截的,在那張卡的證據夾,#315)。只收「<輪>/<檔名>」、只給圖檔
             from urllib.parse import urlparse, parse_qs
@@ -2031,7 +2036,8 @@ def sandbox_home():
         for f in (os.path.join(cf.HOME,cf.NAME),cf.PREFS,cf.PREFERENCE_NOTE,
                   os.path.join(cf.HOME,'website-notes.json'),os.path.join(cf.HOME,'platform-notes.json'),
                   cf.APPLY_RULES,os.path.join(cf.HOME,'resume.md'),os.path.join(cf.HOME,'.resume-paste.md'),
-                  os.path.join(cf.HOME,'profiles.json')):
+                  os.path.join(cf.HOME,'profiles.json'),
+                  os.path.join(cf.RESEARCH,'judged-no.jsonl')):   # 判過不送的紀錄:副本看板也要列得出來(J-24)
             if os.path.commonpath((home,os.path.realpath(f)))==home:
                 keep(f,os.path.relpath(os.path.realpath(f),home))
         import settings_api as sa

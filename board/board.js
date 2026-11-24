@@ -498,7 +498,7 @@
   // 找缺時設了條件、但職缺頁沒寫的那幾項(例如薪資面議):留著讓他自己看,卡上講清楚
   function termsBadge(j){
     var u=j.terms_unknown||[]; if(!u.length)return '';
-    return '<span class="opened" title="agent 說這張頁面查不到這幾項條件；程式沒有核對這項判斷">agent 說查不到：'+esc(u.join('、'))+'</span>';
+    return '<span class="opened" title="找這張時設了這幾項條件,但職缺頁上沒寫,沒辦法比">'+esc(u.join('、'))+'查不到</span>';
   }
   // 104 顯示「企業最後處理履歷時間」、Indeed 自動標 Response seems unlikely。我們沒有雇主端資料,
   // 但手上三個訊號合起來能講同一件事:掛超過半年、死線已過、連結檢查沒過。
@@ -3611,6 +3611,8 @@
             ?'<input class="runn fterm-in" type="text" maxlength="80" data-fterm="'+t[0]+'" placeholder="不限,例如 台北 遠端" value="'+escA(String(v))+'">'
             :'<input class="runn fterm-in" type="number" inputmode="numeric" min="'+t[4]+'" data-fterm="'+t[0]+'" placeholder="不限" value="'+escA(String(v))+'">'+
              '<span class="runn-u">'+t[2]+'</span>')+
+          (t[0]==='salary_min'?'<a class="fterm-src" href="https://www.exchangerate-api.com" target="_blank" rel="noopener"'+
+            ' title="頁上寫年薪或外幣時,程式換成新台幣月薪:年薪除以 12,外幣照這裡每天更新的匯率">匯率:ExchangeRate-API</a>':'')+
           '</label>';}).join('')+'</div>';
   }
   // 讀面板上現在填的條件;有一格不合理回 null(並說哪一格)
@@ -3652,8 +3654,8 @@
         seedRowsHTML()+
         findTermsHTML()+
         '<div class="findset">'+findNHTML()+agentFreeHTML()+pvBtn('find')+'</div>'+
-        fold('findmore','找過幾輪 · 各找法的成績',
-          '<div id="find-score">'+findScoreHTML()+'</div><div id="find-rounds">'+findRoundsHTML()+'</div>',
+        fold('findmore','找過幾輪 · 各找法的成績 · 丟掉的職缺',
+          '<div id="find-score">'+findScoreHTML()+'</div><div id="find-rounds">'+findRoundsHTML()+'</div>'+turnedHTML(),
           {cls:'pb-morefold'})+
       '</div>',{id:'finddet',cls:'cuts-d find-d',hcls:'cuts-sum'})+'</div>';
   }
@@ -3661,10 +3663,56 @@
   // 靠每張新缺記的出處(j.src)算;以前沒記,那一批歸在「更早進板」。
   // 最近幾輪:往哪找、判了幾張、送進板幾張、你後來怎麼表態、那輪 agent 自己寫的方向。
   // 指定方向的那幾輪可以直接說「別再往這找」(FB.__research__.mute),下一輪找缺的 agent 會看到。
-  // 這輪條件擋掉幾張、各是哪一項(research.py 記的 terms_missed)
+  // 這輪條件擋掉幾張、各是哪一項(find.py 記的 terms_missed)
   function missedTerms(r){var m=r.terms_missed||{}, ks=Object.keys(m); if(!ks.length)return '';
     var n=0; ks.forEach(function(k){n+=m[k];});
-    return '、agent 回報不符條件 '+n+' 張('+ks.map(function(k){return k+' '+m[k];}).join('、')+')';}
+    return '、不符條件 '+n+' 張('+ks.map(function(k){return k+' '+m[k];}).join('、')+')';}
+  // 這輪丟掉的每一張(find.py 記的 gone,J-24):誰丟的(程式照你的設定、還是 agent 說的)、為什麼、程式讀到的那一頁截圖、
+  // 核對過的刊登日人數月薪。他看截圖自己判斷有沒有讀錯丟錯;丟錯的直接按「加進看板」(貼網址那一條,一律成卡)。
+  var GONE_RULE={'板上已經有':['prog','已在看板上'],'判過不送':['agent','以前判過不送'],'硬排除':['prog','你設的「一定不要」'],
+    '封鎖公司':['prog','你封鎖的公司'],'不符條件':['prog','不符你設的條件'],'agent 說不投':['agent','agent 說不投'],'詐騙':['agent','agent 判成詐騙']};
+  function goneFacts(g){var f=[];
+    if(g.posted_at)f.push('刊登 '+g.posted_at);
+    if(g.applicants!=null)f.push(typeof g.applicants==='number'?g.applicants+' 人應徵':'應徵人數'+g.applicants);
+    if(g.salary_month!=null)f.push('月薪約 '+Math.round(Number(g.salary_month)).toLocaleString()+' 元(程式換算)');
+    if(g.exp_years!=null)f.push('要 '+g.exp_years+' 年經驗');
+    if(g.location)f.push('地點'+g.location+'(agent 說)');
+    return f.join(' · ');}
+  function goneRowHTML(g){var t=GONE_RULE[g.rule]||['prog',g.rule], facts=goneFacts(g),
+    shot=g.shot?'/api/evidence?u='+encodeURIComponent(g.id)+'&amp;f='+encodeURIComponent(g.shot):'';
+    return '<div class="gone">'+
+      (shot?'<a class="gone-shot" href="'+shot+'" target="_blank" rel="noopener" title="程式讀到的那一頁(點開看整張)">'+
+        '<img loading="lazy" alt="那一頁的截圖" src="'+shot+'"></a>':'<span class="gone-shot none">沒有截圖</span>')+
+      '<div class="gone-b"><a class="gone-t" href="'+escA(g.id)+'" target="_blank" rel="noopener">'+esc(g.target||g.id)+'</a>'+
+      '<div class="gone-why"><span class="gone-tag '+t[0]+'">'+(t[0]==='prog'?'程式':'agent')+'</span>'+esc(t[1])+
+        (g.missed&&g.missed.length?':'+esc(g.missed.join('、')):'')+(g.why?'<q>'+esc(g.why)+'</q>':'')+'</div>'+
+      (facts||g.when?'<div class="gone-f">'+esc([g.when?g.when+' 那一輪':'',facts].filter(Boolean).join(' · '))+'</div>':'')+
+      // 板上已有的不用加;封鎖公司加了看板也收起來,要看先到設定解除封鎖
+      (g.rule==='板上已經有'?'':g.rule==='封鎖公司'?'<div class="gone-f">要看這家先到設定解除封鎖</div>':
+        '<button class="cust-b ask" type="button" data-goneadd="'+escA(g.id)+'"'+((MISC.add||{}).running?' disabled':'')+'>'+
+        ic('plus')+' 丟錯了,加進看板</button>')+
+      '</div></div>';}
+  function goneHTML(r){var gs=r.gone||[]; if(!gs.length)return '';
+    var prog=gs.filter(function(g){return (GONE_RULE[g.rule]||['prog'])[0]==='prog';}).length;
+    return fold('fgone:'+(r.round||''),'丟掉的 '+gs.length+' 張(照你的設定 '+prog+'、agent 說的 '+(gs.length-prog)+')',
+      '<div class="gone-l">'+gs.map(goneRowHTML).join('')+'</div>',{cls:'find-rn gone-fold'});}
+  // agent 判過不送的全部(.research/judged-no.jsonl):之後找到也不再讀,「最近幾輪」只留五輪,這裡一直看得到(J-24)。
+  // 展開時才去讀;已經加回看板的不列。
+  var TURNED=null;
+  function turnedRows(){
+    var on={}; jobs.forEach(function(j){on[j.id]=1;});
+    var rs=(TURNED||[]).filter(function(r){return !on[r.url];});
+    return rs.length?rs.map(function(r){return goneRowHTML({id:r.url,rule:r.rule||'agent 說不投',why:r.why,target:r.target,shot:r.shot,when:r.at});}).join('')
+      :'<div class="gone-f">沒有</div>';}
+  function loadTurned(){
+    fetch('/api/turned-down').then(function(r){return r.json();}).then(function(d){TURNED=d.rows||[];
+      var el=$('find-turned'); if(el)el.innerHTML=turnedRows();})
+      .catch(function(){var el=$('find-turned'); if(el)el.textContent='讀不到判過不送的紀錄,重整再試一次';});}
+  function turnedHTML(){
+    return fold('findturned','agent 判過不送的職缺(之後找到也不再讀)',
+      '<div id="find-turned" class="gone-l">'+(TURNED?turnedRows():'讀取中…')+'</div>',{cls:'find-rn gone-fold'});}
+  document.addEventListener('toggle',function(e){var d=e.target;
+    if(d&&d.tagName==='DETAILS'&&d.open&&d.getAttribute('data-fold')==='findturned')loadTurned();},true);
   function findRoundsHTML(){
     var rs=(D.research||[]).slice(-5).reverse(); if(!rs.length)return '';
     var mute=((FB['__research__']||{}).mute)||[];
@@ -3677,6 +3725,7 @@
         '<div class="find-r2">判了 '+(r.judged||0)+' 張、送進板 '+(r.added||[]).length+' 張'+missedTerms(r)+';你看過 '+seen+'、喜歡 '+like+'、不喜歡 '+dis+
         (r.direction?'<button class="cust-b '+(muted?'take':'ask')+'" type="button" data-fmute="'+escA(r.direction)+'">'+
           (muted?ic('check')+' 說過別再找':'別再往這找')+'</button>':'')+'</div>'+
+        goneHTML(r)+
         (r.notes?fold('frn:'+(r.round||''),'那輪 agent 自己寫的','<div>'+esc(r.notes)+'</div>',{cls:'find-rn'}):'')+'</div>';
     }).join('')+'</div>';
   }
@@ -3698,6 +3747,7 @@
   }
   function renderFind(){
     var fb=$('findbar'); if(!fb)return; fb.innerHTML=findPanelHTML();
+    if(FOLD.findturned)loadTurned();   // 重畫後展開著的那一塊重新讀
   }
   // 進度一直在變,但他可能正在打方向:只換狀態字與按鈕,不重畫輸入框(游標與打到一半的字都留著)。
   function refreshFindUI(){
@@ -3791,10 +3841,11 @@
   // 以前一律從 null 開始,頁面一載入就把剛送來的職缺、標記、下一步再抓一次、再畫一次(#606)
   var srvGen=(D.sig||{}).gen||null, srvRev=(D.sig||{}).rev||null, syncing=false;
   function pullJobs(d){
-    if(!d.jobs||!d.jobs.length)return false;
+    // 找缺那幾輪的紀錄(🔎 面板「最近幾輪」):空看板一輪全部丟掉時,職缺清單是空的、這份照樣要換
+    var got=!!d.research; if(got)D.research=d.research;
+    if(!d.jobs||!d.jobs.length)return got;
     jobs=d.jobs; LAZY={}; takeShip(d.ship_files);
     if(d.status)D.status=d.status;   // 投遞前驗收也會重跑;只換職缺不換它,卡上的 ⛔ 會停在舊的那一次
-    if(d.research)D.research=d.research;   // 找缺那幾輪的紀錄(🔎 面板「最近幾輪」)
     return true;
   }
   // 別處改了標記:換成伺服器上的,他手上還沒存的那幾欄疊回去(只送改過的欄,所以兩邊都留得住)
@@ -5836,6 +5887,9 @@
     fetch('/api/log?kind='+encodeURIComponent(kind)).then(function(r){return r.text();}).then(function(t){
       modal('<div class="rzm-box"><button class="rzm-x" type="button">'+ic('x')+' 關閉</button><pre class="log-pre">'+esc(t)+'</pre></div>','');});
   }
+  document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-goneadd]');
+    if(!b)return; startRun('add',{text:b.getAttribute('data-goneadd')},b);
+    snack('加入中:跟貼網址一樣一律成卡,好了會出現在「新職缺」');});
   document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('[data-addurls]');
     if(!b)return; var ta=$('add-urls'), txt=(ta&&ta.value||'').trim();
     if(!/https?:\/\//.test(txt)){snack('先貼職缺網址(http 開頭)'); if(ta)ta.focus(); return;}

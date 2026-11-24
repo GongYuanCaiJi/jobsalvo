@@ -163,6 +163,7 @@ class FakeBrowser:
         self.fetch_parts = {}                # 網址 → 程式讀網址時瀏覽器給的每一段(含變形開關加的)
         self.read_parts = []                 # 程式最近一次讀工作區,瀏覽器給的每一段(含變形開關加的)
         self.hand_fail = ''                  # 交給使用者那一步失敗的原因(空的是交得出去)
+        self.rates = {'TWD': 1, 'USD': 0.03125}   # 一元新台幣換多少外幣(1 美元 = 32 元)
 
     # ---- 讀頁(只有 web/ 核心叫)----
     def raw_tabs(self):
@@ -197,6 +198,9 @@ class FakeBrowser:
         with open(path, 'wb') as target:
             target.write(b'png')
         return path
+
+    def exchange_rates(self):
+        return dict(self.rates)
 
     def raw_fetch(self, url):
         self.fetches.append(url)

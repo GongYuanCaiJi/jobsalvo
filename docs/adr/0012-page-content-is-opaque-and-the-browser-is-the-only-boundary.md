@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted;「不判斷」的範圍見 ADR-0013
 ---
 
 # 網站任務程式的結構:頁面內容只准白名單函式讀,瀏覽器是唯一外部邊界

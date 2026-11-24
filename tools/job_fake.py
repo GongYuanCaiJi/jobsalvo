@@ -9,7 +9,7 @@ job_fake —— 看板副本上按「跑準備區」「找新職缺」時跑的�
 
 它照同一套格式寫進度(jobrun),最後對副本做跟真的收尾一樣的事:
   prep     把副本「正在準備」的卡推到「待你決定」
-  research 在副本加兩筆假職缺(🆕 待評估看得到)
+  research 在副本加兩筆假職缺(🆕 待評估看得到),每輪紀錄記一張丟掉的(看板「丟掉的職缺」列得出來)
   apply    fill:把副本可投遞的卡標成「agent 填好了」;submit:核准有效的卡搬到已投遞(假確認頁)。
            核准規則照真的 form_record.approval_problem,沒核准的一張都不會動。
   add      貼網址加入:每個網址加一張假卡進待評估
@@ -64,6 +64,9 @@ def prep(board, sp, step, limit=0, url=''):
         't0': t0, 'finished_at': time.time()})
 
 
+ALL_GONE = '沙箱:全部丟掉'   # 照這個方向找的假找缺一張都不進看板,只有丟掉的(看板檢查考空看板)
+
+
 def research(board, sp, step, mode, direction, minutes=0):
     path = os.path.join(sp, 'converge_status.json')
     t0, me = time.time(), os.getpid()
@@ -76,8 +79,19 @@ def research(board, sp, step, mode, direction, minutes=0):
             'target': f'(沙箱假職缺 {i})測試用·沙箱公司', 'chan': '官方', 'ammo': '', 'note': '',
             'bk': False, 'dead': False, 'added': today,
             'sum': {'fit': '沙箱假資料', 'co': '沙箱', 'loc': '', 'deadline': '', 'salary': '',
-                    'bar': '', 'posted': '', 'ammo': ''}} for i in (1, 2)]
-    bd.set_data(lambda data, fb: data['jobs'].extend(new), live=board)
+                    'bar': '', 'posted': '', 'ammo': ''}} for i in (1, 2) if direction != ALL_GONE]
+    gone = [{'id': f'https://example.test/fake/{int(t0)}-3', 'rule': '不符條件', 'why': '', 'shot': '',
+             'target': '(沙箱假職缺 3)測試用·沙箱公司', 'missed': ['應徵人數'], 'applicants': 300}]
+    row = {'round': time.strftime('%Y-%m-%d %H:%M:%S'), 'mode': mode, 'direction': direction, 'judged': 3,
+           'added': [job['id'] for job in new], 'dropped': {'不符條件': 1}, 'gone': gone, 'terms_missed': {'應徵人數': 1}}
+
+    def save(data, fb):
+        data['jobs'].extend(new)
+        data.setdefault('research', []).append(row)
+    bd.set_data(save, live=board)
+    import find                  # agent 說不投的一張記進判過不送(看板「agent 判過不送的職缺」列得出來)
+    find.turned_add([{'url': f'https://example.test/fake/{int(t0)}-4', 'at': row['round'], 'mode': mode, 'rule': 'agent 說不投',
+                      'why': '沙箱:跟你要的方向無關', 'target': '(沙箱假職缺 4)測試用·沙箱公司', 'shot': ''}])
     jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, finished_at=time.time()))
 
 

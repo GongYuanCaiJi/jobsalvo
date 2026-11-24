@@ -84,7 +84,7 @@ HOST_ATTRS = {'hostname', 'netloc'}
 LOOPBACK = {'localhost', '127.0.0.1', '::1', ''}
 OWN_HOSTS = re.compile(
     r'(?:^|\.)(?:example(?:\.(?:com|org|net))?|invalid|test|localhost|127\.0\.0\.1|github\.com|'
-    r'jsdelivr\.net|w3\.org|claude\.com|ts\.net|jina\.ai|astral\.sh|metadata\.google\.internal)$', re.I,
+    r'jsdelivr\.net|w3\.org|claude\.com|ts\.net|jina\.ai|er-api\.com|exchangerate-api\.com|astral\.sh|metadata\.google\.internal)$', re.I,
 )
 
 REGEX_CALLS = {'compile', 'search', 'match', 'fullmatch', 'findall', 'finditer', 'sub', 'subn', 'split'}

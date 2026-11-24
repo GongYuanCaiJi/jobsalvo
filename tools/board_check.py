@@ -1912,6 +1912,59 @@ FIND_CHECKS.append(
  """))
 
 FIND_CHECKS.append(
+ ('找新職缺:每輪丟掉的職缺逐張列在「最近幾輪」,寫明誰丟的、哪一條、核對過的值,丟錯的按一下加進看板',"""
+   // #808:以前只有「清掉幾張」的數字,丟掉的是哪幾張、為什麼看不到,他沒辦法檢查 agent 有沒有讀錯丟錯
+   var d=document.getElementById('finddet'); if(!d)return '頁首沒有找新職缺';
+   d.open=true; await T.idle();
+   var rev=function(){return fetch('/api/rev').then(function(r){return r.json();});};
+   var prev=((await rev()).research||{}).finished_at||0;
+   document.querySelector('#findrow [data-find="wide"]').click();
+   if(!await T.until(async function(){var r=(await rev()).research||{}; return r.phase==='done'&&(r.finished_at||0)>prev;},20000))
+     return '找缺沒有在期限內跑完';
+   await T.until(function(){return document.querySelector('#find-rounds .gone-fold');},8000);
+   var more=document.querySelector('#findrow details[data-fold="findmore"]'); if(!more)return '沒有「找過幾輪」那一塊';
+   more.open=true; await T.idle();
+   var g=document.querySelector('#find-rounds .gone-fold'); if(!g)return '「最近幾輪」沒有列出丟掉的職缺(副本上的假找缺每輪丟一張)';
+   var bad=[];
+   if(!/丟掉的 1 張/.test(g.querySelector('summary').textContent))bad.push('沒寫丟掉幾張:'+g.querySelector('summary').textContent);
+   g.open=true; await T.idle();
+   var item=g.querySelector('.gone'); if(!item)return bad.concat('展開後沒有逐張列出').join('；');
+   var t=item.textContent;
+   if(!/沙箱假職缺 3/.test(t))bad.push('沒寫是哪一張職缺');
+   if(!/程式/.test(item.querySelector('.gone-tag').textContent)||!/不符你設的條件:應徵人數/.test(t))bad.push('沒寫是程式照哪一條丟的:'+t.slice(0,80));
+   if(!/300 人應徵/.test(t))bad.push('沒列程式核對過的應徵人數');
+   if(!/沒有截圖/.test(t))bad.push('沒有截圖的那張沒照實寫');
+   var a=item.querySelector('a.gone-t'); if(!a||!/example\\.test\\/fake/.test(a.href))bad.push('職缺名稱點不開原頁');
+   if(!item.querySelector('[data-goneadd]'))bad.push('丟錯的沒有「加進看板」');
+   // agent 判過不送的:「最近幾輪」只留五輪,另外一塊一直列著(之後找到也不再讀)
+   var tf=document.querySelector('#findrow details[data-fold="findturned"]');
+   if(!tf)bad.push('沒有「agent 判過不送的職缺」那一塊');
+   else{tf.open=true;
+     var row=await T.until(function(){var r=document.querySelector('#find-turned .gone'); return r&&/沙箱假職缺 4/.test(r.textContent)&&r;},8000);
+     if(!row)bad.push('agent 判過不送的那張沒有列出來');
+     else if(!/agent 說不投/.test(row.textContent)||!/沙箱:跟你要的方向無關/.test(row.textContent))bad.push('判過不送的沒寫 agent 怎麼說:'+row.textContent.slice(0,80));}
+   return bad.join('；');
+ """))
+
+FIND_CHECKS.append(
+ ('找新職缺:看板還沒有職缺、這輪全部丟掉時,不用重新整理就列出丟掉的職缺',"""
+   // Sol 審 #812:輪詢拿到空的職缺清單就整包略過,這輪的丟掉紀錄要重新整理才看得到;第一次用的人正是空看板
+   var d=document.getElementById('finddet'); if(!d)return '頁首沒有找新職缺';
+   d.open=true; await T.idle();
+   var rev=function(){return fetch('/api/rev').then(function(r){return r.json();});};
+   var prev=((await rev()).research||{}).finished_at||0;
+   T.type(document.getElementById('find-dir'),'沙箱:全部丟掉');
+   document.querySelector('#findrow [data-find="dir"]').click();
+   if(!await T.until(async function(){var r=(await rev()).research||{}; return r.phase==='done'&&(r.finished_at||0)>prev;},20000))
+     return '找缺沒有在期限內跑完';
+   var more=document.querySelector('#findrow details[data-fold="findmore"]'); if(!more)return '沒有「找過幾輪」那一塊';
+   more.open=true;
+   var g=await T.until(function(){var x=document.querySelector('#find-rounds .gone-fold'); return x&&/丟掉的 1 張/.test(x.textContent)&&x;},8000);
+   return g?'':'這輪丟掉的職缺沒有列出來(要重新整理才看得到)';
+ """, 'empty_board', {'fresh_page': True}))
+FIND_CHECKS.append(('找新職缺:職缺放回看板', "return '';", 'refill_board', {'fresh_page': True, 'with_previous': True}))
+
+FIND_CHECKS.append(
  ('每顆派 agent 的按鈕旁邊都有「📝 prompt」,點開是彈窗、不是把版面撐開',"""
    var bad=[];
    var fd2=document.getElementById('finddet'); if(fd2)fd2.open=true; await T.idle();
@@ -2813,7 +2866,7 @@ FIND_CHECKS.append(('找缺卡片把未核對摘要、未知條件、agent 判�
    var group=card.closest('details.cogrp'); if(group&&!group.open){group.querySelector('summary').click(); await T.idle();}
    card=T.card(P.id);
    if(card.querySelectorAll('.facts .fact-unverified').length!==3)bad.push('地點、薪資、截止日沒有逐項標「agent 說的・沒核對到」');
-   if(!card.textContent.includes('agent 說查不到：薪資'))bad.push('agent 回報查不到的條件沒有照實標明來源');
+   if(!card.textContent.includes('薪資查不到'))bad.push('程式比不了的條件沒有標在卡上');
    if(!card.textContent.includes('agent 判斷：可能是幽靈職缺')||!card.textContent.includes('UI-RISK-WHY'))bad.push('幽靈職缺理由沒有標成 agent 判斷');
    if(!card.textContent.includes('agent 判斷：可能是重貼')||!card.textContent.includes('UI-REPOST-WHY'))bad.push('重貼沒有標成 agent 判斷、附它引的舊卡');
    if(card.textContent.includes('一字不差相同'))bad.push('看板還在說程式比過公司職稱');

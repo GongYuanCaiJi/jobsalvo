@@ -82,7 +82,10 @@ FIELD_CITES = ('verified', 'not_on_page', 'missing')
 BLOCKED = (None, 'company_exact', 'company_alias', 'company_other_spelling')
 DEADLINE = ('2026-12-01', '', '下個月')
 CROWD = (12, '沒有上限', '很多人')
-TERMS_MISSED = (0, 3)
+TERMS = ('posted_days', 'applicants_max', 'salary_min', 'exp_max', 'location')
+TERM_VALUE = ('pass', 'miss', 'unchecked', 'unjudged')     # 核對過且符合、核對過但不符、那一欄沒核對到、核對到但值比不了
+EXCLUDE = (None, 'word', 'regex', 'other_word')           # 使用者設的「一定不要」
+PRIOR = ('new', 'on_board', 'turned_verified', 'turned_unverified')   # 這個網址之前的樣子
 
 # ---- 文字那一維 ----
 _CHARS = st.characters(codec='utf-8', categories=('L', 'N', 'P', 'Zs'), exclude_characters='\n\r\x00')
