@@ -924,7 +924,7 @@ def run_status(kind):
         st=jobrun.read(os.path.join(run_sp(kind),RUNS[kind]['status']),(RUNS[kind]['script'],'job_fake.py'))
     return {k:st[k] for k in ('phase','running','paused','n','done','msg','missing','ready','skipped','techerr','added',
                                'mode','which','direction','step','t0','finished_at','stage','results','url',
-                               'graceful','finishing','pending','found','dropped','timeup','minutes','unadded')
+                               'graceful','finishing','pending','found','dropped','timeup','minutes','unadded','took','notes')
             if st.get(k) is not None}
 
 

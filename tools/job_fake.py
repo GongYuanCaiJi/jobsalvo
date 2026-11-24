@@ -71,7 +71,8 @@ def research(board, sp, step, mode, direction, minutes=0):
     path = os.path.join(sp, 'converge_status.json')
     t0, me = time.time(), os.getpid()
     base = {'pid': me, 'mode': mode, 'direction': direction, 't0': t0, 'minutes': minutes}
-    jobrun.write(path, dict(base, phase='start')); time.sleep(step)
+    import find
+    jobrun.write(path, dict(base, phase='start')); clock = find.Run(board, None, minutes); time.sleep(step)
     jobrun.write(path, dict(base, phase='agent', which=mode)); time.sleep(step * 2)
     jobrun.write(path, dict(base, phase='fold')); time.sleep(step)
     today = time.strftime('%Y-%m-%d')
@@ -83,16 +84,17 @@ def research(board, sp, step, mode, direction, minutes=0):
     gone = [{'id': f'https://example.test/fake/{int(t0)}-3', 'rule': '不符條件', 'why': '', 'shot': '',
              'target': '(沙箱假職缺 3)測試用·沙箱公司', 'missed': ['應徵人數'], 'applicants': 300}]
     row = {'round': time.strftime('%Y-%m-%d %H:%M:%S'), 'mode': mode, 'direction': direction, 'judged': 3,
-           'added': [job['id'] for job in new], 'dropped': {'不符條件': 1}, 'gone': gone, 'terms_missed': {'應徵人數': 1}}
+           'added': [job['id'] for job in new], 'dropped': {'不符條件': 1}, 'notes': '沙箱:交件少的原因是假資料只有三張', 'gone': gone, 'terms_missed': {'應徵人數': 1}}
 
     def save(data, fb):
         data['jobs'].extend(new)
         data.setdefault('research', []).append(row)
     bd.set_data(save, live=board)
-    import find                  # agent 說不投的一張記進判過不送(看板「agent 判過不送的職缺」列得出來)
+    # agent 說不投的一張記進判過不送(看板「agent 判過不送的職缺」列得出來)
     find.turned_add([{'url': f'https://example.test/fake/{int(t0)}-4', 'at': row['round'], 'mode': mode, 'rule': 'agent 說不投',
                       'why': '沙箱:跟你要的方向無關', 'target': '(沙箱假職缺 4)測試用·沙箱公司', 'shot': ''}])
-    jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, finished_at=time.time()))
+    jobrun.write(path, dict(base, phase='done', added=len(new), found=len(new) + 1, dropped=1, finished_at=time.time(),
+                            took=clock.unpaused_seconds(), notes=row['notes']))
 
 
 # 假的 agent 回報:副本上的狀態只用來演練看板流程,不讀或改任何網站。

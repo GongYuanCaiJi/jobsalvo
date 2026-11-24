@@ -3431,6 +3431,14 @@
     if(!p.found&&p.timeup)return '這輪沒找到，可以把時間放寬';
     return '找到 '+p.found+' 張、清掉 '+(p.dropped||0)+' 張、'+add;
   }
+  function findTook(p){
+    if(p.took==null)return '';
+    var m=Math.round(p.took/60);
+    return ' · 跑了'+(m<1?'不到 1':' '+m)+' 分鐘'+(p.minutes?'(上限 '+p.minutes+' 分鐘)':'');
+  }
+  function findWhy(p){
+    return p.notes?'<div class="find-why">'+ic('bot')+' 這輪 agent 寫的交件說明:'+esc(p.notes)+'</div>':'';
+  }
   // 貼網址加入的上一輪結果:放在他貼網址的這一格底下(不進回報區,他沒有要處理的)。
   // 沒加成卡的一行一張:哪一張、為什麼(agent 看到的是什麼),點名字打開那一頁自己看
   function addResultHTML(){
@@ -3451,7 +3459,7 @@
     if(p.running)return '<span class="prep-st run">'+ic('hourglass')+' 正在找（'+esc(findWhat(p))+'）：'+esc(p.step||FIND_PH[p.phase]||p.phase)+'　· 已 '+minsOf(p)+' 分鐘'+
       (p.minutes?' / 最多找 '+p.minutes+' 分鐘':'')+'</span>'+runCtlHTML('research',p);
     if(p.phase==='done')return '<span class="prep-st ok">'+ic('circle-check')+' 上一輪（'+esc(findWhat(p))+'）'+hhmm(p.finished_at)+' '+
-      (p.timeup?'時間到':'找完')+'：'+findTally(p)+(p.msg?' · '+esc(p.msg):'')+'</span>';
+      (p.timeup?'時間到':'找完')+'：'+findTally(p)+findTook(p)+(p.msg?' · '+esc(p.msg):'')+'</span>'+findWhy(p);
     if(p.phase==='stopped')return '<span class="prep-st">'+ic('square')+' 上一輪你按了停止'+(p.graceful?':新增 '+(p.added||0)+' 筆'+
       (p.pending?',還有 '+p.pending+' 張找到沒判,下一輪先判':''):'')+'。要找再按一次。</span>';
     return phaseSt(p,'research');
@@ -3949,7 +3957,7 @@
           (AGENT+' 填好 '+ok+'/'+rs.length+' 張,看過沒問題就按卡上的「確認送出」'),null,{label:'去看',fn:function(){switchTab(a.stage==='submit'&&ok?'sent':'ship');}});}
       else if(a.phase==='failed'||a.phase==='died')snack(AGENT+' 沒跑完,詳情在「可以投了」最上面');}
     if(_runDone.research){ _runDone.research=false; var f=FIND||{};
-      if(f.phase==='done')snack((f.timeup?'找缺時間到：':'找缺完成：')+findTally(f),null,{label:'去看',fn:function(){switchTab('none');}});
+      if(f.phase==='done')snack((f.timeup?'找缺時間到：':'找缺完成：')+findTally(f)+findTook(f),null,{label:'去看',fn:function(){switchTab('none');}});
       else if(f.phase==='nothing')snack('這輪沒有找：'+(f.msg||''));
       else if(f.phase==='failed'||f.phase==='died')snack('找缺沒跑完，詳情在「找新職缺」');}
     if(_runDone.replies){ _runDone.replies=false; var q=REPLIES||{};

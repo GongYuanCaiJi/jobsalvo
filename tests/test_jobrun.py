@@ -45,6 +45,19 @@ class GracefulStop(unittest.TestCase):
         self.assertFalse(jobrun.finishing(path))
         self.assertEqual(jobrun.read(path, (MARK,))['phase'], 'stopped')
 
+    def test_stopping_while_paused_still_counts_the_pause(self):
+        d = self.enterContext(tempfile.TemporaryDirectory(prefix='jobrun-test-'))
+        path = os.path.join(d, 'status.json')
+        parent = subprocess.Popen([sys.executable, '-c', PARENT], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: parent.poll() is None and parent.kill())
+        parent.stdout.readline()
+        jobrun.write(path, {'phase': 'judge', 'pid': parent.pid, 'graceful': True})
+        jobrun.control(path, (MARK,), 'pause')
+        then = time.time() - 100
+        os.utime(path + '.paused', (then, then))
+        jobrun.control(path, (MARK,), 'stop')
+        self.assertGreaterEqual(jobrun.paused_seconds(path), 99)
+
     def test_flows_without_graceful_stop_at_once(self):
         d = self.enterContext(tempfile.TemporaryDirectory(prefix='jobrun-test-'))
         path = os.path.join(d, 'status.json')

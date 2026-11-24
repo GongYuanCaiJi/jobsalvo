@@ -1900,6 +1900,9 @@ FIND_CHECKS.append(
    // 副本上的假找缺跑得很快,「正在找… / 最多找 N 分鐘」那一下常常看不到;直接看這輪的進度帶了幾分鐘
    if((rv.research||{}).minutes!==20)bad.push('這輪沒有帶著格子的 20 分鐘出發(進度裡是 '+JSON.stringify((rv.research||{}).minutes)+')');
    else if(!/找到 3 張、清掉 1 張、進看板 2 張/.test(result))bad.push('跑完沒照實講三個數字:'+result);
+   if(!/跑了(不到 )?\\d+ 分鐘\\(上限 20 分鐘\\)/.test(result))bad.push('跑完沒寫這輪跑了多久、上限多少:'+result);
+   var why=await T.until(function(){return document.querySelector('#find-st .find-why');},8000);
+   if(!why||!/沙箱:交件少的原因/.test(why.textContent))bad.push('沒列出這輪 agent 寫的交件說明');
    // 填完馬上按(不等存設定):這輪也要帶著剛填的值
    prev=((await rev()).research||{}).finished_at||0; rv=null;
    fm=q(); fm.value='7'; fm.dispatchEvent(new Event('change',{bubbles:true}));

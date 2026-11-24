@@ -1237,6 +1237,7 @@ footer{margin-top:var(--space-32);padding-top:var(--space-16);border-top:1px sol
 .prep-st.run{color:var(--ink-dim);font-weight:var(--weight-semibold)}
 .prep-st.ok{color:var(--ink-dim)}
 .prep-st.bad{color:var(--warn);font-weight:var(--weight-semibold)}
+.find-why{flex:1 1 100%;font-size:var(--text-sm);line-height:var(--leading-normal);color:var(--ink-dim);overflow-wrap:anywhere}
 
 /* ---------- 找新職缺(更深/更廣/指定方向) ---------- */
 #findbar{margin:0}

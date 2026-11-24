@@ -467,13 +467,19 @@ class Run:
     def __init__(self, board, browser, minutes):
         import jobrun
         self.board, self.browser = board, browser
-        self.deadline = time.time() + minutes * 60 if minutes else None
+        self.started = time.time()
+        self.deadline = self.started + minutes * 60 if minutes else None
         self.paused0 = jobrun.current_paused()
 
-    def left(self, default):
+    def paused(self):
         import jobrun
-        return default if self.deadline is None else max(
-            0, int(self.deadline + jobrun.current_paused() - self.paused0 - time.time()))
+        return jobrun.current_paused() - self.paused0
+
+    def unpaused_seconds(self):
+        return int(time.time() - self.started - self.paused())
+
+    def left(self, default):
+        return default if self.deadline is None else max(0, int(self.deadline + self.paused() - time.time()))
 
     def agent(self, brief, known, default, materials=()):
         """派一個 agent;時間用完就不派,這一輪照讀到的收尾。"""
@@ -542,7 +548,7 @@ def run(ask, board, browser, limit, minutes):
         message = '；'.join(value for value in messages if value)
         print(f'找缺：{message}' if message else '找缺：完成')
         status(values.pop('phase', 'done'), added=len(added), dropped=sum(drop.values()), msg=message,
-               finished_at=time.time(), **values)
+               finished_at=time.time(), took=current.unpaused_seconds(), notes=notes[:600], **values)
         print(f'這輪新增 {len(added)} 筆職缺(在看板「🆕 待評估」)')
 
     status('start')

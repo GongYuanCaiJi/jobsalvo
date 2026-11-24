@@ -122,6 +122,17 @@ def control(path, names, action, hold=None):
     pids = tree(st.get('pid') or 0)
     mark = path + '.paused'
 
+    def unpause():
+        if not os.path.exists(mark):
+            return
+        total = paused_seconds(path)      # 含這一段還停著的時間,記起來再清掉暫停記號
+        try:
+            with open(path + '.pausedsum', 'w', encoding='utf-8') as f:
+                f.write(str(total))
+            os.remove(mark)
+        except OSError:
+            pass
+
     def send(sig, order):
         for p in order:
             with contextlib.suppress(OSError):   # 已經結束了
@@ -137,28 +148,20 @@ def control(path, names, action, hold=None):
     if action == 'resume':
         # 先記好暫停了多久、清掉暫停記號,再解凍:解凍的那一刻時限(agent_run.wait_done)就要看到這一段,
         # 不然剛醒來那一下會照沒扣暫停的時間算,當場判逾時
-        total = paused_seconds(path)      # 含這一段還停著的時間,記起來再清掉暫停記號
-        try:
-            with open(path + '.pausedsum', 'w', encoding='utf-8') as f:
-                f.write(str(total))
-            os.remove(mark)
-        except OSError:
-            pass
+        unpause()
         send(signal.SIGCONT, list(reversed(pids)))
         return True, '繼續跑了'
     if action == 'stop' and st.get('graceful') and not finishing(path):
         open(path + '.finish', 'w').close()
+        unpause()
         send(signal.SIGCONT, pids)                  # 凍住的先解凍,收工要它動
         send(signal.SIGTERM, pids[1:])              # 只停底下的 agent,主程式留著收工
-        with contextlib.suppress(OSError):   # 沒有暫停過就沒有暫停記號
-            os.remove(mark)
         return True, '收工中:已經做完的會收下'
     if action == 'stop':
         clear_finish(path)
+        unpause()
         send(signal.SIGCONT, pids)                  # 凍住的行程收不到結束訊號,先解凍
         send(signal.SIGTERM, pids)
-        with contextlib.suppress(OSError):   # 沒有暫停過就沒有暫停記號
-            os.remove(mark)
         write(path, dict({k: v for k, v in st.items() if k not in ('running', 'paused', 'at')},
                          phase='stopped', msg='你按了停止', finished_at=time.time()))
         return True, '停掉了'

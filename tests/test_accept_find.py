@@ -697,8 +697,10 @@ class ClockTest(FindCase):
                 _code, browser = self.go(search_takes(took, paused), judge(lambda m: [row(m, URL)]), reads={URL: 'ok'},
                                          argv=['--minutes', '1'])
                 expect(self, 'J-18', [55 <= t <= 60 for t in browser.timeouts], [True, True] if left else [True], case)
-                expect(self, 'J-18', self.home.status_file('converge')['msg'],
+                status = self.home.status_file('converge')
+                expect(self, 'J-18', status['msg'],
                        '' if left else '有 1 張候選的判斷交件未完整，已列為待確認（判斷 agent 沒有啟動）', case)
+                expect(self, 'J-18', (status['took'], status['notes']), (took - (paused - 100), '往後端找'), case)
 
 
 class RoundCase(FindCase):
@@ -866,9 +868,12 @@ class WholeRoundTest(RoundCase):
         final = self.home.status_file('converge')
         running = {'pid': os.getpid(), 'mode': 'dir', 'direction': '機器人', 'minutes': 7, 'graceful': True}
         clocks = [status.pop(key) for status in (*seen.values(), final) for key in ('t0', 'at')] + [final.pop('finished_at')]
+        took = final.pop('took')
+        expect(self, 'J-18', 0 <= took <= clocks[5] - clocks[4], True)
         expect(self, 'J-20', (seen, final, code), ({'search': dict(running, phase='start'),
                                                     'judge': dict(running, phase='agent', step='核對 agent 引的職缺頁原文')},
-                                                   dict(running, phase='done', added=1, dropped=0, msg='', found=1), 0))
+                                                   dict(running, phase='done', added=1, dropped=0, msg='', found=1,
+                                                        notes=('往後端找' + 'x' * 600)[:600]), 0))
         expect(self, 'J-20', clocks[0] == clocks[2] == clocks[4] <= clocks[1] <= clocks[3] <= clocks[5], True)
         history = self.research()
         expect(self, 'J-23', (len(history), history[-1]), (10, {
@@ -917,11 +922,11 @@ class EmptyRoundTest(RoundCase):
     def test_no_candidates(self):
         code, _browser, printed = self.go_empty(Script((), {'candidates': [], 'notes': '', 'stopped': ''}))
         final = self.home.status_file('converge')
-        for key in ('t0', 'at', 'finished_at'):
+        for key in ('t0', 'at', 'finished_at', 'took'):
             final.pop(key)
         expect(self, 'J-20', (code, final, printed.splitlines()[-2:], [dict(row, round='') for row in self.research()]), (
             0, {'pid': os.getpid(), 'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': 'done', 'added': 0,
-                'dropped': 0, 'msg': '', 'found': 0}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
+                'dropped': 0, 'msg': '', 'found': 0, 'notes': ''}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
             [{'round': '', 'mode': 'both', 'direction': '', 'judged': 0, 'dropped': {}, 'gone': [], 'terms_missed': {}, 'notes': '', 'seeds': [],
               'added': []}]))
 
@@ -977,9 +982,9 @@ class SearchEndTest(FindCase):
                 'notes': '往後端找' if handed else '', 'seeds': [], 'added': [URL] if handed else []}, end)
             expect(self, 'J-18', browser.timeouts, [4 * 3600, 3600] if handed else [4 * 3600], end)   # 沒給時間上限:搜尋 4 小時、判斷 1 小時
             if not handed:
-                rest = {key: value for key, value in status.items() if key not in ('msg', 't0', 'at', 'finished_at', 'pid')}
+                rest = {key: value for key, value in status.items() if key not in ('msg', 't0', 'at', 'finished_at', 'pid', 'took')}
                 expect(self, 'J-20', rest, {'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': want,
-                                            'added': 0, 'dropped': 0, 'found': 0, 'timeup': end == I.TIMEOUT}, end)
+                                            'added': 0, 'dropped': 0, 'found': 0, 'timeup': end == I.TIMEOUT, 'notes': ''}, end)
             expect(self, 'J-20', (self.card() is not None, browser.fetches), (handed, [URL] if handed else []), end)
 
     def test_unreadable_board(self):
