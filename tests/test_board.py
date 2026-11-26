@@ -1911,10 +1911,10 @@ class ResumeForAgents(unittest.TestCase):
     def test_build_only_markup_never_reaches_the_agent(self):
         """給 agent 的履歷文字只含正文;排版 CSS、照片和產檔標記不會傳進去。"""
         from unittest.mock import patch
-        import prefs
+        import settings_api
         raw = '<style>line-height:1</style><img src="x"><!-- FILL: x ATTACHMENT: y -->\n個人簡介\n為什麼是我'
         with patch.dict(os.environ, {'JOBSALVO_RESUME_TEXT': raw}):
-            t = prefs.resume()
+            t = settings_api.resume()
         for junk in ('<style', '</style>', '<img', '<!--', 'line-height', 'FILL:', 'ATTACHMENT:'):
             self.assertNotIn(junk, t, junk)
         for keep in ('個人簡介', '為什麼是我'):

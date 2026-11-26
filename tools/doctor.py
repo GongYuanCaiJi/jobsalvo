@@ -149,6 +149,17 @@ def _folder_history_row():
             'detail': '；'.join(problems), 'fix': ' '.join(f for f in fixes if f)}
 
 
+def tailscale_ip():
+    """抓自己的 Tailscale IPv4;沒 tailscale/沒連上就回 None。"""
+    tsc = shutil.which('tailscale') or '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+    try:
+        out = subprocess.run([tsc, 'ip', '-4'], capture_output=True, text=True, timeout=5).stdout.strip()
+        ip = out.splitlines()[0].strip() if out else ''
+        return ip if ip.startswith('100.') else None
+    except (OSError, subprocess.SubprocessError):   # 沒裝 Tailscale、沒開:只綁本機
+        return None
+
+
 def check_environment(agents=None):
     """Check Python and only the runtimes in the configured agent list.
 
@@ -239,8 +250,7 @@ def check_environment(agents=None):
 
     # 手機走 Tailscale 連看板:macOS 防火牆會安靜擋掉跑看板的 Python(換 Python 版本後實際發生過,手機只會轉圈)
     if sys.platform == 'darwin' and os.path.isfile(venv):
-        import board_server
-        ip = board_server.tailscale_ip()
+        ip = tailscale_ip()
         if ip:
             exe = os.path.realpath(venv)
             problem = firewall_problem(ip, cf.PORT)

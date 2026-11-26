@@ -134,22 +134,6 @@ def hard_rules():
     return custom or '(目前沒有)'
 
 
-# 履歷檔裡可能有給建置用的東西:<style> 排版 CSS、照片 <img>、產檔用的 <!-- --> 標記。
-# 那些不是「他是誰」,原封不動丟給 agent 等於拿版面 CSS 當判斷依據,佔 token 又沒用。
-# 只拿掉標記本身,標記之間的正文照樣留著。
-_BUILD_ONLY = re.compile(r'<style\b.*?</style>|<img\b[^>]*>|<!--.*?-->', re.S | re.I)
-
-
-def resume():
-    t = os.environ.get('JOBSALVO_RESUME_TEXT', '')
-    if not t.strip():
-        import settings_api
-        t, problem = settings_api.resume_material()
-        if not t:
-            return '(讀不到上傳履歷文字:請把履歷內容貼上來)'
-    return re.sub(r'\n{3,}', '\n\n', _BUILD_ONLY.sub('', t)).strip()
-
-
 def checked_resumes(resumes=None):
     resumes = cf.RESUMES.values() if resumes is None else resumes
     return [item for item in resumes if item.get('enabled', True)]

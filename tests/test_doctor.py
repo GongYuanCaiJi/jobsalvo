@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """環境檢查:紅燈 ⇔ 真的跑不動。誤報(明明能跑卻擋)跟漏報(跑不動卻通過)一樣要擋;
 程式新呼叫的外部指令一定要對到一項檢查或寫明為什麼不查,環境檢查才不會過時。"""
-import os, re, sys, glob, unittest
+import os, re, sys, glob, subprocess, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -198,6 +198,22 @@ class Coverage(unittest.TestCase):
         missing = {cmd: where for cmd, where in found.items()
                    if cmd not in doctor.CHECKED and cmd not in doctor.NOT_CHECKED}
         self.assertEqual(missing, {}, '程式呼叫了這些外部指令,環境檢查沒查、也沒寫為什麼不查(tools/doctor.py 的 CHECKED / NOT_CHECKED)')
+
+
+class PhoneFirewall(unittest.TestCase):
+    def test_the_firewall_check_probes_the_tailscale_address(self):
+        real_run, real_isfile, probed = subprocess.run, os.path.isfile, []
+
+        def run(argv, *a, **k):
+            if list(argv[1:]) == ['ip', '-4']:
+                return subprocess.CompletedProcess(argv, 0, stdout='100.64.0.7\n', stderr='')
+            return real_run(argv, *a, **k)
+        with mock.patch('subprocess.run', side_effect=run), mock.patch.object(sys, 'platform', 'darwin'), \
+                mock.patch('os.path.isfile', side_effect=lambda p: p.endswith('.venv/bin/python3') or real_isfile(p)), \
+                mock.patch.object(doctor, 'firewall_problem', side_effect=lambda ip, port: probed.append(ip) or ''):
+            checks = {c['key']: c for c in doctor.check_environment(agents('codex'))['checks']}
+        self.assertEqual(probed, ['100.64.0.7'])
+        self.assertTrue(checks['firewall']['ok'])
 
 
 if __name__ == '__main__':

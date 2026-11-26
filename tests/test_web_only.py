@@ -260,12 +260,12 @@ class WebOnly(tb.HttpBase):
             'files': {'zh': 'resume/feature-48.txt'},
         }]
         self.assertEqual(self.req('/api/settings', {'settings': settings})[0], 200)
-        import prefs, settings_api
+        import settings_api
         material, problem = settings_api.resume_material()
         self.assertFalse(problem)
         self.assertIn(resume_text, material)
         with patch.dict(os.environ, {'JOBSALVO_RESUME_TEXT': material}):
-            self.assertIn(resume_text, prefs.resume())
+            self.assertIn(resume_text, settings_api.resume())
         with patch.object(bs.subprocess, 'Popen') as popen:
             popen.return_value.poll.return_value = None
             code, raw, _ = self.req('/api/run/research', {'mode': 'wide'})
@@ -301,12 +301,12 @@ class WebOnly(tb.HttpBase):
         legacy_text = '舊版一頁履歷中的資料工程經驗'
         with open(os.path.join(cf.HOME, 'resume.md'), 'w', encoding='utf-8') as f:
             f.write(legacy_text)
-        import prefs, settings_api
+        import settings_api
         material, problem = settings_api.resume_material()
         self.assertFalse(problem)
         self.assertIn(legacy_text, material)
         with patch.dict(os.environ, {'JOBSALVO_RESUME_TEXT': ''}):
-            self.assertIn(legacy_text, prefs.resume())
+            self.assertIn(legacy_text, settings_api.resume())
 
     def test_apply_or_replies_prompt_for_a_live_browser_only_when_needed(self):
         with patch.object(bs, 'is_real', return_value=True), \

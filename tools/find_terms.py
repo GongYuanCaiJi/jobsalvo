@@ -108,13 +108,186 @@ def check_judged(said, terms, today=None):
             [TERMS[key][0] for key, value in verdicts.items() if value is None])
 
 
+def _expand_lookbehind_alternatives(pattern):
+    def class_end(text, start):
+        i = start + 1
+        if i < len(text) and text[i] == '^':
+            i += 1
+        if i < len(text) and text[i] == ']':
+            i += 1
+        while i < len(text):
+            if text[i] == '\\':
+                i += 2
+            elif text[i] == ']':
+                return i
+            else:
+                i += 1
+        return None
+
+    def group_end(text, start):
+        depth = 1
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if ch == '\\':
+                i += 2
+            elif ch == '[':
+                end = class_end(text, i)
+                if end is None:
+                    return None
+                i = end + 1
+            elif ch == '(':
+                depth += 1
+                i += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    return i
+                i += 1
+            else:
+                i += 1
+        return None
+
+    def alternatives(body):
+        parts = []
+        start = 0
+        depth = 0
+        i = 0
+        while i < len(body):
+            ch = body[i]
+            if ch == '\\':
+                i += 2
+            elif ch == '[':
+                end = class_end(body, i)
+                if end is None:
+                    return [body]
+                i = end + 1
+            elif ch == '(':
+                depth += 1
+                i += 1
+            elif ch == ')':
+                depth -= 1
+                i += 1
+            elif ch == '|' and depth == 0:
+                parts.append(body[start:i])
+                start = i + 1
+                i += 1
+            else:
+                i += 1
+        if not parts:
+            return [body]
+        parts.append(body[start:])
+        return parts
+
+    def expand(text):
+        out = []
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == '\\':
+                out.append(text[i:i + 2])
+                i += 2
+                continue
+            if ch == '[':
+                end = class_end(text, i)
+                if end is None:
+                    out.append(text[i:])
+                    break
+                out.append(text[i:end + 1])
+                i = end + 1
+                continue
+            if text.startswith(('(?<=', '(?<!'), i):
+                opener = text[i:i + 4]
+                end = group_end(text, i + len(opener))
+                if end is not None:
+                    branches = alternatives(text[i + len(opener):end])
+                    if len(branches) > 1:
+                        branches = [expand(branch) for branch in branches]
+                        if opener == '(?<=':
+                            out.append('(?:' + '|'.join(f'(?<={branch})' for branch in branches) + ')')
+                        else:
+                            out.append(''.join(f'(?<!{branch})' for branch in branches))
+                    else:
+                        out.append(text[i:end + 1])
+                    i = end + 1
+                    continue
+            out.append(ch)
+            i += 1
+        return ''.join(out)
+
+    return expand(pattern)
+
+
+def compile_match(pattern):
+    """Compile the Python approximation of a board RegExp (case-insensitive).
+
+    The settings page does the authoritative syntax check with the browser's
+    RegExp constructor before POSTing. This server-side check catches Python
+    extensions that would otherwise pass Python but silently fail in the
+    board, while translating JavaScript named groups for Python's validator.
+    """
+    pattern = _expand_lookbehind_alternatives(str(pattern))
+    out = []
+    i = 0
+    in_class = False
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == '\\':
+            if i + 1 >= len(pattern):
+                out.append(ch)
+                i += 1
+                continue
+            nxt = pattern[i + 1]
+            if not in_class:
+                if nxt in ('A', 'Z'):
+                    raise ValueError(r'Python 的 \A、\Z 錨點不是看板正規式語法')
+                if pattern.startswith((r'\N{', r'\g<'), i):
+                    raise ValueError('Python 專用跳脫不是看板正規式語法')
+                if pattern.startswith(r'\k<', i):
+                    m = re.match(r'\\k<([A-Za-z_][A-Za-z0-9_]*)>', pattern[i:])
+                    if not m:
+                        raise ValueError('命名群組參照格式不對')
+                    out.append(f'(?P={m.group(1)})')
+                    i += len(m.group(0))
+                    continue
+            out.extend((ch, nxt))
+            i += 2
+            continue
+
+        if ch == '[':
+            in_class = True
+        elif ch == ']' and in_class:
+            in_class = False
+
+        if not in_class and pattern.startswith('(?', i):
+            if pattern.startswith(('(?P<', '(?P='), i):
+                raise ValueError('Python 命名群組不支援；請改用 JavaScript 的 (?<name>...)')
+            if pattern.startswith(('(?:', '(?=', '(?!', '(?<=', '(?<!'), i):
+                prefix = next(p for p in ('(?<=', '(?<!', '(?:', '(?=', '(?!')
+                              if pattern.startswith(p, i))
+                out.append(prefix)
+                i += len(prefix)
+                continue
+            m = re.match(r'\(\?<([A-Za-z_][A-Za-z0-9_]*)>', pattern[i:])
+            if m:
+                out.append(f'(?P<{m.group(1)}>')
+                i += len(m.group(0))
+                continue
+            raise ValueError('Python 專用群組語法不是看板正規式語法')
+
+        if not in_class and ch in '*+?}' and i + 1 < len(pattern) and pattern[i + 1] == '+':
+            raise ValueError('Python 專用 possessive quantifier 不是看板正規式語法')
+        out.append(ch)
+        i += 1
+    return re.compile(''.join(out), re.IGNORECASE | re.ASCII)
+
+
 def excluded(title):
     """使用者設定的「一定不要」(search.exclude_words 一行一個字、進階 exclude_title 正規式):核對過的職稱一出現就不送。"""
     search = config.C.get('search') or {}
     parts = [re.escape(str(word).strip()) for word in search.get('exclude_words') or () if str(word).strip()]
     flags = re.I
     if (search.get('exclude_title') or '').strip():
-        from settings_api import compile_match
         compiled = compile_match(search['exclude_title'].strip())
         parts.append(compiled.pattern)
         flags = compiled.flags

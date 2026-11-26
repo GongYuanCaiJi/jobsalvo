@@ -41,6 +41,7 @@ HERE=os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0,HERE)
 import board_doc as bd
 import config as cf
+from doctor import tailscale_ip  # noqa: E402
 import card
 import jobrun
 REPO=cf.HOME
@@ -2017,16 +2018,6 @@ class H(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — 存檔失敗的原因照實回給看板(存檔列顯示沒存成)
             self._json(400,{'ok':False,'err':str(e)})
     def log_message(self,*a): pass  # 安靜
-
-def tailscale_ip():
-    """抓自己的 Tailscale IPv4;沒 tailscale/沒連上就回 None。"""
-    tsc=shutil.which('tailscale') or '/Applications/Tailscale.app/Contents/MacOS/Tailscale'
-    try:
-        out=subprocess.run([tsc,'ip','-4'],capture_output=True,text=True,timeout=5).stdout.strip()
-        ip=out.splitlines()[0].strip() if out else ''
-        return ip if ip.startswith('100.') else None
-    except (OSError,subprocess.SubprocessError):   # 沒裝 Tailscale、沒開:只綁本機
-        return None
 
 def resolve_hosts(arg):
     """一律綁 127.0.0.1 與 ::1(純本機迴環,不經過網路卡),再加上 Tailscale IP 給手機連。

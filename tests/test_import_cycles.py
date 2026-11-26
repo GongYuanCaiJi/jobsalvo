@@ -11,8 +11,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import dev_arch as da  # noqa: E402
 
 ALLOWED = [
-    {'add_job', 'autopilot', 'board_server', 'customize', 'cut_tailor', 'doctor', 'feedback_dump', 'find',
-     'find_terms', 'gate', 'gate_flows', 'init', 'prefs', 'reconcile', 'settings_api'},
     {'agent_report', 'board_doc'},
     {'iv', 'iv_sheet'},
 ]

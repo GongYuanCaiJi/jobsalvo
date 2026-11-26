@@ -140,9 +140,10 @@ def user_materials(board):
     agent 寫的東西(偏好筆記的 Agent 假設、卡片摘要、前幾輪紀錄、網站筆記)只給使用者看,不交給下一個 agent;
     整個看板也不放這裡:每份指示只放它自己要的(#832)。"""
     import prefs
+    import settings_api
     feedback, jobs = prefs.load(board)
     return (
-        ('履歷原文', prefs.resume()),
+        ('履歷原文', settings_api.resume()),
         ('使用者自訂的偏好', prefs.hard_rules()),
         ('使用者封鎖的公司', _listed(str(x) for x in feedback.get('__block__') or () if x)),
         ('使用者說過別再找的方向', _listed(str(x) for x in (feedback.get('__research__') or {}).get('mute') or () if x)),

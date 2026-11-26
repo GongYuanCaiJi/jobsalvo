@@ -18,8 +18,8 @@ from numbered import Accept  # noqa: E402
 def _regex(said, row, truth):
     """比對規則:看板用它比對職稱和內文,要是寫得出來的正規表示式(空的只有「其他」可以,那一類程式自己加)。"""
     try:
-        import settings_api
-        settings_api.compile_match(str(said or ''))
+        import find_terms
+        find_terms.compile_match(str(said or ''))
     except (re.error, ValueError) as e:
         return f'不是正規表示式({str(e)[:60]})'
     return None

@@ -26,6 +26,7 @@ OTHER = '其他'
 
 def prompt(out, fb, jobs):
     import prefs
+    import settings_api
     cs = prefs.cards(fb, jobs)
     seen = '\n'.join(f"- {c['title']}({c['mark']})" + (f"｜他說「{c['note']}」" if c['note'] else '') for c in cs[:150])
     titles = '\n'.join('- ' + prefs.title_of(j) for j in jobs[:300])
@@ -37,7 +38,7 @@ def prompt(out, fb, jobs):
             'match(JavaScript 正規表示式,不分大小寫,比對職稱與內文;中英文關鍵字都寫進去,用 | 分隔)。'
             '程式會檢查每個 match 寫不寫得出來,寫不出來的那一項不收。\n'
             '\n'
-            f'他的上傳履歷文字:\n{prefs.resume()}\n\n他自訂的偏好:\n{prefs.hard_rules()}\n\n'
+            f'他的上傳履歷文字:\n{settings_api.resume()}\n\n他自訂的偏好:\n{prefs.hard_rules()}\n\n'
             f'他表過態的卡(最多 150 張):\n{seen or "(還沒有)"}\n\n板上的職稱(最多 300 張):\n{titles or "(還沒有)"}\n\n'
             f'現在的設定(可以沿用、改名、合併):\n{now}\n\n'
             f'寫一個 JSON 檔到 {out}:{{"categories": [...], "tags": [...], "why": "一兩句說明這樣分的理由"}}。'

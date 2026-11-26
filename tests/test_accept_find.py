@@ -827,8 +827,8 @@ class RoundCase(FindCase):
 
     def shared(self):
         """搜尋與判斷都拿到的:只有使用者自己寫的、選的(#831)。"""
-        import prefs
-        return [('履歷原文', prefs.resume()), ('使用者自訂的偏好', '只看台北'),
+        import settings_api
+        return [('履歷原文', settings_api.resume()), ('使用者自訂的偏好', '只看台北'),
                 ('使用者封鎖的公司', 'Evil Inc'), ('使用者說過別再找的方向', '行銷')]
 
     @staticmethod

@@ -16,6 +16,7 @@ import os, re, sys, copy, subprocess, hashlib, contextlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import config as cf
+from find_terms import compile_match
 
 UPLOAD_DIRS = ('resume/', 'custom/')
 UPLOAD_EXT = ('.pdf', '.md', '.markdown', '.css', '.txt', '.docx', '.doc', '.rtf', '.odt', '.png', '.jpg', '.jpeg')
@@ -225,6 +226,21 @@ def resume_material():
     return '', '讀不到已啟用履歷的文字；請把履歷內容貼上來。' + ('\n' + '\n'.join(problems) if problems else '')
 
 
+# 履歷檔裡可能有給建置用的東西:<style> 排版 CSS、照片 <img>、產檔用的 <!-- --> 標記。
+# 那些不是「他是誰」,原封不動丟給 agent 等於拿版面 CSS 當判斷依據,佔 token 又沒用。
+# 只拿掉標記本身,標記之間的正文照樣留著。
+_BUILD_ONLY = re.compile(r'<style\b.*?</style>|<img\b[^>]*>|<!--.*?-->', re.S | re.I)
+
+
+def resume():
+    t = os.environ.get('JOBSALVO_RESUME_TEXT', '')
+    if not t.strip():
+        t, problem = resume_material()
+        if not t:
+            return '(讀不到上傳履歷文字:請把履歷內容貼上來)'
+    return re.sub(r'\n{3,}', '\n\n', _BUILD_ONLY.sub('', t)).strip()
+
+
 def _skill_ok(value):
     if value in (None, ''):
         return True
@@ -235,180 +251,6 @@ def _skill_ok(value):
 
 
 SLUG = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
-
-
-def _expand_lookbehind_alternatives(pattern):
-    def class_end(text, start):
-        i = start + 1
-        if i < len(text) and text[i] == '^':
-            i += 1
-        if i < len(text) and text[i] == ']':
-            i += 1
-        while i < len(text):
-            if text[i] == '\\':
-                i += 2
-            elif text[i] == ']':
-                return i
-            else:
-                i += 1
-        return None
-
-    def group_end(text, start):
-        depth = 1
-        i = start
-        while i < len(text):
-            ch = text[i]
-            if ch == '\\':
-                i += 2
-            elif ch == '[':
-                end = class_end(text, i)
-                if end is None:
-                    return None
-                i = end + 1
-            elif ch == '(':
-                depth += 1
-                i += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    return i
-                i += 1
-            else:
-                i += 1
-        return None
-
-    def alternatives(body):
-        parts = []
-        start = 0
-        depth = 0
-        i = 0
-        while i < len(body):
-            ch = body[i]
-            if ch == '\\':
-                i += 2
-            elif ch == '[':
-                end = class_end(body, i)
-                if end is None:
-                    return [body]
-                i = end + 1
-            elif ch == '(':
-                depth += 1
-                i += 1
-            elif ch == ')':
-                depth -= 1
-                i += 1
-            elif ch == '|' and depth == 0:
-                parts.append(body[start:i])
-                start = i + 1
-                i += 1
-            else:
-                i += 1
-        if not parts:
-            return [body]
-        parts.append(body[start:])
-        return parts
-
-    def expand(text):
-        out = []
-        i = 0
-        while i < len(text):
-            ch = text[i]
-            if ch == '\\':
-                out.append(text[i:i + 2])
-                i += 2
-                continue
-            if ch == '[':
-                end = class_end(text, i)
-                if end is None:
-                    out.append(text[i:])
-                    break
-                out.append(text[i:end + 1])
-                i = end + 1
-                continue
-            if text.startswith(('(?<=', '(?<!'), i):
-                opener = text[i:i + 4]
-                end = group_end(text, i + len(opener))
-                if end is not None:
-                    branches = alternatives(text[i + len(opener):end])
-                    if len(branches) > 1:
-                        branches = [expand(branch) for branch in branches]
-                        if opener == '(?<=':
-                            out.append('(?:' + '|'.join(f'(?<={branch})' for branch in branches) + ')')
-                        else:
-                            out.append(''.join(f'(?<!{branch})' for branch in branches))
-                    else:
-                        out.append(text[i:end + 1])
-                    i = end + 1
-                    continue
-            out.append(ch)
-            i += 1
-        return ''.join(out)
-
-    return expand(pattern)
-
-
-def compile_match(pattern):
-    """Compile the Python approximation of a board RegExp (case-insensitive).
-
-    The settings page does the authoritative syntax check with the browser's
-    RegExp constructor before POSTing. This server-side check catches Python
-    extensions that would otherwise pass Python but silently fail in the
-    board, while translating JavaScript named groups for Python's validator.
-    """
-    pattern = _expand_lookbehind_alternatives(str(pattern))
-    out = []
-    i = 0
-    in_class = False
-    while i < len(pattern):
-        ch = pattern[i]
-        if ch == '\\':
-            if i + 1 >= len(pattern):
-                out.append(ch)
-                i += 1
-                continue
-            nxt = pattern[i + 1]
-            if not in_class:
-                if nxt in ('A', 'Z'):
-                    raise ValueError(r'Python 的 \A、\Z 錨點不是看板正規式語法')
-                if pattern.startswith((r'\N{', r'\g<'), i):
-                    raise ValueError('Python 專用跳脫不是看板正規式語法')
-                if pattern.startswith(r'\k<', i):
-                    m = re.match(r'\\k<([A-Za-z_][A-Za-z0-9_]*)>', pattern[i:])
-                    if not m:
-                        raise ValueError('命名群組參照格式不對')
-                    out.append(f'(?P={m.group(1)})')
-                    i += len(m.group(0))
-                    continue
-            out.extend((ch, nxt))
-            i += 2
-            continue
-
-        if ch == '[':
-            in_class = True
-        elif ch == ']' and in_class:
-            in_class = False
-
-        if not in_class and pattern.startswith('(?', i):
-            if pattern.startswith(('(?P<', '(?P='), i):
-                raise ValueError('Python 命名群組不支援；請改用 JavaScript 的 (?<name>...)')
-            if pattern.startswith(('(?:', '(?=', '(?!', '(?<=', '(?<!'), i):
-                prefix = next(p for p in ('(?<=', '(?<!', '(?:', '(?=', '(?!')
-                              if pattern.startswith(p, i))
-                out.append(prefix)
-                i += len(prefix)
-                continue
-            m = re.match(r'\(\?<([A-Za-z_][A-Za-z0-9_]*)>', pattern[i:])
-            if m:
-                out.append(f'(?P<{m.group(1)}>')
-                i += len(m.group(0))
-                continue
-            raise ValueError('Python 專用群組語法不是看板正規式語法')
-
-        if not in_class and ch in '*+?}' and i + 1 < len(pattern) and pattern[i + 1] == '+':
-            raise ValueError('Python 專用 possessive quantifier 不是看板正規式語法')
-        out.append(ch)
-        i += 1
-    return re.compile(''.join(out), re.IGNORECASE | re.ASCII)
 
 
 def _check_files(item, label, langs, bad):
