@@ -436,7 +436,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
         self.assertIn('--verbose', argv)                       # stream-json 要 --verbose 才會一步一行
         self.assertIn('--dangerously-skip-permissions', argv)
         self.assertIn('--strict-mcp-config', argv)
-        self.assertNotIn('--safe-mode', argv)                  # 會連 skills、CLAUDE.md 都關,範圍比 codex 大
+        self.assertIn('--safe-mode', argv)      # 使用者的 CLAUDE.md、skills、輸出風格是寫給他自己的 agent 的,不是這一輪的材料(#831)
         off = json.loads(argv[argv.index('--settings') + 1])
         # 個人記憶跟 codex 那邊一樣關:它每輪開頭會去翻,跟這份工作無關
         self.assertEqual(off, {'disableAllHooks': True, 'autoMemoryEnabled': False,

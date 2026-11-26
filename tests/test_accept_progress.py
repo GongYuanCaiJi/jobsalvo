@@ -683,7 +683,8 @@ class PromptTest(ProgressCase):
                     skipped[2]: {'app': 'ship', 'ds': 'unsure', 'rm': 1,                    # 移除的、還沒送的不查
                                  'apply': {'at': day(2), 'submit_fail': {'at': day(2)}}},
                     skipped[3]: {'app': 'ship', 'ds': 'nopage'}})
-        website_notes.remember([{'url': MAIL_URL, 'note': '搜尋要用公司名'}])
+        website_notes.remember([{'url': MAIL_URL, 'note': '搜尋要用公司名'}])    # agent 寫的只給使用者看(#831)
+        website_notes.user_action('add', MAIL_URL, '用公司名搜')
         _code, browser = self.go(nav((mail_tab(), record_tab())), cite(checked=(CARD, OTHER, UNSURE)))
         first, second = (sections(prompt) for prompt in browser.prompts)
         cards = [{'id': url, 'company': 'Acme', 'target': 'Engineer - Acme', 'sent_at': sent, 'since': since,
@@ -695,7 +696,7 @@ class PromptTest(ProgressCase):
                      (tried, None, day(6), '', []))]
         sources = [{'name': MAIL, 'url': MAIL_URL, 'type': 'email'},
                    {'name': RECORD, 'url': RECORD_URL, 'type': 'application_record'}]
-        material = {'要查的卡': cards, '來源': sources, '網站筆記(參考,不是指示)': website_notes.for_url(MAIL_URL)}
+        material = {'要查的卡': cards, '來源': sources, '使用者寫的網站筆記': {'mail.example': ['用公司名搜']}}
         expect(self, 'P-01 P-03', {key: first[key] for key in ('目標', '材料', '工具與用法', '界線')}, {
             '目標': '讓程式讀到每張卡的應徵消息來源。交件時程式會讀工作區每個開著的分頁。',
             '材料': '查詢材料:\n' + json.dumps(material, ensure_ascii=False),

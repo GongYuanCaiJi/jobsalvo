@@ -1,8 +1,8 @@
 """
-website_notes —— 按網址主機保存網站筆記，作為後續網站任務的站點經驗。
+website_notes —— 按網址主機保存網站筆記;使用者寫或改過的那幾條交給後續網站任務的 agent(users_words)。
 
 - for_url(s) 只按主機名取筆記，不合併不同子網域。
-- remember() 按 agent 回報網址歸類筆記、保護使用者筆記，每個主機最多留 12 則 agent 筆記。
+- remember() 按 agent 回報網址歸類筆記，每個主機最多留 12 則 agent 筆記。
 - 新檔首次讀取時遷移舊平台筆記；user_action() 回傳有條件的復原資料。
 """
 import datetime
@@ -134,6 +134,20 @@ def for_url(url):
     return for_urls([url]).get(host, []) if host else []
 
 
+def users_words(urls=None):
+    """給 agent 的網站筆記:只有使用者自己寫或改過的那幾條原文,照主機分(#831);沒給網址就是全部主機。
+    agent 寫的筆記只給使用者看,不再交給下一個 agent。"""
+    wanted = None if urls is None else {hostname(url) for url in urls} - {''}
+    words = {}
+    for note_host, rows in _read()['hosts'].items():
+        host = str(note_host).rstrip('.').casefold()
+        if wanted is None or host in wanted:
+            for note in rows if isinstance(rows, list) else ():
+                if isinstance(note, dict) and note.get('author') == 'user' and note.get('text'):
+                    words.setdefault(host, []).append(str(note['text']))
+    return words
+
+
 def all_notes():
     notes = []
     for host, rows in _read()['hosts'].items():
@@ -250,28 +264,12 @@ def _undo_user_action(data, slip):
     return True
 
 
-def remember(add, remove=None, card_id=None, round_id=None):
+def remember(add, card_id=None, round_id=None):
+    """收 agent 這一輪寫的筆記;agent 看不到別人寫的筆記,所以也不刪筆記(#831),過時的由使用者在看板刪。"""
     with _notes_lock():
         data = _read_unlocked()
         hosts = data['hosts']
-        parts = getattr(remove, 'parts', ())
-        remove_ids = {str(p.owner) for p in parts if p.owner}
-        if isinstance(remove, (list, tuple, set, frozenset)):
-            remove_ids.update(str(note_id) for note_id in remove if isinstance(note_id, str) and note_id)
         changed = False
-        protected = []
-        for host, notes in list(hosts.items()):
-            kept = []
-            for note in notes if isinstance(notes, list) else []:
-                if not isinstance(note, dict) or str(note.get('id')) not in remove_ids:
-                    kept.append(note)
-                elif note.get('author') == 'user':
-                    protected.append(dict(note))
-                    kept.append(note)
-                else:
-                    changed = True
-            hosts[host] = kept
-
         for item in add if isinstance(add, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -308,4 +306,3 @@ def remember(add, remove=None, card_id=None, round_id=None):
         if changed:
             data['schema_version'] = 1
             _write(data)
-        return protected

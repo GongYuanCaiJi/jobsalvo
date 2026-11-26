@@ -107,7 +107,7 @@ def brief(slot: Slot, intents: tuple[Intended, ...], goal: str = GOAL) -> Brief:
         ('這次要改的', '\n'.join(f'{row.item}\n改前:{row.before or "(沒有)"}\n改後:{row.after or "(刪除)"}'
                              for row in intents)),
         ('附件', '\n'.join(f'{name}: {path}' for name, path in attachments)),
-        ('網站筆記', json.dumps(website_notes.for_url(slot.url), ensure_ascii=False)),
+        ('使用者寫的網站筆記', json.dumps(website_notes.users_words([slot.url]), ensure_ascii=False)),
     )
     limits = ('只動材料列出的這份平台履歷。', '不輸入密碼。', '原稿和附件不改。')
     return Brief(goal, materials, (EGO, BEFORE, AFTER, SHELL), limits, SHEET)

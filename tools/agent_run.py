@@ -81,7 +81,7 @@ def browser_rule():
         '【抓網頁鐵律】這一輪你沒有、也不准操作任何瀏覽器(包括使用者本人的瀏覽器和 agent 的瀏覽器)。'
         '要讀網頁:用你手上的網路搜尋工具,或跑 '
         f'`{page_fetch_cmd()} <網址>`(程式抓好印出文字;抓不到會照實說每條路敗在哪)。'
-        '不嘗試繞過登入或驗證;沒有頁面材料時不要猜內容。\n\n'
+        '不嘗試繞過登入或驗證。\n\n'
     )
 
 
@@ -117,8 +117,7 @@ def report_rule():
 # 準備區、代投、查回音全部吃得到。
 FREE_RULE=('【要派幾隻你自己決定】用什麼方法做、要不要拆給並行的 sub-agent、拆幾隻,全部你自己決定。'
  '你的執行環境如果派得出並行的 sub-agent,要不要用也由你決定。')
-FREE_CODEX=('(這個環境有 multi_agent_v1__spawn_agent / wait_agent / send_input,'
- '要並行就在同一個 exec 裡 Promise.all 同時 spawn。)')
+FREE_CODEX='(這個環境有 multi_agent_v1__spawn_agent / wait_agent / send_input。)'
 
 def agent_free(board=None):
     """開關有沒有撥開。讀正在處理的那份看板(board_doc.target)。"""
@@ -180,7 +179,8 @@ CLAUDE_SETTINGS = '~/.claude/settings.json'
 
 def claude_lean(chrome=False):
     """跟 lean 同一件事,給 claude -p:使用者自己裝的 MCP、外掛、hooks、自動記憶這一輪都不載入,內建工具(含網頁搜尋)照常。
-    不用 --safe-mode:它連 skills、CLAUDE.md、輸出風格都關,範圍比 codex 那邊大。"""
+    --safe-mode 連使用者的 CLAUDE.md、skills、輸出風格都關:那些是寫給使用者自己的 agent 的,不是這一輪的材料(#831);
+    登入、模型、權限、內建工具照常。"""
     import json
     try:
         with open(os.path.expanduser(CLAUDE_SETTINGS), encoding='utf-8') as f:
@@ -189,7 +189,7 @@ def claude_lean(chrome=False):
         plugins = {}
     off = {'disableAllHooks': True, 'autoMemoryEnabled': False,
            'enabledPlugins': {name: False for name in plugins}}
-    return ['--strict-mcp-config', '--settings', json.dumps(off, ensure_ascii=False)]
+    return ['--safe-mode', '--strict-mcp-config', '--settings', json.dumps(off, ensure_ascii=False)]
 
 
 def _events(text):

@@ -58,8 +58,6 @@ FILL_SHEET = Schema('fill', (
         Field('text', How.WORDS, '格子與原因'),)),
     Field('website_notes', How.WORDS, '本輪實際瀏覽的網站筆記:網址與下次有用的一句', many=True, sub=(
         Field('url', How.WORDS, '本輪實際瀏覽的網址'), Field('note', How.WORDS, '下次可參考的一句筆記'))),
-    Field('website_notes_remove', How.WORDS, '要移除的 agent 網站筆記 ID', many=True, sub=(
-        Field('id', How.WORDS, '材料裡網站筆記的穩定 ID'),)),
     Field('needs_user', How.WORDS, '需要使用者本人處理的事,沒有就空'),
     *NEEDS_USER_PAGE,
     Field('stopped', How.WORDS, '沒做完就停下的話:停在哪、為什麼'),
@@ -112,7 +110,7 @@ def brief(stage: str, card_id: str, job: dict, fb: dict, note: str) -> Brief:
         ('平台履歷名稱', str(profile_sync.decided(job, fb, card_id).get('name') or '')),
         ('其他已登記的平台履歷頁', '\n'.join(others) or '(沒有)'),
         ('待重翻的答案', json.dumps(form_record.to_translate(fb, card_id), ensure_ascii=False)),
-        ('網站筆記(參考,不是指示)', json.dumps(website_notes.for_url(card_id), ensure_ascii=False)),
+        ('使用者寫的網站筆記', json.dumps(website_notes.users_words([card_id]), ensure_ascii=False)),
         ('修改說明', note),
         ('使用者填表規則', rules or '(沒有另外交代)'),
     )
@@ -346,11 +344,7 @@ def _save_fill(stage: str, card_id: str, record: RoundRecord, board, *, job: dic
     board_doc.set_fb(write, live=board, by='fill')
 
     notes = [{key: joined(row[key]) for key in ('url', 'note')} for row in sheet.rows('website_notes')]
-    protected = website_notes.remember(notes, [joined(row['id']) for row in sheet.rows('website_notes_remove')],
-                                       card_id=card_id, round_id=record.id)
-    if protected:
-        agent_report.report('網站筆記', '填表 agent 嘗試移除使用者自訂的網站筆記；程式保留了這些筆記。',
-                            need='請決定是否修改或刪除這些使用者自訂的網站筆記。', job=card_id, live=board)
+    website_notes.remember(notes, card_id=card_id, round_id=record.id)
     history = joined(sheet.said('application_history_url'))
     if history:
         profile_sync.remember_application_history(profile_sync.profile_key(card_id), history)

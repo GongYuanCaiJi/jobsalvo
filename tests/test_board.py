@@ -1009,13 +1009,12 @@ class FeedbackDump(Tmp):
         from unittest.mock import patch
         import config as cf
         import feedback_dump
-        import prefs
 
         note = os.path.join(self.dir, 'preference-note.md')
         legacy = os.path.join(self.dir, 'prefs.md')
         make_board(self.path, {'https://ex.test/job/1': {'s': 'like', 'n': '想多看這類'}})
         with patch.object(feedback_dump, 'OUT', note), \
-             patch.object(prefs, 'PREF', note), \
+             patch.object(cf, 'PREFERENCE_NOTE', note), \
              patch.object(cf, 'PREFS', legacy), \
              patch('sys.argv', ['feedback_dump.py', '--live', self.path]):
             feedback_dump.main()

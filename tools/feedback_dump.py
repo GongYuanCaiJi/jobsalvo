@@ -120,7 +120,7 @@ def _full_jd(job):
 
 
 def feedback_state_path(note_path=None):
-    note_path = note_path or prefs.PREF
+    note_path = note_path or cf.PREFERENCE_NOTE
     root, _ext = os.path.splitext(note_path)
     return root + '-feedback-state.json'
 

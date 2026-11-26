@@ -45,8 +45,6 @@ REPOST_HINT = '公司與職稱跟這張舊卡一字不差,程式沒查過是不�
 WEBSITE_NOTES = (
     Field('website_notes', How.WORDS, '這輪實際造訪、下次有用的讀頁經驗', many=True, sub=(
         Field('url', How.WORDS, '這輪實際造訪的網址'), Field('note', How.WORDS, '可重用的讀頁經驗'))),
-    Field('website_notes_remove', How.WORDS, '要移除的過時 agent 網站筆記', many=True, sub=(
-        Field('id', How.WORDS, '網站筆記的 ID'),)),
 )
 SEARCH_SHEET = Schema('find-search', (
     Field('candidates', How.WORDS, '找到的職缺', many=True, sub=(
@@ -127,31 +125,6 @@ def _marks(feedback, url):
     return '、'.join(word for word in words if word) or '未表態', prefs.his_words(state.get('n'))
 
 
-def _round_history(rounds, feedback):
-    """最近 8 輪每輪的紀錄原樣交出,加上那輪進看板的卡後來他看了幾張、喜歡幾張、不喜歡幾張。"""
-    rows = []
-    for record in rounds[-8:]:
-        states = [feedback.get(url) or {} for url in record.get('added') or []]
-        rows.append(dict(record, marks={'seen': sum(bool(s.get('s') or s.get('app') or s.get('rm')) for s in states),
-                                        'liked': sum(bool(s.get('app') or s.get('s') in ('like', 'grow')) for s in states),
-                                        'disliked': sum(s.get('s') == 'dislike' for s in states)}))
-    return json.dumps(rows, ensure_ascii=False)
-
-
-def _angle_map(feedback, jobs):
-    angles = {}
-    for job in jobs:
-        angle = ((job.get('src') or {}).get('angle') or '').strip()
-        state = feedback.get(job['id']) or {}
-        counts = angles.setdefault(angle, {'sent': 0, 'liked': 0, 'disliked': 0, 'unseen': 0})
-        counts['sent'] += 1
-        counts['liked'] += bool(state.get('app') or state.get('s') in ('like', 'grow'))
-        counts['disliked'] += state.get('s') == 'dislike'
-        counts['unseen'] += not (state.get('s') or state.get('app') or state.get('rm'))
-    return '\n'.join(f"- {angle}：送過 {row['sent']}、喜歡 {row['liked']}、不喜歡 {row['disliked']}、還沒看 {row['unseen']}"
-                     for angle, row in angles.items() if angle) or '(目前沒有角度表態)'
-
-
 def _seed_text(seeds):
     return '\n'.join(f"- 指定{'職缺網址' if seed['k'] == 'job' else '公司'}：{seed['v']}"
                      for seed in seeds) or '(目前沒有)'
@@ -162,24 +135,17 @@ def _listed(values):
 
 
 def user_materials(board):
-    """搜尋與判斷共用的使用者材料。「一定不要」與條件由程式判(find_terms),不交 agent;
+    """搜尋與判斷都要的使用者材料:只放使用者自己寫的、選的(#831)。「一定不要」與條件由程式判(find_terms),不交 agent;
     封鎖名單照交(別的寫法、簡稱由 agent 判),程式另擋一字不差的(J-12)。
-    整個看板的東西(每張卡、agent 寫的摘要、看板上的網址)不放這裡:每份指示只放它自己要的(#832)。"""
+    agent 寫的東西(偏好筆記的 Agent 假設、卡片摘要、前幾輪紀錄、網站筆記)只給使用者看,不交給下一個 agent;
+    整個看板也不放這裡:每份指示只放它自己要的(#832)。"""
     import prefs
     feedback, jobs = prefs.load(board)
-    search = cf.C.get('search') or {}
-    rounds = (bd.load(board).get('data') or {}).get('research') or []
     return (
         ('履歷原文', prefs.resume()),
-        ('使用者偏好筆記原文', _read_text(cf.PREFERENCE_NOTE)),
-        ('角度地圖(依目前看板卡片與表態計數)', _angle_map(feedback, jobs)),
-        ('最近幾輪找缺資料', _round_history(rounds, feedback)),
+        ('使用者自訂的偏好', prefs.hard_rules()),
         ('使用者封鎖的公司', _listed(str(x) for x in feedback.get('__block__') or () if x)),
-        ('使用者設定的要小心字', _listed(str(x) for x in search.get('flag_words') or () if x)),
-        ('使用者設定的要小心職稱正規式原文', search.get('flag_title') or '(目前沒有)'),
         ('使用者說過別再找的方向', _listed(str(x) for x in (feedback.get('__research__') or {}).get('mute') or () if x)),
-        ('使用者設定的職缺分類', json.dumps((cf.C.get('board') or {}).get('categories') or [], ensure_ascii=False)),
-        ('網站筆記檔案位置', f'{cf.path("website-notes.json")}。依主機名自行讀取相關筆記,筆記只供參考。'),
     ), feedback, jobs
 
 
@@ -231,15 +197,17 @@ def round_terms(ask):
 
 
 def search_brief(ask, shared, feedback, jobs, minutes=None):
+    import website_notes
     return Brief(
         '依使用者的找缺 skill 與條件找可能符合需求的職缺,交回職缺網址。使用者決定要不要保留每張卡。',
         (*_ask(ask), ('使用者的找缺 skill', _search_skills(ask['mode'])), *shared,
          ('使用者表態過的卡', _marked(feedback, jobs)), ('使用者在看板上寫的想法', _board_notes(feedback)),
-         ('已在看板上的職缺網址', f'{_board_urls_file(jobs)}(一行一個)')),
+         ('已在看板上的職缺網址', f'{_board_urls_file(jobs)}(一行一個)'),
+         ('使用者寫的網站筆記', json.dumps(website_notes.users_words(), ensure_ascii=False))),
         ('網路搜尋:找候選職缺。', FETCH),
         (*((f'這一步最多 {minutes} 分鐘;時間到程式停掉你,收下交件檔裡的候選。',) if minutes else ()),
          '只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。',
-         '網站筆記不記職缺內容、個人資料、登入資訊或推測;使用者寫的筆記列入移除也不會刪除。'),
+         '網站筆記不記職缺內容、個人資料、登入資訊或推測。'),
         SEARCH_SHEET, sheet_file=True)
 
 
@@ -262,12 +230,17 @@ def judge_brief(ask, shared, material, urls, pages, feedback, jobs, sheet=JUDGE_
         if mark != '未表態' or words:      # 沒表態的舊卡沒有使用者的話可引
             old.append(f"{cards.name(job)}｜{job['id']}｜當時表態：{mark}" + (f'｜原話：「{words}」' if words else ''))
     old_block = material.add(old, 'old') or '(目前沒有)'
+    search = cf.C.get('search') or {}
     choices = '\n'.join(f'- {key}:{item.get("name") or item.get("id")};什麼時候用:{item.get("when") or "(沒寫)"}'
                         for key, (_id, _lang, item) in resume_choices().items())
     return Brief(
         '照使用者的判斷 skill 判斷每一個職缺;每一欄都引程式讀到的那一頁的段落。使用者決定要不要保留每張卡。' if sheet is JUDGE_SHEET
         else '這幾個網址是使用者自己貼的,一律進看板,不用判送不送;照使用者的判斷 skill 寫每一張,每一欄都引程式讀到的那一頁的段落。',
         (*_ask(ask), ('使用者的判斷 skill', _skill('judge')), *shared,
+         ('使用者設定的要小心字', _listed(str(x) for x in search.get('flag_words') or () if x)),
+         ('使用者設定的要小心職稱正規式原文', search.get('flag_title') or '(目前沒有)'),
+         ('使用者設定的職缺分類', _listed(str(c.get('name') or '') for c in (cf.C.get('board') or {}).get('categories') or ()
+                                    if isinstance(c, dict) and c.get('name'))),
          ('可選的履歷與語言', choices or '(目前沒有已勾選的履歷;resume 留空)'),
          ('交付代號', f'material_id={material.material_id}'),
          ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', '\n\n'.join(blocks)),
@@ -279,7 +252,7 @@ def judge_brief(ask, shared, material, urls, pages, feedback, jobs, sheet=JUDGE_
 
 def note_brief(skill, base, delta):
     return Brief(
-        '依使用者選擇的整理偏好筆記 skill,整理上次整理後的新表態,讓下一輪找缺使用更新後的角度。',
+        '依使用者選擇的整理偏好筆記 skill,把上次整理後的新表態整理進偏好筆記,給使用者看。',
         (('整理偏好筆記 skill', skill), ('偏好筆記原文', base.rstrip()), ('新表態原文', delta.rstrip())),
         (NO_TOOLS,),
         ('只更新 Agent 假設區;使用者自訂區逐字保留。', '每張新表態都要歸屬;沒列齊時程式不更新筆記,下一輪再整理。'),
@@ -540,11 +513,8 @@ def _save(board, entries, history_row):
 
 def _save_website_notes(sheet, round_id):
     import website_notes
-    additions = [{'url': joined(row['url']), 'note': joined(row['note'])} for row in sheet.rows('website_notes')]
-    removals = [joined(row['id']) for row in sheet.rows('website_notes_remove')]
-    protected = website_notes.remember(additions, removals, round_id=round_id)
-    return (f'agent 試圖移除 {len(protected)} 則使用者網站筆記，程式已保留；請到網站筆記設定確認'
-            if protected else '')
+    website_notes.remember([{'url': joined(row['url']), 'note': joined(row['note'])} for row in sheet.rows('website_notes')],
+                           round_id=round_id)
 
 
 class Run:
@@ -658,8 +628,8 @@ def run(ask, board, browser, limit, minutes):
         finish([], 0, notes, [why], phase='done' if timeup else 'failed', found=0, timeup=timeup)
         return 0 if timeup else 1
     status('agent', step=f"時間到，停止找新的，正在判找到的 {len(search.sheet.rows('candidates'))} 張" if timeup else '整理新表態偏好')
-    messages = [*(mark.text for mark in stops(search)), _save_website_notes(search.sheet, search.id),
-                _update_preference_note(current)]
+    _save_website_notes(search.sheet, search.id)
+    messages = [*(mark.text for mark in stops(search)), _update_preference_note(current)]
     candidates = {}
     for row in search.sheet.rows('candidates'):
         candidates.setdefault(joined(row['url']), {key: joined(value) for key, value in row.items()})

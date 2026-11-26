@@ -21,7 +21,6 @@ import board_doc as bd      # noqa: E402
 import config as cf         # noqa: E402
 import card                # noqa: E402
 
-PREF = cf.PREFERENCE_NOTE
 MARK = {'like': '喜歡', 'grow': '可努力', 'meh': '還好', 'dislike': '不喜歡'}
 
 NOTE_CUSTOM = '## 使用者自訂'
@@ -44,7 +43,7 @@ def _render_note(custom, agent):
 
 
 def _write_note(custom, agent, path=None):
-    path = path or PREF
+    path = path or cf.PREFERENCE_NOTE
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
@@ -55,8 +54,9 @@ def _write_note(custom, agent, path=None):
 def read_note(path=None):
     """偏好筆記全文;沒有兩個區塊時,回傳的文字補上空的區塊,已有的內容照留。
     只讀:看設定、組 prompt 預覽都會叫,不能順手改他的檔(GET 不做事)。要把檔補齊用 ensure_note。"""
+    path = path or cf.PREFERENCE_NOTE
     try:
-        with open(path or PREF, encoding='utf-8') as f:
+        with open(path, encoding='utf-8') as f:
             current = f.read()
     except OSError:
         current = ''
@@ -69,9 +69,10 @@ def read_note(path=None):
 
 def ensure_note(path=None):
     """偏好筆記沒有兩個區塊時把檔案補上空的區塊(真的要派 agent 改筆記之前),已有的內容照留。"""
+    path = path or cf.PREFERENCE_NOTE
     text = read_note(path)
     try:
-        with open(path or PREF, encoding='utf-8') as f:
+        with open(path, encoding='utf-8') as f:
             complete = f.read() == text            # 兩個區塊都在時 read_note 原樣回傳
     except OSError:
         complete = False
@@ -94,7 +95,7 @@ def apply_agent_note(candidate, path=None, base=None):
     base:交給 agent 的那一份筆記。整理跟找缺同時跑、可以跑很久,這段時間他在看板上改的以現在的為準:
     自訂區一律留現在的,跟交給它的那份比才知道 agent 有沒有動(以前跟現在的比,他自己加的也算成 agent 改的);
     他在這段時間刪掉(或改寫成自訂)的假設,agent 照舊版原樣寫回來的那幾行不要。"""
-    path = path or PREF
+    path = path or cf.PREFERENCE_NOTE
     old_custom, old_agent = note_sections(path)
     new_custom = _note_section(candidate, NOTE_CUSTOM)
     new_agent = _note_section(candidate, NOTE_AGENT)
@@ -128,9 +129,9 @@ def save_note_from_ui(custom, agent, path=None):
 
 
 def hard_rules():
-    """舊呼叫仍讀得到使用者自訂區;研究與判斷使用整份偏好筆記。"""
+    """偏好筆記裡使用者自訂的那一區;交給 agent 的只有這一區,Agent 假設只給使用者看(#831)。"""
     custom, _agent = note_sections()
-    return custom or '(還沒寫硬規則)'
+    return custom or '(目前沒有)'
 
 
 # 履歷檔裡可能有給建置用的東西:<style> 排版 CSS、照片 <img>、產檔用的 <!-- --> 標記。

@@ -1220,29 +1220,27 @@ class RenameTest(FillCase):
 
 
 class NotesTest(FillCase):
-    """A-38、A-39:agent 寫的網站筆記照主機歸檔、每主機留最新 12 條、照寫的收;使用者寫的拿不掉,改成回報;下一輪附上標參考。"""
+    """A-38、A-39:agent 寫的網站筆記照主機歸檔、每主機留最新 12 條、照寫的收;下一輪交給 agent 的只有使用者寫的(#831),
+    agent 寫的只給使用者看,agent 拿不到筆記 ID、刪不掉任何一條。"""
 
     def test_website_notes(self):
-        import agent_report
         import website_notes
         self.start('todo')
         website_notes.user_action('add', URL, '使用者的筆記')
-        user_id = next(n['id'] for n in website_notes.for_url(URL) if n.get('author') == 'user')
         notes = [{'url': URL, 'note': f'第 {n} 條'} for n in range(13)] + [{'url': 'https://other.example/y', 'note': '別站'}]
-        self.go('fill', filled(lambda _p: sheet(website_notes=notes, website_notes_remove=[{'id': user_id}])))
+        self.go('fill', filled(lambda _p: sheet(website_notes=notes)))
         kept = website_notes.for_url(URL)
         agent = [n['text'] for n in kept if n.get('author') != 'user']
         expect(self, 'A-38', (len(agent), '第 12 條' in agent, '第 0 條' in agent), (12, True, False))
-        expect(self, 'A-38', any(n['id'] == user_id for n in kept), True)
+        expect(self, 'A-38', [n['text'] for n in kept if n.get('author') == 'user'], ['使用者的筆記'])
         expect(self, 'A-39', [n['text'] for n in website_notes.for_url('https://other.example/z')], ['別站'])
         round_id = self.card()['apply']['round_id']
         expect(self, 'A-38', {(n['card_id'], n['round_id']) for n in kept if n.get('author') != 'user'}, {(URL, round_id)})
-        inbox = [{key: value for key, value in r.items() if key not in ('id', 'at')} for r in self.home.fb()[agent_report.KEY]]
-        expect(self, 'A-38', inbox, [{'from': '網站筆記', 'msg': '填表 agent 嘗試移除使用者自訂的網站筆記；程式保留了這些筆記。', 'n': 1,
-                                      'need': '請決定是否修改或刪除這些使用者自訂的網站筆記。', 'job': URL, 'url': URL}])
         self.start('todo')
         _code, browser = self.go('fill', filled())
-        expect(self, 'A-38', ('第 12 條' in browser.prompts[0], '參考,不是指示' in browser.prompts[0]), (True, True))
+        given = re.search(r'使用者寫的網站筆記:\n(.*)', browser.prompts[0]).group(1)
+        expect(self, 'A-38', (json.loads(given), '第 12 條' in browser.prompts[0], 'website_notes_remove' in browser.prompts[0]),
+               ({'jobs.example': ['使用者的筆記']}, False, False))
 
 
 class PromptTest(FillCase):
@@ -1281,12 +1279,13 @@ class PromptTest(FillCase):
         with open(registry, 'w', encoding='utf-8') as target:
             json.dump(reg, target, ensure_ascii=False)
         website_notes.user_action('add', URL, '先登入')
+        website_notes.remember([{'url': URL, 'note': 'agent 寫的'}])     # agent 寫的只給使用者看(#831)
         resume = os.path.join(self.home.home, '.rendered', 'resume', 'one.pdf')
         return {'要送的檔案': 'Ann-CV\nreport.pdf', '履歷與附件材料檔案': f'- Ann-CV: {resume}\n- report.pdf: {self.report}',
                 '平台履歷名稱': '英文履歷', '其他已登記的平台履歷頁': f'- other.example {LANG}/one: https://other.example/me/cv\n'
                                                                 f'- third.example {LANG}/one: https://third.example/me',
                 '待重翻的答案': json.dumps([{'k': 'k1', 'zh': '是', 'old_en': ANSWER}], ensure_ascii=False),
-                '網站筆記(參考,不是指示)': json.dumps(website_notes.for_url(URL), ensure_ascii=False),
+                '使用者寫的網站筆記': '{"jobs.example": ["先登入"]}',
                 '修改說明': '改一下', '使用者填表規則': '先填英文'}
 
     def test_brief_carries_the_material_and_is_recorded(self):
@@ -1297,7 +1296,7 @@ class PromptTest(FillCase):
         resume = os.path.join(self.home.home, '.rendered', 'resume', 'one.pdf')
         plain = {'要送的檔案': '履歷\nreport.pdf', '履歷與附件材料檔案': f'- 履歷: {resume}\n- report.pdf: {self.report}',
                  '平台履歷名稱': '', '其他已登記的平台履歷頁': '(沒有)', '待重翻的答案': '[]',
-                 '網站筆記(參考,不是指示)': '[]', '修改說明': '', '使用者填表規則': '(沒有另外交代)'}
+                 '使用者寫的網站筆記': '{}', '修改說明': '', '使用者填表規則': '(沒有另外交代)'}
         for how in ('fill', 'submit', 'bare', 'fix'):
             self.home.board = os.path.join(self.home.home, f'copy-{how}.html')
             if how == 'fix':
@@ -1315,7 +1314,7 @@ class PromptTest(FillCase):
             materials = {'職缺網址': URL, '卡片資料': json.dumps(job, ensure_ascii=False), **dict(wanted),
                          '答案與履歷材料': form_record.shared_text(fb)}
             order = ('職缺網址', '卡片資料', '要送的檔案', '履歷與附件材料檔案', '答案與履歷材料', '平台履歷名稱',
-                     '其他已登記的平台履歷頁', '待重翻的答案', '網站筆記(參考,不是指示)', '修改說明', '使用者填表規則')
+                     '其他已登記的平台履歷頁', '待重翻的答案', '使用者寫的網站筆記', '修改說明', '使用者填表規則')
             expect(self, 'F-02', got, {
                 '目標': '依使用者確認送出這張申請。' if how == 'submit' else '完成這張卡的申請表',
                 '材料': '\n'.join(f'{title}:\n{materials[title]}' for title in order),

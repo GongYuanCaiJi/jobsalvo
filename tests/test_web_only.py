@@ -334,13 +334,12 @@ class WebOnly(tb.HttpBase):
 
     def test_preference_note_keeps_his_rules_and_agent_assumptions_distinct(self):
         import tempfile
-        import prefs
 
         home = self.enterContext(tempfile.TemporaryDirectory(prefix='preference-note-test-'))
         raw_prefs = os.path.join(home, 'prefs.md')
         note = os.path.join(home, 'preference-note.md')
         with patch.object(cf, 'HOME', home), patch.object(cf, 'PREFS', raw_prefs), \
-                patch.object(cf, 'PREFERENCE_NOTE', note), patch.object(prefs, 'PREF', note), \
+                patch.object(cf, 'PREFERENCE_NOTE', note), \
                 patch.object(cf, 'APPLY_RULES', os.path.join(home, 'apply-rules.md')):
             with open(note, 'w', encoding='utf-8') as f:
                 f.write('# 偏好筆記\n\n## 使用者自訂\n\n不要外派\n\n'

@@ -818,21 +818,24 @@ class RoundCase(FindCase):
         research = [{'round': f'r{n}', 'added': []} for n in range(8)] + [
             dict(self.LAST, added=[self.OLD, self.THIRD, self.FOURTH, self.SIDE, self.FIFTH, self.SEVENTH, self.SIXTH])]
         self.home.write_board(jobs, fb, research=research)
+        import prefs
+        import website_notes
+        with open(cf.PREFERENCE_NOTE, 'w', encoding='utf-8') as note:     # Agent 假設是 agent 寫的,不交給下一個 agent(#831)
+            note.write(f'{prefs.NOTE_CUSTOM}\n只看台北\n{prefs.NOTE_AGENT}\n- 喜歡後端(agent 猜的)\n')
+        website_notes.user_action('add', URL, '使用者的筆記')
+        website_notes.remember([{'url': URL, 'note': 'agent 的筆記'}])
 
     def shared(self):
+        """搜尋與判斷都拿到的:只有使用者自己寫的、選的(#831)。"""
         import prefs
-        rounds = [{'round': f'r{n}', 'added': [], 'marks': {'seen': 0, 'liked': 0, 'disliked': 0}} for n in range(1, 8)] + [
-            dict(self.LAST, added=[self.OLD, self.THIRD, self.FOURTH, self.SIDE, self.FIFTH, self.SEVENTH, self.SIXTH],
-                 marks={'seen': 6, 'liked': 4, 'disliked': 1})]
-        with open(cf.PREFERENCE_NOTE, encoding='utf-8') as note:
-            note_text = note.read().strip()
-        return [
-            ('履歷原文', prefs.resume()), ('使用者偏好筆記原文', note_text),
-            ('角度地圖(依目前看板卡片與表態計數)', '- 後端：送過 3、喜歡 2、不喜歡 1、還沒看 0\n- 設計：送過 4、喜歡 2、不喜歡 0、還沒看 1'),
-            ('最近幾輪找缺資料', json.dumps(rounds, ensure_ascii=False)),
-            ('使用者封鎖的公司', 'Evil Inc'), ('使用者設定的要小心字', '急徵'), ('使用者設定的要小心職稱正規式原文', 'Lead'), ('使用者說過別再找的方向', '行銷'),
-            ('使用者設定的職缺分類', json.dumps(cf.C['board']['categories'], ensure_ascii=False)),
-            ('網站筆記檔案位置', f'{cf.path("website-notes.json")}。依主機名自行讀取相關筆記,筆記只供參考。')]
+        return [('履歷原文', prefs.resume()), ('使用者自訂的偏好', '只看台北'),
+                ('使用者封鎖的公司', 'Evil Inc'), ('使用者說過別再找的方向', '行銷')]
+
+    @staticmethod
+    def judge_only(flags=('急徵', 'Lead')):
+        """只有判斷拿到的:設定頁寫明「交給判斷那一段看」的要小心字,和交件要照寫的分類名稱。"""
+        return [('使用者設定的要小心字', flags[0]), ('使用者設定的要小心職稱正規式原文', flags[1]),
+                ('使用者設定的職缺分類', '、'.join(c['name'] for c in cf.C['board']['categories']))]
 
     @staticmethod
     def skill(name):
@@ -897,11 +900,12 @@ class WholeRoundTest(RoundCase):
                            ('使用者表態過的卡', f'- {TITLE} · {COMPANY}｜喜歡｜原話：「喜歡這種」\n- Designer · Beta｜可努力\n'
                                               '- SRE · Gamma｜不喜歡\n- UX · Delta｜喜歡、加進準備區\n- QA · Eps｜已移除\n- Ops · Eta｜加進準備區'),
                            ('使用者在看板上寫的想法', '(目前沒有)'),
-                           ('已在看板上的職缺網址', f'{urls_file}(一行一個)')]),
+                           ('已在看板上的職缺網址', f'{urls_file}(一行一個)'),
+                           ('使用者寫的網站筆記', '{"jobs.example": ["使用者的筆記"]}')]),
             '工具與用法': '網路搜尋:找候選職缺。\n' + find.FETCH,
             '界線': '- 這一步最多 7 分鐘;時間到程式停掉你,收下交件檔裡的候選。\n'
                   '- 只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。\n'
-                  '- 網站筆記不記職缺內容、個人資料、登入資訊或推測;使用者寫的筆記列入移除也不會刪除。',
+                  '- 網站筆記不記職缺內容、個人資料、登入資訊或推測。',
             '交件單格式': find.SEARCH_SHEET.format_text() + f'\n交件單同時寫進 {sheet_file}:每多一列就寫一次整份,先寫到 {sheet_file}.tmp 再改名成 {sheet_file};'
                                                          '時間到時程式收這個檔裡最後寫的那一份。'})
         material = re.search(r'material_id=(\w+)', judge_prompt['材料']).group(1)
@@ -913,7 +917,7 @@ class WholeRoundTest(RoundCase):
             f'Ops · Eta｜{self.SEVENTH}｜當時表態：加進準備區'), len(PARTS + self.EXTRA) + 1))      # 沒表態的舊卡不列
         expect(self, 'J-04', judge_prompt, {
             '目標': '照使用者的判斷 skill 判斷每一個職缺;每一欄都引程式讀到的那一頁的段落。使用者決定要不要保留每張卡。',
-            '材料': listed([*ask, ('使用者的判斷 skill', self.skill('judge')), *self.shared(),
+            '材料': listed([*ask, ('使用者的判斷 skill', self.skill('judge')), *self.shared(), *self.judge_only(),
                            ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'), ('交付代號', f'material_id={material}'),
                            ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', f'=== {URL} ===\n{page}'),
                            ('看板上的舊卡與當時表態', old)]),
@@ -984,6 +988,35 @@ class WholeRoundTest(RoundCase):
             expect(self, 'J-19', '喜歡這種' in export.read(), True)
 
 
+class AgentWordsTest(FindCase):
+    """#831:給搜尋與判斷 agent 的指示只放使用者自己寫的、選的。看板上多了 agent 寫的東西(沒表態的卡和它的摘要、
+    前幾輪紀錄、偏好筆記的 Agent 假設、agent 的網站筆記),兩份指示一個字都不變。"""
+
+    MARKED = 'https://jobs.example/jobs/5'
+
+    def prompts(self, noise):
+        import prefs
+        import website_notes
+        jobs = [{'id': self.MARKED, 'target': 'Backend · Acme', 'title': 'Backend', 'company': 'Acme'}]
+        research = []
+        with open(cf.PREFERENCE_NOTE, 'w', encoding='utf-8') as note:
+            note.write(f'{prefs.NOTE_CUSTOM}\n只看台北\n{prefs.NOTE_AGENT}\n' + ('- 喜歡機器人公司(agent 猜的)\n' if noise else ''))
+        if noise:
+            jobs.append({'id': 'https://jobs.example/jobs/6', 'target': 'Robot · Beta', 'title': 'Robot', 'company': 'Beta',
+                         'src': {'angle': '機器人', 'why': 'agent 覺得很合'}, 'sum': {'fit': 'agent 寫的摘要'}})
+            research = [{'round': '2026-11-01 10:00', 'mode': 'wide', 'notes': '上一輪 agent 說往機器人找', 'added': []}]
+            website_notes.remember([{'url': URL, 'note': 'agent 說要先捲動'}])
+        self.home.write_board(jobs, {self.MARKED: {'s': 'like', 'n': '喜歡這種'}}, research=research)
+        browser = FakeBrowser(search(URL), judge(lambda m: [row(m, URL)]), fetched={URL: fetched(URL, 'ok', PARTS)})
+        with contextlib.redirect_stdout(io.StringIO()):
+            find.main(['--board', self.home.board, '--mode', 'both', '--minutes', '7'], browser=browser)
+        return [re.sub(r'\S+/sheet\.json|material_id=\w+', '', prompt) for prompt in browser.prompts]   # 每輪證據夾不同
+
+    def test_agent_written_things_never_reach_the_next_agent(self):
+        clean = self.prompts(noise=False)
+        expect(self, 'J-22', (len(clean), self.prompts(noise=True)), (2, clean))
+
+
 class EmptyRoundTest(RoundCase):
     """J-03、J-20、J-22:什麼都還沒有的看板:材料照寫沒有;讀不到的頁照列原因交判斷;沒有候選照實收尾。"""
 
@@ -999,19 +1032,19 @@ class EmptyRoundTest(RoundCase):
         _code, browser, _printed = self.go_empty(search(URL), judge(lambda m: [row(m, URL, cites='missing')]))
         none = '(目前沒有)'
         shared = dict(self.shared())
-        shared.update({'角度地圖(依目前看板卡片與表態計數)': '(目前沒有角度表態)', '最近幾輪找缺資料': '[]',
-                       **{title: none for title in ('使用者封鎖的公司', '使用者設定的要小心字',
-                                                    '使用者設定的要小心職稱正規式原文', '使用者說過別再找的方向')}})
+        shared.update({title: none for title in ('使用者自訂的偏好', '使用者封鎖的公司', '使用者說過別再找的方向')})
         ask = [('使用者方向原文', '(沒有寫)'), ('這輪找法', '更深＋更廣'), ('使用者條件', '{}'), ('使用者指名的搜尋種子', none)]
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
         search_prompt, judge_prompt = (self.sections(p)['材料'] for p in browser.prompts)
         skills = '\n\n'.join(self.skill(name) for name in ('common', 'deep', 'wide'))
         expect(self, 'J-22', search_prompt, listed([*ask, ('使用者的找缺 skill', skills), *shared.items(),
                                                     ('使用者表態過的卡', none), ('使用者在看板上寫的想法', none),
-                                                    ('已在看板上的職缺網址', f'{os.path.join(cf.RESEARCH, "board-urls.txt")}(一行一個)')]))
+                                                    ('已在看板上的職缺網址', f'{os.path.join(cf.RESEARCH, "board-urls.txt")}(一行一個)'),
+                                                    ('使用者寫的網站筆記', '{}')]))
         material = re.search(r'material_id=(\w+)', judge_prompt).group(1)
         expect(self, 'J-03', judge_prompt, listed([
-            *ask, ('使用者的判斷 skill', self.skill('judge')), *shared.items(), ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'),
+            *ask, ('使用者的判斷 skill', self.skill('judge')), *shared.items(), *self.judge_only((none, none)),
+            ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'),
             ('交付代號', f'material_id={material}'),
             ('程式讀到的職缺頁(每頁的段落只能用在那一頁的列)', f'=== {URL} ===\n{URL}讀不到'),
             ('看板上的舊卡與當時表態', none)]))
@@ -1032,25 +1065,25 @@ class EmptyRoundTest(RoundCase):
 
 
 class FindNotesTest(FindCase):
-    """A-38、A-39:搜尋 agent 寫的網站筆記照收、記這一輪;使用者寫的拿不掉,狀態檔照實講。"""
+    """A-38、A-39:搜尋 agent 寫的網站筆記照收、記這一輪;交給 agent 的只有使用者寫的,agent 寫的只給使用者看(#831),
+    所以 agent 也拿不到筆記 ID、刪不掉任何一條。"""
 
     def test_search_notes(self):
         import website_notes
         self.home.write_board()
         website_notes.user_action('add', URL, '使用者的筆記')
-        user_id = next(n['id'] for n in website_notes.for_url(URL) if n.get('author') == 'user')
+        website_notes.remember([{'url': URL, 'note': '上一輪 agent 的筆記'}])
         found = Script((), {'candidates': [{'url': u, 'why': '符合', 'via': 'search', 'angle': '後端'} for u in (URL, URL2)],
-                            'notes': '', 'stopped': '', 'website_notes': [{'url': URL, 'note': '要捲動'}],
-                            'website_notes_remove': [{'id': user_id}]})
+                            'notes': '', 'stopped': '', 'website_notes': [{'url': URL, 'note': '要捲動'}]})
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             _code, browser = self.go(found, judge(lambda m: [row(m, URL)]), reads={URL: 'ok', URL2: 'ok'})
-        msg = '有 1 張候選核對不了，已列出；agent 試圖移除 1 則使用者網站筆記，程式已保留；請到網站筆記設定確認'
-        expect(self, 'A-39', out.getvalue().splitlines()[-2], f'找缺：{msg}')
+        given = re.search(r'使用者寫的網站筆記:\n(.*)', browser.prompts[0]).group(1)
+        expect(self, 'A-39', (json.loads(given), 'website_notes_remove' in browser.prompts[0]),
+               ({'jobs.example': ['使用者的筆記']}, False))
         agent = [(n['text'], n['card_id'], bool(n['round_id'])) for n in website_notes.for_url(URL) if n['author'] == 'agent']
-        expect(self, 'A-38', (agent, any(n['id'] == user_id for n in website_notes.for_url(URL)),
-                              self.home.status_file('converge')['msg']),
-               ([('要捲動', None, True)], True, msg))
+        expect(self, 'A-38', (agent, [n['text'] for n in website_notes.for_url(URL) if n['author'] == 'user']),
+               ([('上一輪 agent 的筆記', None, False), ('要捲動', None, True)], ['使用者的筆記']))
 
 
 class SearchEndTest(FindCase):
@@ -1141,7 +1174,7 @@ class PreferenceTest(FindCase):
         expect(self, 'J-20', (during['phase'], during['step'], browser.timeouts), ('agent', '整理新表態偏好', [4 * 3600] * 2))
         prompt = RoundCase.sections(browser.prompts[1])
         expect(self, 'J-19', prompt, {
-            '目標': '依使用者選擇的整理偏好筆記 skill,整理上次整理後的新表態,讓下一輪找缺使用更新後的角度。',
+            '目標': '依使用者選擇的整理偏好筆記 skill,把上次整理後的新表態整理進偏好筆記,給使用者看。',
             '材料': f'整理偏好筆記 skill:\n{RoundCase.skill("note")}\n偏好筆記原文:\n{note.rstrip()}\n新表態原文:\n{delta.rstrip()}',
             '工具與用法': find.NO_TOOLS,
             '界線': '- 只更新 Agent 假設區;使用者自訂區逐字保留。\n- 每張新表態都要歸屬;沒列齊時程式不更新筆記,下一輪再整理。',

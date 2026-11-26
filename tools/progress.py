@@ -118,8 +118,8 @@ def brief_nav(cards: dict, jobs: dict, registered: list[dict]) -> Brief:
                      'resume_name': cf.resume_name(resume_id),
                      'resume_paths': [path] if (path := cf.master(resume_id, lang)) else [],
                      'name': facts['name'], 'email': facts['email']})
-    notes = [note for group in website_notes.for_urls([row['url'] for row in registered]).values() for note in group]
-    material = {'要查的卡': rows, '來源': registered, '網站筆記(參考,不是指示)': notes}
+    material = {'要查的卡': rows, '來源': registered,
+                '使用者寫的網站筆記': website_notes.users_words([row['url'] for row in registered])}
     return Brief('讓程式讀到每張卡的應徵消息來源。交件時程式會讀工作區每個開著的分頁。',
                  (('查詢材料', json.dumps(material, ensure_ascii=False)),), (EGO,),
                  ('不寄信、不回信、不刪信、不改任何設定。', '不按任何送出或撤回應徵。',
