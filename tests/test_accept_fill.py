@@ -1,6 +1,7 @@
 """幫你填表的驗收:從 fill.py 入口(--stage fill、fix、submit、confirm)與 agent 叫的 form_plan 入口,加假瀏覽器邊界,
 跑 acceptance_inputs 的組合,斷言行為清單 F 段與 A 段在填表上的那幾條。句子照 tools/web/marks.py 的 TEMPLATES 一字不差。
 """
+import contextlib
 import copy
 import dataclasses
 import datetime
@@ -1438,14 +1439,18 @@ class ParallelTest(FillCase):
     URLS = (URL, 'https://jobs.example/jobs/2', 'https://jobs.example/jobs/3')
 
     class Flight:
-        """同時有幾支假 agent 在跑。"""
-        def __init__(self):
+        """同時有幾支假 agent 在跑。進場的先等到 parties 支都進來才往下走,同時跑不靠各支剛好在 wait 的秒數裡重疊;
+        真的沒有那麼多支同時跑時,等滿 60 秒放行,peak 照實少。"""
+        def __init__(self, parties):
             self.lock, self.now, self.peak = threading.Lock(), 0, 0
+            self.gate = threading.Barrier(parties, timeout=60)
 
         def enter(self, _browser):
             with self.lock:
                 self.now += 1
                 self.peak = max(self.peak, self.now)
+            with contextlib.suppress(threading.BrokenBarrierError):
+                self.gate.wait()
             return ''
 
         def leave(self, _browser):
@@ -1500,15 +1505,15 @@ class ParallelTest(FillCase):
                 *([self.EXISTING] if n > 0 else [])]
 
     def test_three_at_once_leave_the_board_exactly_as_one_by_one(self):
-        flight, seen = self.Flight(), {}
+        seen = {}
         for workers in (1, 3):
+            flight = self.Flight(workers)
             # 越前面的越晚交件:同時跑時寫看板的順序跟選的順序相反
             scripts = [self.card_script(n, flight, (0.4, 0.2, 0.05)[n], more=self.own_answers(n),
                                         problems=[{'text': f'填不了 {n}'}] if n < 2 else []) for n in range(3)]
             code, _seconds, browsers = self.run_all(workers, scripts)
             seen[workers] = (code, self.outcome(3), flight.peak)
             expect(self, 'F-29', (code, [len(b.printed) for b in browsers.values()]), (0, [2, 2, 2]), workers)
-            flight.peak = 0
         bank = json.loads(seen[3][1])['bank']
         expect(self, 'F-25', sorted(entry['q'] for entry in bank),
                sorted([QUESTION, 'Notice period', 'Salary 0', 'Salary 1']), 'every new answer is on the board once')
@@ -1519,7 +1524,7 @@ class ParallelTest(FillCase):
 
     def test_cards_whose_pages_look_the_same_each_keep_their_own_result(self):
         import evidence
-        flight = self.Flight()
+        flight = self.Flight(3)
         scripts = [self.card_script(0, flight, 0.4, same_page=True, problems=[{'text': '填不了 0'}]),
                    self.card_script(1, flight, 0.3, same_page=True, needs_user='要本人登入 1'),
                    self.card_script(2, flight, 0.2, same_page=True)]      # 越前面的越晚交件;頁面逐字相同
@@ -1540,7 +1545,7 @@ class ParallelTest(FillCase):
 
     def test_one_card_breaking_settles_only_that_card_while_the_others_finish(self):
         import delivery_core
-        flight, real = self.Flight(), fill.run_round
+        flight, real = self.Flight(2), fill.run_round      # 第二張在派 agent 前就斷線,只有兩支進場
         scripts = [self.card_script(n, flight, 0.3) for n in range(3)]
         self.board(3)
         browsers = {url: FakeBrowser(script) for url, script in zip(self.URLS, scripts)}
@@ -1576,7 +1581,7 @@ class ParallelTest(FillCase):
 
         def sent(printed):
             return {'submitted': 'true', 'evidence': printed[-1].cite(receipt), 'needs_user': '', 'stopped': ''}
-        flight = self.Flight()
+        flight = self.Flight(2)      # 第二張取消又確認過,不派 agent
         browsers = {url: FakeBrowser(Script((('before', page), ('tool', flight.enter), ('wait', 0.3), ('tool', flight.leave),
                                              ('after', page)), sent)) for url in self.URLS}
         pinned = dict(ids, **{self.URLS[1]: 'cancelled-then-reconfirmed'})      # 第二張派出之後取消又確認過
@@ -1590,9 +1595,10 @@ class ParallelTest(FillCase):
     def test_a_shared_answer_one_card_retranslated_is_not_read_as_a_user_edit_by_the_others(self):
         """他改了中文、答案 k1 標待重翻;三張都引 k1 並打上重翻後的英文。誰先交件誰把新英文記回答案庫,
         另外兩張不能把它當成他這一輪又改了(F-21),不管幾張同時跑,三張都不標待重打。"""
-        flight, seen = self.Flight(), {}
+        seen = {}
         bank = [dict(BANK[0], tr=1)]
         for workers in (1, 3):
+            flight = self.Flight(workers)
             more = [{'q': QUESTION, 'src': 'bank', 'value': 'Yes, authorized', 'k': 'k1'}]
             scripts = [self.card_script(n, flight, (0.4, 0.2, 0.05)[n], more=more) for n in range(3)]
             self.run_all(workers, scripts, bank)
@@ -1604,7 +1610,7 @@ class ParallelTest(FillCase):
 
     def test_any_kind_of_error_on_one_card_is_written_on_that_card_and_the_others_still_run(self):
         import delivery_core
-        flight, real = self.Flight(), fill.run_round
+        flight, real = self.Flight(2), fill.run_round
         scripts = [self.card_script(n, flight, 0.2) for n in range(3)]
         self.board(3)
         browsers = {url: FakeBrowser(script) for url, script in zip(self.URLS, scripts)}
@@ -1624,7 +1630,7 @@ class ParallelTest(FillCase):
     def test_two_cards_registering_the_same_platform_profile_at_once_keep_the_first_one(self):
         """同一個平台履歷兩張卡同時登記:先寫進登記表的算,後來的不蓋掉。讀登記表放慢,讓兩張同時查到「還沒登記」。"""
         import profile_registry
-        flight, saved, load, save = self.Flight(), [], profile_registry.load, profile_registry.save
+        flight, saved, load, save = self.Flight(3), [], profile_registry.load, profile_registry.save
 
         def slow_load(*args, **kwargs):
             time.sleep(0.15)
@@ -1642,8 +1648,8 @@ class ParallelTest(FillCase):
         expect(self, 'S-22', (self.home.registry()[PLATFORM][f'{LANG}/one']['read'], len(set(saved))), (saved[0], 1), saved)
 
     def test_three_cards_take_about_as_long_as_one(self):
-        flight = self.Flight()
-        _code, one, _browsers = self.run_all(3, [self.card_script(0, flight, 0.5)])
+        _code, one, _browsers = self.run_all(3, [self.card_script(0, self.Flight(1), 0.5)])
+        flight = self.Flight(3)
         _code, three, _browsers = self.run_all(3, [self.card_script(n, flight, 0.5) for n in range(3)])
         self.assertEqual(flight.peak, 3)
         self.assertLess(three, one * 2, f'1 張 {one:.2f} 秒、3 張 {three:.2f} 秒')

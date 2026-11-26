@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import socket
@@ -21,11 +22,15 @@ class EgoFallbackLimit(unittest.TestCase):
         import web.fetch as page_fetch
         from concurrent.futures import ThreadPoolExecutor
         live, peak, lock = [0], [0], threading.Lock()
+        # 進來的先等到上限那麼多支都進來,同時跑不靠各支剛好在 sleep 裡重疊;排不到那麼多支時等滿 60 秒放行,peak 照實少
+        gate = threading.Barrier(page_fetch.EGO_FALLBACK_WORKERS, timeout=60)
 
         def fake_now(url):
             with lock:
                 live[0] += 1
                 peak[0] = max(peak[0], live[0])
+            with contextlib.suppress(threading.BrokenBarrierError):
+                gate.wait()
             _time.sleep(0.2)
             with lock:
                 live[0] -= 1
