@@ -5,7 +5,7 @@ board_doc —— 板子 HTML 的「解析 + 組裝」單一真相。
 以前 PRE/M1.../SUF 那段接字串在 build_board / fold_pipeline / publish_board 各抄一份;
 現在只有這裡一份,誰要組板都 import。改板結構只改這裡。
 """
-import re,json,sys,os,copy
+import re,json,sys,os,copy,datetime,hashlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as _cf
 
@@ -300,9 +300,8 @@ def rewrite(fn, live=None, by=''):
             journal(live, fb_diff(before, p['fb']), by or _os.path.basename(sys.argv[0] or '') or 'script')
         except OSError as e:
             # 流水帳壞掉不能擋住存檔(改動已經寫進去了),但他要知道:標記寫壞時就是靠它救。回報在同一把鎖內補寫進看板
-            import agent_report
-            agent_report.apply_report(p['fb'], '看板', f'標記流水帳寫不進去,這次的改動沒有留紀錄:{e.strerror or e}',
-                                      need=f'看 {_os.path.basename(journal_path(live))} 是不是被刪、被鎖或磁碟滿了')
+            apply_report(p['fb'], '看板', f'標記流水帳寫不進去,這次的改動沒有留紀錄:{e.strerror or e}',
+                         need=f'看 {_os.path.basename(journal_path(live))} 是不是被刪、被鎖或磁碟滿了')
             write_doc(live, assemble(p['sty'], stat_first(p['thdr'], p['data']), p['tail'], p['data'],
                                      _fb_json(p['fb']), p['app']))
     return out
@@ -323,6 +322,77 @@ def set_data(mutate, live=None):
     def fn(p):
         mutate(p['data'], copy.deepcopy(p['fb']))
     rewrite(fn, target(live))
+
+
+# 看板「📣 回報」那一格怎麼加一則(agent_report 寫進看板檔;這裡寫流水帳失敗時也用)
+KEY = '__inbox__'
+NO_SHOT = '這一輪沒有程式自己截的那一頁'
+KEEP_DONE = 200        # 處理好的只留最近這麼多則:看板每次都整份讀寫這一格,永遠不清會越來越肥
+
+
+def stamp():
+    # 記到微秒:「這一輪開始之前開的」(resolve 的 before)同一秒內也分得出先後;只記到秒的舊回報照字串比一定算比較早
+    return datetime.datetime.now().isoformat(timespec='microseconds')
+
+
+def page_of(fb, job):
+    """跟這張卡有關的事要去哪一頁做:agent 填表最後停在的那一頁,沒有就是職缺頁。"""
+    a = (fb.get(job) or {}).get('apply') if isinstance(fb.get(job), dict) else None
+    return next((str(u) for u in ((a or {}).get('tab_url'), job) if str(u or '').startswith(('https://', 'http://'))), '')
+
+
+def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, url='', info=False, ev=None):
+    """純函式版(測試用)。回傳那一筆。
+    url:要他處理的那一頁(看板上點得開);沒給、又跟某張卡有關,就照 page_of 附上,回報一定帶得到去處。
+    by_agent:agent 自己寫的(不是程式驗出來的):標 agent;沒附程式自己截的那一頁(ev)就標 noev(缺證據),
+    不叫他照做(todo 不列,#315)。
+    """
+    now = now or stamp()
+    msg, need, job, src = (msg or '').strip(), (need or '').strip(), (job or '').strip(), (src or 'agent').strip()
+    if not msg:
+        raise ValueError('回報要寫發生了什麼')
+    # 只收 http(s):別的(about:、javascript:)看板也不給點,不能吃掉後面那個點得開的
+    url = (url or '').strip()
+    url = url if url.startswith(('https://', 'http://')) else page_of(fb, job)
+    box = fb.setdefault(KEY, [])
+    for it in box:
+        if not it.get('done') and (it.get('from'), it.get('job', ''), it.get('msg')) == (src, job, msg):
+            it['n'] = it.get('n', 1) + 1
+            it['at'] = now
+            if need:
+                it['need'] = need
+            if url:
+                it['url'] = url
+            if info:
+                it['info'] = True
+            if ev:
+                it['ev'] = ev
+                it.pop('noev', None)
+            if by_agent:            # 同一句又報一次:這一次要附的是這一輪的截圖
+                it['agent'] = True
+                it.pop('ev', None)
+                it['noev'] = NO_SHOT
+            return it
+    it = {'id': 'r' + hashlib.sha256(f'{src}|{job}|{msg}|{now}'.encode()).hexdigest()[:10],
+          'at': now, 'from': src, 'msg': msg, 'n': 1}
+    if need:
+        it['need'] = need
+    if job:
+        it['job'] = job
+    if url:
+        it['url'] = url
+    if info:
+        it['info'] = True
+    if ev:
+        it['ev'] = ev
+    if by_agent:
+        it['agent'], it['noev'] = True, NO_SHOT
+    box.append(it)
+    done = sorted((x for x in box if x.get('done')), key=lambda x: (str(x.get('done')), str(x.get('at'))))
+    if len(done) > KEEP_DONE:
+        old = {id(x) for x in done[:len(done) - KEEP_DONE]}
+        box[:] = [x for x in box if id(x) not in old]
+    return it
 
 
 def main():

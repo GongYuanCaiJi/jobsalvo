@@ -23,6 +23,7 @@ import re
 
 import agent_report
 import config as cf
+import board_doc as bd
 import form_record as fr
 
 CHANGES = (
@@ -80,7 +81,7 @@ def sweep(fb, before, today=None, changes=CHANGES):
             if _answer_stale(e, change, before[change['id']]):
                 fr.redo(fb, e['k'], today)
                 n += 1
-        for it in fb.get(agent_report.KEY) or []:
+        for it in fb.get(bd.KEY) or []:
             if _report_stale(it, change, before[change['id']]):
                 it['done'], it['res'] = today, '過時:' + change['why']
                 n += 1

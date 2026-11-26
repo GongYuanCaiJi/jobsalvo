@@ -1,8 +1,12 @@
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tools')))
+import _env  # noqa: E402,F401  測試跑在暫存資料夾
 import interview_bank as ib
 import iv_sheet
 
@@ -23,6 +27,18 @@ def _data():
 
 
 class IvSheetTest(unittest.TestCase):
+    def test_the_command_line_finds_the_card_by_part_of_its_name_and_refuses_an_ambiguous_one(self):
+        data = _data()
+        data['jobs'].append({'id': 'K', 'company': '另一家', 'title': '工程師'})
+        with mock.patch('board_doc.load', return_value={'data': data}), \
+                mock.patch.object(sys, 'argv', ['iv_sheet.py', '某某', '--md']), redirect_stdout(io.StringIO()) as out:
+            iv_sheet.main()
+        self.assertEqual(out.getvalue(), iv_sheet.build(data, 'J')[0])
+        with mock.patch('board_doc.load', return_value={'data': data}), \
+                mock.patch.object(sys, 'argv', ['iv_sheet.py', '工程師', '--md']), self.assertRaises(SystemExit) as e:
+            iv_sheet.main()
+        self.assertEqual(str(e.exception.code), '「工程師」要對到唯一一張卡,現在對到:某某公司 工程師 (J)、另一家 工程師 (K)')
+
     def test_shared_question_is_on_every_sheet_and_the_card_variant_replaces_only_that_card(self):
         data = _data()
         data['jobs'].append({'id': 'K', 'company': '另一家', 'title': '工程師'})

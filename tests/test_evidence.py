@@ -48,7 +48,7 @@ class AgentReportEvidence(EvidenceTests):
         self.assertTrue(it.get('noev'))
         self.assertIn(it, agent_report.open_items(fb))
         self.assertNotIn(it, agent_report.todo(fb))
-        program = agent_report.apply_report(fb, '查回音', '查回音 agent 沒完成', need='看紀錄', job=U)
+        program = bd.apply_report(fb, '查回音', '查回音 agent 沒完成', need='看紀錄', job=U)
         self.assertIn(program, agent_report.todo(fb))
 
 

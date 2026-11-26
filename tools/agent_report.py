@@ -21,7 +21,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import board_doc as bd      # noqa: E402
 
-KEY = '__inbox__'
 # 回報的來源由派 agent 的程式給(#316):agent_run 把這一輪的來源放進這個環境變數,agent 跑這支時照它記,自己寫的 --from 不算數
 REPORT_FROM_ENV = 'JOBSALVO_REPORT_FROM'
 # 幫你填表那個流程的來源代號。存在資料裡的是舊叫法「代投」(舊回報也這樣存,改掉要搬資料);看板照 GLOSSARY 顯示「幫你填表」
@@ -30,75 +29,8 @@ FROM_APPLY = '代投'
 FROM = {'找新職缺': ['找新職缺', 'discover'], '逐張判斷': ['逐張判斷', 'discover'], '跑準備區': ['跑準備區', 'prep'],
         '平台履歷同步': ['全部同步', 'cfg'],
         '查回音': ['查應徵進度', 'sent'], FROM_APPLY: ['幫你填表', 'ship']}
-NO_SHOT = '這一輪沒有程式自己截的那一頁'
-KEEP_DONE = 200        # 處理好的只留最近這麼多則:看板每次都整份讀寫這一格,永遠不清會越來越肥
 RETRY = '__retry__'    # 每件事連續沒做完幾輪:{件: 輪數}
 RETRY_ROUNDS = 3       # 本地規則:連續幾輪沒做完才告訴他;主流沒有適用的數字(docs/research/board-decision-load.md)
-
-
-def _now():
-    # 記到微秒:「這一輪開始之前開的」(resolve 的 before)同一秒內也分得出先後;只記到秒的舊回報照字串比一定算比較早
-    return datetime.datetime.now().isoformat(timespec='microseconds')
-
-
-def page_of(fb, job):
-    """跟這張卡有關的事要去哪一頁做:agent 填表最後停在的那一頁,沒有就是職缺頁。"""
-    a = (fb.get(job) or {}).get('apply') if isinstance(fb.get(job), dict) else None
-    return next((str(u) for u in ((a or {}).get('tab_url'), job) if str(u or '').startswith(('https://', 'http://'))), '')
-
-
-def apply_report(fb, src, msg, need='', job='', now=None, by_agent=False, url='', info=False, ev=None):
-    """純函式版(測試用)。回傳那一筆。
-    url:要他處理的那一頁(看板上點得開);沒給、又跟某張卡有關,就照 page_of 附上,回報一定帶得到去處。
-    by_agent:agent 自己寫的(不是程式驗出來的):標 agent;沒附程式自己截的那一頁(ev)就標 noev(缺證據),
-    不叫他照做(todo 不列,#315)。
-    """
-    now = now or _now()
-    msg, need, job, src = (msg or '').strip(), (need or '').strip(), (job or '').strip(), (src or 'agent').strip()
-    if not msg:
-        raise ValueError('回報要寫發生了什麼')
-    # 只收 http(s):別的(about:、javascript:)看板也不給點,不能吃掉後面那個點得開的
-    url = (url or '').strip()
-    url = url if url.startswith(('https://', 'http://')) else page_of(fb, job)
-    box = fb.setdefault(KEY, [])
-    for it in box:
-        if not it.get('done') and (it.get('from'), it.get('job', ''), it.get('msg')) == (src, job, msg):
-            it['n'] = it.get('n', 1) + 1
-            it['at'] = now
-            if need:
-                it['need'] = need
-            if url:
-                it['url'] = url
-            if info:
-                it['info'] = True
-            if ev:
-                it['ev'] = ev
-                it.pop('noev', None)
-            if by_agent:            # 同一句又報一次:這一次要附的是這一輪的截圖
-                it['agent'] = True
-                it.pop('ev', None)
-                it['noev'] = NO_SHOT
-            return it
-    it = {'id': 'r' + hashlib.sha256(f'{src}|{job}|{msg}|{now}'.encode()).hexdigest()[:10],
-          'at': now, 'from': src, 'msg': msg, 'n': 1}
-    if need:
-        it['need'] = need
-    if job:
-        it['job'] = job
-    if url:
-        it['url'] = url
-    if info:
-        it['info'] = True
-    if ev:
-        it['ev'] = ev
-    if by_agent:
-        it['agent'], it['noev'] = True, NO_SHOT
-    box.append(it)
-    done = sorted((x for x in box if x.get('done')), key=lambda x: (str(x.get('done')), str(x.get('at'))))
-    if len(done) > KEEP_DONE:
-        old = {id(x) for x in done[:len(done) - KEEP_DONE]}
-        box[:] = [x for x in box if id(x) not in old]
-    return it
 
 
 def settle(fb, src, scope, marks, *, head, need, job='', url='', now=None):
@@ -109,7 +41,7 @@ def settle(fb, src, scope, marks, *, head, need, job='', url='', now=None):
       · 其他沒做完:記一輪、不打擾,下一輪重做;連續 RETRY_ROUNDS 輪才開一則,寫出試了幾輪、卡在哪。
       · 乾淨收尾:輪數歸零。
     這件事上一輪開的、這一輪不成立的收掉;升級前開頭是 head 的舊回報一併收掉。回連續沒做完幾輪。"""
-    now = now or _now()
+    now = now or bd.stamp()
     handed = next((dict(m.params) for m in marks if m.code == 'HANDED_OVER'), None)
     rounds = 0 if not marks or handed else (fb.get(RETRY) or {}).get(scope, 0) + 1
     if rounds:
@@ -121,7 +53,7 @@ def settle(fb, src, scope, marks, *, head, need, job='', url='', now=None):
         host, todo = _host(handed['url']), '；'.join(said)
         key, line, page = '\n'.join(('handoff:' + src, host, todo)), f'{head}：{todo}', handed['url']
     elif rounds >= RETRY_ROUNDS:
-        key, page = 'retry:' + scope, url or page_of(fb, job)
+        key, page = 'retry:' + scope, url or bd.page_of(fb, job)
         line = f'{head}連續 {rounds} 輪沒做完：\n' + '\n'.join(dict.fromkeys(m.text for m in marks))
     else:
         key = None
@@ -139,7 +71,7 @@ def settle(fb, src, scope, marks, *, head, need, job='', url='', now=None):
                   'need': need, 'parts': {}, 'n': 1}
             if handed:
                 it['host'] = host
-            fb.setdefault(KEY, []).append(it)
+            fb.setdefault(bd.KEY, []).append(it)
         it['parts'][scope] = {'line': line, 'job': job, 'url': page}
         it['at'] = now
         _show(it)
@@ -168,7 +100,7 @@ def _show(it):
 def report(src, msg, need='', job='', live=None, by_agent=False, url='', info=False, ev=None):
     live = bd.target(live)
     out = []
-    bd.set_fb(lambda fb: out.append(apply_report(fb, src, msg, need, job, by_agent=by_agent,
+    bd.set_fb(lambda fb: out.append(bd.apply_report(fb, src, msg, need, job, by_agent=by_agent,
                                                  url=url, info=info, ev=ev)),
               live=live, by='agent_report')
     return out[0]
@@ -191,7 +123,7 @@ def apply_resolve(fb, job, why, day=None, src=None, before=None, only=None):
     併了好幾張卡的那一則(settle 的 parts):只拿掉這張卡那幾件,其他卡還卡著就留著、重寫字。"""
     day = day or datetime.date.today().isoformat()
     n = 0
-    for it in fb.get(KEY, []):
+    for it in fb.get(bd.KEY, []):
         if (it.get('done') or src is not None and not str(it.get('from', '')).startswith(src)
                 or before is not None and str(it.get('at', '')) >= before or only is not None and not only(it)):
             continue
@@ -219,7 +151,7 @@ def resolve(job, why, live=None, src=None, before=None, only=None):
 
 
 def open_items(fb):
-    return [it for it in fb.get(KEY, []) if not it.get('done')]
+    return [it for it in fb.get(bd.KEY, []) if not it.get('done')]
 
 
 def todo(fb):

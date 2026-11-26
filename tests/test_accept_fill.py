@@ -408,10 +408,10 @@ class FormRecordTest(FillCase):
                    {'id': 'b', 'from': agent_report.FROM_APPLY, 'job': other, 'msg': '填不上'},
                    {'id': 'c', 'from': '網站筆記', 'job': URL, 'msg': '筆記'}]
         self.start('todo')
-        board_doc.set_fb(lambda fb: fb.__setitem__(agent_report.KEY, copy.deepcopy(reports)), live=self.home.board)
+        board_doc.set_fb(lambda fb: fb.__setitem__(board_doc.KEY, copy.deepcopy(reports)), live=self.home.board)
         self.go('fill', filled())
         today = datetime.date.today().isoformat()
-        expect(self, 'F-04', self.home.fb()[agent_report.KEY],
+        expect(self, 'F-04', self.home.fb()[board_doc.KEY],
                [dict(reports[0], done=today, res='這張重新填好了,結果看卡上'), reports[1], reports[2]])
 
     def test_a_round_without_a_sheet_leaves_the_form_alone(self):

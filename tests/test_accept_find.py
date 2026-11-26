@@ -1411,11 +1411,11 @@ class AddJobTest(FindCase):
             expect(self, 'J-16', (browser.fetches, writes, out), ([], [{'phase': 'nothing', 'msg': msg}], '新增 0 張\n'), case)
 
     def test_unfinished_judges_still_add_the_card_and_say_so(self):
-        import agent_report
+        import board_doc
         for end in [end for end in I.ENDS if end != I.UNAVAILABLE]:
             self.home.write_board()
             self.go(judge(lambda m: [row(m, URL)], end=end), reads={URL: 'ok'}, argv=['--url', URL], entry='add')
-            reported = [(r['msg'], r['need']) for r in self.home.fb().get(agent_report.KEY, []) if r.get('from') == '貼網址加入']
+            reported = [(r['msg'], r['need']) for r in self.home.fb().get(board_doc.KEY, []) if r.get('from') == '貼網址加入']
             ended = {I.NO_SHEET: '沒有交件單', I.TIMEOUT: '逾時', I.CRASHED: '當掉', I.STOPPED_BY_USER: '被停止'}.get(end)
             problem = f'判斷 agent 沒有交件({ended})' if ended else ''
             expect(self, 'J-16', (self.card() is not None, reported, self.home.status_file('add')['msg'],

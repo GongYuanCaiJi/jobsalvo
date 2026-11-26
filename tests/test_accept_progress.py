@@ -17,6 +17,7 @@ from acceptance_home import LANG, Home
 import fake_browser
 from fake_browser import FakeBrowser, Script, Tab
 import agent_report
+import board_doc
 import config as cf
 import json
 import profile_sync
@@ -158,7 +159,7 @@ class SourceTest(ProgressCase):
             old = {'id': 'r0', 'at': '2026-01-01T00:00:00', 'from': '查應徵進度', 'msg': '上一輪的', 'n': 1}
             other = dict(old, id='r9', **{'from': '找缺'})
             import board_doc
-            board_doc.set_fb(lambda fb: fb.update({agent_report.KEY: [dict(old), dict(other)]}), live=self.home.board)
+            board_doc.set_fb(lambda fb: fb.update({board_doc.KEY: [dict(old), dict(other)]}), live=self.home.board)
             tabs = [tab for name in self.SOURCES for tab in self.tabs(name, states[name])]
             labelled = [{'tab': tab.label, 'source': name} for name in self.SOURCES for tab in self.tabs(name, states[name])
                         if states[name] != 'unlabeled']
@@ -175,7 +176,7 @@ class SourceTest(ProgressCase):
                 expect(self, 'P-11', self.replies(url).get('at'), TODAY.isoformat() if not program else None, (case, url))
             expect(self, 'P-09' if 'not_open' in case else 'P-08', (self.home.status_file('reply')['phase'], self.code),
                    ('done' if not program else 'incomplete', 0), case)
-            reports = self.home.fb()[agent_report.KEY]
+            reports = self.home.fb()[board_doc.KEY]
             expect(self, 'P-17', [dict(r, id='', at='') for r in reports], [
                 dict(old, id='', at='', done=TODAY.isoformat(), res='這一輪重查過了'), dict(other, id='', at='')], case)
             if program:
@@ -318,14 +319,14 @@ class UnsureTest(ProgressCase):
             self.start({})      # 登記應徵紀錄頁
             others = [dict(open_report, id='r2', job=OTHER), dict(open_report, id='r3', **{'from': '找缺'})]
             self.home.write_board([{'id': UNSURE, 'target': 'Engineer - Acme', 'title': 'Engineer', 'company': 'Acme'}],
-                                  {UNSURE: copy.deepcopy(prior), agent_report.KEY: [dict(open_report), *copy.deepcopy(others)]})
+                                  {UNSURE: copy.deepcopy(prior), board_doc.KEY: [dict(open_report), *copy.deepcopy(others)]})
             tabs = (mail_tab(), record_tab(I.READ if all_read else I.UNREADABLE))
             wrong_subject = (lambda m: {'subject': {'material_id': m.material_id, 'ids': [9999]}},) if reply == 'quote_only' else ()
             rows = [] if reply == 'none' else [(UNSURE, MAIL, '確認信', SUBJECT, QUOTE, '', reply in ('verified', 'quote_only'), *wrong_subject)]
             self.go(nav(tabs), cite(rows, checked=(UNSURE,) if checked else ()))
             card = {key: value for key, value in self.card(UNSURE).items() if key != 'replies'}
             stamp = (card.get('history') or [{}])[-1].get('at', '')
-            reports = self.home.fb()[agent_report.KEY]
+            reports = self.home.fb()[board_doc.KEY]
             expect(self, 'P-13', reports[1:3], others, case)       # 別張卡的、別的流程開的不收
             reports = reports[:1] + [r for r in reports[3:] if r.get('job') == UNSURE]
             if reply == 'verified':     # 那一則就是送出的證據;寄的那一份照卡上記(統計表用)

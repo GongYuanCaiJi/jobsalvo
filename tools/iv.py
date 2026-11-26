@@ -62,21 +62,6 @@ def _load():
     return d['data'], (json.loads(d['fb']) if isinstance(d['fb'], str) else d['fb'])
 
 
-def label(j):
-    """卡片給人看的名字:有公司和職稱就用,沒有(例如從應徵紀錄同步進來的卡)就用卡名。"""
-    return f"{j.get('company') or ''} {j.get('title') or ''}".strip() or cd.name(j)
-
-
-def card(q, data):
-    jobs = [j for j in data.get('jobs') or [] if isinstance(j, dict)]
-    exact = [j for j in jobs if j.get('id') == q]
-    hit = exact or [j for j in jobs if q in str(j.get('id')) or q in label(j)]
-    if len(hit) != 1:
-        names = '、'.join(f"{label(j)} ({j.get('id')})" for j in hit[:6]) or '沒有'
-        raise SystemExit(f'「{q}」要對到唯一一張卡,現在對到:{names}')
-    return hit[0]
-
-
 def qref(q, data, loose=False):
     """題目:寫 id,或題目文字的一段,對到唯一一題才動。id 只是內部主鍵,agent 和使用者看到的都是題目文字。"""
     items = ib.normalize(data.get('bank'))['items']
@@ -213,18 +198,18 @@ def show(a, data, fb):
         live = [j for j in data.get('jobs') or [] if (fb.get(j.get('id')) or {}).get('oc') in ('iv', 'offer')]
         ids = [j['id'] for j in live] + [k for k in list(bank['links']) + list(bank['rounds']) if k not in {j['id'] for j in live}]
         for jid in dict.fromkeys(ids):
-            j = card(jid, data)
+            j = cd.lookup(jid, data)
             qs = bank['links'].get(jid, {})
             srcs = {s: sum(1 for q, v in qs.items() if v['src'] == s and q not in ib.shared_ids(bank)) for s in ib.SRCS}
             nsh = len(ib.shared_ids(bank))
             rs = bank['rounds'].get(jid, [])
-            print(f"{label(j)}  [{(fb.get(jid) or {}).get('oc') or '—'}]  {jid}")
+            print(f"{cd.label(j)}  [{(fb.get(jid) or {}).get('oc') or '—'}]  {jid}")
             print('   面試:' + ('; '.join(when(r) for r in rs) if rs else '還沒記時間'))
             print(f'   {len(ib.job_qids(bank, jid))} 題 · ' + ' · '.join(
                 [f'共有 {nsh}'] * bool(nsh) + [f'{ib.SRCS[s]} {n}' for s, n in srcs.items() if n]))
         return
-    j = card(a.card, data)
-    print(f"{label(j)}  {j['id']}")
+    j = cd.lookup(a.card, data)
+    print(f"{cd.label(j)}  {j['id']}")
     for r in bank['rounds'].get(j['id'], []):
         print('  面試 ' + when(r) + (' · ' + r['note'] if r.get('note') else ''))
     links = bank['links'].get(j['id'], {})
@@ -312,7 +297,7 @@ def main():
         if form.get('stage') in ('wip', 'ok') and (m := memo_check(form.get('script'), form.get('t') or '這題')):
             raise SystemExit('沒寫進去:' + m)
         lf = link_form(a) if a.card else None
-        job = card(a.card, data)['id'] if a.card else None
+        job = cd.lookup(a.card, data)['id'] if a.card else None
         before = {it.get('id') for it in (data.get('bank') or {}).get('items') or []}
         bank = write('put', form)
         qid = form.get('id') or next(it['id'] for it in bank['items'] if it['id'] not in before)
@@ -327,7 +312,7 @@ def main():
         write('share', None, it['id'], None, a.cmd == 'share')
         print(f"{'設成共有' if a.cmd == 'share' else '取消共有'}:「{it['t']}」")
         return
-    job = card(a.card, data)['id']
+    job = cd.lookup(a.card, data)['id']
     if a.cmd == 'variant':
         it = qref(a.qid, data)
         if a.clear:

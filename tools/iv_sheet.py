@@ -199,9 +199,9 @@ def interviews(data, fb):
 
 
 def main():
-    import board_doc as bd, config as cf, iv
+    import board_doc as bd, config as cf
     data = bd.load()['data']
-    job = iv.card(sys.argv[1], data)['id'] if len(sys.argv) > 1 else sys.exit(__doc__)
+    job = card.lookup(sys.argv[1], data)['id'] if len(sys.argv) > 1 else sys.exit(__doc__)
     if '--md' in sys.argv:
         print(build(data, job)[0], end='')
     else:

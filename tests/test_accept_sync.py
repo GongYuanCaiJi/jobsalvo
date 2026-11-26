@@ -125,7 +125,7 @@ class SyncCase(unittest.TestCase):
     def forget(self):
         """同一個測試跑好幾種情況:前一種留下的回報與連續輪數清掉,每一種都從第一輪算。"""
         import board_doc
-        board_doc.set_fb(lambda fb: [fb.pop(key, None) for key in (agent_report.KEY, agent_report.RETRY)],
+        board_doc.set_fb(lambda fb: [fb.pop(key, None) for key in (board_doc.KEY, agent_report.RETRY)],
                          live=self.home.board)
 
     def assert_sources(self, visual, case):

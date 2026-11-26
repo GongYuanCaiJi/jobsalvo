@@ -313,9 +313,8 @@ def _record_sent_version(fb, url, jobs):
     try:
         ship.record_sent(fb,url,job)
     except Exception as e:  # noqa: BLE001 — 記不下來照實寫進看板的回報(卡照樣算已送出),不擋他按的那一下
-        import agent_report
-        agent_report.apply_report(fb,'看板',f'記不下寄出的是哪一份:{str(e)[:120]}',
-                                  need='這張照樣算已送出;要留紀錄就到可投遞夾看寄出的那一份',job=url)
+        bd.apply_report(fb,'看板',f'記不下寄出的是哪一份:{str(e)[:120]}',
+                        need='這張照樣算已送出;要留紀錄就到可投遞夾看寄出的那一份',job=url)
 
 def _manual_sent_problem(job, fb):
     """他按「我已在外部送出」(任何階段都能按):要記寄出的是哪一份履歷、哪個語言,他一定知道,所以還沒挑就擋下來請他挑。"""

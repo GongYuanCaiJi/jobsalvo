@@ -184,6 +184,22 @@ def platform(job):
     return host if '.' in host else s
 
 
+def label(j):
+    """卡片給人看的名字:有公司和職稱就用,沒有(例如從應徵紀錄同步進來的卡)就用卡名。"""
+    return f"{j.get('company') or ''} {j.get('title') or ''}".strip() or name(j)
+
+
+def lookup(q, data):
+    """用 id 或卡名的一段對到唯一一張卡;對不到或對到好幾張就停下,列出對到的。"""
+    jobs = [j for j in data.get('jobs') or [] if isinstance(j, dict)]
+    exact = [j for j in jobs if j.get('id') == q]
+    hit = exact or [j for j in jobs if q in str(j.get('id')) or q in label(j)]
+    if len(hit) != 1:
+        names = '、'.join(f"{label(j)} ({j.get('id')})" for j in hit[:6]) or '沒有'
+        raise SystemExit(f'「{q}」要對到唯一一張卡,現在對到:{names}')
+    return hit[0]
+
+
 def label_jobs(jobs, alias=None, extra_titles=None):
     """送給看板的卡:每張帶上卡名(name)、公司名(co)、來源平台(src_plat)、死線那一天(dl),看板直接用,不自己算(#343)。
     有 agent 引的公司的卡,co 就是那串字(套使用者的別名);升級前的舊卡照舊:同一家(legacy_same_company)

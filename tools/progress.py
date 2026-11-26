@@ -305,6 +305,7 @@ def _unsure(data: dict, url: str, new: list[dict], checked: bool, jobs: dict, st
     """送出結果不明:核對過的一則就是送出的證據;來源都查過、agent 列了這張、按送出也過了一陣子卻沒有一則,才算沒送出;
     只有核實不了的就回報(P-13)。"""
     import agent_report
+    import board_doc
     import delivery_core as ds
     import ship
     proof = [item for item in new if not item.get('unverified')]
@@ -316,8 +317,8 @@ def _unsure(data: dict, url: str, new: list[dict], checked: bool, jobs: dict, st
         ship.record_sent(data, url, jobs.get(url))
         agent_report.apply_resolve(data, url, '查應徵進度查到送出的證據,已改成已投出', src=agent_report.FROM_APPLY)
     elif new:
-        agent_report.apply_report(data, '查回音', UNCLEAR, need=UNCLEAR_NEED, job=url,
-                                  url=new[0]['link'] or url)      # 引句核對到就附那一頁,否則附職缺
+        board_doc.apply_report(data, '查回音', UNCLEAR, need=UNCLEAR_NEED, job=url,
+                               url=new[0]['link'] or url)      # 引句核對到就附那一頁,否則附職缺
     elif checked and tried and (now - tried).total_seconds() >= UNSURE_WAIT:      # 讀不懂按送出的時間就算不出等了多久,不判沒送出
         ds.fire(data, url, 'not_sent', at=stamp, issues=[NOT_SENT])
         agent_report.apply_resolve(data, url, '查應徵進度查過了,沒有送出的證據', src=agent_report.FROM_APPLY)

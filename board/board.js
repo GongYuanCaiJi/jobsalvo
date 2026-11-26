@@ -4901,7 +4901,7 @@
     var hm=/^handoff:/.test(String(it.key||''))&&/^(\S+) 要你本人處理(?:，([^：\n]*))?：\n/.exec(msg);
     if(hm){lead=[hm[1],hm[2]].filter(Boolean).join(' · '); msg=msg.slice(hm[0].length).trim();}
     var chars=Array.from(msg), preview=chars.length>120?chars.slice(0,119).join('')+'…':msg;
-    var go=/^https?:\/\//.test(String(it.url||''))?it.url:'';   // 後台一律附好(agent_report.page_of)
+    var go=/^https?:\/\//.test(String(it.url||''))?it.url:'';   // 後台一律附好(board_doc.page_of)
     var host=''; try{if(go)host=new URL(go).hostname;}catch(_e){}
     // 收著時摘要最多 120 字;打開後全文放在開合的內容裡(標題列不能選字、點一下就收起來),摘要用 CSS 讓位,同一段字只看得到一份。分組時來源寫在組名,不再每則寫一次
     var full='<div class="ib-full">'+esc(msg)+'</div>';
@@ -4929,7 +4929,7 @@
         (it.done?'改回還沒處理':'處理好了')+'</button></div>')+'</div>';
     return fold('ib:'+it.id,head,body,{cls:'ansrow ibrow'+(it.done||it.info?'':' pend'),attr:' data-ib="'+id+'"'});
   }
-  // 要他去哪一頁處理:回報附的那一頁(後台 agent_report.page_of 補上的),舊回報沒附就是那張卡的職缺頁;只給 http 開頭的
+  // 要他去哪一頁處理:回報附的那一頁(後台 board_doc.page_of 補上的),舊回報沒附就是那張卡的職缺頁;只給 http 開頭的
   function inboxTab(it){
     if(it.job){var f=FB[it.job]||{}; return f.app||'discover';}
     return (IB_FROM[it.from]||[])[1]||'';

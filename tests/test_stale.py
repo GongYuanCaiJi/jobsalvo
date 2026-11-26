@@ -19,6 +19,7 @@ import _env  # noqa: E402,F401  測試跑在暫存資料夾
 from _env import read_fb  # noqa: E402
 
 import agent_report  # noqa: E402
+import board_doc  # noqa: E402
 import board_server as bs  # noqa: E402
 import config as cf  # noqa: E402
 import form_record as fr  # noqa: E402
@@ -50,7 +51,7 @@ def seed():
         U2: {'app': 'sent', 'form': {'plat': '104', 'lock': 1, 'at': '2026-09-20T10:00:00', 'f': [
             {'q': '你的缺點?', 'src': 'bank', 'k': 'refused_sent'},
         ]}},
-        agent_report.KEY: [
+        board_doc.KEY: [
             # 選平台履歷交給 agent、附件拿錯的那一份比的那個 bug 產生的回報(bug 修掉了 → 過時)
             {'id': 'r1', 'at': '2026-09-29T14:20:00', 'from': '代投', 'job': U1, 'n': 1,
              'msg': '填表沒完成:平台附件「求職信」少了'},
