@@ -316,7 +316,7 @@ class Http(HttpBase):
         # 看板檔裡存的頁面程式是上次重建時的;更新之後以前畫面一直是舊版,要等下一次重建
         import apply_shell as ash
         with open(self.path, encoding='utf-8') as f:
-            p = bd.parse(f.read())
+            p = bd._parse(f.read())
         with open(self.path, 'w', encoding='utf-8') as f:
             f.write(bd.assemble(p['sty'], p['thdr'], p['tail'], p['data'], p['fb'], '/*舊的頁面程式*/'))
         code, raw, _ = self.req('/')
@@ -324,7 +324,7 @@ class Http(HttpBase):
         self.assertEqual(code, 200)
         self.assertNotIn('/*舊的頁面程式*/', page)
         self.assertIn(ash.read(ash.JS)[:200], page)
-        served = bd.parse(page)
+        served = bd._parse(page)
         self.assertEqual([j['id'] for j in served['data']['jobs']], [j['id'] for j in p['data']['jobs']])
         with open(self.path, encoding='utf-8') as f:
             self.assertIn('/*舊的頁面程式*/', f.read())                  # 看板檔本身不動,留給重建去換
@@ -452,7 +452,7 @@ class Http(HttpBase):
             {'id': 'r1', 'job': url, 'approve': [{'item': 'field:0'}], 'msg': 'x'}]}
         doc = {'fb': json.dumps(fb), 'data': {}}
         def ask():
-            with mock.patch.object(bs, 'read_doc', return_value=''), mock.patch.object(bd, 'parse', return_value=doc), \
+            with mock.patch.object(bd, 'load_doc', return_value=('', doc)), \
                     mock.patch('delivery_state.allowed', return_value=True), \
                     mock.patch.object(bs, 'run_status', return_value={'running': True}):
                 return bs.start_run('apply', {'stage': 'fix', 'url': url})
@@ -467,7 +467,7 @@ class Http(HttpBase):
         fb = {url: {'app': 'ship', 'ds': 'unsure', 'apply': {'submit_fail': {'at': '2026-01-05T08:00:00'}}},
               JOBS[2]['id']: {'app': 'ship'}}
         doc = {'fb': json.dumps(fb), 'data': {}}
-        with mock.patch.object(bs, 'read_doc', return_value=''), mock.patch.object(bd, 'parse', return_value=doc), \
+        with mock.patch.object(bd, 'load_doc', return_value=('', doc)), \
                 mock.patch.object(bs, 'run_status', return_value={'running': True}):
             self.assertNotEqual(bs.start_run('replies', {'url': url})[0], 400)
             self.assertEqual(bs.start_run('replies', {'url': JOBS[2]['id']})[0], 400)
@@ -620,7 +620,7 @@ class Http(HttpBase):
         make_board(self.path, {}, jobs=jobs)
         page = self.req('/')[1].decode('utf-8')
         self.assertNotIn('履' * 100, page)
-        served = bd.parse(page)['data']['jobs'][0]['resume']['variants']
+        served = bd._parse(page)['data']['jobs'][0]['resume']['variants']
         self.assertEqual(served['zh-general'].get('html_lazy'), 1)
         self.assertEqual(served['zh-general']['motive'], {'txt': '動機'})      # 卡上直接顯示的留著
         self.assertEqual(served['zh-general']['attachments'], [{'slug': 'a'}])
@@ -656,7 +656,7 @@ class Http(HttpBase):
         make_board(self.path, {}, jobs=jobs)
         page = self.req('/')[1].decode('utf-8')
         self.assertFalse('TOP-FAKE-' * 100 in page, '首頁仍送出舊形狀的履歷全文')
-        served = bd.parse(page)['data']['jobs'][0]['resume']
+        served = bd._parse(page)['data']['jobs'][0]['resume']
         self.assertNotIn('html', served)
         self.assertNotIn('pages', served)
         self.assertEqual(served['html_lazy'], 1)
@@ -717,7 +717,7 @@ class ShipFilesApi(HttpBase):
                                JOBS[2]['id']: {'app': 'ready', 'custom_docs': 'broken'}}, jobs=self.jobs)
 
     def test_page_and_polling_carry_each_cards_files_from_the_backend(self):
-        page = bd.parse(self.req('/')[1].decode('utf-8'))['data']
+        page = bd._parse(self.req('/')[1].decode('utf-8'))['data']
         files = page['ship_files']
         self.assertEqual((files[JOBS[0]['id']]['resume_id'], files[JOBS[0]['id']]['lang']), ('general', 'zh'))
         self.assertEqual(files[JOBS[1]['id']]['problem'], '還沒挑履歷')
@@ -946,7 +946,7 @@ class Research(RunButton):
         self.assertEqual(self.req('/api/run/research', {'mode': 'wide', 'resume_text': '測試履歷'})[0], 409)   # 同時只跑一輪
         st = self.wait_run(lambda s: s.get('phase') == 'done')
         self.assertEqual(st['added'], 2)
-        self.assertEqual(len(bd.parse(read(self.path))['data']['jobs']), len(JOBS) + 2)
+        self.assertEqual(len(bd._parse(read(self.path))['data']['jobs']), len(JOBS) + 2)
         self.assertNotEqual(self.rev()['gen'], r1['gen'])    # 頁面靠這個知道要重拿職缺
 
     def test_bad_requests(self):
@@ -1029,7 +1029,7 @@ class PrepSkips(Tmp):
                             'reason': '職缺已關:網址導回職缺列表'})
         moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
         self.assertEqual(read_fb(self.path)[a], {'s': 'meh', 'app': 'prep'})
-        job = bd.parse(read(self.path))['data']['jobs'][0]
+        job = bd._parse(read(self.path))['data']['jobs'][0]
         self.assertFalse(job.get('dead'))
         self.assertEqual(job['prep_note'], '職缺已關:網址導回職缺列表')
         self.assertEqual(moved, {'ready': 0, 'skipped': 1})
@@ -1044,7 +1044,7 @@ class PrepSkips(Tmp):
         write_fill(out, a, {'material_id': numbered.material_id, 'skip': True, 'reason': '職缺已關:已額滿'})
         moved = ct._apply_stages([(a, 'A')], self.path, out_dir=out)
         self.assertEqual(read_fb(self.path)[a], {'s': 'meh', 'app': 'prep'})
-        job = bd.parse(read(self.path))['data']['jobs'][0]
+        job = bd._parse(read(self.path))['data']['jobs'][0]
         self.assertFalse(job.get('dead'))
         self.assertEqual(job['prep_note'], '職缺已關:已額滿')
         self.assertEqual(moved, {'ready': 0, 'skipped': 1})
@@ -1059,7 +1059,7 @@ class PrepSkips(Tmp):
         write_fill(out, u, {'material_id': numbered.material_id, 'variant': 'general', 'lang': 'en',
                                 'real_title': {'text': 'Northwind Graduate · Risk Analyst', 'cite': [1]}})
         self.assertEqual(ct.apply_real_titles([(u, 'x')], self.path, out_dir=out), 1)
-        t = [j for j in bd.parse(read(self.path))['data']['jobs'] if j['id'] == u][0]['target']
+        t = [j for j in bd._parse(read(self.path))['data']['jobs'] if j['id'] == u][0]['target']
         self.assertEqual(t, f'Northwind Graduate · Risk Analyst（[Lever]({u})）')
 
 class PrepRunFinish(Tmp):
@@ -1137,7 +1137,7 @@ class PrepRunFinish(Tmp):
         fb = read_fb(self.path)
         self.assertEqual(fb[a]['app'], 'ready')
         self.assertEqual(fb[b]['app'], 'prep')
-        data = bd.parse(read(self.path))['data']
+        data = bd._parse(read(self.path))['data']
         cards = {j['id']: j for j in data['jobs']}
         self.assertEqual(cards[b]['prep_note'], '這一輪沒判到')
         self.assertNotIn('resume', cards[b])
@@ -1288,7 +1288,7 @@ class PrepReselection(Tmp):
         self.assertIn('Active role: expired credentials; unrelated account is 已關閉.', prompt)
         self.assertIn('不可開啟來源網址或使用瀏覽器', prompt)
         self.assertNotIn(urls[3], prompt)
-        self.assertFalse(next(j for j in bd.parse(read(self.path))['data']['jobs']
+        self.assertFalse(next(j for j in bd._parse(read(self.path))['data']['jobs']
                               if j['id'] == urls[0]).get('dead', False))
         self.assertEqual(json.load(open(os.path.join(round_dir, 'cached.json'), encoding='utf-8')), [urls[3]])
 
@@ -1381,7 +1381,7 @@ class PrepReselection(Tmp):
         self.assertEqual(seen['cached'][0][0], [(c1, '')])
         fb = read_fb(self.path)
         self.assertEqual({u: fb[u]['app'] for u in jd}, {u1: 'ready', c1: 'ready', u2: 'prep', c2: 'prep'})
-        card = next(j for j in bd.parse(read(self.path))['data']['jobs'] if j['id'] == u1)
+        card = next(j for j in bd._parse(read(self.path))['data']['jobs'] if j['id'] == u1)
         self.assertEqual((card['target'], card['resume']['recommend']), ('Round One Analyst', 'a'))
 
     def test_cached_pick_is_promoted_and_reconciled_without_agent(self):
@@ -1463,7 +1463,7 @@ class PrepReselection(Tmp):
         self.assertEqual(current['variant'], 'manual')
         self.assertEqual(current['lang'], 'en')
         self.assertEqual(current['app'], 'ready')
-        card_data = bd.parse(read(self.path))['data']['jobs'][0]['resume']
+        card_data = bd._parse(read(self.path))['data']['jobs'][0]['resume']
         self.assertEqual(card_data['recommend'], 'general')
         self.assertEqual(card_data['pick_why'], 'new recommendation')
         self.assertTrue(card_data['content_problem'])
@@ -1753,7 +1753,7 @@ class ConversionKeepsARestorePoint(OwnHome):
 
         before = self._git('log', '-1', '--format=%H', '--grep=轉換前').strip()
         self.assertTrue(before)
-        old = json.loads(bd.parse(self._git('show', before + ':board.html'))['fb'])
+        old = json.loads(bd._parse(self._git('show', before + ':board.html'))['fb'])
         self.assertEqual(old[JOBS[0]['id']]['ds'], 'running')
         self.assertEqual(read_fb(self.path)[JOBS[0]['id']]['ds'], 'stuck')
 
@@ -1763,7 +1763,7 @@ class ConversionKeepsARestorePoint(OwnHome):
 
         folder = os.path.join(self.dir, self.fh.BACKUP_DIR)
         [backup] = os.listdir(folder)
-        self.assertEqual(json.loads(bd.parse(read(os.path.join(folder, backup)))['fb'])[JOBS[0]['id']]['ds'], 'running')
+        self.assertEqual(json.loads(bd._parse(read(os.path.join(folder, backup)))['fb'])[JOBS[0]['id']]['ds'], 'running')
         self.assertEqual(read_fb(self.path)[JOBS[0]['id']]['ds'], 'stuck')
 
     def test_without_a_restore_point_nothing_is_converted(self):
@@ -1867,7 +1867,7 @@ class BoardStatusExitCode(Tmp):
             result = board_status.main()
 
         self.assertEqual(result, 3)
-        self.assertTrue(bd.parse(read(self.path))['data']['status']['issues'])
+        self.assertTrue(bd._parse(read(self.path))['data']['status']['issues'])
 
 
 class ResumeForAgents(unittest.TestCase):
@@ -2033,5 +2033,5 @@ class StatusSkipsRemoved(Tmp):
         with mock.patch.object(board_status.ship, "check", return_value=["缺履歷"]), \
              mock.patch.object(sys, "argv", ["board_status", "--board", self.path, "--write"]):
             board_status.main()
-        status = bd.parse(read(self.path))['data']['status']
+        status = bd._parse(read(self.path))['data']['status']
         self.assertEqual([x['jid'] for x in status['issues']], urls[:1])

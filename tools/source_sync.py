@@ -35,8 +35,7 @@ def files(board=None):
         return
     try:
         import board_doc as bd
-        with open(board, encoding='utf-8') as source:
-            parsed = bd.parse(source.read())
+        parsed = bd.load(board)
         fb = json.loads(parsed['fb'])
     except (OSError, ValueError, KeyError):
         return

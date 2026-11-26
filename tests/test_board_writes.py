@@ -673,7 +673,7 @@ class ServedVersion(TwoDevices):
 
     def test_page_version_matches_poll_until_someone_writes(self):
         self.board('confirmed')
-        served = bd.parse(self.bs.serve_doc(self.bs.snapshot(), 3))['data']['sig']
+        served = bd._parse(self.bs.serve_doc(self.bs.snapshot(), 3))['data']['sig']
         rev, data = self.bs.content_sig()
         self.assertEqual(served, {'rev': rev, 'gen': data + '.3'})
         bd.set_fb(lambda fb: fb.setdefault(CARD, {}).update(note='x'), self.path)

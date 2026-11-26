@@ -34,7 +34,7 @@ class BoardAutoUpdate(HttpBase):
         self.assertFalse(result['auto'])
 
     def test_page_and_revision_endpoint_share_the_server_version(self):
-        page = bd.parse(self.req('/')[1].decode('utf-8'))['data']
+        page = bd._parse(self.req('/')[1].decode('utf-8'))['data']
         revision = json.loads(self.req('/api/rev')[1])
         self.assertEqual(page['server_version'], revision['server_version'])
 

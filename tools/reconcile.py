@@ -81,10 +81,9 @@ def _source_report(errors, live):
                                                '整理好之前,準備履歷和填表會先停著', live=live)
         # 這一輪沒再出現的(修好了、那份檔不用了)收掉:這一輪又報的時間是這一輪的,留著;回報不掛在哪一張卡上(job 是空的)。
         # 先看有沒有要收的:沒有就不寫看板檔(每次存檔都會跑這支)
-        with open(live, encoding='utf-8') as f:
-            if any(it.get('from') == src and str(it.get('at', '')) < started
-                   for it in agent_report.open_items(json.loads(bd.parse(f.read())['fb']))):
-                agent_report.resolve('', '這份檔整理好了', live=live, src=src, before=started)
+        if any(it.get('from') == src and str(it.get('at', '')) < started
+               for it in agent_report.open_items(json.loads(bd.load(live)['fb']))):
+            agent_report.resolve('', '這份檔整理好了', live=live, src=src, before=started)
     except Exception as e:  # noqa: BLE001 — 回報管道本身寫不進看板:至少印出來(從按鈕跑時進這一輪的紀錄),不擋建置
         print(f'  ⚠ 來源檔的問題沒寫進回報:{e}')
 

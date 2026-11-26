@@ -245,7 +245,8 @@ class Pilot:
             self.step()
         except Exception as e:  # noqa: BLE001 — 自動流程最外層:出錯不能拖垮伺服器、下一次觸發再試,原因照實寫進看板的回報
             self.last = {'error': str(e)[:200], 't': time.time()}
-            if self.report:                          # 同一句還沒處理前再報只加次數,不會每分鐘洗版
+            # 同一句還沒處理前再報只加次數,不會每分鐘洗版。看板被繞過改過的寫不進回報(頁面已經在講),不報
+            if self.report and not isinstance(e, bd.Tampered):
                 self.report('自動流程', CRASH + f'{type(e).__name__}: {str(e)[:160]}',
                             need='下一次存檔或每分鐘會再試;一直出現就重開看板伺服器')
             return
@@ -293,7 +294,7 @@ class Pilot:
         if got:
             # 這一輪接下來照看板現在的樣子排(不在舊快照上再標一次:快照之後別處改過的卡,那樣會算錯)
             fb.clear()
-            fb.update(json.loads(bd.parse(bd.read_doc(self.state))['fb']))
+            fb.update(json.loads(bd.load(self.state)['fb']))
         return list(got)
 
     def _settle(self, fb):
@@ -369,8 +370,7 @@ class Pilot:
         with self._step_lock:
             bad = saver()
             if not bad:
-                with open(self.state, encoding='utf-8') as source:
-                    p = bd.parse(source.read())
+                p = bd.load(self.state)
                 self._sync_flow(p['data'], json.loads(p['fb']))
             return bad
 
@@ -379,12 +379,10 @@ class Pilot:
             return self._step()
 
     def _step(self):
-        with open(self.state, encoding='utf-8') as f:
-            p = bd.parse(f.read())
+        p = bd.load(self.state)
         fb = json.loads(p['fb'])
         if self._resolve_fill_pending(fb):
-            with open(self.state, encoding='utf-8') as f:
-                p = bd.parse(f.read())
+            p = bd.load(self.state)
             fb = json.loads(p['fb'])
         self._sync_flow(p['data'], fb)
         bs = self.build_state()
@@ -519,9 +517,11 @@ class Pilot:
 
     def start(self):
         """伺服器起來時看一次(補上停機期間該做的),之後每分鐘看一次時間(查回音)。"""
-        with open(self.state, encoding='utf-8') as source:
-            existing = json.loads(bd.parse(source.read())['fb'])
-        if not isinstance(existing.get(KEY), dict):
+        try:
+            first = not isinstance(json.loads(bd.load(self.state)['fb']).get(KEY), dict)
+        except bd.Tampered:   # 看板被繞過改過:伺服器照樣起來,頁面講原因;使用者放行後下一次觸發再盤點
+            first = False
+        if first:
             self.step()  # 首次盤點必須成功；已有流程的派工留到 HTTP 開始服務後
         self.kick(delay=3)
 

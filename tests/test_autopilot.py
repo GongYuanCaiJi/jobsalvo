@@ -707,7 +707,7 @@ class PilotStepTest(unittest.TestCase):
 
     def test_start_fails_if_existing_cards_cannot_be_inventoried(self):
         p = self.pilot()
-        with mock.patch.object(ap.bd, 'parse', side_effect=ValueError('broken board')):
+        with mock.patch.object(ap.bd, 'load', side_effect=ValueError('broken board')):
             with self.assertRaisesRegex(ValueError, 'broken board'):
                 p.start()
         self.assertIsNone(p._timer)

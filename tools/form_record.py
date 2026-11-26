@@ -417,8 +417,7 @@ def snapshot(fb, url):
 def board_status(board):
     """看板上投遞前驗收的結果(看板資料的 status),核准規則要看它。讀不到回 None:核准一律擋(不知道驗收過沒有)。"""
     try:
-        with open(board, encoding='utf-8') as f:
-            return bd.parse(f.read())['data'].get('status')
+        return bd.load(board)['data'].get('status')
     except (OSError, ValueError, KeyError, TypeError):
         return None
 

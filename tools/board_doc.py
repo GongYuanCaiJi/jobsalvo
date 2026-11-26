@@ -26,7 +26,7 @@ class BoardError(ValueError):
     檔案不在是 OSError,三種壞法都接得住;不用 sys.exit(它會穿過所有 except,任務就無聲結束)。"""
 
 
-def inner(h,start,end):
+def _inner(h,start,end):
     """start 之後、第一個 end 之前的那一段(跟非貪婪的 start(.*?)end 一樣)。
     看板檔有十幾 MB:以前用 re.S 的 .*? 一格一格試,解析一次光找區塊就要 50ms。"""
     i=h.find(start)
@@ -34,15 +34,16 @@ def inner(h,start,end):
     if j<0: raise BoardError("找不到區塊 "+start[:40])
     return h[i+len(start):j]
 
-def parse(html):
-    """把一份板子 html 拆成各區塊。data-jobs 回 dict、data-fb 回原字串(逐字搬他標記,不動)。"""
+def _parse(html):
+    """把一份板子 html 拆成各區塊。data-jobs 回 dict、data-fb 回原字串(逐字搬他標記,不動)。
+    不對外:收文字就有人自己 open 看板檔丟進來,繞過指紋。拿拆好的看板一律走 load / load_doc。"""
     return {
-      'sty':  inner(html,'<style id="sty">','</style>'),
-      'thdr': inner(html,'<template id="t-hdr">','</template>'),
-      'tail': inner(html,'<template id="tail">','</template>'),
-      'app':  inner(html,'<script id="app-src">','</script>'),
-      'data': json.loads(inner(html,'<script id="data-jobs" type="application/json">','</script>')),
-      'fb':   inner(html,'<script id="data-fb" type="application/json">','</script>'),
+      'sty':  _inner(html,'<style id="sty">','</style>'),
+      'thdr': _inner(html,'<template id="t-hdr">','</template>'),
+      'tail': _inner(html,'<template id="tail">','</template>'),
+      'app':  _inner(html,'<script id="app-src">','</script>'),
+      'data': json.loads(_inner(html,'<script id="data-jobs" type="application/json">','</script>')),
+      'fb':   _inner(html,'<script id="data-fb" type="application/json">','</script>'),
     }
 
 def stat_first(thdr, data):
@@ -170,10 +171,17 @@ def read_doc(live, locked=False):
     raise Tampered(TAMPERED.format(name=_os.path.basename(live)))
 
 
+def load_doc(board=None):
+    """讀一份看板(先對指紋,對不上丟 Tampered):回 (原文, 拆好的各區塊)。給了 board 就讀那一份,沒給照 target() 找。
+    拆好的看板只能從這裡(和 load)拿:拆的那一步不收外面給的文字,自己 open 看板檔就拆不了,繞不過指紋。
+    要原文的(看板伺服器算版本、整份送給頁面)用這支,只要內容的用 load。"""
+    doc = read_doc(board or target())
+    return doc, _parse(doc)
+
+
 def load(board=None):
-    """讀一份看板拆好(先對指紋,對不上丟 Tampered):給了 board 就讀那一份,沒給照 target() 找。
-    只讀的地方都走這裡,不自己 open 看板檔(繞過指紋就會照被偷改過的內容做事)。"""
-    return parse(read_doc(board or target()))
+    """讀一份看板拆好(先對指紋,對不上丟 Tampered)。看 load_doc。"""
+    return load_doc(board)[1]
 
 
 def copy_board(src, dst):
@@ -279,7 +287,7 @@ def rewrite(fn, live=None, by=''):
     live 給了就寫那一份,不再看 AGENT_BOARD(要照派 agent 的程式指定的那一份走,先用 target() 挑);沒給照 target()。"""
     live = live or target()
     with live_lock(live):
-        p = parse(read_doc(live, locked=True))
+        p = _parse(read_doc(live, locked=True))
         raw = p['fb']
         before = json.loads(raw)
         p['fb'] = json.loads(raw)

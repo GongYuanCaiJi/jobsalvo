@@ -17,7 +17,7 @@ class StuckPageLostTest(unittest.TestCase):
     def test_stuck_page_loss_stays_held_until_user_hands_it_back(self):
         with tempfile.TemporaryDirectory(prefix='issue-742-') as tmp:
             path = demo.build(os.path.join(tmp, 'board.html'))
-            jobs = bd.parse(bd.read_doc(path))['data']['jobs']
+            jobs = bd.load(path)['data']['jobs']
             url = jobs[0]['id']
             skip = [job['id'] for job in jobs[1:]]
             original = '卡在必填欄'

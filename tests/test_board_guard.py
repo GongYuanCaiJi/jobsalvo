@@ -126,7 +126,7 @@ class AgentHasNoBoardLocation(unittest.TestCase):
 def sneak(path, mutate):
     """不經正常寫入直接改看板檔(agent 自己開檔改的樣子)。"""
     with open(path, encoding='utf-8') as f:
-        p = bd.parse(f.read())
+        p = bd._parse(f.read())
     fb = json.loads(p['fb'])
     mutate(fb)
     with open(path, 'w', encoding='utf-8') as f:
@@ -179,6 +179,63 @@ class SneakedEditsAreCaught(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         bd.set_fb(lambda fb: None, live=self.board)
         self.assertEqual(_env.read_fb(self.board)[U]['n'], '我自己用編輯器改的')
+
+
+    def test_read_only_tools_do_not_act_on_a_sneaked_board(self):
+        import board_marks, board_server, form_record, prefs
+        sneak(self.board, confirm_behind_the_back)
+        with self.assertRaises(bd.Tampered):
+            prefs.load(self.board)
+        self.assertIsNone(form_record.board_status(self.board))     # 讀不到驗收結果:核准一律擋
+        self.assertEqual(board_marks.titles(self.board), {})        # 他被叫去看流水帳:照樣能看,只是不拿改過的內容當卡名
+        self.assertIsNone(board_server.migrate_marks(self.board))   # 伺服器照樣起來講原因,不照改過的內容轉換
+
+
+class OnlyLoadHandsOutASplitBoard(unittest.TestCase):
+    def test_nobody_outside_board_doc_splits_board_text_itself(self):
+        """拆好的看板只能從 bd.load / bd.load_doc 拿(先對指紋)。拆文字的那一步不對外:以前 parse 收文字,
+        20 幾處自己 open 看板檔丟進去,指紋檢查就被跳過(#787)。外面一律不准碰 board_doc 底線開頭的名字,
+        也不准自己照區塊標記切看板文字(bd.M1–M5、SUF、pre,或字面寫出 <script id="data-…">);
+        只有看板伺服器拿 load_doc 讀到的原文算版本(snap_of)要用標記。"""
+        import ast
+        self.assertFalse(hasattr(bd, 'parse'))
+        marks = {'M1', 'M2', 'M3', 'M4', 'M5', 'SUF', 'pre'}
+        root = os.path.dirname(TOOLS)
+        bad = []
+        for base in (TOOLS, os.path.join(root, '.claude')):
+            for folder, _dirs, files in os.walk(base):
+                for name in files:
+                    path = os.path.join(folder, name)
+                    rel = os.path.relpath(path, root)
+                    if not name.endswith('.py') or rel == os.path.join('tools', 'board_doc.py'):
+                        continue
+                    with open(path, encoding='utf-8') as f:
+                        tree = ast.parse(f.read())
+                    names = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                             for a in n.names if a.name == 'board_doc'}
+
+                    def is_board_doc(v):
+                        if isinstance(v, ast.Name):
+                            return v.id in names
+                        return (isinstance(v, ast.Call) and ast.unparse(v.func) in ('__import__', 'importlib.import_module')
+                                and [ast.unparse(a) for a in v.args[:1]] == ["'board_doc'"])
+
+                    def off_limits(attr, fn):
+                        hidden = attr.startswith('_') and not attr.startswith('__')
+                        return hidden or (attr in marks and (rel, fn) != (os.path.join('tools', 'board_server.py'), 'snap_of'))
+
+                    def walk(node, fn):
+                        for c in ast.iter_child_nodes(node):
+                            here = c.name if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn
+                            if ((isinstance(c, ast.Attribute) and is_board_doc(c.value) and off_limits(c.attr, here))
+                                    or (isinstance(c, ast.ImportFrom) and c.module == 'board_doc'
+                                        and any(off_limits(a.name, here) for a in c.names))
+                                    or (isinstance(c, ast.Constant) and isinstance(c.value, str)
+                                        and '<script id="data-' in c.value)):
+                                bad.append(f'{rel}:{c.lineno}')
+                            walk(c, here)
+                    walk(tree, '')
+        self.assertEqual(bad, [], '這些地方繞過 bd.load 自己拆看板文字:讀看板改用 bd.load(看板) / bd.load_doc(看板)')
 
 
 class NormalWritesAreNotMistakenForSneaking(unittest.TestCase):

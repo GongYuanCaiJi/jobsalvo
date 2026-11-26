@@ -37,7 +37,7 @@ def board():
     """一份真的看板檔,只留第一張卡給自動流程管(其他算開啟當下就在的舊卡)。回 (路徑, 那張的 id)。"""
     with tempfile.TemporaryDirectory(prefix='autopilot-replay-') as d:
         path = demo.build(os.path.join(d, 'board.html'))
-        jobs = bd.parse(bd.read_doc(path))['data']['jobs']
+        jobs = bd.load(path)['data']['jobs']
         url = jobs[0]['id']
         others = [j['id'] for j in jobs[1:]]
         bd.set_fb(lambda fb: fb.update({'__auto__': {'since': '2026-01-01T00:00:00', 'skip': others,
@@ -47,7 +47,7 @@ def board():
 
 
 def doc(path):
-    p = bd.parse(bd.read_doc(path))
+    p = bd.load(path)
     return p['data'], json.loads(p['fb'])
 
 

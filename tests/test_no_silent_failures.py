@@ -95,7 +95,7 @@ class FailuresReachTheBoard(unittest.TestCase):
     def reports(self):
         import agent_report
         with open(self.path, encoding='utf-8') as fh:
-            fb = json.loads(self.bd.parse(fh.read())['fb'])
+            fb = json.loads(self.bd._parse(fh.read())['fb'])
         return [it['msg'] for it in agent_report.open_items(fb)]
 
     def test_folder_history_not_scheduled_is_reported(self):
@@ -115,7 +115,7 @@ class FailuresReachTheBoard(unittest.TestCase):
         os.makedirs(self.bd.journal_path(self.path))          # 同名資料夾擋住,開不了檔
         self.bd.set_fb(lambda fb: fb.__setitem__(self.url, {'s': 'like'}), live=self.path, by='test')
         with open(self.path, encoding='utf-8') as fh:
-            self.assertEqual(json.loads(self.bd.parse(fh.read())['fb'])[self.url], {'s': 'like'})
+            self.assertEqual(json.loads(self.bd._parse(fh.read())['fb'])[self.url], {'s': 'like'})
         self.assertTrue(any('流水帳' in m for m in self.reports()), self.reports())
 
     def test_background_build_that_cannot_start_is_reported(self):

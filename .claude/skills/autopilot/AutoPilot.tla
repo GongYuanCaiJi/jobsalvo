@@ -167,7 +167,7 @@ CardStales ==
 -----------------------------------------------------------------------------
 (* Pilot._step。整步拿 _step_lock(一次只跑一步),但每一小段之間別人都插得進來。 *)
 
-(* T1:open() + bd.parse 讀看板檔(不拿鎖)。status 只在這裡讀一次;_settle、_sweep_gone 換的只有 fb。 *)
+(* T1:bd.load 讀看板檔(不拿鎖;指紋對不上才拿鎖重讀,那時丟 Tampered 停下)。status 只在這裡讀一次;_settle、_sweep_gone 換的只有 fb。 *)
 PilotReads ==
   /\ pc = "idle"
   /\ snap' = [app |-> app, dsv |-> dsv, at |-> at, seen |-> seen, tried |-> tried, status |-> status]

@@ -367,7 +367,7 @@ def refresh_like(live=None):
 
 
 def load(live=None):
-    with open(live or bd.LIVE, encoding='utf-8') as f: p = bd.parse(f.read())
+    p = bd.load(live or bd.LIVE)
     return json.loads(p['fb']), p['data']['jobs']
 
 

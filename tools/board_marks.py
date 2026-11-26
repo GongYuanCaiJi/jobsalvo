@@ -35,7 +35,11 @@ def load(live):
     return out
 
 def titles(live):
-    p = bd.parse(open(live, encoding='utf-8').read())
+    """卡片名字。看板被繞過改過的(TAMPERED 叫他來這裡看)不拿改過的內容當名字,只列網址。"""
+    try:
+        p = bd.load(live)
+    except bd.Tampered:
+        return {}
     t = {}
     for j in p['data'].get('jobs', []):
         t[j['id']] = card.name(j) or j['id']   # 卡片名字只由 card.py 算

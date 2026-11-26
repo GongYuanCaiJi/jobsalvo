@@ -221,8 +221,7 @@ def _configured_input_paths(copy, settings):
         import sys as _sys
         _sys.path.insert(0, HERE)
         import board_doc as bd
-        with open(board_path, encoding='utf-8') as source:
-            fb = json.loads(bd.parse(source.read())['fb'])
+        fb = json.loads(bd.load(board_path)['fb'])
         for mark in fb.values():
             if not isinstance(mark, dict):
                 continue
@@ -323,8 +322,7 @@ def _redirect_absolute_inputs(copy, settings):
         import sys as _sys
         _sys.path.insert(0, HERE)
         import board_doc as bd
-        with open(board_path, encoding='utf-8') as source:
-            fb = json.loads(bd.parse(source.read())['fb'])
+        fb = json.loads(bd.load(board_path)['fb'])
     except (OSError, ValueError, KeyError):
         return count
     replacements = {}
@@ -407,8 +405,7 @@ def status_summary(board_path):
     """Only issue counts from the copied board; never print job names or copied values."""
     import board_doc as bd
     try:
-        with open(board_path, encoding='utf-8') as source:
-            status = bd.parse(source.read())['data'].get('status')
+        status = bd.load(board_path)['data'].get('status')
     except Exception as error:  # noqa: BLE001 — 原因(只給例外類別)照實印進檢查結果
         return f'⚠ 看板驗收:讀不到副本結果({type(error).__name__})'
     if not isinstance(status, dict) or 'issues' not in status:

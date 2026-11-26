@@ -42,8 +42,7 @@ def build(live=None, only_ids=None, heading=True):
 
 def _build(live=None, only_ids=None, heading=True):
     """回 (整理文字, 文字裡列出的卡片代號)。"""
-    with open(live or bd.LIVE, encoding='utf-8') as f:
-        p = bd.parse(f.read())
+    p = bd.load(live or bd.LIVE)
     fb = json.loads(p['fb']); jobs = p['data']['jobs']
     byid = {j['id']: j for j in jobs}
     only_ids = set(only_ids) if only_ids is not None else None

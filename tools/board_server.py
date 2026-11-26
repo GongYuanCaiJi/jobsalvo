@@ -114,13 +114,8 @@ def _gzip(b):
         _GZ[k]=z
     return z
 
-def read_doc():
-    """讀看板檔(對過指紋:被繞過正常寫入改過就丟 bd.Tampered,請求那一頭回 423 講原因)。"""
-    return bd.read_doc(STATE)
-
-def snap_of(doc):
-    """一份看板內容拆好:parts(bd.parse)、fb(標記 dict)、rev / data_sig(標記、職缺資料的版本,/api/rev 給頁面比)。"""
-    parts=bd.parse(doc)
+def snap_of(doc,parts):
+    """bd.load_doc 讀到的一份看板:原文、parts、fb(標記 dict)、rev / data_sig(標記、職缺資料的版本,/api/rev 給頁面比)。"""
     i3,i4,i5=doc.find(bd.M3),doc.find(bd.M4),doc.find(bd.M5)
     return {'doc':doc,'parts':parts,'fb':json.loads(parts['fb'] or '{}'),
             'rev':_hl.md5(doc[i4:i5].encode('utf-8')).hexdigest()[:12],
@@ -136,7 +131,7 @@ def snapshot():
     st=os.stat(STATE); key=(STATE,st.st_ino,st.st_mtime_ns,st.st_ctime_ns,st.st_size)
     with _SNAP_LOCK:
         if _SNAP['key']!=key:
-            _SNAP['snap']=snap_of(read_doc()); _SNAP['key']=key
+            _SNAP['snap']=snap_of(*bd.load_doc(STATE)); _SNAP['key']=key
         return _SNAP['snap']
 
 def page_cfg():
@@ -753,7 +748,10 @@ def migrate_marks(state):
     產生它的規則改了、造成它的 bug 修掉了的 agent 回報和還沒確認的答案:清掉(stale.sweep,GLOSSARY「過時」)。
     證據夾之前填的卡,可投遞夾裡的填表截圖搬進證據夾(evidence.old_shots)。"""
     import copy, delivery_core, evidence, stale
-    with open(state,encoding='utf-8') as source: fb0=json.loads(bd.parse(source.read())['fb'])
+    try:
+        fb0=json.loads(bd.load(state)['fb'])
+    except bd.Tampered:   # 被繞過改過的不照它轉換;伺服器照樣起來,頁面講原因(423),放行後下次重開再轉
+        return
     probe=copy.deepcopy(fb0)
     stuck=delivery_core.settle(probe,_apply_busy())
     before=stale.boundaries()

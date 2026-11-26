@@ -105,7 +105,7 @@ def read_board(path):
     """看板檔讀出來拆好(data、fb 都在裡面)。好幾個測試檔各寫過一份一模一樣的,收在這。"""
     import board_doc
     with open(path, encoding='utf-8') as f:
-        return board_doc.parse(f.read())
+        return board_doc._parse(f.read())
 
 
 def read_fb(path):

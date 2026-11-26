@@ -918,7 +918,7 @@ class PageGetsTheNextStep(Server):
         fb = ready_to_confirm()
         fb['__ans__'][0]['inf'] = 1
         self.use(fb)
-        page = bd.parse(self.req('/')[1].decode('utf-8'))['data']
+        page = bd._parse(self.req('/')[1].decode('utf-8'))['data']
         self.assertEqual(page['next'][URL]['confirm'], step(fb)['confirm'])
         self.assertTrue(page['next'][URL]['confirm'])
 
@@ -941,7 +941,7 @@ class PageGetsTheNextStep(Server):
     def test_the_page_and_the_job_poll_carry_the_card_and_company_names(self):
         import board_doc as bd
         self.use(ready_to_confirm())
-        page = bd.parse(self.req('/')[1].decode('utf-8'))['data']['jobs'][0]
+        page = bd._parse(self.req('/')[1].decode('utf-8'))['data']['jobs'][0]
         poll = json.loads(self.req('/api/jobs')[1])['jobs'][0]
         self.assertEqual([(j['name'], j['co'], j['src_plat']) for j in (page, poll)], [('Role · Acme', 'Acme', 'cells.example')] * 2)
 
@@ -951,7 +951,7 @@ class PageGetsTheNextStep(Server):
         self.use(ready_to_confirm())
         import agent_report
         import autopilot
-        cfg = bd.parse(self.req('/')[1].decode('utf-8'))['data']['cfg']
+        cfg = bd._parse(self.req('/')[1].decode('utf-8'))['data']['cfg']
         self.assertEqual((cfg['reply_retry'], cfg['inbox_from']),
                          ({'max': autopilot.REPLY_RETRY_MAX, 'gap': autopilot.REPLY_RETRY_GAP}, agent_report.FROM))
 

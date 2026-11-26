@@ -124,10 +124,8 @@ def agent_free(board=None):
     """開關有沒有撥開。讀正在處理的那份看板(board_doc.target)。"""
     try:
         import json as _j, board_doc as _bd
-        live=board or _bd.target()
-        with open(live,encoding='utf-8') as f:
-            return bool(_j.loads(_bd.parse(f.read())['fb']).get('__agentfree__'))
-    except Exception:  # noqa: BLE001 — 讀不到看板就當開關沒撥開(預設值);只影響要不要叫 agent 自己決定拆幾隻
+        return bool(_j.loads(_bd.load(board)['fb']).get('__agentfree__'))
+    except Exception:  # noqa: BLE001 — 讀不到看板(含被繞過改過)就當開關沒撥開(預設值);只影響要不要叫 agent 自己決定拆幾隻
         return False
 
 CODEX_CONFIG='~/.codex/config.toml'

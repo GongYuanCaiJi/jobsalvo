@@ -23,10 +23,10 @@ description: 用 TLA+ 模型檢查加真程式重演,驗自動流程(tools/autop
 ## 1. 這次改動要不要跑
 
 ```bash
-git diff b9248438 -- tools/autopilot.py tools/next_step.py tools/board_server.py tools/form_record.py tools/delivery_state.json tools/apply_run.py tools/chrome_door.py
+git diff fb4275d0 -- tools/autopilot.py tools/next_step.py tools/board_server.py tools/form_record.py tools/delivery_state.json tools/apply_run.py tools/chrome_door.py
 ```
 
-diff 碰到第 4 節表裡任一處就跑。`b9248438` 是這次確認模型和重演描述的是那時的程式的 commit(同步點)。
+diff 碰到第 4 節表裡任一處就跑。`fb4275d0` 是這次確認模型和重演描述的是那時的程式的 commit(同步點)。
 
 ## 2. 跑
 
@@ -52,7 +52,7 @@ python3 .claude/skills/autopilot/check.py --out <暫存資料夾>
 | 程式 | 模型的動作 | 怎麼跟著改 |
 |---|---|---|
 | `delivery_state.json` 的 todo / running / parked / stuck / gone / stale / nopage 列,`AUTO_FILL` | `Go(...)`、`CardStales`、`PilotPlans` 的 `AutoFill` | 自動(check.py 重產 `Table.tla`)。自動會填的狀態多了模型外的,check.py 會停下來叫你加 |
-| `Pilot._step` 開頭讀看板檔(`open` + `bd.parse`),plan 前處理 pending;只以 `run_status('apply')` 的該卡 fill 進度和 `apply.at` 變化認定派出,不看投遞狀態 | `PilotReads`、`PilotResolves` | 手改 |
+| `Pilot._step` 開頭讀看板檔(`bd.load`,不拿鎖),plan 前處理 pending;只以 `run_status('apply')` 的該卡 fill 進度和 `apply.at` 變化認定派出,不看投遞狀態 | `PilotReads`、`PilotResolves` | 手改 |
 | `build_state()`、`run_status()`、`autopilot.plan`、`next_step._move` / `_fill` | `PilotPlans` | 手改 |
 | 填表前一次 `bd.rewrite` 把 `fill:<id>:<apply.at>` 加進 tried 並記 `pending[mark] = 時間`;`start_run` 在 `_RUN_LOCK` 裡 `Popen(start_new_session=True)` 後立刻寫 `phase/start + url + t0`;沒有可填卡時 `phase=nothing` 也帶指定的 `url`;`plan` 要補建時 `self.build()` | `PilotReserves`、`PilotLaunches` | 手改 |
 | `Pilot._step` 結尾 `bd.rewrite(mut)`:在 `live_lock` 內重讀最新 data + fb;記 `seen` 和 `adv:`(真的推進才記),推進要最新 `app == 'ready'` 且 `ship_blocked` 不擋;填表 200 清 pending、明確非 200 撤 tried/pending、例外保留 pending | `PilotWrites` | 手改 |

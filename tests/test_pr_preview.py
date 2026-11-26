@@ -124,7 +124,7 @@ class PrPreview(HttpBase):
         return code, json.loads(raw)
 
     def page_cfg(self):
-        return bd.parse(self.req('/')[1].decode('utf-8'))['data']['cfg']
+        return bd._parse(self.req('/')[1].decode('utf-8'))['data']['cfg']
 
     def open_until_ready(self, n):
         code, out = self.api(body={'op': 'open', 'number': n})

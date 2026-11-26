@@ -43,8 +43,7 @@ def sync(board, sp, step):
 def prep(board, sp, step, limit=0, url=''):
     import cut_tailor as ct     # 進度檔的位置跟真的 cut_tailor 同一套
     st = lambda d: ct._status(d, sp=sp)
-    with open(board, encoding='utf-8') as f:
-        fb = json.loads(bd.parse(f.read())['fb'])
+    fb = json.loads(bd.load(board)['fb'])
     rows = [k for k, v in fb.items() if isinstance(v, dict) and v.get('app') == 'prep' and (not url or k == url)]
     rows = rows[:limit] if limit else rows      # 看板上選的「跑幾張」、卡片 ⋯ 的「只準備這張」照真的一樣算
     t0, me = time.time(), os.getpid()
