@@ -1302,7 +1302,7 @@
     return out.length?'<span class="barchips">'+out.join('')+'</span>':'';
   }
   // 104 那種固定順序的一行事實:地點｜年資學歷｜薪資。每張卡位置都一樣,用掃的不用讀的。
-  // 地點常常是整串地址(台中市西區忠明南路497號…),看板只需要到市或區。
+  // 地點常常是整串地址(月球市示範路0號…),看板只需要到市或區。
   function shortLoc(x){
     x=String(x).trim();
     var m=x.match(/^[^,;，、]{0,4}?[縣市][^,;，、]{0,3}?區/)||x.match(/^[^,;，、]{0,6}?[縣市]/);
@@ -1710,7 +1710,7 @@
         sec('沒過驗收',other,'','',true),
         {cls:'stbar stfold'}):'');
   }
-  // 「Binance ×3、OpenTrain、萬蕙昇 等」:批次按鈕旁先寫是哪幾家(照清單順序,前三家)
+  // 「範例雲端 ×3、月球工坊、範例科技 等」:批次按鈕旁先寫是哪幾家(照清單順序,前三家)
   function bulkCos(list){var g={},o=[]; list.forEach(function(j){var c=companyOf(j); if(!g[c]){g[c]=0;o.push(c);} g[c]++;});
     return o.slice(0,3).map(function(c){return esc(c)+(g[c]>1?' ×'+g[c]:'');}).join('、')+(o.length>3?' 等':'');}
   function readyAllToShip(){

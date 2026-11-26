@@ -446,7 +446,7 @@ def selftest():
     check_link(norm_link({'src': 'other', 'cite': '我 2026-08-28 在別家的錄影面試被問過', 'quote': '你的優勢是什麼'}))   # 自己被問過沒有網頁
     b = apply(b, 'link', None, q, 'J', 'asked')
     assert b['links']['J'][q]['src'] == 'me'
-    b = apply(b, 'round', {'at': '2026-10-23 15:00', 'how': '現場', 'where': '台北'}, None, 'J')
+    b = apply(b, 'round', {'at': '2026-10-23 15:00', 'how': '現場', 'where': '月球市'}, None, 'J')
     b = apply(b, 'round', {'at': '2026-10-21T14:30', 'how': '電話'}, None, 'J')
     assert [r['at'] for r in b['rounds']['J']] == ['2026-10-21T14:30', '2026-10-23T15:00']
     b = apply(b, 'round', {'old_at': '2026-10-21T14:30'}, None, 'J', None)

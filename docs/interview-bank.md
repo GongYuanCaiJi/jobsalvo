@@ -14,7 +14,7 @@
 
 ## 面試備忘 PDF
 
-每一場面試的 🎤 面試準備區有「📄 預覽、匯出面試資料」:先在看板裡預覽排好的 PDF,滿意再按「⬇ 下載 PDF」。手機的瀏覽器不能把 PDF 嵌在框裡看,那裡改成「↗ 開啟 PDF」,用手機自己的檢視器開。命令列:`python3 tools/iv_sheet.py 萬蕙昇`(加 `--md` 只看 Markdown)。PDF 放在資料夾的 `面試備忘/`。
+每一場面試的 🎤 面試準備區有「📄 預覽、匯出面試資料」:先在看板裡預覽排好的 PDF,滿意再按「⬇ 下載 PDF」。手機的瀏覽器不能把 PDF 嵌在框裡看,那裡改成「↗ 開啟 PDF」,用手機自己的檢視器開。命令列:`python3 tools/iv_sheet.py 範例科技`(加 `--md` 只看 Markdown)。PDF 放在資料夾的 `面試備忘/`。
 
 同一個預覽視窗(「預覽、匯出面試資料」)預覽、下載的是四份合成的一個 PDF,順序固定:自己的履歷、平台履歷、附件、面試備忘(`tools/iv_pack.py`)。自己的履歷和附件是這張卡寄出的那幾份。**平台履歷(104 等)還不會自動取得**(#736):用 `python3 tools/iv_pack.py <職缺網址> <PDF 檔>` 放進去(檔名是網址的雜湊,不用自己取)就會合進去;沒放,那一格印一頁「平台履歷:尚未放入」並寫明放哪裡,不會默默少一份。
 
@@ -26,14 +26,14 @@
 
 ```bash
 python3 tools/iv.py show                    # 每一場什麼時候面、幾題、出處分佈
-python3 tools/iv.py show 萬蕙昇              # 一場的面試時間和每一題
+python3 tools/iv.py show 範例科技              # 一場的面試時間和每一題
 python3 tools/iv.py find 薪水                # 先找題庫裡有沒有,有就 link,不要再寫一題一樣的
 python3 tools/iv.py get 薪水 > q.json        # 題目參數寫 id 或題目文字的一段都行,對到唯一一題才動;改一題:先拿現在的 json(含 rev),改完再 put
-python3 tools/iv.py put q.json --card 萬蕙昇 --src guess --why "職缺寫了模型微調"
-python3 tools/iv.py link 萬蕙昇 "怎麼評估一個模型" --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞"
-python3 tools/iv.py unlink 萬蕙昇 "怎麼評估一個模型"
-python3 tools/iv.py round 萬蕙昇 --at 2026-10-23T15:00 --how 現場 --where "台北市…" --note "聯絡人…"
-python3 tools/iv.py round 萬蕙昇 --del 2026-10-23T15:00
+python3 tools/iv.py put q.json --card 範例科技 --src guess --why "職缺寫了模型微調"
+python3 tools/iv.py link 範例科技 "怎麼評估一個模型" --src this --cite "面試趣 2026-06-21 https://interview.tw/i/…" --quote "怎麼評估一個模型的好壞"
+python3 tools/iv.py unlink 範例科技 "怎麼評估一個模型"
+python3 tools/iv.py round 範例科技 --at 2026-10-23T15:00 --how 現場 --where "月球市…" --note "聯絡人…"
+python3 tools/iv.py round 範例科技 --del 2026-10-23T15:00
 python3 tools/iv.py check                   # 整份不合規則的地方
 ```
 
@@ -75,7 +75,7 @@ python3 tools/iv.py check                   # 整份不合規則的地方
 ### 出處(`links` 的一筆)
 
 ```json
-{"k": "prep", "src": "this", "cite": "面試趣 2026-06-21 https://interview.tw/i/6a37e69e59ac3155e40ef2d5", "quote": "怎麼評估一個模型的好壞", "why": ""}
+{"k": "prep", "src": "this", "cite": "面試趣 2026-06-21 https://interview.tw/i/fake-article-id", "quote": "怎麼評估一個模型的好壞", "why": ""}
 ```
 
 - `src`:`me` 我被問過 / `this` 這家考過 / `other` 別家考過 / `guess` 預想的。
@@ -87,7 +87,7 @@ python3 tools/iv.py check                   # 整份不合規則的地方
 ### 面試時間(`rounds` 的一筆)
 
 ```json
-{"at": "2026-10-23T15:00", "how": "現場", "where": "台北市信義路三段132號8樓", "note": "聯絡人 廖小姐"}
+{"at": "2026-10-23T15:00", "how": "現場", "where": "月球市示範路 0 號", "note": "聯絡人 範例小姐"}
 ```
 
 `at` 寫 `2026-10-23` 或 `2026-10-23T15:00`;`how` 是 現場/電話/視訊/AI 錄影/筆試/其他。
