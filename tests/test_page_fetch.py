@@ -25,7 +25,7 @@ class EgoFallbackLimit(unittest.TestCase):
         # 進來的先等到上限那麼多支都進來,同時跑不靠各支剛好在 sleep 裡重疊;排不到那麼多支時等滿 60 秒放行,peak 照實少
         gate = threading.Barrier(page_fetch.EGO_FALLBACK_WORKERS, timeout=60)
 
-        def fake_now(url):
+        def fake_now(url, _wait=0):
             with lock:
                 live[0] += 1
                 peak[0] = max(peak[0], live[0])

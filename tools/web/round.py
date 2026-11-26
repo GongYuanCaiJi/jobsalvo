@@ -241,14 +241,14 @@ def stuck(record: RoundRecord) -> tuple[Mark, ...]:
 
 def continue_with(record: RoundRecord, brief: Brief, browser, *, timeout_s: int, board=None, materials=(),
                   known=None) -> RoundRecord:
-    """同一個 agent session 的下一回合(查應徵進度第二回合):不開新工作區,交件單另存一個夾;
+    """同一個 agent session 的下一回合(查應徵進度第二回合、找缺時間還沒用完):不開新工作區,交件單另存一個夾;
     materials:這一回合印給 agent 的編號材料(引段照它核對),known:KNOWN 格的清單。"""
     if not record.session:
         return dataclasses.replace(record, end=End.NOT_STARTED, end_why='沒有可繼續的 agent session')
     import evidence
     evidence_round = evidence.Round(record.task, 'continue', board=board)
     directory = evidence_round.dirs[0]
-    prompt = brief.render(workspace=record.workspace)
+    prompt = _render(brief, record.workspace, directory)
     evidence_round.instruction(prompt)
     try:
         with evidence.activated(evidence_round):
@@ -258,6 +258,7 @@ def continue_with(record: RoundRecord, brief: Brief, browser, *, timeout_s: int,
         evidence_round.note('round_end', end=End.CRASHED.value, reason=str(error))
         return _record(brief, record.task, directory, workspace=record.workspace, end=End.CRASHED, why=str(error),
                        session=record.session, agent_id=record.agent_id, runtime=record.runtime)
+    _take_sheet_file(brief, directory)
     if result.why:
         evidence_round.note('round_end', end=_end(result.status, os.path.join(directory, 'handoff.json')).value,
                             reason=str(result.why))

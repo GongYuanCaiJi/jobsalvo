@@ -49,10 +49,11 @@ class Browser(Protocol):
 class Real:
     """接真的 ego 工作區、讀網址的三條路與 agent_run;validate_url 是公開網址檢查(測試台換成准它自己的主機)。"""
 
-    def __init__(self, door=None, validate_url=None, browser_only=False):
+    def __init__(self, door=None, validate_url=None, browser_only=False, wait=0):
         self.door = door
         self.validate_url = validate_url
-        self.browser_only = browser_only    # 只用 agent 的瀏覽器讀網址(page_fetch --browser)
+        self.browser_only = browser_only or bool(wait)    # 只用 agent 的瀏覽器讀網址(page_fetch --browser)
+        self.wait = wait                    # 瀏覽器開頁後 agent 要多等的秒數(page_fetch --wait)
         self.last_shot_cropped = False
 
     @classmethod
@@ -93,8 +94,9 @@ class Real:
 
     def raw_fetch(self, url):
         from web.fetch import fetch_with_browser, request_page
-        read = fetch_with_browser if self.browser_only else request_page
-        return dataclasses.asdict(read(url, validate_url=self.validate_url))
+        if self.browser_only:
+            return dataclasses.asdict(fetch_with_browser(url, validate_url=self.validate_url, wait=self.wait))
+        return dataclasses.asdict(request_page(url, validate_url=self.validate_url))
 
     def raw_form(self, tab):
         return self.door.read_page(tab)

@@ -328,20 +328,37 @@ def _reader(url, request_fn=None, reader_root=None):
                       http_status=status, errors=cut)
 
 
-def _ego(url):
+def _ego(url, wait=0):
     with _EGO_SLOTS:                     # 先排到位子才開工作區
-        return _ego_now(url)
+        return _ego_now(url, wait)
 
 
-def _ego_now(url):
+def _ego_now(url, wait=0):
     """要跑 JS 才有字的頁:在 agent 的瀏覽器(ego)開一個暫時的工作區讀,讀完就收(跟使用者在自己的瀏覽器點開職缺一樣)。
     網址在 fetch() 已確認是公開網址;載完後最後停在的網址也要是公開的(被導去內網、本機就不收)。"""
     import chrome_door
-    page = chrome_door.EgoDoor().read_pages([url])[url]
+    page = chrome_door.EgoDoor().read_pages([url], wait=wait)[url]
     _assert_public_url(str(page.get('url') or url))
     text = str(page.get('text') or '').strip()
     if not text:
         raise RuntimeError('ego returned no readable text')
+    # 頁上的字不含連結網址(直接抓的內文有):每個連結照頁上的順序列在前面,agent 才拿得到網址;
+    # 頁太長時截的是內文尾巴,連結不會被截掉;連結最多佔頁面材料上限的一半,頁上的字至少留另一半
+    links = {}
+    for anchor in page.get('anchors') or ():
+        href = str((anchor or {}).get('href') or '')
+        if href.startswith(('http://', 'https://')) and href not in links:
+            links[href] = str(anchor.get('text') or '').replace('\n', ' ').strip()
+    listed, room = [], chrome_door.PAGE_MATERIAL_CHAR_LIMIT // 2
+    for href, words in links.items():
+        line = f'{words} ⟦網址 {href}⟧'.strip()
+        if len(line) + 1 > room:
+            listed.append(f'還有 {len(links) - len(listed)} 個連結太多沒列')
+            break
+        listed.append(line)
+        room -= len(line) + 1
+    if listed:
+        text = '頁上的連結:\n' + '\n'.join(listed) + '\n\n頁上的字:\n' + text
     return PageResult(url, 'ok', text=text, via='ego', title=str(page.get('title') or ''))
 
 # 好幾個缺一起抓:大多時間在等網路,一個一個抓的話,一個打不開的頁(逾時加重試最多四分鐘)會卡住後面全部。
@@ -411,11 +428,11 @@ def screenshot(url, out, validate_url=None, quote='', *, with_status=False):
             door.release(opened['tab_id'])
 
 
-def fetch_with_browser(url, validate_url=None, ego_fn=None):
+def fetch_with_browser(url, validate_url=None, ego_fn=None, wait=0):
     """只用 agent 的瀏覽器(ego)讀:agent 讀了直接抓的字,說頁還沒載完、要跑 JS 才有內容時用。"""
     try:
         (validate_url or _assert_public_url)(url)
-        result = (ego_fn or _ego)(url)
+        result = ego_fn(url) if ego_fn else _ego(url, wait)
     except Exception as error:  # noqa: BLE001 — 讀不到:原因照實放進結果
         return PageResult(str(url), 'unknown', errors=(f'ego: {type(error).__name__}: {str(error)[:180]}',))
     if not result.readable:

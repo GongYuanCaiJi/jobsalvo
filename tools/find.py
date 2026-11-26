@@ -205,11 +205,23 @@ def search_brief(ask, shared, feedback, jobs, minutes=None):
          ('使用者表態過的卡', _marked(feedback, jobs)), ('使用者在看板上寫的想法', _board_notes(feedback)),
          ('已在看板上的職缺網址', f'{_board_urls_file(jobs)}(一行一個)'),
          ('使用者寫的網站筆記', json.dumps(website_notes.users_words(), ensure_ascii=False))),
-        ('網路搜尋:找候選職缺。', FETCH),
-        (*((f'這一步最多 {minutes} 分鐘;時間到程式停掉你,收下交件檔裡的候選。',) if minutes else ()),
-         '只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。',
-         '網站筆記不記職缺內容、個人資料、登入資訊或推測。'),
-        SEARCH_SHEET, sheet_file=True)
+        SEARCH_TOOLS, _search_limits(f'這一步最多 {minutes} 分鐘' if minutes else ''), SEARCH_SHEET, sheet_file=True)
+
+
+SEARCH_TOOLS = ('網路搜尋:找候選職缺。', FETCH)
+IDLE_TURN = 30      # 秒;接著找的回合這麼快就交回沒有新網址,算它沒再找(本地規則,#4)
+
+
+def _search_limits(time_left):
+    return (*((f'{time_left};時間到程式停掉你,收下交件檔裡的候選。',) if time_left else ()),
+            '只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。',
+            '網站筆記不記職缺內容、個人資料、登入資訊或推測。')
+
+
+def more_brief(kept, minutes):
+    """同一個搜尋 agent 交件時,使用者給的時間還沒用完:接著同一段對話找(#4);前面交的程式都收下了。"""
+    return Brief('同一輪找缺接著找,交回新找到的職缺網址。', (('已收下的候選', f'{kept} 個,不用重交'),),
+                 SEARCH_TOOLS, _search_limits(f'使用者給這一步的時間還剩 {minutes} 分鐘'), SEARCH_SHEET, sheet_file=True)
 
 
 def resume_choices():
@@ -538,12 +550,51 @@ class Run:
     def left(self, default):
         return default if self.deadline is None else max(0, int(self.deadline + self.paused() - time.time()))
 
+    def searches(self, first):
+        """找那一段:agent 交件時時間還剩一分鐘以上,就接著同一段對話再找,直到時間用完(#4);
+        沒交件、交件單壞了、他按了停止,或接著找的回合不到 30 秒(不算暫停)就交回沒有新網址(它沒再找,本地規則)就停。
+        回每一回合的紀錄,第一回合在前。"""
+        import jobrun
+        from web.round import continue_with
+        rounds, seen_urls = [first], set(_candidate_urls(first))
+        while rounds[-1].end is End.HANDED and not rounds[-1].sheet.broken and rounds[-1].session:
+            seconds = self.left(0)
+            if seconds < 60 or jobrun.finishing(os.path.join(tmp(), STATUS)):
+                break
+            began = self.unpaused_seconds()
+            more = continue_with(rounds[-1], more_brief(len(seen_urls), seconds // 60), self.browser,
+                                 timeout_s=seconds, board=self.board)
+            rounds.append(more)
+            new = set(_candidate_urls(more)) - seen_urls
+            if not new and self.unpaused_seconds() - began < IDLE_TURN:
+                break
+            seen_urls |= new
+        return rounds
+
     def agent(self, brief, known, default, materials=(), timed=False):
         """派一個 agent;timed(找那一段)才受時間上限,時間用完就不派。"""
         seconds = self.left(default) if timed else default
         return run_round('find', brief, self.browser, timeout_s=seconds, board=self.board, workspace=NO_WORKSPACE,
                          known=known, materials=materials) if seconds else record_unstarted(
             brief, 'find', self.board, '找缺的時間到了')
+
+
+def _candidate_urls(record):
+    return [joined(row['url']) for row in record.sheet.rows('candidates') if joined(row['url'])]
+
+
+def _ended_badly(record):
+    """這一回合怎麼沒交出能收的:交件單壞了、沒交代、沒啟動或當掉,照實寫給使用者看。"""
+    return (record.sheet.broken.text if record.sheet.broken else
+            'agent 沒交代' if record.end is End.NO_SHEET else
+            '這一輪沒有啟動' if record.end is End.NOT_STARTED else
+            say('ENDED', end=end_label(record.end)).text)
+
+
+def _kept(record):
+    """這一回合收得下的交件:交了件,或時間到時交件檔裡有寫(#198);交件單壞了不收。"""
+    return not record.sheet.broken and (record.end is End.HANDED or
+                                        (record.end is End.TIMEOUT and bool(record.sheet.rows('candidates'))))
 
 
 def _update_preference_note(current):
@@ -613,26 +664,31 @@ def run(ask, board, browser, limit, minutes):
                finished_at=time.time(), took=current.unpaused_seconds(), notes=notes[:600], **values)
         print(f'這輪新增 {len(added)} 筆職缺(在看板「🆕 待評估」)')
 
+    jobrun.clear_finish(os.path.join(tmp(), STATUS))    # 上一輪按停止留下的收工記號不帶到這一輪
     status('start')
     subprocess.run([sys.executable, os.path.join(HERE, 'feedback_dump.py'), '--live', board])   # 更新他資料夾裡的逐張表態匯出
     shared, feedback, jobs = user_materials(board)
     current = Run(board, browser, minutes)
-    search = current.agent(search_brief(ask, shared, feedback, jobs, minutes), {}, 4 * 3600, timed=True)
-    notes = joined(search.sheet.said('notes'))
-    timeup = search.end is End.TIMEOUT
-    harvested = timeup and not search.sheet.broken and bool(search.sheet.rows('candidates'))   # 時間到收下交件檔裡的(#198)
-    if (search.end is not End.HANDED and not harvested) or search.sheet.broken:
-        why = (search.sheet.broken.text if search.sheet.broken else
-               'agent 沒交代' if search.end is End.NO_SHEET else
-               '這一輪沒有啟動' if search.end is End.NOT_STARTED else
-               say('ENDED', end=end_label(search.end)).text)
-        finish([], 0, notes, [why], phase='done' if timeup else 'failed', found=0, timeup=timeup)
+    first = current.agent(search_brief(ask, shared, feedback, jobs, minutes), {}, 4 * 3600, timed=True)
+    rounds = current.searches(first)
+    kept = [record for record in rounds if _kept(record)]
+    search = kept[-1] if kept else first
+    notes = '\n'.join(dict.fromkeys(said for said in (joined(record.sheet.said('notes')) for record in kept or [first])
+                                    if said))     # 每一回合各自寫的,照順序接起來
+    timeup = rounds[-1].end is End.TIMEOUT      # 最後一回合是時間到停的
+    said_stop = [*dict.fromkeys(mark.text for record in rounds for mark in stops(record))]   # 每一回合 agent 說的停下、要本人處理
+    if not kept:
+        finish([], 0, notes, [*said_stop, _ended_badly(search)], phase='done' if timeup else 'failed', found=0, timeup=timeup)
         return 0 if timeup else 1
-    status('agent', step=f"時間到，停止找新的，正在判找到的 {len(search.sheet.rows('candidates'))} 張" if timeup else '整理新表態偏好')
-    _save_website_notes(search.sheet, search.id)
-    messages = [*(mark.text for mark in stops(search)), _update_preference_note(current)]
+    status('agent', step=f"時間到，停止找新的，正在判找到的 {len({u for r in kept for u in _candidate_urls(r)})} 張" if timeup else '整理新表態偏好')
+    for record in kept:
+        _save_website_notes(record.sheet, record.id)
+    messages = [*said_stop,
+                *(_ended_badly(record) for record in rounds
+                  if not _kept(record) and (record.end is not End.TIMEOUT or record.sheet.broken)),
+                _update_preference_note(current)]
     candidates = {}
-    for row in search.sheet.rows('candidates'):
+    for row in (row for record in kept for row in record.sheet.rows('candidates')):
         candidates.setdefault(joined(row['url']), {key: joined(value) for key, value in row.items()})
     candidates.pop('', None)
     have, turned = {job['id']: job for job in jobs}, turned_down()

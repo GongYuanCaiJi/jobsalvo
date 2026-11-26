@@ -805,7 +805,8 @@ class EgoDoor:
             if opened or self.workspace:
                 self.release((opened or {}).get('tab_id'))
 
-    def read_pages(self, urls, board=None):
+    def read_pages(self, urls, board=None, wait=0):
+        """開每個網址讀一次;等到瀏覽器說頁載完(最多 15 秒),wait 是 agent 要再多等的秒數(page_fetch --wait)。"""
         temporary = self.workspace is None
         if temporary:
             script = f'const task = await taskSpace({json.dumps(_workspace_name("read-"))});\n'
@@ -822,12 +823,14 @@ class EgoDoor:
             f'const urls = {json.dumps(list(urls))}, pages = {{}};\n'
             'for (const url of urls) {\n'
             'await reader.goto(url,{waitUntil:"domcontentloaded",timeout:30000});\n'
+            'await reader.waitForLoadState("load",{timeout:15000}).catch(()=>{});\n'   # 載不完照讀,讀到什麼由 agent 判斷
+            + (f'await reader.waitForTimeout({int(float(wait) * 1000)});\n' if wait else '') +
             f'pages[url]=await reader.evaluate({PROFILE_FN}); }}\n'
         )
         script += 'return {pages,reader:reader.label};\n'
         if temporary:
             script += '} finally {await task.finish({keep:[]});}\n'
-        result = _ego(script, timeout=max(60, len(urls) * 60))
+        result = _ego(script, timeout=max(60, len(urls) * (60 + int(float(wait or 0)))))
         if not temporary:
             self.workspace['reader'] = result['reader']
         return result['pages']

@@ -688,14 +688,14 @@ class RoundTest(FindCase):
     def test_scope_limits_status_and_history(self):
         self.home.write_board(research=[{'round': str(n)} for n in range(25)])
         _code, browser = self.go(
-            search(URL, URL2), judge(lambda m: [row(m, URL), row(m, URL2, keep='false')]),
+            search(URL, URL2), search(), judge(lambda m: [row(m, URL), row(m, URL2, keep='false')]),
             reads={URL: 'ok', URL2: 'ok'},
             argv=['--mode', 'dir', '--direction', '機器人', '--seed-co', 'Acme', '--minutes', '7', '--limit', '1',
                   '--terms', '{"exp_max": 3}'])
         first = browser.prompts[0]
         expect(self, 'J-22', ('機器人' in first, 'Acme' in first, '指定方向' in first, '使用者條件:\n{"exp_max": 3}\n' in first),
                (True, True, True, True))
-        expect(self, 'J-18', (browser.timeouts[0] <= 7 * 60, browser.timeouts[1:]), (True, [3600]))   # 只限找那一段(#198 US10)
+        expect(self, 'J-18', (all(t <= 7 * 60 for t in browser.timeouts[:2]), browser.timeouts[2:]), (True, [3600]))   # 只限找那一段(#198 US10),接著找的回合也算在裡面(#4)
         expect(self, 'J-01', browser.fetches, [URL])          # 跑幾張:只讀前一張
         expect(self, 'J-13', (self.card() is not None, self.card(URL2) is None), (True, True))
         status = json.load(open(os.path.join(self.home.tmp['converge'], 'converge_status.json'), encoding='utf-8'))
@@ -794,6 +794,112 @@ class TimeupTest(FindCase):
                 expect(self, 'J-18', (status['phase'], status['timeup'], status['msg']), ('done', True, msg), sheet)
 
 
+class KeepSearchingTest(FindCase):
+    """#4、J-18:搜尋 agent 交件時使用者給的時間還沒用完,程式接著同一段對話找,每一回合交的網址都收下;
+    這回合沒有新網址、沒交件或當掉就停,前面交的照收。"""
+
+    def test_time_left_continues_the_same_agent_and_keeps_every_turn(self):
+        self.home.write_board()
+        _code, browser = self.go(search(URL), search(URL, URL2), search(URL2),
+                                 judge(lambda m: [row(m, URL), row(m, URL2)]), reads={URL: 'ok', URL2: 'ok'},
+                                 argv=['--minutes', '7'])
+        expect(self, '#4', [resume for resume, _agent in browser.resumed], [None, 'fake-session', 'fake-session', None])
+        expect(self, '#4', [re.findall(r'已收下的候選:\n(\d+) 個|時間還剩 (\d) 分鐘', prompt) for prompt in browser.prompts[1:3]],
+               [[('1', ''), ('', '6')], [('2', ''), ('', '6')]])
+        status = self.home.status_file('converge')
+        expect(self, '#4', (status['found'], status['added'], self.card(URL2) is not None), (2, 2, True))
+
+    def test_a_turn_that_searched_without_finding_anything_new_does_not_end_the_search(self):
+        # haiku 實跑:接著找的那回合搜了一分鐘、沒有新的,就收工了;時間還沒用完要再接著找。不到 30 秒交空的才算它沒再找
+        import time
+        real, later = time.time, [0]
+
+        def searched(seconds, *urls):
+            def tool(_browser):
+                later[0] += seconds
+                return ''
+            return Script((('tool', tool),), search(*urls).sheet)
+        with mock.patch('time.time', lambda: real() + later[0]):
+            self.home.write_board()
+            _code, browser = self.go(search(URL), searched(60), searched(60, URL2), searched(5),
+                                     judge(lambda m: [row(m, URL), row(m, URL2)]), reads={URL: 'ok', URL2: 'ok'},
+                                     argv=['--minutes', '30'])
+        expect(self, '#4', ([resume for resume, _agent in browser.resumed], self.card(URL2) is not None),
+               ([None, 'fake-session', 'fake-session', 'fake-session', None], True))
+
+    def test_a_search_that_ran_until_the_time_was_up_is_marked_time_up(self):
+        self.home.write_board()
+        self.go(search(URL), search(URL2, end=I.TIMEOUT, written=True), judge(lambda m: [row(m, URL), row(m, URL2)]),
+                reads={URL: 'ok', URL2: 'ok'}, argv=['--minutes', '7'])
+        status = self.home.status_file('converge')
+        expect(self, '#4', (status['timeup'], status['added'], self.research()[-1]['end']), (True, 2, 'timeup'))
+
+    def test_a_turn_that_ends_badly_keeps_what_earlier_turns_handed(self):
+        for end in (I.CRASHED, I.NO_SHEET, I.BROKEN_SHEET):
+            self.fresh()
+            _code, browser = self.go(search(URL), Script((), None if end is I.CRASHED else {'candidates': []}, end),
+                                     judge(lambda m: [row(m, URL)]), reads={URL: 'ok'}, argv=['--minutes', '7'])
+            status = self.home.status_file('converge')
+            expect(self, '#4', (len(browser.prompts), status['phase'], status['added']), (3, 'done', 1), end)
+            self.assertIn({I.CRASHED: '當掉', I.NO_SHEET: 'agent 沒交代', I.BROKEN_SHEET: '讀不了'}[end], status['msg'], end)
+
+    def test_after_the_user_presses_stop_no_new_turn_starts(self):
+        # Sol review #860:兩回合之間按了停止,不能再派下一回合
+        def press_stop(_browser):
+            open(os.path.join(find.tmp(), find.STATUS) + '.finish', 'w').close()
+            return ''
+        self.home.write_board()
+        _code, browser = self.go(Script((('tool', press_stop),), search(URL).sheet), judge(lambda m: [row(m, URL)]),
+                                 reads={URL: 'ok'}, argv=['--minutes', '30'])
+        expect(self, '#4', ([resume for resume, _agent in browser.resumed], self.card(URL) is not None), ([None, None], True))
+
+    def test_a_stop_pressed_in_an_earlier_round_does_not_cut_this_round_short(self):
+        # Sol review #860 複審:上一輪按停止留下的收工記號,不能讓下一輪不接著找
+        os.makedirs(find.tmp(), exist_ok=True)
+        open(os.path.join(find.tmp(), find.STATUS) + '.finish', 'w').close()
+        self.home.write_board()
+        _code, browser = self.go(search(URL), search(URL2), search(), judge(lambda m: [row(m, URL), row(m, URL2)]),
+                                 reads={URL: 'ok', URL2: 'ok'}, argv=['--minutes', '7'])
+        expect(self, '#4', (len(browser.resumed), self.card(URL2) is not None), (4, True))
+
+    def test_a_turn_that_fails_still_says_what_went_wrong(self):
+        # Sol review #860 複審:沒收下的回合寫了停下原因也要照列;時間到時交件單壞了也要說
+        for later, said in ((Script((), {'candidates': [], 'stopped': '登入後才能繼續'}, I.TIMEOUT), '登入後才能繼續'),
+                            (Script((), '{壞掉', I.TIMEOUT), '讀不了')):
+            self.fresh()
+            self.go(search(URL), later, judge(lambda m: [row(m, URL)]), reads={URL: 'ok'}, argv=['--minutes', '7'])
+            status = self.home.status_file('converge')
+            expect(self, '#4', (status['added'], said in status['msg']), (1, True), said)
+        self.fresh()     # 第一回合就時間到、沒有候選:沒東西收,agent 說的停下原因照樣要列(Sol review-4c)
+        self.go(Script((), {'candidates': [], 'stopped': '登入後才能繼續'}, I.TIMEOUT), argv=['--minutes', '7'])
+        self.assertIn('登入後才能繼續', self.home.status_file('converge')['msg'])
+
+    def test_paused_time_does_not_count_as_searching(self):
+        # Sol review #860 第 4 項:暫停 60 秒、只找 5 秒就交空的,算它沒再找
+        import time
+        import jobrun
+        real, later, paused = time.time, [0], [0]
+
+        def paused_turn(_browser):
+            later[0] += 65
+            paused[0] += 60
+            return ''
+        with mock.patch('time.time', lambda: real() + later[0]), mock.patch.object(jobrun, 'current_paused', lambda: paused[0]):
+            self.home.write_board()
+            _code, browser = self.go(search(URL), Script((('tool', paused_turn),), search().sheet),
+                                     judge(lambda m: [row(m, URL)]), reads={URL: 'ok'}, argv=['--minutes', '30'])
+        expect(self, '#4', [resume for resume, _agent in browser.resumed], [None, 'fake-session', None])
+
+    def test_what_each_turn_said_about_stopping_reaches_the_user(self):
+        # Sol review #860:第一回合 agent 說停下的原因,後面的回合交了件也要照列
+        first = search(URL)
+        first.sheet['stopped'] = '104 要登入才看得到'
+        self.home.write_board()
+        self.go(first, search(URL2), search(), judge(lambda m: [row(m, URL), row(m, URL2)]),
+                reads={URL: 'ok', URL2: 'ok'}, argv=['--minutes', '7'])
+        self.assertIn('104 要登入才看得到', self.home.status_file('converge')['msg'])
+
+
 class RoundCase(FindCase):
     """一輪找缺的看板與 agent 收到的共用材料。"""
 
@@ -875,7 +981,7 @@ class WholeRoundTest(RoundCase):
                         resume='one/zh')]
         judged = Script(look('judge'), lambda printed: {
             'candidates': rows(printed[0]), 'stopped': ''})
-        browser = FakeBrowser(found, judged, fetched={URL: fetched(URL, 'ok', PARTS + self.EXTRA)})
+        browser = FakeBrowser(found, search(), judged, fetched={URL: fetched(URL, 'ok', PARTS + self.EXTRA)})   # 時間沒用完:接著找一回合,沒有新的
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = find.main(['--board', self.home.board, '--mode', 'dir', '--direction', '機器人', '--seed-url',
@@ -888,7 +994,7 @@ class WholeRoundTest(RoundCase):
         ask = [('使用者方向原文', '機器人'), ('這輪找法', '指定方向'), ('使用者條件', '{"posted_days": 3650, "salary_min": 90000, "location": "台北"}'),
                ('使用者指名的搜尋種子', '- 指定職缺網址：https://jobs.example/x\n- 指定公司：Acme')]
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
-        search_prompt, judge_prompt = (self.sections(p) for p in browser.prompts)
+        search_prompt, judge_prompt = self.sections(browser.prompts[0]), self.sections(browser.prompts[-1])
         sheet_file = re.search(r'交件單同時寫進 (\S+):', search_prompt['交件單格式']).group(1)    # 這一輪證據夾裡的交件檔
         urls_file = re.search(r'已在看板上的職缺網址:\n(\S+)\(一行一個\)', search_prompt['材料']).group(1)
         with open(urls_file, encoding='utf-8') as listed_urls:      # 看板上已有的網址在檔裡,指示不隨看板長大(#832)
@@ -1007,14 +1113,14 @@ class AgentWordsTest(FindCase):
             research = [{'round': '2026-11-01 10:00', 'mode': 'wide', 'notes': '上一輪 agent 說往機器人找', 'added': []}]
             website_notes.remember([{'url': URL, 'note': 'agent 說要先捲動'}])
         self.home.write_board(jobs, {self.MARKED: {'s': 'like', 'n': '喜歡這種'}}, research=research)
-        browser = FakeBrowser(search(URL), judge(lambda m: [row(m, URL)]), fetched={URL: fetched(URL, 'ok', PARTS)})
+        browser = FakeBrowser(search(URL), search(), judge(lambda m: [row(m, URL)]), fetched={URL: fetched(URL, 'ok', PARTS)})
         with contextlib.redirect_stdout(io.StringIO()):
             find.main(['--board', self.home.board, '--mode', 'both', '--minutes', '7'], browser=browser)
         return [re.sub(r'\S+/sheet\.json|material_id=\w+', '', prompt) for prompt in browser.prompts]   # 每輪證據夾不同
 
     def test_agent_written_things_never_reach_the_next_agent(self):
         clean = self.prompts(noise=False)
-        expect(self, 'J-22', (len(clean), self.prompts(noise=True)), (2, clean))
+        expect(self, 'J-22', (len(clean), self.prompts(noise=True)), (3, clean))      # 搜尋、接著找(#4)、判斷
 
 
 class EmptyRoundTest(RoundCase):
@@ -1460,10 +1566,10 @@ class PageFetchTest(FindCase):
         def real(**kwargs):
             made.append(kwargs)
             return FakeBrowser(fetched={URL: fetched(URL, 'ok')})
-        for argv, wanted in (([URL], False), ([URL, '--browser'], True)):
+        for argv, wanted, wait in (([URL], False, 0), ([URL, '--browser'], True, 0), ([URL, '--wait', '3'], False, 3)):
             with mock.patch.object(page_fetch, 'Real', real), contextlib.redirect_stdout(io.StringIO()):
                 page_fetch.main(argv)
-            expect(self, 'I-13', made.pop(), {'browser_only': wanted}, argv)
+            expect(self, 'I-13', made.pop(), {'browser_only': wanted, 'wait': wait}, argv)
 
 
 if __name__ == '__main__':

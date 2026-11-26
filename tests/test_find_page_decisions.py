@@ -28,6 +28,51 @@ class PageFetchToolForTheAgent(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('Rendered by JavaScript', out.getvalue())
 
+    def browser_read(self, argv, later_ms, filler=0, nav=0):
+        """換掉跑 ego 腳本那一支(瀏覽器邊界):頁一載完只有骨架,later_ms 毫秒後清單才畫出來;腳本叫它等多久就給那時的頁。"""
+        import contextlib
+        import io
+        import re
+        import chrome_door
+        import page_fetch
+        import web.fetch
+        url = 'https://example.invalid/list'
+        job = 'https://example.invalid/job/42'
+
+        def ego(script, timeout=None):
+            waited = sum(int(ms) for ms in re.findall(r'waitForTimeout\((\d+)\)', script))
+            drawn = waited >= later_ms
+            page = {'url': url, 'title': '職缺清單',
+                    'text': '職缺清單\n' + ('Platform Engineer' if drawn else '載入中') + '\n更多職缺' * filler,
+                    'anchors': [{'href': f'https://example.invalid/nav/{n}?{"x" * 80}', 'text': '導覽'} for n in range(nav)]
+                               + ([{'href': job, 'text': 'Platform Engineer'}] if drawn else [])}
+            return {'pages': {url: page}, 'reader': 'p1'}
+        out = io.StringIO()
+        with patch.object(web.fetch, '_assert_public_url', return_value='203.0.113.1'), \
+                patch.object(web.fetch, '_direct', side_effect=AssertionError('agent 指定用瀏覽器讀')), \
+                patch.object(chrome_door, '_ego', side_effect=ego), contextlib.redirect_stdout(out):
+            code = page_fetch.main([*argv, url])
+        return code, out.getvalue(), job
+
+    def test_the_agent_can_ask_the_browser_to_wait_before_reading(self):
+        # #4:要跑 JS 才畫出清單的頁,瀏覽器一載完就讀只有骨架;agent 讀了覺得沒載完,可以叫它多等幾秒再讀
+        code, early, job = self.browser_read(['--browser'], 3000)
+        self.assertEqual((code, 'Platform Engineer' in early, job in early), (0, False, False))
+        code, late, job = self.browser_read(['--wait', '3'], 3000)
+        self.assertEqual((code, 'Platform Engineer' in late), (0, True))
+        self.assertIn('--wait 秒數', early)
+
+    def test_a_browser_read_hands_the_agent_every_link_on_the_page(self):
+        # #4:瀏覽器讀到的字不含連結網址,清單頁上的職缺網址要照樣交給 agent
+        _code, out, job = self.browser_read(['--wait', '3'], 0)
+        self.assertIn(f'Platform Engineer ⟦網址 {job}⟧', out)
+        _code, long_page, job = self.browser_read(['--wait', '3'], 0, filler=30000)   # 超過頁面材料上限被截
+        self.assertIn('超過', long_page)
+        self.assertIn(f'⟦網址 {job}⟧', long_page)
+        _code, many_links, _job = self.browser_read(['--wait', '3'], 0, nav=2000)   # 連結多到超過上限:頁上的字照樣留著
+        self.assertIn('個連結太多沒列', many_links)
+        self.assertRegex(many_links, r'\d+\. Platform Engineer')
+
 
 
 
