@@ -16,8 +16,7 @@ from urllib.parse import urlsplit
 TOOLS = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tools'))
 sys.path.insert(0, TOOLS)
 
-import apply_tab
-from chrome_door import PROFILE_FN
+from chrome_door import FILL_FN, PROFILE_FN, READ_FORM
 import dev_browser
 
 
@@ -466,7 +465,7 @@ class WebsiteTestBench:
                     title: async () => document.title
                 };
                 return await (__READ_FORM__)(page);
-            }""".replace('__READ_FORM__', apply_tab.READ_FORM)
+            }""".replace('__READ_FORM__', READ_FORM)
             return page.evaluate(reader, {'frameTree': frame_tree, 'trees': trees,
                                           'descriptions': descriptions, 'files': files})
         finally:
@@ -474,7 +473,7 @@ class WebsiteTestBench:
                 cdp.detach()
 
     def _fill_fields(self, page_id, items):
-        """正式的 apply_tab.FILL_FN 在測試台的分頁上跑。同步版 Playwright 不能在頁面回呼裡再操作頁面,
+        """正式的 chrome_door.FILL_FN 在測試台的分頁上跑。同步版 Playwright 不能在頁面回呼裡再操作頁面,
         所以 FILL_FN 收到的 page 是頁內的替身:backend 編號先由 CDP 換成元素上的標記,滑鼠與鍵盤在頁內派發事件。"""
         page = self._page_refs[page_id] or self.browser.page
         cdp = self.browser.cdp if page is self.browser.page else page.context.new_cdp_session(page)
@@ -515,7 +514,7 @@ class WebsiteTestBench:
                 evaluate: async (fn, arg) => fn(arg),
             };
             return await (__FILL_FN__)(page, items);
-        }""".replace('__FILL_FN__', apply_tab.FILL_FN)
+        }""".replace('__FILL_FN__', FILL_FN)
         return page.evaluate(shim, items)
 
     def reload_page(self, page_id, url):

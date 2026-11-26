@@ -11,6 +11,7 @@ import config as cf  # noqa: E402
 import board_doc  # noqa: E402
 import markdown_pdf  # noqa: E402
 import profile_registry  # noqa: E402
+import source_sync  # noqa: E402
 import profile_sync as ps  # noqa: E402
 import sync_seed  # noqa: E402
 import sync_material  # noqa: E402
@@ -118,7 +119,7 @@ class ConfirmScreenSyncNotice(unittest.TestCase):
         # 答案來源:one 的基準是現在的母稿(跟上),two 的基準是舊稿(落後);兩份登記同一個讀頁網址
         for variant in ('one', 'two'):
             ps.remember(self.platform, 'zh', variant, self.SHARED)
-        sync_seed.seed_sync_baseline(self.platform, 'zh', 'one', '# one\n- current\n', [], ps._master_fp('zh', 'one'))
+        sync_seed.seed_sync_baseline(self.platform, 'zh', 'one', '# one\n- current\n', [], source_sync.master_fingerprint('zh', 'one'))
         sync_seed.seed_sync_baseline(self.platform, 'zh', 'two', '# two\n- old\n', [], 'old-two')
 
         self.assertIn('⚠ 平台履歷落後', self.confirm_lines('two'))
@@ -156,11 +157,26 @@ class SyncBaseline(unittest.TestCase):
         self.assertEqual(ps.where('platform.example', 'zh', 'one')['name'], '平台上的名字')
 
     def test_status_tracks_master_edits_and_sync_baseline(self):
-        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
+        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], source_sync.master_fingerprint('zh', 'one'))
         self.assertEqual(ps.status()[0]['state'], 'ok')
         with open(os.path.join(self.home, 'resume', 'one.md'), 'w', encoding='utf-8') as out:
             out.write('# 作品\n- 更新的項目\n')
         self.assertEqual(ps.status()[0]['state'], 'master-changed')
+
+    def test_a_legacy_baseline_without_a_master_fingerprint_uses_the_current_master_file(self):
+        # 很舊的基準沒記原始履歷的指紋:轉換時拿現在那份原始履歷檔的指紋補上,加上附件的指紋
+        import source_sync
+        reg = ps._load_registry()
+        entry = reg['platform.example']['zh/one']
+        entry['sync_versions'] = []
+        entry.update(sync_version='legacy-reviewed', sync_reviewed_version='legacy-reviewed',
+                     sync_baseline={'source': '# 作品\n- 新項目\n', 'answers': []})
+        ps._save_registry(reg)
+
+        row, = sync_records.versions_for('platform.example', 'zh', 'one')
+        master = source_sync.fingerprint(os.path.join(self.home, 'resume', 'one.md'))
+        self.assertEqual(row['target_text']['__target_fingerprint__'],
+                         f"{master}+{sync_material.attachments_fingerprint('zh', 'one')}")
 
     def test_status_migrates_a_reviewed_legacy_baseline_without_losing_it(self):
         reg = ps._load_registry()
@@ -168,7 +184,7 @@ class SyncBaseline(unittest.TestCase):
         entry['sync_versions'] = []
         entry.update(sync_version='legacy-reviewed', sync_reviewed_version='legacy-reviewed',
                      sync_baseline={'source': '# 作品\n- 新項目\n', 'answers': [], 'used_answers': [],
-                                    'master': ps._master_fp('zh', 'one'),
+                                    'master': source_sync.master_fingerprint('zh', 'one'),
                                     'attachments': sync_material.attachments_fingerprint('zh', 'one')})
         ps._save_registry(reg)
 
@@ -191,7 +207,7 @@ class SyncBaseline(unittest.TestCase):
         for key in ('sync_version', 'sync_reviewed_version', 'sync_pending_baseline', 'sync_visuals'):
             entry.pop(key, None)   # main 只存 sync_baseline:沒有「看過這一版」,也沒有版本號
         entry.update(sync_baseline={'source': '# 作品\n- 新項目\n', 'answers': [], 'used_answers': [],
-                                    'master': ps._master_fp('zh', 'one'),
+                                    'master': source_sync.master_fingerprint('zh', 'one'),
                                     'attachments': sync_material.attachments_fingerprint('zh', 'one')})
         ps._save_registry(reg)
 
@@ -209,7 +225,7 @@ class SyncBaseline(unittest.TestCase):
         entry.pop('sync_versions', None)
         entry.update(sync_version='legacy-reviewed', sync_reviewed_version='legacy-reviewed',
                      sync_baseline={'source': '# 作品\n- 新項目\n', 'answers': [], 'used_answers': [],
-                                    'master': ps._master_fp('zh', 'one'),
+                                    'master': source_sync.master_fingerprint('zh', 'one'),
                                     'attachments': sync_material.attachments_fingerprint('zh', 'one')})
         ps._save_registry(reg)
 
@@ -239,7 +255,7 @@ class SyncBaseline(unittest.TestCase):
     def test_a_check_left_by_the_old_review_does_not_count_as_synced(self):
         # 舊考題(02233a0):舊版逐字比、agent 判讀留下的核對紀錄不算同步過;只有同步存檔成功記下的那一筆算
         reg = ps.registry()
-        reg['_profile_checks'] = {'platform.example#zh/one': {'master': ps._master_fp('zh', 'one'), 'matched': True,
+        reg['_profile_checks'] = {'platform.example#zh/one': {'master': source_sync.master_fingerprint('zh', 'one'), 'matched': True,
                                                               'by': 'review'}}
         ps._save_registry(reg)
         self.assertEqual(ps.status()[0]['state'], 'unchecked')
@@ -253,7 +269,7 @@ class SyncBaseline(unittest.TestCase):
             out.write(b'cover v1')
         cf.ATTACHMENTS[:] = [{'id': 'cover', 'name': '求職信', 'files': {'zh': 'resume/cover.pdf'}, 'enabled': True}]
         self.addCleanup(cf.ATTACHMENTS.clear)
-        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
+        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], source_sync.master_fingerprint('zh', 'one'))
         self.assertEqual(ps.status()[0]['state'], 'ok')
         with open(cover, 'wb') as out:
             out.write(b'cover v2')
@@ -281,12 +297,12 @@ class SyncBaseline(unittest.TestCase):
     def test_markdown_attachment_fingerprint_follows_the_rendered_pdf_bytes(self):
         # 比的是排好的 PDF,落後與否也看它:PDF 重排了就落後;原稿改了但還沒重排,平台上該有的檔還沒變
         md, pdf = self._markdown_cover()
-        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
+        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], source_sync.master_fingerprint('zh', 'one'))
         self.assertEqual(ps.status()[0]['state'], 'ok')
         with open(pdf, 'wb') as out:
             out.write(b'%PDF-1 rendered again')
         self.assertEqual(ps.status()[0]['state'], 'master-changed')
-        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], ps._master_fp('zh', 'one'))
+        sync_seed.seed_sync_baseline('platform.example', 'zh', 'one', '# 作品\n- 新項目\n', [], source_sync.master_fingerprint('zh', 'one'))
         with open(md, 'w', encoding='utf-8') as out:
             out.write('# 求職信(改過,還沒重排)\n')
         self.assertEqual(ps.status()[0]['state'], 'ok')

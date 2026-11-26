@@ -70,6 +70,12 @@ def fingerprint(path):
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def master_fingerprint(lang, variant):
+    """一份履歷在這個語言的原始履歷檔指紋;合併版(a+b)逐份接起來,有一份沒設定就回空字串。"""
+    paths = [cf.master(part, lang) for part in variant.split('+')]
+    return '+'.join(fingerprint(p) for p in paths) if all(paths) else ''
+
+
 def entry_fingerprint(entry):
     digest = hashlib.sha256()
     digest.update(fingerprint(entry['path']).encode('ascii'))

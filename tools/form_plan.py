@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-form_plan —— 程式配好答案、自己填:讀申請表的每一格(apply_tab.READ_FORM),照答案庫和以前填過的表單配答案,
-配好的格子程式自己填(--fill,apply_tab.FILL_FN)。
+form_plan —— 程式配好答案、自己填:讀申請表的每一格(chrome_door.READ_FORM),照答案庫和以前填過的表單配答案,
+配好的格子程式自己填(--fill,chrome_door.FILL_FN)。
 
 agent 打開申請表(處理完一鍵帶入、上傳)之後跑 --fill;程式配不到的題目(新題目、要判斷意思的選項)才列給它判斷,
 選項和沒有答案的題目由 agent 處理(--set);程式只填空白文字欄。--check 只列仍空白的可自動填欄位。
@@ -178,7 +178,7 @@ def render(plan, check):
 
 
 def how(x):
-    """程式自己填這一格用哪一種填法(apply_tab.FILL_FN)。"""
+    """程式自己填這一格用哪一種填法(chrome_door.FILL_FN)。"""
     return ('click' if x['type'] in CHOICE else 'select' if x['type'] == 'select-one'
             else 'combo' if x['type'] == 'combobox' else 'text')
 

@@ -28,7 +28,7 @@ class Browser(Protocol):
         """讀一個網址:url、status(ok、partial、unknown)、text、via、title、http_status、errors。"""
 
     def raw_form(self, tab: str) -> list[dict]:
-        """申請表每一格瀏覽器給的名稱與值(apply_tab.READ_FORM 的格式)。"""
+        """申請表每一格瀏覽器給的名稱與值(chrome_door.READ_FORM 的格式)。"""
 
     def open_workspace(self) -> dict:
         """開一個只有空白分頁的工作區,回 {'id', 'name'}。"""

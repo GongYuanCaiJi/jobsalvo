@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """平台履歷登記、同步基準與專用答案。"""
 import os, sys, re, argparse
+import dataclasses, hashlib, json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import config as cf
 import profile_registry
 import sync_material
 import sync_records
+from web.marks import Mark, say
 
 
 def _host(url):
@@ -169,12 +170,6 @@ def where(platform, lang, variant):
     return (registry().get(platform) or {}).get(f'{lang}/{variant}')
 
 
-def _master_fp(lang, variant):
-    import source_sync
-    paths = [cf.master(part, lang) for part in variant.split('+')]
-    return '+'.join(source_sync.fingerprint(p) for p in paths) if all(paths) else ''
-
-
 def sync_version(entry):
     """最新一版改動清單的證據輪次；舊登記沿用最後一列的輪次。"""
     return sync_records.version(entry)
@@ -222,6 +217,44 @@ def mark_sync_reviewed(platform, lang, variant, version):
     return sync_records.mark_reviewed(platform, lang, variant, version)
 
 
+@dataclasses.dataclass(frozen=True)
+class Slot:
+    """登記檔裡的一份:平台、語言、哪一份履歷、登記網址;登記成檔案的是附件。"""
+    platform: str
+    lang: str
+    variant: str
+    url: str
+    kind: str = '平台履歷'
+
+    @property
+    def key(self) -> str:
+        return f'{self.platform}:{self.lang}/{self.variant}'
+
+
+def slot_of(platform, lang, variant, entry) -> Slot:
+    return Slot(platform, lang, variant, str(entry.get('edit') or entry.get('read') or ''),
+                '附件' if entry.get('kind') == 'file' else '平台履歷')
+
+
+def target(source: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def standing(slot: Slot, board=None) -> Mark:
+    """還沒同步、最新清單你還沒看過、已跟上、原始履歷已落後(S-11–S-14);讀不到原稿不說跟上。"""
+    versions = sync_records.versions_for(slot.platform, slot.lang, slot.variant)
+    try:
+        current = target(sync_material.source(slot, board))
+    except (OSError, ValueError):
+        current = None
+    if not versions:
+        return say('STANDING_NEVER')
+    if not versions[-1].get('reviewed_at'):
+        return say('STANDING_UNREVIEWED')
+    return say('STANDING_OK') if versions[-1].get('target') == current else say('STANDING_BEHIND')
+
+
 def slots(platform=None):
     """登記過的每一份平台履歷:[(平台, 語言, 履歷, 那一筆)]。"""
     return [(p, key.partition('/')[0], key.partition('/')[2], entry) for p, entries in registry().items()
@@ -231,10 +264,9 @@ def slots(platform=None):
 
 def state(platform, lang, variant, entry, board=None):
     """這一份平台履歷跟本機的關係:ok(跟上) / master-changed(落後或最新清單還沒看過) / unchecked(還沒同步)。"""
-    import sync
     rows = sync_records.versions_for(platform, lang, variant)      # 舊登記升級轉換後的版本;呼叫的人接著從 entry 讀版本
     entry.update({'sync_versions': rows} if rows else {})
-    code = sync.standing(sync.slot_of(platform, lang, variant, entry), board).code
+    code = standing(slot_of(platform, lang, variant, entry), board).code
     return {'STANDING_NEVER': 'unchecked', 'STANDING_OK': 'ok'}.get(code, 'master-changed')
 
 
@@ -259,7 +291,8 @@ def status(board=None):
             board_error = f'看板讀不到,不知道有沒有代填內容等你確認:{error}'
     out = []
     for p, lang, v, entry in slots():
-        if not _master_fp(lang, v):
+        import source_sync
+        if not source_sync.master_fingerprint(lang, v):
             continue
         st = state(p, lang, v, entry, board)
         version = sync_version(entry)

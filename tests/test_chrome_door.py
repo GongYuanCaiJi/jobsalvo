@@ -125,5 +125,21 @@ class OnlyTheDoorAsksWhichFamily(unittest.TestCase):
         self.assertEqual(bad, [], '這幾處自己判斷是哪一家,改成用 chrome_door 的門路')
 
 
+
+class TheDoorFillsWithTheProgramsFillFunction(unittest.TestCase):
+    def test_fill_fields_sends_each_item_to_the_fill_function_on_the_cards_page(self):
+        sent = []
+        door = chrome_door.EgoDoor()
+        door.workspace = {'id': 42, 'name': 'card', 'page': 'p1'}
+        items = [{'backend': 7, 'how': 'type', 'value': '台北'}]
+        with patch.object(chrome_door, '_ego', side_effect=lambda script, timeout=60: sent.append((script, timeout)) or []):
+            door.fill_fields('42:p1', items)
+        (script, timeout), = sent
+        self.assertIn('async (page, items) =>', script)
+        self.assertTrue(script.rstrip().endswith('(page, [{"backend": 7, "how": "type", "value": "\\u53f0\\u5317"}]);'), script[-120:])
+        self.assertIn('binding.page', script)
+        self.assertEqual(timeout, 70)
+
+
 if __name__ == '__main__':
     unittest.main()

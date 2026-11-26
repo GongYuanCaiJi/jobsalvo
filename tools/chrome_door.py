@@ -30,6 +30,193 @@ PAGE_MATERIAL_CHAR_LIMIT = 100_000
 # 讀一頁的唯讀函式,在頁面裡跑(瀏覽器那一側,ADR-0012:轉成段落在 web/seen.py)
 PROFILE_FN = "() => {\n  const labelFor = el => {\n    const labelled = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean)\n      .map(id => document.getElementById(id)?.innerText || '').join(' ');\n    const labels = el.labels ? [...el.labels].map(x => x.innerText || '').join(' ') : '';\n    return (el.getAttribute('aria-label') || labelled || labels || el.getAttribute('placeholder') || '').trim();\n  };\n  const sectionFor = el => {\n    const group = el.closest('fieldset,section,[role=group],[role=radiogroup],[role=listbox]');\n    const heading = group && group.querySelector('legend,[role=heading],h1,h2,h3,h4,h5');\n    return group ? (labelFor(group) || (heading && heading.innerText) || '').trim() : '';\n  };\n  const fileNames = el => [...(el.files || [])].map(file => file.name).join(', ');\n  // 保留欄位上下文與選取狀態(勾選、aria),不猜哪些值是個人聲明;送出、按鈕類 input 不是資料\n  const fields = [...document.querySelectorAll('input,textarea,select,[role=textbox],[role=combobox],[role=checkbox],[role=radio],[role=switch],[role=listbox],[role=option],[role=slider],[role=spinbutton],[contenteditable=true],[aria-selected],[aria-checked],[aria-pressed],[aria-valuenow],[aria-valuetext],[aria-activedescendant],[aria-expanded]')]\n    .filter(el => !['hidden','password'].includes((el.type || '').toLowerCase()))\n    .filter(el => !(el.tagName === 'INPUT' && ['submit','button','image','reset'].includes((el.type || '').toLowerCase())))\n    .filter(el => {const s = getComputedStyle(el); return el.getClientRects().length && s.display !== 'none' && s.visibility !== 'hidden';})\n    .map(el => ({id: el.id || '', label: labelFor(el), section: sectionFor(el), role: el.getAttribute('role') || '',\n      type: (el.type || el.tagName.toLowerCase()).toLowerCase(), autocomplete: el.getAttribute('autocomplete') || '',\n      text: el.innerText || '', parentText: el.parentElement?.innerText || '',\n      value: el.type === 'file' ? fileNames(el) : (el.isContentEditable ? el.innerText : el.value) ?? '',\n      shown: el.tagName === 'SELECT' ? [...el.selectedOptions].map(x => x.text).join(' ') : undefined,\n      checked: ['checkbox','radio'].includes(el.type) ? el.checked : undefined,\n      aria: Object.fromEntries(['aria-selected','aria-checked','aria-pressed','aria-expanded','aria-activedescendant',\n        'aria-valuenow','aria-valuetext','aria-controls','aria-labelledby','aria-describedby'].map(a => [a, el.getAttribute(a)]))}));\n  // 收起來的內容(「更多」、摺疊區)常已在 DOM 裡只是沒畫出來;innerText 讀不到,判讀就說「無法確認」。\n  // 把沒畫出來的文字接在後面(跳過程式碼類標籤),不靠各網站的按鈕名稱。\n  // display:contents 本身沒有外框,但祖先有外框時子節點仍然可見。\n  const drawn = el => !!el && (el.getClientRects().length > 0\n    || (getComputedStyle(el).display === 'contents' && drawn(el.parentElement)));\n  const body = document.body || document.documentElement;\n  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);\n  const collapsed = [];\n  for (let n = walker.nextNode(); n; n = walker.nextNode()) {\n    const p = n.parentElement, s = (n.nodeValue || '').trim();\n    if (!s || !p || p.closest('script,style,noscript,template,svg') || drawn(p)) continue;\n    collapsed.push(s);\n  }\n  const readingParts = [], readingRects = [];\n  const documentRect = node => {\n    const boxes = node.nodeType === 3 ? (() => {\n      const range = document.createRange(); range.selectNodeContents(node);\n      return [...range.getClientRects()];\n    })() : [node.getBoundingClientRect()];\n    const visible = boxes.filter(r => r.width > 0 && r.height > 0);\n    if (!visible.length) return null;\n    const x = Math.min(...visible.map(r => r.left)) + scrollX;\n    const y = Math.min(...visible.map(r => r.top)) + scrollY;\n    return {x, y, width: Math.max(...visible.map(r => r.right)) + scrollX - x,\n      height: Math.max(...visible.map(r => r.bottom)) + scrollY - y};\n  };\n  // 欄位值是使用者打的字,照讀到的樣子收(前後空白、只有空白都是值,ADR-0011);\n  // 文字節點前後的空白是排版用的原始碼,畫出來看不到,才去掉\n  const addReading = (value, node, asIs = false) => {\n    const text = String(value ?? '');\n    if (asIs ? !text : !text.trim()) return;\n    readingParts.push(asIs ? text : text.trim());\n    readingRects.push(documentRect(node));\n  };\n  const TOGGLES = [['aria-checked', {true: '已勾選', false: '未勾選', mixed: '部分勾選'}],\n                   ['aria-pressed', {true: '已按下', false: '未按下', mixed: '部分按下'}]];\n  const readableUrl = value => { try { return decodeURIComponent(value); } catch (_error) { return value; } };\n  const visit = node => {\n    if (node.nodeType === 3) { addReading(node.nodeValue, node); return; }\n    if (node.nodeType !== 1) return;\n    const el = node;\n    if (el.closest('script,style,noscript,template,svg') || !drawn(el)) return;\n    const tag = el.tagName;\n    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) {\n      if (el.type === 'file') { addReading(fileNames(el), el, true); return; }\n      if (['hidden', 'password', 'submit', 'button', 'image', 'reset'].includes((el.type || '').toLowerCase())) return;\n      if (el.type === 'checkbox' || el.type === 'radio') addReading(`⟦欄位 ${el.checked ? '已勾選' : '未勾選'}⟧`, el);\n      else addReading(tag === 'SELECT' ? [...el.selectedOptions].map(x => x.text).join(' ') : el.value, el, true);\n      return;\n    }\n    for (const child of el.childNodes) visit(child);\n    if (tag === 'A' && el.href) addReading(`⟦網址 ${readableUrl(el.href)}⟧`, el);\n    if (['IFRAME', 'VIDEO', 'AUDIO', 'SOURCE', 'EMBED', 'OBJECT'].includes(tag)) {\n      const url = el.src || el.data;\n      if (url) addReading(`⟦網址 ${readableUrl(url)}⟧`, el);\n    }\n    if (['option', 'radio', 'checkbox'].includes(el.getAttribute('role')) && el.hasAttribute('aria-selected'))\n      addReading(`⟦欄位 ${el.getAttribute('aria-selected') === 'true' ? '已選取' : '未選取'}⟧`, el);\n    // 自製開關(role=switch 等)、切換鈕的狀態只在 aria-checked、aria-pressed 上,畫面上的字不變;不認得的值照原樣寫\n    for (const [attr, words] of TOGGLES) if (el.hasAttribute(attr)) {\n      const state = el.getAttribute(attr);\n      addReading(`⟦欄位 ${words[state] || attr + '=' + state}⟧`, el);\n    }\n  };\n  visit(body);\n  return {url: location.href, title: document.title, readyState: document.readyState, sinceLoad: performance.now(),\n    documentKey: performance.timeOrigin,\n    readingParts,\n    readingRects,\n    documentSize: {width: Math.max(document.documentElement?.scrollWidth || 0, body?.scrollWidth || 0),\n      height: Math.max(document.documentElement?.scrollHeight || 0, body?.scrollHeight || 0)},\n    reading: readingParts.join(' ').replace(/\\s+/g, ' ').trim(),\n    text: (body.innerText || '') + (collapsed.length ? '\\n' + collapsed.join('\\n') : ''),\n    links: [...document.links].map(a => a.href),\n    media: [...document.querySelectorAll('iframe,video,audio,source,embed,object')].map(el => el.src || el.data).filter(Boolean),\n    anchors: [...document.links].map(a => ({href: a.href, text: (a.innerText || '').trim()})), fields};\n}"
 
+# 讀申請表:照瀏覽器替讀屏軟體整理好的無障礙樹(Chrome 的 Accessibility.getFullAXTree)讀,不自己猜網頁結構。
+# 每一格的角色、名稱、目前的值、勾選與必填都是瀏覽器算好的;藏起來的不在樹上。網站沒把題目綁在格子上時,
+# 題目就照讀屏軟體的閱讀順序:這一格前面、上一格之後的那幾行字(context)。同網域的 iframe 一起讀。
+# 在 ego 的 Node 端跑(拿 page),回傳的形狀給表單規劃使用。
+READ_FORM = r"""async (page) => {
+  const FIELD = new Set(['textbox','searchbox','combobox','listbox','checkbox','radio','switch','spinbutton','slider','menulistpopup']);
+  const MAX_LINES = 1500;
+  const val = x => (x && x.value !== undefined) ? x.value : undefined;
+  const props = n => Object.fromEntries((n.properties || []).map(p => [p.name, val(p.value)]));
+  const trees = [];
+  let frames = [];
+  try {
+    const walk = f => { frames.push(f.frame.id); (f.childFrames || []).forEach(walk); };
+    walk((await page.cdp('Page.getFrameTree', {})).frameTree);
+  } catch (e) { frames = [undefined]; }
+  for (const frameId of frames) {
+    try { trees.push((await page.cdp('Accessibility.getFullAXTree', frameId ? {frameId} : {})).nodes || []); }
+    catch (e) { /* 跨網域的 iframe 這一頁讀不到:跟讀屏軟體在這一頁一樣,略過 */ }
+  }
+  const fields = [], lines = [], uploads = [];
+  let pending = [];                    // 上一格之後、這一格之前讀到的字(閱讀順序)
+  let group = {key: null, context: ''};
+  for (const nodes of trees) {
+    const byId = new Map(nodes.map(n => [n.nodeId, n]));
+    const roots = nodes.filter(n => !n.parentId || !byId.has(n.parentId));
+    const order = [];
+    const live = n => ['polite', 'assertive'].includes(props(n).live);
+    // 富文字編輯區塊(contenteditable 沒標角色):瀏覽器標成可編輯(editable),最外層那一個算一格文字框
+    const editRoot = n => !!props(n).editable && !(n.parentId && byId.get(n.parentId) && props(byId.get(n.parentId)).editable)
+      && !FIELD.has(val(n.role));
+    // 題目組(fieldset 的 legend、radiogroup):瀏覽器算好的這一組名稱,由近到遠
+    const visit = (n, anc, grp) => {
+      if (!n) return;
+      order.push([n, anc, grp]);
+      const role = val(n.role);
+      // 讀屏軟體的播報區(aria-live,例如「option X, selected.」)不是頁面上的字
+      const next = n.ignored ? anc : anc.concat([live(n) ? 'live' : editRoot(n) ? 'textbox' : role]);
+      const name = String(val(n.name) || '');
+      const g = !n.ignored && ['group', 'radiogroup'].includes(role) && name ? [[n.nodeId, name]].concat(grp) : grp;
+      for (const c of n.childIds || []) visit(byId.get(c), next, g);
+    };
+    // 自製下拉選單:瀏覽器給這一格的值常是空的,選好的字顯示在同一個框裡。往上找最近一層有字的框,
+    // 那一層裡只有這一格才算(碰到別的格子就停),播報區和題目本身不算
+    const texts = (n, out) => {
+      if (!n) return out;
+      const role = val(n.role);
+      if (role !== 'StaticText' && !n.ignored && (FIELD.has(role) || live(n))) return out;
+      if (role === 'StaticText') out.push(String(val(n.name) || ''));
+      for (const c of n.childIds || []) texts(byId.get(c), out);
+      return out;
+    };
+    const holds = (n, self) => n && (n !== self && FIELD.has(val(n.role)) && !n.ignored || (n.childIds || []).some(c => holds(byId.get(c), self)));
+    const selection = (n, label) => {
+      for (let a = byId.get(n.parentId), i = 0; a && i < 6; a = byId.get(a.parentId), i++) {
+        if (holds(a, n)) return '';
+        const t = texts(a, []).join('');
+        if (t && t !== label) return t;
+      }
+      return '';
+    };
+    roots.forEach(r => visit(r, [], []));
+    for (const [n, anc, grp] of order) {
+      if (n.ignored) continue;
+      const rich = editRoot(n);
+      const role = rich ? 'textbox' : val(n.role), name = String(val(n.name) || ''), p = props(n);
+      if (role === 'StaticText' || role === 'staticText') {
+        // 格子裡面的字是那一格的值,不是下一題的題目;其他的字照讀到的樣子算一行(ADR-0011,不替網站去掉記號)
+        if (anc.some(r => FIELD.has(r) || r === 'live')) continue;
+        if (name && lines[lines.length - 1] !== name) { lines.push(name); pending.push(name); }
+        continue;
+      }
+      let dom = {};
+      if (FIELD.has(role) || role === 'button') {
+        try {
+          const d = (await page.cdp('DOM.describeNode', {backendNodeId: n.backendDOMNodeId})).node || {};
+          const a = d.attributes || [];
+          for (let i = 0; i + 1 < a.length; i += 2) dom[a[i]] = a[i + 1];
+          dom.tag = String(d.nodeName || '').toLowerCase();
+        } catch (e) { /* 拿不到 DOM 細節:照無障礙樹的就好 */ }
+      }
+      if (role === 'button' && dom.type === 'file') {
+        // 檔名從 DOM 的 files 讀:瀏覽器畫在按鈕旁邊的字(「No file chosen」「2 files」)跟介面語言有關,不是檔名
+        try {
+          const {object} = await page.cdp('DOM.resolveNode', {backendNodeId: n.backendDOMNodeId});
+          const files = ((await page.cdp('Runtime.callFunctionOn', {objectId: object.objectId, returnByValue: true,
+            functionDeclaration: 'function(){return [...(this.files || [])].map(f => f.name);}'})).result || {}).value || [];
+          if (files.length) uploads.push({label: name, files});
+        } catch (e) {
+          uploads.push({label: name, files: [], read_error: '程式讀不到這一格選了哪些檔'});
+        }
+        continue;
+      }
+      if (!FIELD.has(role)) continue;
+      if (dom.type === 'password' || dom.type === 'hidden') continue;
+      const checked = p.checked === true || p.checked === 'true' || p.checked === 'mixed';
+      const v = rich ? texts(n, []).join('')
+        : String(val(n.value) ?? '') || (['combobox', 'listbox'].includes(role) ? selection(n, name) : '');
+      const choice = ['radio', 'checkbox', 'switch', 'listbox', 'combobox', 'menulistpopup'].includes(role);
+      const value = role === 'radio' ? (checked ? (dom.value || name) : '') : ['checkbox', 'switch'].includes(role) ? (checked ? (dom.value || 'on') : '') : v;
+      const shown = role === 'radio' || ['checkbox', 'switch'].includes(role) ? (checked ? name : undefined) : (role === 'combobox' || role === 'listbox' ? v : undefined);
+      const type = role === 'radio' ? 'radio' : ['checkbox', 'switch'].includes(role) ? 'checkbox'
+        : ['combobox', 'listbox', 'menulistpopup'].includes(role) ? (dom.tag === 'select' ? 'select-one' : 'combobox')
+        : (rich || dom.tag === 'textarea' || p.multiline) ? 'textarea' : (dom.type || 'text');
+      // 同一組選項(radio、checkbox 同一個 name)是同一題:題目是這一組第一個選項前面的字,組裡每個選項都帶著它;
+      // 選項之間的字是選項自己的標籤,不算題目
+      const key = (role === 'radio' || role === 'checkbox') && dom.name ? role + ':' + dom.name : null;
+      // 這一格前面的字照讀到的記下(不截短);前面沒有字就是沒有,不沿用上一格的(ADR-0011)
+      if (!key || key !== group.key) group = {key, context: pending.join('\n')};
+      fields.push({label: name, name: dom.name || dom.id || '', type, value, shown,
+                   context: group.context || undefined, choiceControl: choice, required: p.required === true,
+                   disabled: p.disabled === true || undefined,
+                   backend: n.backendDOMNodeId, _key: key || fields.length, _grp: grp});   // backend:程式自己填這一格用
+      pending = [];
+    }
+  }
+  // 選項類的題目組名稱:只收只裝這一題(同一組 radio/勾選)的那一層;外層大區塊(「個人資料」)裝好幾題,不是題目
+  const inGroup = new Map();
+  for (const f of fields) for (const [id] of f._grp) (inGroup.get(id) || inGroup.set(id, new Set()).get(id)).add(f._key);
+  for (const f of fields) {
+    const hit = ['radio', 'checkbox'].includes(f.type) && f._grp.find(([id]) => inGroup.get(id).size === 1);
+    if (hit) f.group = hit[1];
+    delete f._key; delete f._grp;
+  }
+  const read = {url: await page.url(), title: await page.title(), fields, uploads, lines};
+  if (lines.length > MAX_LINES) {
+    // 太長不截短冒充完整:照實標程式沒比到(#591 ID「拍改前、拍改後工具」)
+    return {...read, lines: [], fields: [], read_status: 'too_large',
+            read_error: `頁面超過 ${MAX_LINES} 行,程式沒比到`};
+  }
+  return read;
+}"""
+
+
+# 程式自己填格子(form_plan --fill / --set):每一格照讀頁時記下的 backend 找回同一個元素,照種類用一種填法,
+# 都是真的滑鼠、鍵盤事件(網站的程式看到的跟人操作一樣)。跑在 ego 的 Node 端:收 page 和 [{backend, how, value}]。
+#   text  點那一格、全選、insertText(取代原本的字)
+#   combo 點那一格、全選、一個字一個字打(才會跳建議清單),等看得到的 role=option 裡字一字不差的那一項點下去;
+#         有建議清單卻沒有一字不差的那一項就回填不上,交給 agent(ADR-0011);沒有建議清單的就留著打好的字
+#   select 原生下拉:選項的字一字不差才選,送 input、change;沒有就回填不上,交給 agent
+#   click  選項類(radio、勾選):點那一項
+FILL_FN = r"""async (page, items) => {
+  const out = [];
+  for (const it of items) {
+    try {
+      const {object} = await page.cdp('DOM.resolveNode', {backendNodeId: it.backend});
+      const call = async (fn, ...args) => ((await page.cdp('Runtime.callFunctionOn', {objectId: object.objectId,
+        functionDeclaration: fn, arguments: args.map(value => ({value})), awaitPromise: true, returnByValue: true})).result || {}).value;
+      const box = await call(`function(){this.scrollIntoView({block:'center'}); const r=this.getBoundingClientRect();
+        return r.width && r.height ? {x: r.x + r.width / 2, y: r.y + r.height / 2} : null;}`);
+      if (it.how === 'click') {
+        if (box) await page.mouse.click(box.x, box.y); else await call('function(){this.click();}');
+      } else if (it.how === 'select') {
+        const ok = await call(`function(want){const o=[...this.options].find(o=>o.text===want);
+          if(!o) return false; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(this,o.value);
+          this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); return true;}`, it.value);
+        if (!ok) throw new Error('選單裡沒有一字不差的這一項');
+      } else {
+        if (box) await page.mouse.click(box.x, box.y);
+        await call(`function(){this.focus(); if (typeof this.select === 'function') this.select();
+          else {const r=document.createRange(); r.selectNodeContents(this); const s=getSelection(); s.removeAllRanges(); s.addRange(r);}}`);
+        if (it.how === 'combo') {
+          await page.keyboard.type(it.value);
+          let pos = null;
+          for (let i = 0; i < 15 && !(pos && pos.x !== undefined); i++) {
+            await page.waitForTimeout(200);
+            pos = await page.evaluate(want => {
+              const os = [...document.querySelectorAll('[role=option]')].filter(o => o.getClientRects().length);
+              const o = os.find(o => o.innerText === want);
+              if (!o) return {shown: os.length};
+              o.scrollIntoView({block: 'nearest'}); const r = o.getBoundingClientRect();
+              return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+            }, it.value);
+          }
+          if (pos && pos.x !== undefined) await page.mouse.click(pos.x, pos.y);
+          else if (pos && pos.shown) throw new Error('建議清單裡沒有一字不差的這一項');
+        } else {
+          await page.keyboard.insertText(it.value);
+        }
+      }
+      out.push({backend: it.backend, ok: true});
+    } catch (e) {
+      out.push({backend: it.backend, ok: false, why: String(e && e.message || e).slice(0, 200)});
+    }
+  }
+  return out;
+}"""
+
 class NotNow(LookupError):
     """這一家現在做不到(不是壞了):訊息講做不到、改用什麼。"""
 
@@ -446,9 +633,8 @@ class EgoDoor:
         return opened
 
     def open_for_agent(self, url, old_tab=None, on_open=None):
-        import apply_tab
         if self.workspace is not None:
-            return _ego(self._task(old_tab) + f'const data=await ({apply_tab.READ_FORM})(page);\n'
+            return _ego(self._task(old_tab) + f'const data=await ({READ_FORM})(page);\n'
                         'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
         name = _workspace_name()
         opened = _ego(
@@ -462,7 +648,7 @@ class EgoDoor:
             on_open(opened)
         return _ego(self._task() +
                     f'await page.goto({json.dumps(url)}, {{waitUntil:"domcontentloaded",timeout:30000}});\n'
-                    + f'const data=await ({apply_tab.READ_FORM})(page);\n'
+                    + f'const data=await ({READ_FORM})(page);\n'
                     'return {workspace:binding,tab_id:binding.id+":"+binding.page,page:data};')
 
     def follow_page(self, tab_id):
@@ -506,14 +692,12 @@ class EgoDoor:
         return script
 
     def fill_fields(self, tab_id, items):
-        """程式自己填這幾格(apply_tab.FILL_FN):[{backend, how, value}] → 每一格 {backend, ok, why}。"""
-        import apply_tab
-        return _ego(self._task(tab_id) + f'return await ({apply_tab.FILL_FN})(page, {json.dumps(items)});',
+        """程式自己填這幾格(FILL_FN):[{backend, how, value}] → 每一格 {backend, ok, why}。"""
+        return _ego(self._task(tab_id) + f'return await ({FILL_FN})(page, {json.dumps(items)});',
                     timeout=60 + 10 * len(items))
 
     def read_page(self, tab_id):
-        import apply_tab
-        return _ego(self._task(tab_id) + f'return await ({apply_tab.READ_FORM})(page);')
+        return _ego(self._task(tab_id) + f'return await ({READ_FORM})(page);')
 
     def read_profile_page(self, tab_id):
         """讀 agent 正在編輯的同一頁，保留尚未按儲存的欄位值與實際連結。"""

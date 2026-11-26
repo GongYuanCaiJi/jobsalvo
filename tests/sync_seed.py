@@ -2,6 +2,7 @@
 from unittest import mock
 
 import profile_sync as ps
+import source_sync
 import sync
 import sync_material
 
@@ -24,7 +25,7 @@ def seed_sync_baseline(platform, lang, variant, source, answers, master_fp=None,
         if isinstance(answer, dict):
             text[f"答案: {answer.get('q') or answer.get('k') or ''}"] = str(answer.get('v') or '')
     text['__target_fingerprint__'] = (current.get('__target_fingerprint__', '')
-                                      if master_fp in (None, ps._master_fp(lang, variant))
+                                      if master_fp in (None, source_sync.master_fingerprint(lang, variant))
                                       else str(master_fp))
     entry['sync_versions'] = [{'round_id': 'seed', 'target': sync.target(text), 'target_text': text,
                                'reviewed_at': 'seed'}]

@@ -27,8 +27,8 @@ def versions(slot):
 
 
 def _legacy_target_text(lang, variant, baseline):
+    import source_sync
     import sync_material
-    import profile_sync
 
     source = str(baseline.get('source') or '')
     parts = variant.split('+')
@@ -64,7 +64,7 @@ def _legacy_target_text(lang, variant, baseline):
                     if old_attachment_fp in (None, current_attachment_fp) else '')
     master = baseline.get('master')
     if master is None:
-        master = '+'.join(profile_sync._master_fp(lang, part) for part in parts)
+        master = '+'.join(source_sync.master_fingerprint(lang, part) for part in parts)
     attachment_fp = current_attachment_fp if old_attachment_fp is None else old_attachment_fp
     text['__target_fingerprint__'] = '+'.join([str(master), str(attachment_fp)])
     return text

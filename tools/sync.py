@@ -6,19 +6,18 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import hashlib
 import json
 import os
 import time
 
 import profile_sync
+from profile_sync import Slot, slot_of, standing, target
 import sync_material
 import sync_records
 from web import listing
 from web.brief import AFTER, BEFORE, EGO, SHELL, Brief
 from web.changelist import Intended, build, restore_intents
-from web.marks import Mark, say
+from web.marks import say
 from web.outside import Real
 from web.round import NEEDS_USER_PAGE, End, RoundRecord, record_unstarted, run as run_round, stuck
 from web.sheet import Field, How, Schema
@@ -46,47 +45,9 @@ SHEET = Schema('sync', (
 ))
 
 
-@dataclasses.dataclass(frozen=True)
-class Slot:
-    """登記檔裡的一份:平台、語言、哪一份履歷、登記網址;登記成檔案的是附件。"""
-    platform: str
-    lang: str
-    variant: str
-    url: str
-    kind: str = '平台履歷'
-
-    @property
-    def key(self) -> str:
-        return f'{self.platform}:{self.lang}/{self.variant}'
-
-
-def slot_of(platform, lang, variant, entry) -> Slot:
-    return Slot(platform, lang, variant, str(entry.get('edit') or entry.get('read') or ''),
-                '附件' if entry.get('kind') == 'file' else '平台履歷')
-
-
 def slots(platform=None, lang=None, variant=None) -> list[Slot]:
     return [slot_of(p, l, v, entry) for p, l, v, entry in profile_sync.slots(platform)
             if (lang is None or l == lang) and (variant is None or v == variant)]
-
-
-def target(source: dict[str, str]) -> str:
-    return hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True,
-                                     separators=(',', ':')).encode('utf-8')).hexdigest()
-
-
-def standing(slot: Slot, board=None) -> Mark:
-    """還沒同步、最新清單你還沒看過、已跟上、原始履歷已落後(S-11–S-14);讀不到原稿不說跟上。"""
-    versions = sync_records.versions_for(slot.platform, slot.lang, slot.variant)
-    try:
-        current = target(sync_material.source(slot, board))
-    except (OSError, ValueError):
-        current = None
-    if not versions:
-        return say('STANDING_NEVER')
-    if not versions[-1].get('reviewed_at'):
-        return say('STANDING_UNREVIEWED')
-    return say('STANDING_OK') if versions[-1].get('target') == current else say('STANDING_BEHIND')
 
 
 def intended(slot: Slot, source: dict[str, str]) -> tuple[Intended, ...]:
