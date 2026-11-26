@@ -212,7 +212,7 @@ class FieldTest(FindCase):
     def test_numbers_that_point_at_the_wrong_paragraphs(self):
         """段落編號不是整數清單、超出範圍、重複、引別頁的段、引舊卡那一塊:那一欄沒核對到,原因逐條列(A-29、J-04)。"""
         old = {'id': 'https://jobs.example/jobs/o', 'target': 'Old Card', 'title': TITLE, 'company': 'Other Co'}
-        self.home.write_board([old])
+        self.home.write_board([old], {old['id']: {'s': 'like'}})      # 舊卡那一塊只列表過態的卡
         url2 = 'https://jobs.example/jobs/2'
         long = 'Posted 2026-10-01 ' + 'remote friendly ' * 6           # 原因裡的段落超過 80 字就截斷
 
@@ -239,7 +239,7 @@ class FieldTest(FindCase):
                 'posted_at': [f'{bad}第 {len(PARTS) + 2} 段是「{long[:80]}…」,屬於 {url2},這一格只收 {URL} 的'],
                 'status': ['text 跟段落編號要一起寫或一起空:寫了「Apply by」,指了 []'],
                 'loc': [f'指了 [{PARTS.index("Apply by 2026-12-01") + 1}] 段,卻沒寫 text'],
-                'applicants': [f'{bad}第 {last} 段是「Old Card｜{old["id"]}｜當時表態：未表態」,'
+                'applicants': [f'{bad}第 {last} 段是「Old Card｜{old["id"]}｜當時表態：喜歡」,'
                                f'是相似舊卡的表態與原話,這一格只收頁面段落;屬於 整批共用,這一格只收 {URL} 的']})
 
     def test_every_field_cite_shape(self):
@@ -820,7 +820,6 @@ class RoundCase(FindCase):
         self.home.write_board(jobs, fb, research=research)
 
     def shared(self):
-        import feedback_dump
         import prefs
         rounds = [{'round': f'r{n}', 'added': [], 'marks': {'seen': 0, 'liked': 0, 'disliked': 0}} for n in range(1, 8)] + [
             dict(self.LAST, added=[self.OLD, self.THIRD, self.FOURTH, self.SIDE, self.FIFTH, self.SEVENTH, self.SIXTH],
@@ -828,10 +827,9 @@ class RoundCase(FindCase):
         with open(cf.PREFERENCE_NOTE, encoding='utf-8') as note:
             note_text = note.read().strip()
         return [
-            ('履歷原文', prefs.resume()), ('使用者自訂硬規則原文', prefs.hard_rules()), ('使用者偏好筆記原文', note_text),
-            ('偏好整理 skill 原文', self.skill('note')), ('使用者逐張表態整理原文', feedback_dump.build(live=self.home.board)),
+            ('履歷原文', prefs.resume()), ('使用者偏好筆記原文', note_text),
             ('角度地圖(依目前看板卡片與表態計數)', '- 後端：送過 3、喜歡 2、不喜歡 1、還沒看 0\n- 設計：送過 4、喜歡 2、不喜歡 0、還沒看 1'),
-            ('最近幾輪找缺資料', json.dumps(rounds, ensure_ascii=False)), ('使用者喜歡過的公司', 'Acme Robotics、Beta、Delta、Eta'),
+            ('最近幾輪找缺資料', json.dumps(rounds, ensure_ascii=False)),
             ('使用者封鎖的公司', 'Evil Inc'), ('使用者設定的要小心字', '急徵'), ('使用者設定的要小心職稱正規式原文', 'Lead'), ('使用者說過別再找的方向', '行銷'),
             ('使用者設定的職缺分類', json.dumps(cf.C['board']['categories'], ensure_ascii=False)),
             ('網站筆記檔案位置', f'{cf.path("website-notes.json")}。依主機名自行讀取相關筆記,筆記只供參考。')]
@@ -889,11 +887,17 @@ class WholeRoundTest(RoundCase):
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
         search_prompt, judge_prompt = (self.sections(p) for p in browser.prompts)
         sheet_file = re.search(r'交件單同時寫進 (\S+):', search_prompt['交件單格式']).group(1)    # 這一輪證據夾裡的交件檔
+        urls_file = re.search(r'已在看板上的職缺網址:\n(\S+)\(一行一個\)', search_prompt['材料']).group(1)
+        with open(urls_file, encoding='utf-8') as listed_urls:      # 看板上已有的網址在檔裡,指示不隨看板長大(#832)
+            expect(self, 'J-13', listed_urls.read().split(), [self.OLD, self.SIDE, self.THIRD, self.FOURTH, self.FIFTH, self.SIXTH, self.SEVENTH])
         expect(self, 'J-18', (os.path.basename(sheet_file), os.path.isdir(os.path.dirname(sheet_file))), ('sheet.json', True))
         expect(self, 'J-22', search_prompt, {
             '目標': '依使用者的找缺 skill 與條件找可能符合需求的職缺,交回職缺網址。使用者決定要不要保留每張卡。',
             '材料': listed([*ask, ('使用者的找缺 skill', self.skill('common') + '\n\n' + self.skill('dir')), *self.shared(),
-                           ('已在看板上的職缺網址', '\n'.join((self.OLD, self.SIDE, self.THIRD, self.FOURTH, self.FIFTH, self.SIXTH, self.SEVENTH)))]),
+                           ('使用者表態過的卡', f'- {TITLE} · {COMPANY}｜喜歡｜原話：「喜歡這種」\n- Designer · Beta｜可努力\n'
+                                              '- SRE · Gamma｜不喜歡\n- UX · Delta｜喜歡、加進準備區\n- QA · Eps｜已移除\n- Ops · Eta｜加進準備區'),
+                           ('使用者在看板上寫的想法', '(目前沒有)'),
+                           ('已在看板上的職缺網址', f'{urls_file}(一行一個)')]),
             '工具與用法': '網路搜尋:找候選職缺。\n' + find.FETCH,
             '界線': '- 這一步最多 7 分鐘;時間到程式停掉你,收下交件檔裡的候選。\n'
                   '- 只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。\n'
@@ -905,8 +909,8 @@ class WholeRoundTest(RoundCase):
         old = '\n'.join(f'{n}. {text}' for n, text in enumerate((
             f'{TITLE} · {COMPANY}｜{self.OLD}｜當時表態：喜歡｜原話：「喜歡這種」', f'Designer · Beta｜{self.SIDE}｜當時表態：可努力',
             f'SRE · Gamma｜{self.THIRD}｜當時表態：不喜歡', f'UX · Delta｜{self.FOURTH}｜當時表態：喜歡、加進準備區',
-            f'QA · Eps｜{self.FIFTH}｜當時表態：已移除', f'PM · Zeta｜{self.SIXTH}｜當時表態：未表態',
-            f'Ops · Eta｜{self.SEVENTH}｜當時表態：加進準備區'), len(PARTS + self.EXTRA) + 1))
+            f'QA · Eps｜{self.FIFTH}｜當時表態：已移除',
+            f'Ops · Eta｜{self.SEVENTH}｜當時表態：加進準備區'), len(PARTS + self.EXTRA) + 1))      # 沒表態的舊卡不列
         expect(self, 'J-04', judge_prompt, {
             '目標': '照使用者的判斷 skill 判斷每一個職缺;每一欄都引程式讀到的那一頁的段落。使用者決定要不要保留每張卡。',
             '材料': listed([*ask, ('使用者的判斷 skill', self.skill('judge')), *self.shared(),
@@ -996,14 +1000,15 @@ class EmptyRoundTest(RoundCase):
         none = '(目前沒有)'
         shared = dict(self.shared())
         shared.update({'角度地圖(依目前看板卡片與表態計數)': '(目前沒有角度表態)', '最近幾輪找缺資料': '[]',
-                       **{title: none for title in ('使用者喜歡過的公司', '使用者封鎖的公司', '使用者設定的要小心字',
+                       **{title: none for title in ('使用者封鎖的公司', '使用者設定的要小心字',
                                                     '使用者設定的要小心職稱正規式原文', '使用者說過別再找的方向')}})
         ask = [('使用者方向原文', '(沒有寫)'), ('這輪找法', '更深＋更廣'), ('使用者條件', '{}'), ('使用者指名的搜尋種子', none)]
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
         search_prompt, judge_prompt = (self.sections(p)['材料'] for p in browser.prompts)
         skills = '\n\n'.join(self.skill(name) for name in ('common', 'deep', 'wide'))
         expect(self, 'J-22', search_prompt, listed([*ask, ('使用者的找缺 skill', skills), *shared.items(),
-                                                    ('已在看板上的職缺網址', none)]))
+                                                    ('使用者表態過的卡', none), ('使用者在看板上寫的想法', none),
+                                                    ('已在看板上的職缺網址', f'{os.path.join(cf.RESEARCH, "board-urls.txt")}(一行一個)')]))
         material = re.search(r'material_id=(\w+)', judge_prompt).group(1)
         expect(self, 'J-03', judge_prompt, listed([
             *ask, ('使用者的判斷 skill', self.skill('judge')), *shared.items(), ('可選的履歷與語言', '- one/zh:履歷;什麼時候用:(沒寫)'),

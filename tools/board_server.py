@@ -1768,9 +1768,9 @@ class H(BaseHTTPRequestHandler):
                 note='這是骨架。真的跑的時候每批 5 張:每張的 JD 原文、和他對最像的十幾張舊卡的表態與原話,會接在下面。'
             elif kind=='find' and mode in MODES:
                 import agent_run, find
-                shared,_fb0,jobs0=find.user_materials(STATE)
+                shared,fb0,jobs0=find.user_materials(STATE)
                 p=agent_run.rules_for('main',board=STATE,website_task=True)+find.search_brief(
-                    find.ask_of(mode,text or '(你在上面寫的方向會放這裡)'),shared,jobs0).render(workspace=0)
+                    find.ask_of(mode,text or '(你在上面寫的方向會放這裡)'),shared,fb0,jobs0).render(workspace=0)
                 if mode=='dir' and not text:
                     note='你還沒寫方向。在框裡寫的那一句,會放進下面「他說:『…』」的位置。'
             elif kind=='replies':

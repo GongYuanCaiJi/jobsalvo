@@ -162,23 +162,18 @@ def _listed(values):
 
 
 def user_materials(board):
-    """兩個 agent 共用的使用者材料:履歷、偏好、表態與最近幾輪。「一定不要」與條件由程式判(find_terms),不交 agent;
-    封鎖名單照交(別的寫法、簡稱由 agent 判),程式另擋一字不差的(J-12)。"""
-    import feedback_dump
+    """搜尋與判斷共用的使用者材料。「一定不要」與條件由程式判(find_terms),不交 agent;
+    封鎖名單照交(別的寫法、簡稱由 agent 判),程式另擋一字不差的(J-12)。
+    整個看板的東西(每張卡、agent 寫的摘要、看板上的網址)不放這裡:每份指示只放它自己要的(#832)。"""
     import prefs
     feedback, jobs = prefs.load(board)
     search = cf.C.get('search') or {}
     rounds = (bd.load(board).get('data') or {}).get('research') or []
-    liked = dict.fromkeys(row['company'] for row in prefs.cards(feedback, jobs) if row['pos'] and row['company'])
     return (
         ('履歷原文', prefs.resume()),
-        ('使用者自訂硬規則原文', prefs.hard_rules()),
         ('使用者偏好筆記原文', _read_text(cf.PREFERENCE_NOTE)),
-        ('偏好整理 skill 原文', _skill('note')),
-        ('使用者逐張表態整理原文', feedback_dump.build(live=board)),
         ('角度地圖(依目前看板卡片與表態計數)', _angle_map(feedback, jobs)),
         ('最近幾輪找缺資料', _round_history(rounds, feedback)),
-        ('使用者喜歡過的公司', _listed(liked)),
         ('使用者封鎖的公司', _listed(str(x) for x in feedback.get('__block__') or () if x)),
         ('使用者設定的要小心字', _listed(str(x) for x in search.get('flag_words') or () if x)),
         ('使用者設定的要小心職稱正規式原文', search.get('flag_title') or '(目前沒有)'),
@@ -186,6 +181,30 @@ def user_materials(board):
         ('使用者設定的職缺分類', json.dumps((cf.C.get('board') or {}).get('categories') or [], ensure_ascii=False)),
         ('網站筆記檔案位置', f'{cf.path("website-notes.json")}。依主機名自行讀取相關筆記,筆記只供參考。'),
     ), feedback, jobs
+
+
+def _marked(feedback, jobs):
+    """使用者表過態的卡:卡名、標記、原話;沒表態的卡不列(J-19)。"""
+    rows = []
+    for job in jobs:
+        mark, words = _marks(feedback, job['id'])
+        if mark != '未表態' or words:
+            rows.append(f"- {cards.name(job)}｜{mark}" + (f'｜原話：「{words}」' if words else ''))
+    return '\n'.join(rows) or '(目前沒有)'
+
+
+def _board_notes(feedback):
+    return '\n'.join('- ' + note for note in (str(row.get('t') or '').strip() for row in feedback.get('__notes__') or ()
+                                             if isinstance(row, dict)) if note) or '(目前沒有)'
+
+
+def _board_urls_file(jobs):
+    """看板上已有的網址寫成檔(程式讀頁前也會清掉,J-13);指示只給位置,不隨看板長大。"""
+    path = os.path.join(cf.RESEARCH, 'board-urls.txt')
+    os.makedirs(cf.RESEARCH, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as target:
+        target.write(''.join(f'{url}\n' for url in dict.fromkeys(job['id'] for job in jobs)))
+    return path
 
 
 def _ask(ask):
@@ -211,12 +230,12 @@ def round_terms(ask):
     return find_terms.normalize(json.loads(ask['terms']))
 
 
-def search_brief(ask, shared, jobs, minutes=None):
-    urls = '\n'.join(dict.fromkeys(job['id'] for job in jobs))
+def search_brief(ask, shared, feedback, jobs, minutes=None):
     return Brief(
         '依使用者的找缺 skill 與條件找可能符合需求的職缺,交回職缺網址。使用者決定要不要保留每張卡。',
         (*_ask(ask), ('使用者的找缺 skill', _search_skills(ask['mode'])), *shared,
-         ('已在看板上的職缺網址', urls or '(目前沒有)')),
+         ('使用者表態過的卡', _marked(feedback, jobs)), ('使用者在看板上寫的想法', _board_notes(feedback)),
+         ('已在看板上的職缺網址', f'{_board_urls_file(jobs)}(一行一個)')),
         ('網路搜尋:找候選職缺。', FETCH),
         (*((f'這一步最多 {minutes} 分鐘;時間到程式停掉你,收下交件檔裡的候選。',) if minutes else ()),
          '只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。',
@@ -240,7 +259,8 @@ def judge_brief(ask, shared, material, urls, pages, feedback, jobs, sheet=JUDGE_
     old = []
     for job in jobs:
         mark, words = _marks(feedback, job['id'])
-        old.append(f"{cards.name(job)}｜{job['id']}｜當時表態：{mark}" + (f'｜原話：「{words}」' if words else ''))
+        if mark != '未表態' or words:      # 沒表態的舊卡沒有使用者的話可引
+            old.append(f"{cards.name(job)}｜{job['id']}｜當時表態：{mark}" + (f'｜原話：「{words}」' if words else ''))
     old_block = material.add(old, 'old') or '(目前沒有)'
     choices = '\n'.join(f'- {key}:{item.get("name") or item.get("id")};什麼時候用:{item.get("when") or "(沒寫)"}'
                         for key, (_id, _lang, item) in resume_choices().items())
@@ -626,7 +646,7 @@ def run(ask, board, browser, limit, minutes):
     subprocess.run([sys.executable, os.path.join(HERE, 'feedback_dump.py'), '--live', board])   # 更新他資料夾裡的逐張表態匯出
     shared, feedback, jobs = user_materials(board)
     current = Run(board, browser, minutes)
-    search = current.agent(search_brief(ask, shared, jobs, minutes), {}, 4 * 3600, timed=True)
+    search = current.agent(search_brief(ask, shared, feedback, jobs, minutes), {}, 4 * 3600, timed=True)
     notes = joined(search.sheet.said('notes'))
     timeup = search.end is End.TIMEOUT
     harvested = timeup and not search.sheet.broken and bool(search.sheet.rows('candidates'))   # 時間到收下交件檔裡的(#198)
