@@ -26,13 +26,19 @@ class Brief:
     tools: tuple[str, ...]
     limits: tuple[str, ...]
     handoff: Schema
+    sheet_file: bool = False      # 交件單也由 agent 自己寫進檔(時間到時程式收這個檔,#198)
 
-    def render(self, *, workspace: int) -> str:
+    def render(self, *, workspace: int, sheet_file: str = '') -> str:
+        handoff = self.handoff.format_text()
+        if self.sheet_file:
+            path = sheet_file or '(這一輪的交件檔)'
+            handoff += (f'\n交件單同時寫進 {path}:每多一列就寫一次整份,先寫到 {path}.tmp 再改名成 {path};'
+                        '時間到時程式收這個檔裡最後寫的那一份。')
         sections = (
             ('目標', self.goal),
             ('材料', '\n'.join(f'{title}:\n{value}' for title, value in self.materials)),
             ('工具與用法', '\n'.join(tool.replace('{workspace}', str(workspace)) for tool in self.tools)),
             ('界線', '\n'.join(f'- {line}' for line in self.limits)),
-            ('交件單格式', self.handoff.format_text()),
+            ('交件單格式', handoff),
         )
         return '\n\n'.join(f'【{title}】\n{body}' for title, body in sections)

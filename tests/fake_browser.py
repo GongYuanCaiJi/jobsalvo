@@ -294,9 +294,16 @@ class FakeBrowser:
         sheet = script.sheet(printed) if callable(script.sheet) else script.sheet
         if script.end == I.BROKEN_SHEET:
             sheet = '[1, 2'
-        if sheet is not None and script.end in (I.HANDED, I.BROKEN_SHEET):
-            with open(os.path.join(directories[0], 'handoff.json'), 'w', encoding='utf-8') as target:
+        target_path = os.path.join(directories[0], 'handoff.json')
+        if script.end == I.TIMEOUT:      # 逾時前 agent 照指示寫進交件檔的那一份;指示沒給檔就沒地方寫
+            named = re.search(r'交件單同時寫進 (\S+):', prompt)
+            target_path = named.group(1) if named else None
+        if sheet is not None and target_path and script.end in (I.HANDED, I.BROKEN_SHEET, I.TIMEOUT):
+            with open(target_path, 'w', encoding='utf-8') as target:
                 target.write(sheet if isinstance(sheet, str) else json.dumps(sheet, ensure_ascii=False))
+            if script.end == I.TIMEOUT:     # 照指示先寫暫存檔再改名:停掉那一刻正在寫的下一版只寫了一半
+                with open(f'{target_path}.tmp', 'w', encoding='utf-8') as target:
+                    target.write('{"candidates": [')
         return SimpleNamespace(status=status, session='fake-session', why=f'假 agent:{script.end}',
                                agent_id='fake-agent')
 

@@ -43,9 +43,12 @@ def fetched(url, read, parts=PARTS):
             'http_404': dict(base, status='unknown', text='', http_status=404, errors=['HTTP 404'])}[read]
 
 
-def search(*urls, end=I.HANDED):
+def search(*urls, end=I.HANDED, written=None):
+    """written:逾時前 agent 有沒有把交件單寫進交件檔(逾時預設沒寫)。"""
+    if written is None:
+        written = end != I.TIMEOUT
     return Script((), {'candidates': [{'url': u, 'why': '符合', 'via': 'search', 'angle': '後端'} for u in urls],
-                       'notes': '往後端找', 'stopped': ''}, end)
+                       'notes': '往後端找', 'stopped': ''} if written else None, end)
 
 
 def row(material, url, keep='true', cites='verified', **extra):
@@ -692,7 +695,7 @@ class RoundTest(FindCase):
         first = browser.prompts[0]
         expect(self, 'J-22', ('機器人' in first, 'Acme' in first, '指定方向' in first, '使用者條件:\n{"exp_max": 3}\n' in first),
                (True, True, True, True))
-        expect(self, 'J-18', max(browser.timeouts) <= 7 * 60, True)
+        expect(self, 'J-18', (browser.timeouts[0] <= 7 * 60, browser.timeouts[1:]), (True, [3600]))   # 只限找那一段(#198 US10)
         expect(self, 'J-01', browser.fetches, [URL])          # 跑幾張:只讀前一張
         expect(self, 'J-13', (self.card() is not None, self.card(URL2) is None), (True, True))
         status = json.load(open(os.path.join(self.home.tmp['converge'], 'converge_status.json'), encoding='utf-8'))
@@ -731,9 +734,9 @@ class JudgeMaterialTest(FindCase):
 
 
 class ClockTest(FindCase):
-    """J-18:搜尋、判斷從同一個截止時間扣;暫停的時間不計;時間用完就不派判斷,照讀到的收尾。"""
+    """J-18、#198 US10/US17:時間上限只管「找」那一段;暫停的時間不計;判斷照樣做完。"""
 
-    def test_the_judge_gets_what_is_left_of_the_round(self):
+    def test_only_the_search_is_timed(self):
         import time
         import jobrun
         real, clock = time.time, {'later': 0, 'paused': 100}
@@ -745,17 +748,50 @@ class ClockTest(FindCase):
             return Script((('tool', tool),), search(URL).sheet)
         with mock.patch('time.time', lambda: real() + clock['later']), \
                 mock.patch.object(jobrun, 'current_paused', lambda: clock['paused']):
-            for took, paused, left in ((3600, 3700, True), (120, 100, False)):     # 搜尋一小時其中暫停一小時;搜尋兩分鐘沒暫停
+            for took, paused in ((3600, 3700), (120, 100)):     # 搜尋一小時其中暫停一小時;搜尋兩分鐘沒暫停(超過一分鐘上限)
                 case = (took, paused)
                 clock.update(later=0, paused=100)
                 self.home.write_board()
                 _code, browser = self.go(search_takes(took, paused), judge(lambda m: [row(m, URL)]), reads={URL: 'ok'},
                                          argv=['--minutes', '1'])
-                expect(self, 'J-18', [55 <= t <= 60 for t in browser.timeouts], [True, True] if left else [True], case)
+                expect(self, 'J-18', (55 <= browser.timeouts[0] <= 60, browser.timeouts[1:]), (True, [3600]), case)
                 status = self.home.status_file('converge')
-                expect(self, 'J-18', status['msg'],
-                       '' if left else '有 1 張候選核對不了，已列出；agent 沒交代', case)
+                expect(self, 'J-18', (status['msg'], status['added']), ('', 1), case)
                 expect(self, 'J-18', (status['took'], status['notes']), (took - (paused - 100), '往後端找'), case)
+
+
+class TimeupTest(FindCase):
+    """J-18、#198 US9/US12/US20/US22:agent 知道這一步有幾分鐘;時間到收下它寫進交件檔的候選(停掉那一刻正在寫的
+    下一版只寫了一半也一樣),同一輪判完進看板;
+    看板分得出跑完和時間到收下的;一張都沒寫照實講沒找到。"""
+
+    def test_time_up_keeps_what_the_agent_wrote(self):
+        self.home.write_board()
+        _code, browser = self.go(search(URL, end=I.TIMEOUT, written=True), judge(lambda m: [row(m, URL)]),
+                                 reads={URL: 'ok'}, argv=['--minutes', '7'])
+        self.assertIn('這一步最多 7 分鐘', browser.prompts[0])
+        self.assertRegex(browser.prompts[0], r'交件單同時寫進 (\S+sheet\.json):每多一列就寫一次整份,先寫到 \1\.tmp 再改名成 \1;')
+        status = self.home.status_file('converge')
+        expect(self, 'J-18', {k: status[k] for k in ('phase', 'timeup', 'found', 'added', 'msg')},
+               {'phase': 'done', 'timeup': True, 'found': 1, 'added': 1, 'msg': ''})
+        expect(self, 'J-18', (self.card() is not None, self.research()[-1]['end']), (True, 'timeup'))
+
+    def test_a_finished_round_is_not_marked_time_up(self):
+        self.home.write_board()
+        _code, browser = self.go(search(URL), judge(lambda m: [row(m, URL)]), reads={URL: 'ok'})
+        self.assertNotIn('這一步最多', browser.prompts[0])
+        expect(self, 'J-18', (self.home.status_file('converge').get('timeup'), self.research()[-1]['end']),
+               (False, 'finished'))
+
+    def test_time_up_with_nothing_or_a_broken_file(self):
+        for sheet, msg, card in ((None, '這一輪逾時', False), ('[1, 2', None, False)):
+            self.fresh()
+            _code, _browser = self.go(Script((), sheet, I.TIMEOUT), judge(lambda m: [row(m, URL)]), reads={URL: 'ok'},
+                                      argv=['--minutes', '7'])
+            status = self.home.status_file('converge')
+            expect(self, 'J-18', (status['found'], self.card() is not None), (0, card), sheet)
+            if msg:
+                expect(self, 'J-18', (status['phase'], status['timeup'], status['msg']), ('done', True, msg), sheet)
 
 
 class RoundCase(FindCase):
@@ -852,14 +888,18 @@ class WholeRoundTest(RoundCase):
                ('使用者指名的搜尋種子', '- 指定職缺網址：https://jobs.example/x\n- 指定公司：Acme')]
         listed = lambda pairs: '\n'.join(f'{title}:\n{text}' for title, text in pairs)       # noqa: E731
         search_prompt, judge_prompt = (self.sections(p) for p in browser.prompts)
+        sheet_file = re.search(r'交件單同時寫進 (\S+):', search_prompt['交件單格式']).group(1)    # 這一輪證據夾裡的交件檔
+        expect(self, 'J-18', (os.path.basename(sheet_file), os.path.isdir(os.path.dirname(sheet_file))), ('sheet.json', True))
         expect(self, 'J-22', search_prompt, {
             '目標': '依使用者的找缺 skill 與條件找可能符合需求的職缺,交回職缺網址。使用者決定要不要保留每張卡。',
             '材料': listed([*ask, ('使用者的找缺 skill', self.skill('common') + '\n\n' + self.skill('dir')), *self.shared(),
                            ('已在看板上的職缺網址', '\n'.join((self.OLD, self.SIDE, self.THIRD, self.FOURTH, self.FIFTH, self.SIXTH, self.SEVENTH)))]),
             '工具與用法': '網路搜尋:找候選職缺。\n' + find.FETCH,
-            '界線': '- 只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。\n'
+            '界線': '- 這一步最多 7 分鐘;時間到程式停掉你,收下交件檔裡的候選。\n'
+                  '- 只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。\n'
                   '- 網站筆記不記職缺內容、個人資料、登入資訊或推測;使用者寫的筆記列入移除也不會刪除。',
-            '交件單格式': find.SEARCH_SHEET.format_text()})
+            '交件單格式': find.SEARCH_SHEET.format_text() + f'\n交件單同時寫進 {sheet_file}:每多一列就寫一次整份,先寫到 {sheet_file}.tmp 再改名成 {sheet_file};'
+                                                         '時間到時程式收這個檔裡最後寫的那一份。'})
         material = re.search(r'material_id=(\w+)', judge_prompt['材料']).group(1)
         page = '\n'.join(f'{n}. {text}' for n, text in enumerate(PARTS + self.EXTRA, 1))
         old = '\n'.join(f'{n}. {text}' for n, text in enumerate((
@@ -928,13 +968,13 @@ class WholeRoundTest(RoundCase):
         expect(self, 'J-20', (seen, final, code), ({'search': dict(running, phase='start'),
                                                     'judge': dict(running, phase='agent', step='核對 agent 引的職缺頁原文')},
                                                    dict(running, phase='done', added=1, dropped=0, dropped_by={}, msg='', found=1, over=0,
-                                                        notes=('往後端找' + 'x' * 600)[:600]), 0))
+                                                        notes=('往後端找' + 'x' * 600)[:600], timeup=False), 0))
         expect(self, 'J-20', clocks[0] == clocks[2] == clocks[4] <= clocks[1] <= clocks[3] <= clocks[5], True)
         history = self.research()
         expect(self, 'J-23', (len(history), history[-1]), (10, {
             'round': stamp, 'mode': 'dir', 'direction': '機器人', 'judged': 1, 'dropped': {}, 'gone': [], 'terms_missed': {},
             'notes': ('往後端找' + 'x' * 600)[:600], 'seeds': [{'k': 'job', 'v': 'https://jobs.example/x'}, {'k': 'co', 'v': 'Acme'}],
-            'added': [URL]}))
+            'added': [URL], 'end': 'finished'}))
         expect(self, 'J-20', printed.splitlines()[-2:], ['找缺：完成', '這輪新增 1 筆職缺(在看板「🆕 待評估」)'])
         with open(cf.PREFS, encoding='utf-8') as export:
             expect(self, 'J-19', '喜歡這種' in export.read(), True)
@@ -981,9 +1021,9 @@ class EmptyRoundTest(RoundCase):
             final.pop(key)
         expect(self, 'J-20', (code, final, printed.splitlines()[-2:], [dict(row, round='') for row in self.research()]), (
             0, {'pid': os.getpid(), 'mode': 'both', 'direction': '', 'minutes': None, 'graceful': True, 'phase': 'done', 'added': 0,
-                'dropped': 0, 'dropped_by': {}, 'msg': '', 'found': 0, 'notes': ''}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
+                'dropped': 0, 'dropped_by': {}, 'msg': '', 'found': 0, 'notes': '', 'timeup': False}, ['找缺：完成', '這輪新增 0 筆職缺(在看板「🆕 待評估」)'],
             [{'round': '', 'mode': 'both', 'direction': '', 'judged': 0, 'dropped': {}, 'gone': [], 'terms_missed': {}, 'notes': '', 'seeds': [],
-              'added': []}]))
+              'added': [], 'end': 'finished'}]))
 
 
 class FindNotesTest(FindCase):
@@ -1031,7 +1071,8 @@ class SearchEndTest(FindCase):
             history = self.research()[-1]
             expect(self, 'J-23', dict(history, round=''), {
                 'round': '', 'mode': 'both', 'direction': '', 'judged': int(handed), 'dropped': {}, 'gone': [], 'terms_missed': {},
-                'notes': '往後端找' if handed else '', 'seeds': [], 'added': [URL] if handed else []}, end)
+                'notes': '往後端找' if handed else '', 'seeds': [], 'added': [URL] if handed else [],
+                'end': 'finished' if handed else 'timeup' if end == I.TIMEOUT else 'failed'}, end)
             expect(self, 'J-18', browser.timeouts, [4 * 3600, 3600] if handed else [4 * 3600], end)   # 沒給時間上限:搜尋 4 小時、判斷 1 小時
             if not handed:
                 rest = {key: value for key, value in status.items() if key not in ('msg', 't0', 'at', 'finished_at', 'pid', 'took')}

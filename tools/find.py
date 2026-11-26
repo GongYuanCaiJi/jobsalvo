@@ -211,16 +211,17 @@ def round_terms(ask):
     return find_terms.normalize(json.loads(ask['terms']))
 
 
-def search_brief(ask, shared, jobs):
+def search_brief(ask, shared, jobs, minutes=None):
     urls = '\n'.join(dict.fromkeys(job['id'] for job in jobs))
     return Brief(
         '依使用者的找缺 skill 與條件找可能符合需求的職缺,交回職缺網址。使用者決定要不要保留每張卡。',
         (*_ask(ask), ('使用者的找缺 skill', _search_skills(ask['mode'])), *shared,
          ('已在看板上的職缺網址', urls or '(目前沒有)')),
         ('網路搜尋:找候選職缺。', FETCH),
-        ('只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。',
+        (*((f'這一步最多 {minutes} 分鐘;時間到程式停掉你,收下交件檔裡的候選。',) if minutes else ()),
+         '只讀網站,不應徵、不登入、不輸入密碼、不留言或私訊。',
          '網站筆記不記職缺內容、個人資料、登入資訊或推測;使用者寫的筆記列入移除也不會刪除。'),
-        SEARCH_SHEET)
+        SEARCH_SHEET, sheet_file=True)
 
 
 def resume_choices():
@@ -527,7 +528,7 @@ def _save_website_notes(sheet, round_id):
 
 
 class Run:
-    """一輪找缺共用的時間上限:搜尋、整理偏好、判斷都從同一個截止時間扣;暫停的時間不計(J-18)。"""
+    """一輪找缺的時間上限只管「找」那一段;整理偏好、判斷照樣做完(#198 US10、J-18);暫停的時間不計。"""
 
     def __init__(self, board, browser, minutes):
         import jobrun
@@ -546,9 +547,9 @@ class Run:
     def left(self, default):
         return default if self.deadline is None else max(0, int(self.deadline + self.paused() - time.time()))
 
-    def agent(self, brief, known, default, materials=()):
-        """派一個 agent;時間用完就不派,這一輪照讀到的收尾。"""
-        seconds = self.left(default)
+    def agent(self, brief, known, default, materials=(), timed=False):
+        """派一個 agent;timed(找那一段)才受時間上限,時間用完就不派。"""
+        seconds = self.left(default) if timed else default
         return run_round('find', brief, self.browser, timeout_s=seconds, board=self.board, workspace=NO_WORKSPACE,
                          known=known, materials=materials) if seconds else record_unstarted(
             brief, 'find', self.board, '找缺的時間到了')
@@ -608,7 +609,10 @@ def run(ask, board, browser, limit, minutes):
         added = _save(board, entries, {'round': stamp, 'mode': ask['mode'], 'direction': ask['direction'],
                                        'judged': judged, 'dropped': dict(drop), 'gone': list(gone_rows),
                                        'terms_missed': dict(terms_missed),
-                                       'notes': notes[:600], 'seeds': list(ask['seeds'])})
+                                       'notes': notes[:600], 'seeds': list(ask['seeds']),
+                                       # 這輪怎麼收尾,看板「最近幾輪」照這個寫;升級前的紀錄沒有這一欄,看板不標
+                                       'end': 'timeup' if values.get('timeup') else
+                                              'failed' if values.get('phase') == 'failed' else 'finished'})
         if added:
             import prefs
             prefs.refresh_like(board)
@@ -622,17 +626,18 @@ def run(ask, board, browser, limit, minutes):
     subprocess.run([sys.executable, os.path.join(HERE, 'feedback_dump.py'), '--live', board])   # 更新他資料夾裡的逐張表態匯出
     shared, feedback, jobs = user_materials(board)
     current = Run(board, browser, minutes)
-    search = current.agent(search_brief(ask, shared, jobs), {}, 4 * 3600)
+    search = current.agent(search_brief(ask, shared, jobs, minutes), {}, 4 * 3600, timed=True)
     notes = joined(search.sheet.said('notes'))
-    if search.end is not End.HANDED or search.sheet.broken:
-        timeup = search.end is End.TIMEOUT
+    timeup = search.end is End.TIMEOUT
+    harvested = timeup and not search.sheet.broken and bool(search.sheet.rows('candidates'))   # 時間到收下交件檔裡的(#198)
+    if (search.end is not End.HANDED and not harvested) or search.sheet.broken:
         why = (search.sheet.broken.text if search.sheet.broken else
                'agent 沒交代' if search.end is End.NO_SHEET else
                '這一輪沒有啟動' if search.end is End.NOT_STARTED else
                say('ENDED', end=end_label(search.end)).text)
         finish([], 0, notes, [why], phase='done' if timeup else 'failed', found=0, timeup=timeup)
         return 0 if timeup else 1
-    status('agent', step='整理新表態偏好')
+    status('agent', step=f"時間到，停止找新的，正在判找到的 {len(search.sheet.rows('candidates'))} 張" if timeup else '整理新表態偏好')
     messages = [*(mark.text for mark in stops(search)), _save_website_notes(search.sheet, search.id),
                 _update_preference_note(current)]
     candidates = {}
@@ -647,7 +652,7 @@ def run(ask, board, browser, limit, minutes):
     fresh = [url for url in candidates if url not in have and url not in turned]
     urls = fresh[:limit or None]   # 跑幾張:清掉的不算
     if not urls:
-        finish([], 0, notes, messages, gone_rows, found=len(candidates))
+        finish([], 0, notes, messages, gone_rows, found=len(candidates), timeup=timeup)
         return 0
     review_round = evidence.Round('find', 'review', urls, board)
     pages, shots = read_urls(browser, urls, review_round)
@@ -682,7 +687,8 @@ def run(ask, board, browser, limit, minutes):
     if unmatched:
         problems.append(f'另有 {unmatched} 項沒比到')
     messages[:0] = [*problems, *(mark.text for mark in stops(judged))]
-    finish(entries, len(urls) - incomplete, notes, messages, gone_rows, found=len(candidates), over=len(fresh) - len(urls))
+    finish(entries, len(urls) - incomplete, notes, messages, gone_rows, found=len(candidates), over=len(fresh) - len(urls),
+           timeup=timeup)
     return 0
 
 

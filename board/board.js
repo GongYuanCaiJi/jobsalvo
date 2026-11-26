@@ -3805,7 +3805,7 @@
       (r.added||[]).forEach(function(u){var f=FB[u]||{};
         if(f.s||f.app||f.rm)seen++; if(f.app||f.s==='like'||f.s==='grow')like++; else if(f.s==='dislike')dis++;});
       var what=(FIND_MODE[r.mode]||r.mode)+(r.direction?'「'+r.direction+'」':''), muted=!!r.direction&&mute.indexOf(r.direction)>=0;
-      return '<div class="find-r"><div class="find-r1"><b>'+esc(what)+'</b><span class="find-rt">'+esc(r.round||'')+'</span></div>'+
+      return '<div class="find-r"><div class="find-r1"><b>'+esc(what)+'</b><span class="find-rt">'+esc(r.round||'')+({finished:' · 跑完',timeup:' · 時間到收下的',failed:' · 沒跑完'}[r.end]||'')+'</span></div>'+
         '<div class="find-r2">判了 '+(r.judged||0)+' 張、送進板 '+(r.added||[]).length+' 張'+missedTerms(r)+';你看過 '+seen+'、喜歡 '+like+'、不喜歡 '+dis+
         (r.direction?'<button class="cust-b '+(muted?'take':'ask')+'" type="button" data-fmute="'+escA(r.direction)+'">'+
           (muted?ic('check')+' 說過別再找':'別再往這找')+'</button>':'')+'</div>'+

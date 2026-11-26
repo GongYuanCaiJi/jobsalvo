@@ -5,6 +5,7 @@ import dataclasses
 import enum
 import json
 import os
+import shutil
 
 from web import cite, seen, snap
 from web.brief import Brief
@@ -101,6 +102,9 @@ def steps(directory: str) -> tuple[Step, ...]:
     return tuple(found.values())
 
 
+SHEET_FILE = 'sheet.json'     # brief.sheet_file 的 agent 自己寫的交件檔;時間到也收(#198)
+
+
 def _record(brief: Brief, task: str, directory: str, *, workspace=0, end=End.NOT_STARTED,
             why='', handoff=None, session=None, agent_id=None, runtime=None, schema=None, known=None, materials=()):
     selected = schema or brief.handoff
@@ -109,7 +113,7 @@ def _record(brief: Brief, task: str, directory: str, *, workspace=0, end=End.NOT
     # 沒有交件單是這一輪怎麼結束(沒有交件單、沒啟動),不另記成交件單壞掉(A-16)
     sheet = Sheet({}, {}) if not os.path.isfile(path) else read_sheet(
         path, selected, Context((*(snapshot.material for snapshot in (*snapshots_before, *snapshots_after)), *materials), known or {}))
-    return RoundRecord(os.path.basename(directory), task, directory, brief.render(workspace=workspace), workspace,
+    return RoundRecord(os.path.basename(directory), task, directory, _render(brief, workspace, directory), workspace,
                        tuple(snapshots_before), tuple(snapshots_after), handoff, steps(directory), end, why,
                        sheet, session,
                        agent_id, runtime)
@@ -134,7 +138,7 @@ def run(task: str, brief: Brief, browser, *, timeout_s: int, board=None, read_at
         evidence_round.note('program_error', reason=str(error) or type(error).__name__)
         return _record(brief, task, directory, end=End.NOT_STARTED, why=str(error) or type(error).__name__)
 
-    brief_text = brief.render(workspace=workspace)
+    brief_text = _render(brief, workspace, directory)
     evidence_round.instruction(brief_text)
     if resume and agent_id and resume_runtime and _runtime(agent_id) != resume_runtime:
         resume = None       # 設定裡那個 agent 換了 runtime,原本的 session 接不回去
@@ -145,6 +149,7 @@ def run(task: str, brief: Brief, browser, *, timeout_s: int, board=None, read_at
     except (OSError, RuntimeError, ValueError) as error:
         end, why, session, used_agent = End.CRASHED, str(error), None, agent_id
     else:
+        _take_sheet_file(brief, directory)
         end = _end(result.status, os.path.join(directory, 'handoff.json'))
         why, session, used_agent = result.why, result.session, result.agent_id or agent_id
     if end is not End.HANDED and why:
@@ -160,6 +165,17 @@ def run(task: str, brief: Brief, browser, *, timeout_s: int, board=None, read_at
                      session=session, agent_id=used_agent, runtime=_runtime(used_agent), known=known,
                      materials=materials)
     return _hand_over(record, browser)
+
+
+def _render(brief: Brief, workspace: int, directory: str) -> str:
+    return brief.render(workspace=workspace, sheet_file=os.path.join(directory, SHEET_FILE))
+
+
+def _take_sheet_file(brief: Brief, directory: str) -> None:
+    """agent 自己寫的交件檔就是這一輪的交件單(最後一則訊息可能只是一句話);逾時也照收。"""
+    written = os.path.join(directory, SHEET_FILE)
+    if brief.sheet_file and os.path.isfile(written):
+        shutil.copyfile(written, os.path.join(directory, 'handoff.json'))
 
 
 def _hand_over(record: RoundRecord, browser) -> RoundRecord:
