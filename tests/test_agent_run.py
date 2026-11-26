@@ -532,6 +532,27 @@ class ClaudeCodeRuntime(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual('{"a":"A","b":"B"}', handed_in)
 
+    def test_a_long_hand_in_reaches_the_program_whole(self):
+        # 實測:找缺判斷 48 張,交件那一行 5 萬多字;程式只讀紀錄最後 5 萬字就記成當掉、交件單是空的
+        payload = json.dumps({'candidates': [{'url': f'https://example.test/{i}', 'why': '字' * 400}
+                                             for i in range(200)]}, ensure_ascii=False)
+        with tempfile.TemporaryDirectory(prefix='agent-cc-long-') as d:
+            reply = os.path.join(d, 'reply.jsonl')
+            with open(reply, 'w', encoding='utf-8') as f:
+                f.write(self.result_line(result=payload) + '\n')
+            fake = os.path.join(d, 'claude')
+            with open(fake, 'w', encoding='utf-8') as f:
+                f.write(f"#!/bin/sh\ncat >/dev/null\ncat '{reply}'\n")
+            os.chmod(fake, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+            sheet = os.path.join(d, 'sheet.txt')
+            with self.settings([self.entry('cc', 'claude-code')]), \
+                    patch.object(ar, 'claude_bin', return_value=fake):
+                result = ar.run('task', os.path.join(d, 'task.log'), d, output_last_message=sheet)
+            handed_in = open(sheet, encoding='utf-8').read() if os.path.exists(sheet) else ''
+
+        self.assertEqual('completed', result.status)
+        self.assertEqual(payload, handed_in)
+
     def test_failure_reasons_come_from_the_result(self):
         cases = (
             (self.result_line(is_error=True, result='Not logged in · Please run /login'), 'authentication'),

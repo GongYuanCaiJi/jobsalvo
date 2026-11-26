@@ -512,8 +512,7 @@ def _log_text(path, offset=0):
     try:
         with open(path, encoding='utf-8', errors='replace') as f:
             f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(min(offset, size), size - 50000))
+            f.seek(min(offset, f.tell()))
             return f.read()
     except OSError:
         return ''
