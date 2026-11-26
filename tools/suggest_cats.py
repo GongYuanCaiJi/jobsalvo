@@ -52,7 +52,7 @@ def main():
     import prefs, agent_run as ar
     st = lambda d: jobrun.write(os.path.join(SP, STATUS), d)
     t0 = time.time()
-    out = os.path.join(SP, OUT)
+    out = os.path.abspath(os.path.join(SP, OUT))      # agent 從空資料夾開始:交件路徑一律給完整的
     for old in (out, os.path.join(SP, SHOWN)):
         with contextlib.suppress(OSError):   # 上一次沒留下
             os.remove(old)
@@ -60,7 +60,7 @@ def main():
     fb, jobs = prefs.load(a.board)
     import evidence
     with evidence.opened('suggest_cats', 'suggest', (), a.board) as rnd:   # 沒有卡:記進這個流程自己的夾(#315)
-        result = ar.run(prompt(out, fb, jobs), os.path.join(SP, 'suggest_agent.out'), cf.HOME,
+        result = ar.run(prompt(out, fb, jobs), os.path.join(SP, 'suggest_agent.out'),
                         timeout=1800, browser_required=False, board=a.board)
         rnd.handoff(out)
     if not result.ok:

@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -115,7 +116,7 @@ class BrowserCapability(unittest.TestCase):
         self.assertIn('CHROME-PLUGIN-ENABLED', argv)
         lean.assert_called_once_with(True)
         runtime.assert_called()
-        self.assertIn('ego-browser nodejs', prompt)
+        self.assertIn('ego-browser skill', prompt)
         self.assertNotIn('【抓網頁鐵律】', prompt)
 
     def test_browser_commands_keep_the_ego_wrapper_ahead_of_shell_startup_path(self):
@@ -177,6 +178,76 @@ class LeanParity(unittest.TestCase):
         self.assertIn('--disable-slash-commands', argv)
 
 
+class CodexHomeConfig(unittest.TestCase):
+    def test_codex_tools_are_turned_off_from_the_config_codex_actually_reads(self):
+        # #838:設了 CODEX_HOME 的電腦,codex 讀 $CODEX_HOME/config.toml 與 $CODEX_HOME/skills;
+        # 以前只看 ~/.codex,那裡沒有設定檔時使用者掛的 MCP、skill 一個都沒關,照樣列給 agent
+        with tempfile.TemporaryDirectory(prefix='codex-home-') as home:
+            with open(os.path.join(home, 'config.toml'), 'w', encoding='utf-8') as f:
+                f.write('[mcp_servers.probe]\ncommand = "probe"\n')
+            os.makedirs(os.path.join(home, 'skills', 'mine'))
+            open(os.path.join(home, 'skills', 'mine', 'SKILL.md'), 'w').close()
+            with patch.dict(os.environ, {'CODEX_HOME': home}):
+                argv, _ = ar.argv_for({'id': 'c', 'runtime': 'codex', 'model': '', 'effort': 'low'}, 'hi', home)
+        self.assertIn('mcp_servers.probe.enabled=false', argv)
+        self.assertIn(os.path.join(home, 'skills', 'mine', 'SKILL.md'),
+                      next(x for x in argv if x.startswith('skills.config=')))
+
+
+class CodexOwnInstructions(unittest.TestCase):
+    """#838:使用者寫給自己的 codex 的全域指示($CODEX_HOME/AGENTS.md)不交給派出去的 codex;登入、設定、對話紀錄照舊同一份。"""
+
+    def launched_home(self, real, config=''):
+        with open(os.path.join(real, 'config.toml'), 'w', encoding='utf-8') as f:
+            f.write(config)
+        seen = {}
+
+        def popen(argv, **kw):
+            seen.update(kw['env'])
+            return SimpleNamespace(pid=1)
+        with tempfile.TemporaryDirectory(prefix='agent-out-') as out, patch.dict(os.environ, {'CODEX_HOME': real}), \
+                patch.object(ar.subprocess, 'Popen', side_effect=popen):
+            ar.launch('hi', os.path.join(out, 'log'), out, {'id': 'c', 'runtime': 'codex', 'model': '', 'effort': 'low'})
+        return seen['CODEX_HOME']
+
+    def test_the_agent_codex_home_has_everything_but_the_users_own_instructions(self):
+        with tempfile.TemporaryDirectory(prefix='codex-real-') as base:
+            real = os.path.join(base, 'Codex')
+            os.makedirs(os.path.join(real, 'sessions'))
+            for name, text in (('AGENTS.md', '使用者寫給自己的規則'), ('AGENTS.override.md', '另一份'), ('auth.json', '{}')):
+                with open(os.path.join(real, name), 'w', encoding='utf-8') as f:
+                    f.write(text)
+            home = self.launched_home(real)
+            self.assertNotEqual(os.path.realpath(home), os.path.realpath(real))
+            self.assertEqual(sorted(os.listdir(home)), ['auth.json', 'auth.lock', 'config.toml', 'sessions'])
+            for name in os.listdir(home):        # 寫進去的都落在原處:登入更新、鎖、對話紀錄兩邊同一份
+                self.assertEqual(os.path.realpath(os.path.join(home, name)), os.path.realpath(os.path.join(real, name)))
+            self.assertEqual(self.launched_home(real), home)     # 每次同一個資料夾,接續對話找得到
+
+    def test_a_folder_the_program_did_not_make_is_left_alone(self):
+        # 旁邊剛好有同名的資料夾、裡面是使用者自己的登入檔與指示:不刪不改,照舊用原本的家目錄
+        with tempfile.TemporaryDirectory(prefix='codex-real-') as base:
+            real, theirs = os.path.join(base, 'Codex'), os.path.join(base, 'Codex-jobsalvo-agent')
+            os.makedirs(real)
+            os.makedirs(theirs)
+            for folder in (real, theirs):
+                for name in ('auth.json', 'AGENTS.md'):
+                    with open(os.path.join(folder, name), 'w', encoding='utf-8') as f:
+                        f.write(folder)
+            self.assertEqual(self.launched_home(real), real)
+            self.assertEqual(sorted(os.listdir(theirs)), ['AGENTS.md', 'auth.json'])
+
+    def test_login_kept_in_the_keychain_stays_on_the_users_codex_home(self):
+        # 鑰匙圈的鑰匙是 CODEX_HOME 的路徑:換資料夾就登不進去,照舊用原本的
+        with tempfile.TemporaryDirectory(prefix='codex-real-') as real:
+            with open(os.path.join(real, 'auth.json'), 'w', encoding='utf-8') as f:
+                f.write('{}')
+            for config in ('cli_auth_credentials_store = "keyring"\n', "cli_auth_credentials_store = 'keyring'\n"):
+                self.assertEqual(self.launched_home(real, config), real, config)
+        with tempfile.TemporaryDirectory(prefix='codex-real-') as real:      # 沒有登入檔:登入不在檔案裡
+            self.assertEqual(self.launched_home(real), real)
+
+
 class CodexBinary(unittest.TestCase):
     """ChatGPT App 更新會把附的 codex 換位置,PATH 上的捷徑就斷了;斷了要去 App 裡找,不是整個派不出 agent。"""
 
@@ -222,7 +293,7 @@ class OrderedDispatch(unittest.TestCase):
             stack.enter_context(patch.object(ar, 'launch', side_effect=launch))
             stack.enter_context(patch.object(ar, 'wait_done', side_effect=waits))
             log = os.path.join(d, 'task.log')
-            result = ar.run(prompt, log, d, **run_kw)
+            result = ar.run(prompt, log, **run_kw)
             with open(log, encoding='utf-8') as f:
                 return result, f.read()
 
@@ -304,7 +375,7 @@ class OrderedDispatch(unittest.TestCase):
                 [ar.AgentResult('failed', 10, 201)], [ar.AgentResult('completed', 0, 202)],
             ]),
         ):
-            ar.run('task prompt', os.path.join(d, 'judge_3.out'), d)
+            ar.run('task prompt', os.path.join(d, 'judge_3.out'))
             with open(os.path.join(d, 'agent-runs.jsonl'), encoding='utf-8') as f:
                 rows = [json.loads(line) for line in f]
         self.assertEqual([(r['agent'], r['try'], r['status'], r['reason']) for r in rows],
@@ -331,7 +402,7 @@ class OrderedDispatch(unittest.TestCase):
             ]),
         ):
             log = os.path.join(d, 'task.log')
-            result = ar.run('task', log, d)
+            result = ar.run('task', log)
             with open(log, encoding='utf-8') as f:
                 text = f.read()
 
@@ -454,7 +525,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
         self.assertNotIn('x', browse)
         self.assertIn('--no-chrome', argv)                      # 不用瀏覽器的工作不載入 Chrome 工具
         self.assertNotIn('permissions', json.loads(browse[browse.index('--settings') + 1]))
-        self.assertIn('ego-browser nodejs', rules)
+        self.assertIn('ego-browser skill', rules)
         self.assertNotIn('markHandoff()', rules)
 
     def test_launch_feeds_the_prompt_through_stdin(self):
@@ -507,7 +578,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
             patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
         ):
             log = os.path.join(d, 'task.log')
-            self.assertEqual(ar.run('task', log, d).status, 'completed')
+            self.assertEqual(ar.run('task', log).status, 'completed')
             self.assertEqual(ar.session_id(log), '0b1c2d3e-0000-4000-8000-000000000001')
 
     def test_sub_agent_results_reach_the_hand_in(self):
@@ -525,12 +596,32 @@ class ClaudeCodeRuntime(unittest.TestCase):
             with self.settings([self.entry('cc', 'claude-code')]), \
                     patch.object(ar, 'claude_bin', return_value=fake), \
                     patch.dict(os.environ, {'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS': ''}):
-                result = ar.run('task', os.path.join(d, 'task.log'), d, output_last_message=sheet)
+                result = ar.run('task', os.path.join(d, 'task.log'), output_last_message=sheet)
             with open(sheet, encoding='utf-8') as f:
                 handed_in = f.read()
 
         self.assertTrue(result.ok)
         self.assertEqual('{"a":"A","b":"B"}', handed_in)
+
+    def test_the_agent_gets_only_the_environment_its_tools_need(self):
+        # #838 第 4 項:以前整份環境照抄,程式自己的設定(連接埠、暫存夾、開發開關)也交給 agent
+        with tempfile.TemporaryDirectory(prefix='agent-cc-env-') as d:
+            dump = os.path.join(d, 'env.txt')
+            fake = os.path.join(d, 'claude')
+            with open(fake, 'w', encoding='utf-8') as f:
+                f.write(f"#!/bin/sh\ncat >/dev/null\nenv > '{dump}'\necho '{self.result_line()}'\n")
+            os.chmod(fake, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions  暫存夾裡的假指令要能執行
+            mine = {'JOBSALVO_PORT': '8899', 'JOBSALVO_PREVIEW': '{}', 'SUGGEST_TMP': d, 'JOB_FAKE_STEP': '1',
+                    'JOBSALVO_TEST_ALLOW_LOOPBACK_FETCH': '1'}
+            with self.settings([self.entry('cc', 'claude-code')]), \
+                    patch.object(ar, 'claude_bin', return_value=fake), patch.dict(os.environ, mine):
+                self.assertTrue(ar.run('task', os.path.join(d, 'task.log')).ok)
+            with open(dump, encoding='utf-8') as f:
+                got = dict(line.split('=', 1) for line in f.read().splitlines() if '=' in line)
+
+        self.assertEqual({k for k in mine if k in got}, {'JOBSALVO_TEST_ALLOW_LOOPBACK_FETCH'})
+        self.assertIn('JOBSALVO_HOME', got)          # 小工具照它找回使用者資料
+        self.assertIn('JOBSALVO_BOARD_ID', got)
 
     def test_a_long_hand_in_reaches_the_program_whole(self):
         # 實測:找缺判斷 48 張,交件那一行 5 萬多字;程式只讀紀錄最後 5 萬字就記成當掉、交件單是空的
@@ -547,7 +638,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
             sheet = os.path.join(d, 'sheet.txt')
             with self.settings([self.entry('cc', 'claude-code')]), \
                     patch.object(ar, 'claude_bin', return_value=fake):
-                result = ar.run('task', os.path.join(d, 'task.log'), d, output_last_message=sheet)
+                result = ar.run('task', os.path.join(d, 'task.log'), output_last_message=sheet)
             handed_in = open(sheet, encoding='utf-8').read() if os.path.exists(sheet) else ''
 
         self.assertEqual('completed', result.status)
@@ -584,7 +675,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
             patch.object(ar, '_claude_outcome', return_value={'is_error': False, 'subtype': 'success'}),
             evidence.opened('sync', 'profile') as rnd,
         ):
-            self.assertTrue(ar.run('TASK BODY', os.path.join(d, 't.log'), d, browser_required=True).ok)
+            self.assertTrue(ar.run('TASK BODY', os.path.join(d, 't.log'), browser_required=True).ok)
             with open(os.path.join(rnd.dirs[0], evidence.EVENTS), encoding='utf-8') as f:
                 names = [row['file'] for row in map(json.loads, f) if row.get('kind') == 'instruction']
             with open(os.path.join(rnd.dirs[0], names[0]), encoding='utf-8') as f:
@@ -609,7 +700,7 @@ class ClaudeCodeRuntime(unittest.TestCase):
             patch.object(ar, 'wait_done', return_value=[ar.AgentResult('completed', 0, 101)]),
             patch.object(ar, '_claude_outcome', return_value={'is_error': False, 'subtype': 'success'}),
         ):
-            self.assertTrue(ar.run('task', os.path.join(d, 't.log'), d, browser_required=True).ok)
+            self.assertTrue(ar.run('task', os.path.join(d, 't.log'), browser_required=True).ok)
             self.assertEqual(chrome_door.current().runtime, 'claude-code')
         self.assertEqual(seen, [('cc', True)])
         with self.settings([self.entry('cm', 'command-code', browser=True)]):

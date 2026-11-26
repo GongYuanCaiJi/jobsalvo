@@ -90,7 +90,8 @@ def round_apply(stage: str, **fields) -> dict:
 
 
 def brief(stage: str, card_id: str, job: dict, fb: dict, note: str) -> Brief:
-    """目標、材料(職缺、要寄的檔、常用答案、網站筆記、修改說明、使用者填表規則)、工具、界線、交件單(F-02)。"""
+    """目標、材料(職缺、卡片上的職缺名稱、要寄的檔、常用答案、網站筆記、修改說明、使用者填表規則)、工具、界線、交件單(F-02)。"""
+    import card
     import form_record
     import profile_sync
     import ship
@@ -102,7 +103,7 @@ def brief(stage: str, card_id: str, job: dict, fb: dict, note: str) -> Brief:
     rules = pathlib.Path(cf.APPLY_RULES).read_text(encoding='utf-8').strip() if os.path.isfile(cf.APPLY_RULES) else ''
     materials = (
         ('職缺網址', card_id),
-        ('卡片資料', json.dumps(job, ensure_ascii=False)),
+        ('卡片上的職缺', card.name(job)),
         ('要送的檔案', '\n'.join(str(x.get('send_name') or x.get('name')) for x in documents)),
         ('履歷與附件材料檔案', '\n'.join(f'- {x.get("send_name") or x.get("name")}: {x.get("effective_path")}'
                                  for x in documents if x.get('effective_path')) or '(沒有可讀檔案)'),

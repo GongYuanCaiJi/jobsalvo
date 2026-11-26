@@ -127,7 +127,11 @@ def agent_free(board=None):
     except Exception:  # noqa: BLE001 — 讀不到看板(含被繞過改過)就當開關沒撥開(預設值);只影響要不要叫 agent 自己決定拆幾隻
         return False
 
-CODEX_CONFIG='~/.codex/config.toml'
+CODEX_CONFIG = None          # None:codex 實際讀的那份($CODEX_HOME/config.toml,沒設是 ~/.codex)
+
+
+def _codex_home():
+    return os.environ.get('CODEX_HOME') or os.path.expanduser('~/.codex')
 
 def lean(chrome=False):
     """派 codex 時只開這一輪用得到的工具。全域設定可能掛了十幾個 MCP 和外掛,agent 一開頭會照全域指示
@@ -135,7 +139,7 @@ def lean(chrome=False):
     hooks 也關:全域 hooks 多半是規劃文件、壓縮 context 這類輔助,開著的話每一輪開頭都會被塞跟這些流程無關的指示。
     網頁搜尋是內建工具,不受影響。"""
     try:
-        with open(os.path.expanduser(CODEX_CONFIG),encoding='utf-8') as f:
+        with open(os.path.expanduser(CODEX_CONFIG or os.path.join(_codex_home(), 'config.toml')),encoding='utf-8') as f:
             cfg=f.read()
     except OSError:
         cfg=''
@@ -155,13 +159,13 @@ def lean(chrome=False):
         out+=['-c','skills.config=['+','.join('{path=%s,enabled=false}'%json.dumps(p) for p in skills)+']']
     return out
 
-CODEX_SKILL_DIRS = ('~/.codex/skills', '~/.agents/skills')
+CODEX_SKILL_DIRS = None      # None:$CODEX_HOME/skills 與 ~/.agents/skills(codex 自己找的那幾個)
 
 
 def codex_skills():
     """codex 會自動列給 agent 的 skill(每個 SKILL.md 的完整路徑)。"""
     found,seen=[],set()
-    for base in CODEX_SKILL_DIRS:
+    for base in CODEX_SKILL_DIRS or (os.path.join(_codex_home(), 'skills'), '~/.agents/skills'):
         # 很多 skill 是捷徑(symlink)資料夾:要跟進去,codex 也會;記走過的真實路徑,捷徑繞圈也不會走不完
         for root,dirs,files in os.walk(os.path.expanduser(base),followlinks=True):
             real=os.path.realpath(root)
@@ -326,12 +330,21 @@ def codex_bin(which=None, app_bins=CODEX_APP_BINS):
     return next((p for p in app_bins if os.path.isfile(p) and os.access(p, os.X_OK)), None)
 
 
+# agent 呼叫的小工具(agent_report、改卡片、page_fetch、jobsalvo-before/after、ego 包裝)要的環境;其他 JOBSALVO_ 開頭的是程式自己的
+TOOL_ENV = frozenset(('JOBSALVO_HOME', 'JOBSALVO_BOARD_ID', 'JOBSALVO_REPORT_FROM', 'JOBSALVO_AGENT_PATH',
+                      'JOBSALVO_EGO_REAL_BIN', 'JOBSALVO_EGO_EVIDENCE_DIRS', 'JOBSALVO_EGO_WORKSPACE',
+                      'JOBSALVO_TEST_ALLOW_LOOPBACK_FETCH', 'JOBSALVO_BROWSER_TEST_RUN'))
+
+
 def agent_env(board, argv=(), *said, chrome=False):
     """派出去的 agent 的環境:不含看板檔的位置,只有代號(board_doc.BOARD_ID);它呼叫的小工具照代號找回這一份(#307)。
     指示或環境裡帶著看板檔的位置就不派:那等於讓 agent 能繞過狀態表直接改檔。"""
     import board_doc as bd
     live = os.fspath(board) if board else bd.target()
-    env = os.environ.copy()
+    # 程式自己的設定不交給 agent(#838):只留它呼叫的小工具找得到使用者資料要的那幾個(JOBSALVO_HOME 等)
+    env = {k: v for k, v in os.environ.items()
+           if not (k.endswith('_TMP') or k.startswith(('JOB_FAKE_', 'BOARD_CHECK_'))
+                   or (k.startswith('JOBSALVO_') and k not in TOOL_ENV))}
     env.pop('AGENT_BOARD', None)
     env[bd.BOARD_ID] = bd.board_id(live)
     env.pop(REPORT_FROM_ENV, None)
@@ -388,6 +401,8 @@ def launch(prompt, outfile, repo, model='main', effort=None, browser=None, resum
             _attempt_line(log, agent)
             log.flush()
             env = agent_env(board, argv, prompt, fed, chrome=chrome)
+            # 每一家都給:只有 codex 讀它;別家 agent 自己再叫 codex 時也不讀使用者的全域 AGENTS.md
+            env['CODEX_HOME'] = codex_agent_home(env.get('CODEX_HOME') or os.path.expanduser('~/.codex'))
             return subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True, env=env)
         except OSError as e:
@@ -395,6 +410,47 @@ def launch(prompt, outfile, repo, model='main', effort=None, browser=None, resum
         finally:
             if stdin is not subprocess.DEVNULL:
                 stdin.close()        # 子行程已經拿到自己那一份檔案描述子
+
+CODEX_OWN_INSTRUCTIONS = ('AGENTS.md', 'AGENTS.override.md')
+
+
+def codex_agent_home(real):
+    """派出去的 codex 用的 CODEX_HOME(#838):codex 會把 $CODEX_HOME/AGENTS.md(使用者寫給自己的 codex 的全域指示)
+    交給 agent,0.166 沒有開關可關。旁邊開一個固定的資料夾,裡面每一項都是指回原處的捷徑,只少那兩份指示;
+    codex 寫登入檔、拿 auth.lock 都是直接開那個路徑(跟著捷徑寫回原檔),兩邊同一份登入、同一把鎖,接續對話也找得到。
+    登入存在鑰匙圈(用 CODEX_HOME 的路徑當鑰匙)或開不了資料夾時照舊用原本的。"""
+    import tomllib
+    try:
+        with open(os.path.join(real, 'config.toml'), 'rb') as f:
+            store = tomllib.load(f).get('cli_auth_credentials_store')
+    except (OSError, tomllib.TOMLDecodeError):
+        store = None
+    if not os.path.isfile(os.path.join(real, 'auth.json')) or store == 'keyring':
+        return real
+    home = os.path.abspath(real).rstrip(os.sep) + '-jobsalvo-agent'
+    try:
+        os.makedirs(home, exist_ok=True)
+        if any(os.path.lexists(p) and not os.path.islink(p)
+               for p in (os.path.join(home, name) for name in ('auth.json', *CODEX_OWN_INSTRUCTIONS))):
+            return real        # 這個資料夾不是程式建的(裡面有真的登入檔或指示):不動它
+        open(os.path.join(real, 'auth.lock'), 'a').close()      # 鎖要是同一個檔:codex 還沒建過就先建在原處
+        for name in os.listdir(real):
+            link, src = os.path.join(home, name), os.path.join(real, name)
+            if name in CODEX_OWN_INSTRUCTIONS or (os.path.islink(link) and os.readlink(link) == src):
+                continue
+            if os.path.islink(link):
+                os.remove(link)
+            elif os.path.lexists(link):
+                continue                                   # codex 在這裡自己建的檔,不動
+            with contextlib.suppress(FileExistsError):     # 同時派好幾個(填表並行)
+                os.symlink(src, link)
+        for name in CODEX_OWN_INSTRUCTIONS:
+            if os.path.lexists(os.path.join(home, name)):
+                os.remove(os.path.join(home, name))
+    except OSError:
+        return real
+    return home
+
 
 def _agent_entry(agent):
     agents = (cf.C.get('agent') or {}).get('agents') or []
@@ -586,7 +642,7 @@ def _record(outfile, agent, index, started, result, prompt):
         print(f'agent 執行紀錄寫不進去:{e}', file=sys.stderr)
 
 
-def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
+def run(prompt, outfile, model=None, timeout=4*3600, chrome=False, *,
         browser_required=False, browser=None, resume=None, board=None, web=True,
         agent_id=None, on_start=None, launcher=None, waiter=None, report_from=None,
         output_last_message=None, website_task=False):
@@ -594,8 +650,11 @@ def run(prompt, outfile, repo, model=None, timeout=4*3600, chrome=False, *,
     report_from:這一輪 agent 回報時的來源(程式給的,例如「代投」);agent 自己寫別的也照這個記(#316)。
     output_last_message:交件單存到哪裡;兩家都是最後一則訊息交件,換手到哪一家 prompt 都一樣。
     證據(#315):每一次派出去的指示(agent 實際收到的整段,含前綴)、跑完的動作紀錄都記進現在開著的那一輪(evidence.opened);
-    流程沒開輪就記進那個流程自己的夾,沒有一次派 agent 是沒留證據的。"""
+    流程沒開輪就記進那個流程自己的夾,沒有一次派 agent 是沒留證據的。
+    agent 一律從新開的空資料夾開始(#831、#838):看不到程式原始碼、使用者資料夾裡前幾輪的產物;要讀寫的檔指示裡都給完整路徑。"""
     import evidence
+    import tempfile
+    repo = tempfile.mkdtemp(prefix='jobsalvo-agent-')
     rnd = evidence.active() or evidence.Round(os.path.splitext(os.path.basename(sys.argv[0] or ''))[0] or 'agent',
                                               os.path.splitext(os.path.basename(outfile or ''))[0] or 'run', (), board)
 

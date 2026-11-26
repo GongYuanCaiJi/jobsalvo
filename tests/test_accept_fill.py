@@ -1245,7 +1245,7 @@ class NotesTest(FillCase):
 
 
 class PromptTest(FillCase):
-    """F-02、A-32:給填表 agent 的指示逐字(bare:卡上沒選履歷,沒有要寄的檔):目標照這一輪是填表還是送出;材料有職缺、卡片資料、要寄的檔(送出檔名優先)與讀得到的檔、
+    """F-02、A-32:給填表 agent 的指示逐字(bare:卡上沒選履歷,沒有要寄的檔):目標照這一輪是填表還是送出;材料有職缺、卡片上的職缺名稱、要寄的檔(送出檔名優先)與讀得到的檔、
     常用答案、這張卡選的平台履歷名稱、其他平台登記的履歷頁(不含檔案)、待重翻的答案、網站筆記、修改說明、使用者填表規則;
     工具、界線、交件單格式;整段指示記進這一輪的證據夾(看板副本放暫存夾)。"""
 
@@ -1289,6 +1289,16 @@ class PromptTest(FillCase):
                 '使用者寫的網站筆記': '{"jobs.example": ["先登入"]}',
                 '修改說明': '改一下', '使用者填表規則': '先填英文'}
 
+    def test_what_agents_wrote_on_the_card_is_not_handed_to_the_fill_agent(self):
+        # #838 第 6 項:以前整張卡的 JSON 都交出去,含找缺 agent 寫的理由、角度、挑履歷的話、核對紀錄
+        prompts = []
+        for job in (None, {'why': 'AGENT-WHY', 'angle': 'AGENT-ANGLE', 'score': 5, 'checked': ['AGENT-CHECK'],
+                           'resume': {'recommend': 'one', 'lang': LANG, 'pick_why': 'AGENT-PICK'}}):
+            self.start('todo', job=job)
+            _code, browser = self.go('fill', filled())
+            prompts.append(browser.prompts[0])
+        expect(self, 'F-02', (prompts[1] == prompts[0], re.findall(r'AGENT-\w+', prompts[1])), (True, []))
+
     def test_brief_carries_the_material_and_is_recorded(self):
         import config as cf
         import evidence
@@ -1307,14 +1317,14 @@ class PromptTest(FillCase):
                     os.remove(cf.APPLY_RULES)
                 self.confirmed() if how == 'submit' else self.start('todo', job={'resume': {}} if how == 'bare' else None)
                 wanted = dict(plain, **({'要送的檔案': '', '履歷與附件材料檔案': '(沒有可讀檔案)'} if how == 'bare' else {}))
-            job, fb = self.home.jobs()[URL], self.home.fb()
+            fb = self.home.fb()
             shutil.rmtree(evidence.root(self.home.board), ignore_errors=True)       # 副本共用一個暫存證據夾
             script = filled() if how != 'submit' else Script((), {'submitted': 'false', 'needs_user': '', 'stopped': ''})
             _code, browser = self.go('fill' if how == 'bare' else how, script, note='改一下' if how == 'fix' else '')
             got = sections(browser.prompts[0])
-            materials = {'職缺網址': URL, '卡片資料': json.dumps(job, ensure_ascii=False), **dict(wanted),
+            materials = {'職缺網址': URL, '卡片上的職缺': f'{TITLE} - {COMPANY}', **dict(wanted),
                          '答案與履歷材料': form_record.shared_text(fb)}
-            order = ('職缺網址', '卡片資料', '要送的檔案', '履歷與附件材料檔案', '答案與履歷材料', '平台履歷名稱',
+            order = ('職缺網址', '卡片上的職缺', '要送的檔案', '履歷與附件材料檔案', '答案與履歷材料', '平台履歷名稱',
                      '其他已登記的平台履歷頁', '待重翻的答案', '使用者寫的網站筆記', '修改說明', '使用者填表規則')
             expect(self, 'F-02', got, {
                 '目標': '依使用者確認送出這張申請。' if how == 'submit' else '完成這張卡的申請表',

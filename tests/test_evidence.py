@@ -89,7 +89,7 @@ class OtherFlows(EvidenceTests):
     def test_an_agent_dispatched_without_a_round_still_leaves_its_evidence(self):
         a, b = agent_writes()
         with a, b, patch('sys.argv', ['some_flow.py']):
-            self.assertTrue(ar.run('做一件事', os.path.join(self.home, 'x.out'), self.home).ok)
+            self.assertTrue(ar.run('做一件事', os.path.join(self.home, 'x.out')).ok)
         home = evidence.flow_dir('some_flow')
         [rnd] = [os.path.join(home, n) for n in os.listdir(home)]
         same_shape(self, rnd, ('instruction', 'agent_log'))
@@ -98,7 +98,7 @@ class OtherFlows(EvidenceTests):
         cards = ['https://ex.test/job/1', 'https://ex.test/job/2']
         a, b = agent_writes()
         with a, b, evidence.opened('reply', 'check', cards) as rnd:
-            ar.run('查這兩張', os.path.join(self.home, 'r.out'), self.home)
+            ar.run('查這兩張', os.path.join(self.home, 'r.out'))
             rnd.handoff(os.path.join(self.home, 'none.json'))
         for u in cards:
             [one] = _env.evidence_rounds(u)

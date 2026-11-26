@@ -102,6 +102,23 @@ class Customization(unittest.TestCase):
             )
         return result, captured
 
+    def test_the_agent_starts_in_an_empty_folder_outside_the_users_folder(self):
+        # #838:以前在使用者資料夾裡派,看得到前幾輪 agent 的產物;要讀寫的檔指示裡都給完整路徑
+        seen = []
+        agent = self._agent([])
+
+        def launch(prompt, output_log, folder, **kwargs):
+            seen.append((folder, sorted(os.listdir(folder))))
+            return agent(prompt, output_log, folder, **kwargs)
+
+        with mock.patch.object(sa, 'pdf_pages', side_effect=self._pages):
+            result = customize.run_customization(self.board, self.url, ['attachment:portfolio:zh'],
+                                                 sp=os.path.join(self.tmp, 'runs'), launcher=launch, waiter=self._waiter)
+        self.assertTrue(result['ok'], result)
+        [(folder, inside)] = seen
+        self.assertEqual(inside, [])
+        self.assertFalse(os.path.realpath(folder).startswith(os.path.realpath(self.home) + os.sep), folder)
+
     def test_the_round_leaves_its_evidence_in_the_cards_folder(self):
         # #315:客製版這一輪的指示、動作紀錄、交件單,跟幫你填表同一種放法,放在那張卡的證據夾
         result, _prompts = self._run(['attachment:portfolio:zh'])
@@ -126,7 +143,11 @@ class Customization(unittest.TestCase):
         payload = json.loads(prompts[0].split(marker, 1)[1].split('\n\n其他卡片尚未處理', 1)[0])
         self.assertEqual({item['id'] for item in payload}, {'resume:general:zh', 'attachment:portfolio:zh'})
         self.assertIn('突出作品與可查證成果', next(x for x in payload if x['id'] == 'attachment:portfolio:zh')['skill_text'])
-        self.assertTrue(next(x for x in payload if x['id'] == 'resume:general:zh')['skill_text'])  # 使用產品通用 skill
+        # 沒指定 skill 用產品通用的那份:只有目標、界線與交件格式,不教改寫策略(#838 第 3 項)
+        self.assertEqual(next(x for x in payload if x['id'] == 'resume:general:zh')['skill_text'],
+                         '# 通用客製 Skill\n\n依職缺 JD 調整這份履歷或附件。\n\n'
+                         '- 只用原檔已有的事實；不可新增經歷、技能、數字、成果或資格。\n'
+                         '- 沿用原檔的語言、版面風格與字體；維持 PDF，頁數不得多於原檔。')
 
         fb = self._fb()
         self.assertEqual(fb[self.url]['custom_docs']['resume:general:zh']['status'], 'review')

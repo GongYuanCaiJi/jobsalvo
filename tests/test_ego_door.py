@@ -129,8 +129,7 @@ class SharedBrowser(unittest.TestCase):
     def test_both_agents_receive_the_same_browser_rules(self):
         codex, claude = cd.of('codex'), cd.of('claude-code')
         self.assertEqual(codex.apply_rule(), claude.apply_rule())
-        self.assertIn('ego-browser nodejs', codex.apply_rule())
-        self.assertEqual(codex.fetch_task_tools(), claude.fetch_task_tools())
+        self.assertIn('ego-browser skill', codex.apply_rule())
 
     def test_missing_browser_names_the_required_installation(self):
         with patch.object(cd, 'ego_bin', return_value=None, create=True):

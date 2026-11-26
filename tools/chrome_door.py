@@ -10,8 +10,8 @@ chrome_door —— 程式這一側碰「agent 的瀏覽器」(ego lite)的門路
 
 門路對外提供的事(做不到的丟 NotNow,訊息講現在做不到、改用什麼):
   讀那一頁 read_page、讀平台履歷頁 read_profile、截圖 shot、
-  放掉分頁 release、派工前確認 ego 準備好 ready、程式先開好申請頁 open_for_agent、給 agent 的瀏覽器用法
-  (apply_rule、fetch_task_tools)、查應徵進度讀頁 read_pages、接手 hand_off / resume、設定好了沒 configured、
+  放掉分頁 release、派工前確認 ego 準備好 ready、程式先開好申請頁 open_for_agent、給 agent 的瀏覽器工具與界線
+  (apply_rule)、查應徵進度讀頁 read_pages、接手 hand_off / resume、設定好了沒 configured、
   看板 👀 怎麼截(live_timeout、live_refresh)、工作區不在了 gone_pages、收尾 close_if_idle。
 """
 import os, sys, shutil, json, subprocess, uuid, time, contextlib
@@ -571,33 +571,16 @@ class EgoDoor:
         return _ego('return (await listTaskSpaces()).map(s=>({id:s.id,name:s.name,ownership:s.ownership}));')
 
     def apply_rule(self):
-        """操作 agent 瀏覽器的任務共用的前綴:只有工具用法與界線,不教網站怎麼操作、什麼時候停(#601 Solution 1)。"""
+        """操作 agent 瀏覽器的任務共用的前綴:有哪個工具、界線;用法看 ego 自己的說明,不教網站怎麼操作、什麼時候停(#601、#838)。"""
         return (
-            '【agent 的瀏覽器工具】ego lite;用 ego-browser nodejs 執行 Node.js 腳本:'
-            "`ego-browser nodejs <<'EOF' … EOF`;console.log 的內容是回傳值;本機檔案用 await import(\"node:fs/promises\")。"
-            f'API 參考:{os.path.dirname(EGO_SKILL)}/references/api.md。\n'
-            '工作區:const task = await taskSpace(工作區編號); const page = task.page("Page 標籤");編號與標籤照本輪材料。'
-            'task.tabs() 列出分頁。頁面 API:page.goto(url)、page.snapshot()(回 @ref;'
-            'page.snapshot({scope:"subtree",root:"@ref"}) 取某個元素裡面的 @ref)、page.fill(selector,text)、'
-            'page.selectOption(selector,{label})、page.click(selector)、page.keyboard.type(text)、'
-            'page.keyboard.insertText(text)、page.setInputFiles(selector,paths)、page.waitForSelector(selector)、'
-            'page.waitForURL(url)、page.waitForFunction(fn)、page.waitForEvent(name)、page.evaluate(fn,args)、'
-            'page.waitForFileChooser()(回傳的 chooser 用 setFiles(paths))。'
-            'selector 可用 @ref、loc=role:button[name="…"]、loc=css:… 或 text=…;'
-            '一個 selector 應對到一個元素。點擊回傳的 receipt.popups 用 task.page(label) 取得新分頁。'
-            'waitForEvent 的 promise 要在觸發動作之前取得。每次執行是新 Node 行程,變數不保留;工作區與 Page 編號會保留。\n'
-            '【界線】只用 ego-browser nodejs 與本輪指定的工作區;不操作使用者本人的 Chrome、桌面、App 或其他工作區。'
+            '【agent 的瀏覽器工具】ego lite 的 ego-browser 指令;用法照 `ego-browser skill` 印出的說明。'
+            '工作區編號與 Page 標籤照本輪材料。\n'
+            '【界線】只用 ego-browser 與本輪指定的工作區;不操作使用者本人的 Chrome、桌面、App 或其他工作區。'
             '不清 cookie、快取或儲存區,不讀取憑證;不索取、不輸入使用者密碼。'
-            '輸入文字不用 keyboard.paste(它在 Mac 上送出真的 ⌘V,ego 會把工作區轉給使用者)。'
+            '輸入文字用 fill 或 keyboard.insertText,不用 keyboard.paste(它在 Mac 上送出真的 ⌘V,ego 會把工作區轉給使用者)。'
             '不得呼叫 task.handOff 或 takeOverTaskSpace,程式指定的工作區不要 finish;交接與接回只由程式做:'
             '頁面要本人處理時(密碼、二步驗證、驗證碼、真人驗證),照任務交件格式逐字引用那一頁的原文、寫本人要做的事,'
             '程式重讀同一分頁核對引文後才交接。\n\n'
-        )
-
-    def fetch_task_tools(self):
-        return (
-            '附件 API：page.setInputFiles(selector,[完整路徑])、page.waitForFileChooser()、'
-            'chooser.setFiles(paths)。'
         )
 
     def ready(self, board=None):

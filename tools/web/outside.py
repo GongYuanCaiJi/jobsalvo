@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import tempfile
 from types import SimpleNamespace
 from typing import Protocol
 
@@ -151,7 +150,7 @@ class Real:
         log = os.path.join(directories[0], 'agent.log')
         # 每一輪從空資料夾開始:看不到程式原始碼、AGENTS.md / CLAUDE.md 和別的 agent 留下的檔(#831);
         # 要用的檔都給完整路徑。接續同一個 session 也開新的空資料夾,claude --resume 不認資料夾。
-        result = agent_run.run(prompt, log, tempfile.mkdtemp(prefix='jobsalvo-agent-'), timeout=timeout, chrome=self.door is not None,
+        result = agent_run.run(prompt, log, timeout=timeout, chrome=self.door is not None,
                                browser_required=self.door is not None, resume=resume, agent_id=agent_id,
                                output_last_message=os.path.join(directories[0], 'handoff.json'), website_task=True)
         message = getattr(result, 'message', None)

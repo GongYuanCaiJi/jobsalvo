@@ -19,7 +19,6 @@ EGO_PAGE = {'label', 'spaceId', 'openedBy', 'targetId', 'url', 'title', 'info', 
 def texts():
     door = chrome_door.EgoDoor.__new__(chrome_door.EgoDoor)
     yield door.apply_rule()
-    yield door.fetch_task_tools()
     for mod in (fill, profile_sync):
         for v in vars(mod).values():
             if isinstance(v, str) and 'page.' in v:

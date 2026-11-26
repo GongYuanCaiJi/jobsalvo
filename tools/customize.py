@@ -564,7 +564,7 @@ def _job_page_text(url):
 
 def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None):
     """派一個 agent 處理同一卡勾選的所有檔,並在同一個收尾檢查輸出。"""
-    sp = sp or os.environ.get('CUSTOMIZE_TMP') or cf.TMP
+    sp = os.path.abspath(sp or os.environ.get('CUSTOMIZE_TMP') or cf.TMP)
     run_id = _run_id()
     run_dir = os.path.join(sp, card.card_id_from_url(url), run_id)
     os.makedirs(run_dir, exist_ok=True)
@@ -636,7 +636,7 @@ def run_customization(board, url, item_ids, sp=None, launcher=None, waiter=None)
                                 chrome=options.get('chrome', False))
         with evidence.opened('customize', 'tailor', [url], board) as rnd:   # 證據記進這張卡(#315)
             result = agent_run.run(
-                prompt, output_log, cf.HOME, model='main', board=board, web=False,
+                prompt, output_log, model='main', board=board, web=False,
                 launcher=launch_override, waiter=waiter,
             )
             rnd.handoff(report_path)

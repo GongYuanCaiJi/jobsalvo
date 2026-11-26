@@ -279,9 +279,6 @@ class ChromeTestDoor(dev_browser.chrome_door.EgoDoor):
     def apply_rule(self):
         return self._rules().apply_rule()
 
-    def fetch_task_tools(self):
-        return self._rules().fetch_task_tools()
-
 
 class WebsiteTestBench:
     def __init__(self, initial_text='old text', pages=None, initial_pages=None, evidence_dir=None):

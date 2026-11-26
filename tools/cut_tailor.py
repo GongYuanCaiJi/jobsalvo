@@ -177,7 +177,7 @@ def _promote_cached(rows, board):
 
 def prompt(rows, verdicts=None, notes=None, out_dir=None, resumes=None):
     """判斷履歷與語言;agent 只能使用程式附上的職缺頁文字。回 (指示, 這一輪印的編號材料)。"""
-    out_dir = out_dir or OUT
+    out_dir = os.path.abspath(out_dir or OUT)      # agent 從空資料夾開始:交件路徑一律給完整的
     numbered = Numbered()
     jobs = [row_line(u, t, numbered, (verdicts or {}).get(u), (notes or {}).get(u, ''))
             for u, t in rows]
@@ -414,7 +414,7 @@ def run_finish(board, out_dir=None):
             fh.write(str(proc.pid))
     # 證據(#315):這一輪準備的每一張卡各記一份指示、動作紀錄;交件單(每張自己的 fill.json)只記進那一張
     with evidence.opened('prepare', 'tailor', [u for u, _t in rows], board) as rnd:
-        result=ar.run(p, of, cf.HOME, timeout=4*3600, browser_required=False, web=False,
+        result=ar.run(p, of, timeout=4*3600, browser_required=False, web=False,
                       board=board, on_start=worker_started)
         for u, _t in rows:
             rnd.handoff(os.path.join(out_dir, card.card_id_from_url(u), 'fill.json'), card=u)
