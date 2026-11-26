@@ -354,7 +354,9 @@ CHECKS=[
    jr.click(); await T.idle();
    var job=(document.querySelector('#app [data-ivsheet]')||{getAttribute:function(){return '';}}).getAttribute('data-ivsheet');
    T.press('#app [data-ivsheet]'); await T.until(function(){return document.querySelector('#rzmodal .rzm-box');},5000);
-   if(!document.querySelector('#rzmodal iframe, #rzmodal a[download]'))bad.push('面試備忘預覽沒有 PDF');
+   await T.until(function(){return document.querySelector('#rzmodal iframe, #rzmodal a[download], #rzmodal .iv-sheet-err');},30000);
+   var se=document.querySelector('#rzmodal .iv-sheet-err');
+   if(se||!document.querySelector('#rzmodal iframe, #rzmodal a[download]'))bad.push('面試備忘預覽沒有 PDF'+(se?':'+se.textContent:''));
    var sx=document.querySelector('#rzmodal .rzm-x'); if(sx){sx.click(); await T.idle();}
    var sb=document.querySelector('#app [data-ivshare][data-ivshareto="1"]'); if(!sb)return bad.concat('這場沒有可以設成共有的題').join('；');
    var q=sb.getAttribute('data-ivshare'), rows=function(){return document.querySelectorAll('#app details.ivrow[data-iv="'+q+'"]').length;};
@@ -1499,7 +1501,7 @@ ANS_CHECKS = [
    [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
    await T.idle(); B=T.card(ids[1]);
    if(!B)return '找不到第二張測試卡';
-   if(B.querySelector('a[href^="/api/live?"],[data-livego]'))bad.push('頁面不見了,卡上還有 👀');
+   if(B.querySelector('[data-livego]'))bad.push('頁面不見了,卡上還有 👀');
    if(B.querySelector('[data-applyfixopen]'))bad.push('頁面不見了,卡上還能叫 agent 在那一頁改');
    if(!B.querySelector('[data-runone^="apply|"]')&&!/自動重填/.test(B.textContent))bad.push('頁面不見了,卡上沒有重填(也沒寫會自動重填)');
    var fl=document.getElementById('filllistbar');
@@ -1522,7 +1524,7 @@ ANS_CHECKS = [
    [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
    await T.idle(); B=T.card(ids[1]);
    if(!B)return '找不到第二張測試卡';
-   if(!B.querySelector('a[href^="/api/live?"]'))bad.push('agent 填好的卡沒有「👀 看現在的頁面」');
+   if(!B.querySelector('.ap-shot[data-livego]'))bad.push('agent 填好的卡沒有「👀 看現在的頁面」');
    if(ab(B))bad.push('網頁待重打,卡上還是有核准送出(他會核准到跟答案庫不一樣的那一頁)');
    var fo=B.querySelector('[data-applyfixopen]');
    if(!fo||!/1 欄/.test(fo.textContent))return bad.concat('沒有「✏️ 要 agent 改(1 欄…)」').join('；');
@@ -3975,25 +3977,25 @@ CHECKS.append((
       [].slice.call(document.querySelectorAll('#app .cogrp')).forEach(function(d){if(!d.open)d.querySelector('summary').click();});
       await T.idle();
       var c=T.card(P.id); if(!c)return '找不到那張卡';
-      var a=c.querySelector('a[data-apshot][href^="/api/live?"]'); if(!a)return '填好的卡沒有「👀 看現在的頁面」';
+      var a=c.querySelector('.ap-shot[data-livego]'); if(!a)return '填好的卡沒有「👀 看現在的頁面」';
       var main=c.querySelector('.ap-main'); if(!main||!main.hasAttribute('data-approve'))bad.push('填好、沒被擋的卡,主按鈕不是核准送出');
       var of=window.fetch, cv=document.createElement('canvas'); cv.width=20; cv.height=10;
       var blob=await new Promise(function(r){cv.toBlob(r);});
-      window.fetch=function(u){if(String(u).indexOf('/api/live?')===0)return Promise.resolve(new Response(blob,{status:200,headers:{'Content-Type':'image/png'}})); return of.apply(this,arguments);};
+      window.fetch=function(u,o){if(String(u)==='/api/live/shot'&&o&&o.method==='POST')return Promise.resolve(new Response(blob,{status:200,headers:{'Content-Type':'image/png'}})); return of.apply(this,arguments);};
       var n0=location.href; a.click(); await T.idle(); window.fetch=of;
       var m=document.getElementById('rzmodal');
       if(location.href!==n0)bad.push('點了換頁了(該在看板彈窗開)');
       if(!m||m.style.display!=='flex'||!m.querySelector('img.rzm-pg'))bad.push('截得到的時候彈窗裡沒有那張圖');
       if(m)m.querySelector('.rzm-x').click(); await T.idle();
-      window.fetch=function(u){if(String(u).indexOf('/api/live?')===0)return Promise.resolve(new Response('x',{status:404})); return of.apply(this,arguments);};
-      T.card(P.id).querySelector('a[data-apshot]').click(); await T.idle(); window.fetch=of;
+      window.fetch=function(u,o){if(String(u)==='/api/live/shot'&&o&&o.method==='POST')return Promise.resolve(new Response('x',{status:404})); return of.apply(this,arguments);};
+      T.card(P.id).querySelector('.ap-shot[data-livego]').click(); await T.idle(); window.fetch=of;
       m=document.getElementById('rzmodal');
       if(!/不在了/.test(m.textContent))bad.push('那一頁不在了,彈窗沒講');
       if(!m.querySelector('[data-apshot-refill]'))bad.push('那一頁不在了,彈窗裡沒有「讓 agent 重填這張」');
       m.querySelector('.rzm-x').click(); await T.idle();
       // 只是這次接不上(頁面應該還在):照伺服器的話講,不叫他重填
-      window.fetch=function(u){if(String(u).indexOf('/api/live?')===0)return Promise.resolve(new Response('這次接不上,等一下再按一次',{status:503})); return of.apply(this,arguments);};
-      T.card(P.id).querySelector('a[data-apshot]').click(); await T.idle(); window.fetch=of;
+      window.fetch=function(u,o){if(String(u)==='/api/live/shot'&&o&&o.method==='POST')return Promise.resolve(new Response('這次接不上,等一下再按一次',{status:503})); return of.apply(this,arguments);};
+      T.card(P.id).querySelector('.ap-shot[data-livego]').click(); await T.idle(); window.fetch=of;
       m=document.getElementById('rzmodal');
       if(!/接不上/.test(m.textContent))bad.push('一時接不上,彈窗沒照伺服器的話講');
       if(m.querySelector('[data-apshot-refill]'))bad.push('只是一時接不上,彈窗卻叫他重填');
@@ -4004,7 +4006,7 @@ CHECKS.append((
         return of.apply(this,arguments);};
       await T.resync(); window.fetch=of;
       var cb=T.card(P.id);
-      if(cb&&/正在送出/.test(cb.textContent)&&cb.querySelector('a[data-apshot][href^="/api/live?"]'))bad.push('正在送出的卡上還有 👀(按了伺服器會回 409)');
+      if(cb&&/正在送出/.test(cb.textContent)&&cb.querySelector('.ap-shot[data-livego]'))bad.push('正在送出的卡上還有 👀(按了伺服器會回 409)');
       if(cb&&!/正在送出/.test(cb.textContent))bad.push('模擬送出中,卡上沒寫正在送出');
       await T.resync();
       document.querySelector('[data-tab="none"]').click(); await T.idle();
@@ -4023,11 +4025,11 @@ CHECKS.append((
       var of=window.fetch, cv=document.createElement('canvas'); cv.width=20; cv.height=10;
       var blob=await new Promise(function(r){cv.toBlob(r);}), n=0, plan=[];
       var ok=function(){return Promise.resolve(new Response(blob,{status:200,headers:{'Content-Type':'image/png','X-Refresh':'0.1'}}));};
-      window.fetch=function(u){if(String(u).indexOf('/api/live?')!==0)return of.apply(this,arguments);
+      window.fetch=function(u,o){if(String(u)!=='/api/live/shot'||!o||o.method!=='POST')return of.apply(this,arguments);
         var k=plan[Math.min(n,plan.length-1)]; n++;
         return k==='ok'?ok():Promise.resolve(new Response(k==='gone'?'那一頁已經不在了':'這次接不上,等一下再按一次',{status:k==='gone'?404:503}));};
       // 打開,等排好的那幾次重截都截過了(每 0.1 秒一次)
-      var open=async function(p){plan=p; n=0; T.card(P.id).querySelector('a[data-apshot]').click();
+      var open=async function(p){plan=p; n=0; T.card(P.id).querySelector('.ap-shot[data-livego]').click();
         await T.until(function(){return n>=p.length;},10000); await T.frame();
         return document.getElementById('rzmodal');};
       var close=async function(m){m.querySelector('.rzm-x').click(); await T.idle();};
@@ -4062,13 +4064,13 @@ CHECKS.append((
       var b=document.querySelector('.todo [data-livego="'+CSS.escape(P.id)+'"]');
       if(!b)return '「這一頁要你處理的」那一行沒有「👀 看頁面」';
       var of=window.fetch, asked=null;
-      window.fetch=function(u,o){if(/\/api\/live\?/.test(String(u))){asked=String(u);
+      window.fetch=function(u,o){if(String(u)==='/api/live/shot'&&o&&o.method==='POST'){asked=JSON.parse(o.body).u;
         return Promise.resolve(new Response(new Blob(['x'],{type:'image/jpeg'})));}
         return of.apply(this,arguments);};
       b.click(); await T.idle(); window.fetch=of;
       var m=document.getElementById('rzmodal');
       if(!asked)bad.push('按了沒有去截那一頁');
-      else if(asked.indexOf(encodeURIComponent(P.id))<0)bad.push('截的不是這張:'+asked);
+      else if(asked!==P.id)bad.push('截的不是這張:'+asked);
       if(!m||!m.querySelector('.ap-shotbox'))bad.push('沒有在看板裡彈出那一頁');
       else m.querySelector('.rzm-x').click();
       await T.idle(); document.querySelector('[data-tab="none"]').click(); await T.idle();
@@ -4124,7 +4126,7 @@ CHECKS.append((
       var c=T.card(P.id); if(!c)return '找不到那張卡';
       if(!/本人登入或驗證/.test(c.textContent))bad.push('卡上沒講網站要本人登入或驗證');
       if(!/修改/.test(c.textContent))bad.push('沒講處理完按「修改」接著填');
-      if(!c.querySelector('a[data-apshot],[data-livego]'))bad.push('沒有「👀」可以把那一頁叫到面前接手');
+      if(!c.querySelector('[data-livego]'))bad.push('沒有「👀」可以把那一頁叫到面前接手');
       document.querySelector('[data-tab="none"]').click(); await T.idle();
       return bad.join('；');
     """,
@@ -6229,13 +6231,13 @@ CHECKS.append((
       try{
         document.querySelector('[data-tab="prep"]').click(); await T.resync();
         window.fetch=function(input){
-          var url=typeof input==='string'?input:input.url;
-          if(url==='/api/rev?sync=1'&&!releaseSync)return new Promise(function(resolve,reject){
-            releaseSync=function(){of.call(window,input).then(resolve,reject);};});
+          var url=typeof input==='string'?input:input.url, args=arguments;
+          if(url==='/api/source-sync'&&!releaseSync)return new Promise(function(resolve,reject){
+            releaseSync=function(){of.apply(window,args).then(resolve,reject);};});
           return of.apply(this,arguments);
         };
         T.sync();
-        if(!await T.until(function(){return !!releaseSync;},5000))return '沒有攔到背景同步的 /api/rev?sync=1';
+        if(!await T.until(function(){return !!releaseSync;},5000))return '沒有攔到背景同步的 /api/source-sync';
         T.press('#app [data-autoprep]');
         var on=await T.until(async function(){var c=await fetch('/api/settings').then(function(r){return r.json();});
           return ((c.settings||{}).flow||{}).auto_prep===true;},10000);

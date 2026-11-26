@@ -127,7 +127,6 @@ def get(board=None):
     import chrome_door
     import doctor
     import prefs
-    prefs.ensure_note()
     preferences_custom, preferences_agent = prefs.note_sections()
     C = cf.C
     import profile_sync

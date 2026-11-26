@@ -1080,6 +1080,7 @@ footer{margin-top:var(--space-32);padding-top:var(--space-16);border-top:1px sol
 .ap-ok{color:var(--ink-dim);font-weight:var(--weight-bold)}
 .ap-shot{font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--ink);text-decoration:none;padding:var(--space-6) 0}
 .ap-shot:hover{text-decoration:underline}
+button.ap-shot{background:none;border:0;font-family:inherit;cursor:pointer;text-align:left}
 .stage-b.ap-approve.adv{border-color:var(--accent);background:var(--accent);color:var(--accent-text)}
 .ap-approve:disabled{opacity:.5;cursor:not-allowed;background:var(--surface-2);border-color:var(--line);color:var(--ink-dim);filter:none}
 .ap-shotbox{background:var(--surface);border-radius:var(--radius-lg);padding:var(--space-12)}

@@ -50,6 +50,8 @@ class WebOnly(tb.HttpBase):
         code, raw, _ = self.req('/api/update')
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(raw)['blocked'], '副本不檢查更新')
+        code, raw, _ = self.req('/api/update/check', {})              # 「現在檢查」當場問遠端是 POST
+        self.assertEqual(json.loads(raw)['blocked'], '副本不檢查更新')
         code, raw, _ = self.req('/api/update', {})
         self.assertEqual(code, 400)
         self.assertFalse(json.loads(raw)['ok'])

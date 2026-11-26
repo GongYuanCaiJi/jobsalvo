@@ -67,5 +67,22 @@ class AgentNoteMerge(unittest.TestCase):
             self.assertEqual(prefs.note_sections(note)[0], '不要純業務')
 
 
+class ReadingTheNoteDoesNotWriteIt(unittest.TestCase):
+    def test_reading_leaves_the_file_alone_and_only_ensure_note_completes_it(self):
+        """看設定、📝 prompt 預覽是 GET,讀偏好筆記不能順手改他的檔;真的派 agent 之前 ensure_note 才補齊。"""
+        with tempfile.TemporaryDirectory(prefix='prefs-read-') as directory:
+            note = os.path.join(directory, 'note.md')
+            self.assertEqual(prefs.note_sections(note), ('', ''))
+            self.assertFalse(os.path.exists(note))
+            with open(note, 'w', encoding='utf-8') as f:
+                f.write('只寫了一行,沒有區塊')
+            self.assertIn(prefs.NOTE_AGENT, prefs.read_note(note))
+            with open(note, encoding='utf-8') as f:
+                self.assertEqual(f.read(), '只寫了一行,沒有區塊')
+            prefs.ensure_note(note)
+            with open(note, encoding='utf-8') as f:
+                self.assertIn(prefs.NOTE_AGENT, f.read())
+
+
 if __name__ == '__main__':
     unittest.main()

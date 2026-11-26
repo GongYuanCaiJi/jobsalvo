@@ -8,6 +8,9 @@ board_server —— 本機看板 server。狀態就是同一份 board HTML 檔(�
   POST /api/save    → {cmds: [指令…]}:看板的指令(write_fb),回存好的那幾份、每一道的復原單、新的下一步
   GET  /api/state   → 回傳目前 data-fb(給 agent/loop 讀狀態用)
   GET  /api/rev     → 小包:標記版本、職缺資料版本、背景建包中、兩個「跑」的進度(頁面輪詢用)
+  GET 只讀不做事:_foreign 只對 POST/PUT/DELETE 擋別的網站,別的網站一個連結就能讓你送出 GET。
+  會做事的(比對原稿並重建、用 agent 的瀏覽器截圖、當場問遠端有沒有新版)一律 POST:
+  /api/source-sync、/api/live/shot、/api/update/check。
   POST /api/run/prep      → 跑準備區(cut_tailor)
   POST /api/run/research  → 找新職缺 {mode: deep|wide|dir, text: 指定方向}(find)
                             這些只有使用者按得到;看板副本上跑假的,見 job_fake.py
@@ -562,6 +565,10 @@ def prerender_sheets():
                 if not _SHEETS['again']:
                     _SHEETS['running']=False; return
     threading.Thread(target=run,daemon=True).start()
+
+_PACKS={}   # 編號 → 合好的 PDF:POST /api/iv/pack 排的,GET /api/iv/pack/<編號> 只送這些
+_PACKS_LOCK=threading.Lock()
+PACKS_KEPT=8   # ponytail: 只留最近排的 8 份(每份幾 MB),同時開著更多份預覽,最舊那份的連結才會 404
 
 _BUILD_LOCK=threading.Lock()
 # gen:每跑完一次 reconcile +1,給頁面判斷「卡片資料該重拿了」;done:最近那一輪有沒有跑完;
@@ -1322,7 +1329,6 @@ class H(BaseHTTPRequestHandler):
     def _do_GET(self):
         if self._foreign(False): return
         if self.path in ('/','/index.html'):
-            trigger_source_sync()
             # 先記建包次數再讀檔:中間剛好建完的話,頁面拿到的是舊次數,第一次輪詢就會去重拿
             with _BUILD_LOCK: build_n=_build_state['gen']
             self._send(200,serve_doc(snapshot(),build_n))
@@ -1359,53 +1365,8 @@ class H(BaseHTTPRequestHandler):
         elif self.path=='/api/next':
             self._json(200,next_steps(snapshot()))
         elif self.path.startswith('/api/live?'):
-            # 代投那張分頁「現在」的整頁畫面:agent 的視窗開在螢幕外(不搶他的畫面),他要看真的頁面就看這張。
-            # apply_tab 用填這張的那段對話的身分當場截,不經過 agent、不動那一頁。
-            from urllib.parse import urlparse, parse_qs
-            import tempfile
-            q=parse_qs(urlparse(self.path).query); u=(q.get('u') or [''])[0]
-            ast=run_status('apply')
-            if ast.get('running') and ast.get('url')==u:
-                # agent 正拿著這一頁在填/改/送:這時用同一段對話去截,會搶它的分頁、甚至把它那一輪收掉
-                return self._send(409,'Agent 正在處理這一張,跑完再看(進度在最上面的「🚀 填表進度」)','text/plain; charset=utf-8')
-            # 照這張卡記的那一家的門路截(chrome_door):那一家停用、移除或卡上沒記,那一頁接不回來,跟卡上講的一樣要重填
-            import chrome_door
-            try: door=chrome_door.for_card((snapshot()['fb'].get(u) or {}).get('apply'))
-            except ValueError: door=None
-            except chrome_door.Unreachable as gone:
-                if not gone.sure:                          # 設定檔讀不懂:判斷不了,卡不動
-                    return self._send(503,str(gone),'text/plain; charset=utf-8')
-                failed=agent_swapped(u,str(gone))
-                if failed:
-                    return self._send(404,str(gone)+f'。卡上沒改成要重填({failed}):重新整理看板,再按一次 👀。',
-                                      'text/plain; charset=utf-8')
-                return self._send(404,str(gone)+':按卡上的「▶ 讓 agent 重填這張」。','text/plain; charset=utf-8')
-            if door is None:
-                return self._send(503,'這次讀不到看板,等一下再按一次 👀。','text/plain; charset=utf-8')
-            fd,out=tempfile.mkstemp(prefix='apply-live-',suffix='.png')
-            os.close(fd)
-            try:
-                try:
-                    code=_run_then_stop([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
-                                        door.live_timeout)
-                    ok=bool(u) and code==0 and os.path.isfile(out)
-                except (OSError,subprocess.SubprocessError):   # 截圖程式開不起來:跟截不到同一條,下面照實說頁面不見了或接不上
-                    ok=False
-                if ok:
-                    with open(out,'rb') as fh: body=fh.read()
-                    self.send_response(200); self.send_header('Content-Type','image/png')
-                    self.send_header('X-Refresh',str(door.live_refresh))
-                    self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
-                elif page_gone(u):
-                    self._send(404,'那一頁已經不在了(agent 的 Chrome 關掉或重開過)。卡上已改成要重填:按卡上的「▶ 讓 agent 重填這張」。',
-                               'text/plain; charset=utf-8')
-                else:
-                    # 程序還是填好那時候的那一個:頁面應該還在,只是這次接不上(外掛一時斷線這類),不叫他重填
-                    self._send(503,'這次接不上 agent 的 Chrome 裡的那一頁,頁面應該還在。等一下再按一次 👀。',
-                               'text/plain; charset=utf-8')
-            finally:
-                with contextlib.suppress(FileNotFoundError):
-                    os.remove(out)
+            # 截圖會用 agent 的瀏覽器、接不回來還會改卡,改成 POST /api/live/shot(別的網站一個連結就能觸發 GET)
+            self._send(409,'這個分頁的程式是舊版,請重新整理看板再看','text/plain; charset=utf-8')
         elif self.path.startswith('/api/iv/fig?'):
             # 題庫逐字稿裡的圖(![說明](fig:檔名)):放在資料夾的 figures/,只收單層檔名、只給圖檔
             from urllib.parse import urlparse, parse_qs
@@ -1483,10 +1444,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, '沒有這張同步截圖', 'text/plain; charset=utf-8')
             ctype = mimetypes.guess_type(name)[0] or 'image/png'
             self._send(200, body, ctype)
-        elif self.path in ('/api/rev','/api/rev?sync=1'):
-            # 切回看板分頁時頁面帶 sync=1:跟打開看板一樣比對一次原稿,變了就在背景先建
-            if self.path.endswith('?sync=1'):
-                trigger_source_sync()
+        elif self.path.split('?',1)[0]=='/api/rev':   # 舊分頁還會帶 ?sync=1:照樣只回版本,同步改由頁面 POST /api/source-sync
             # 輪詢只拿這一個小包:版本(標記變了沒)、gen(看板資料重建過沒)、building。
             # 以前頁面每 20 秒抓一次 /api/jobs 只為了讀裡面的 gen,那一包 1.26MB,
             # 等於他手機上每分鐘白流 3.8MB、還要解析同樣大小的 JSON。
@@ -1509,20 +1467,14 @@ class H(BaseHTTPRequestHandler):
             try: return self._json(200,{'ok':True,'prs':pr_preview.list_prs()})
             except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as e:
                 return self._json(502,{'ok':False,'msg':str(e)[:300]})
-        elif self.path in ('/api/update','/api/update?now=1'):
-            # 設定頁「⚙ 其他」的版本那一列:現在哪一版、遠端 main 有沒有新的、能不能從這裡更新(tools/update.py)。副本不問遠端。
-            # ?now=1:他按了「現在檢查」,不等每小時那一次
-            result=update_status(force=self.path.endswith('?now=1'))
-            return self._json(200,result)
+        elif self.path.split('?',1)[0]=='/api/update':   # 舊分頁的 ?now=1 也只拿記著的答案;當場問遠端改 POST /api/update/check
+            return self._json(200,update_status())
         elif self.path.startswith('/api/settings/website_notes'):
             import website_notes
             self._json(200, {'notes': website_notes.all_notes()})
         elif self.path=='/api/settings':
             import settings_api as sa
-            note_existed=os.path.exists(cf.PREFERENCE_NOTE)
             d=sa.get(STATE)
-            if not note_existed and os.path.exists(cf.PREFERENCE_NOTE):
-                note_saved()
             try:
                 # 安檢門核對過的那一份(suggest_cats.checked);agent 交的 suggest.json 不直接給看
                 with open(os.path.join(run_sp('suggest'),'suggestion.json'),encoding='utf-8') as f: d['suggest']=json.load(f)
@@ -1551,16 +1503,14 @@ class H(BaseHTTPRequestHandler):
                 import mimetypes
                 with open(f,'rb') as fh: self._send(200,fh.read(),mimetypes.guess_type(f)[0] or 'application/octet-stream')
             else: self._send(404,'not found','text/plain; charset=utf-8')
+        elif self.path.startswith('/api/iv/pack/'):
+            key=self.path[len('/api/iv/pack/'):].split('?',1)[0]
+            with _PACKS_LOCK: pdf=_PACKS.get(key)
+            if pdf: self._send(200,pdf,'application/pdf')
+            else: self._send(404,'這份已經換新了,回看板再按一次「預覽、匯出面試資料」','text/plain; charset=utf-8')
         elif self.path.startswith('/api/iv/pack?'):
-            import iv_pack, markdown_pdf
-            snap=snapshot()
-            try:
-                pdf=iv_pack.pack_bytes(snap['parts']['data'],snap['fb'],self._q('job'),cf.HOME)
-            except StopIteration:
-                return self._send(404,'沒有這一場','text/plain; charset=utf-8')
-            except (markdown_pdf.RenderError,ValueError) as e:
-                return self._send(500,'四份合不起來:%s'%e,'text/plain; charset=utf-8')
-            self._send(200,pdf,'application/pdf')
+            # 排版改成 POST /api/iv/pack(會寫進 面試備忘/、開瀏覽器;別的網站一個連結就能觸發 GET)
+            self._send(409,'這個分頁的程式是舊版,請重新整理看板再看','text/plain; charset=utf-8')
         elif self.path.startswith('/api/preview/'):
             import pdf_preview
             from urllib.parse import urlparse
@@ -1880,8 +1830,89 @@ class H(BaseHTTPRequestHandler):
                                    'ship_files':ship_files_of(jobs,snap['fb']),
                                    'status':d['data'].get('status'),'research':d['data'].get('research')})
 
+    def do_POST_live_shot(self):
+        """👀 代投那張分頁「現在」的整頁畫面:agent 的視窗開在螢幕外(不搶他的畫面),他要看真的頁面就看這張。
+        apply_tab 用填這張的那段對話的身分當場截,不經過 agent、不動那一頁。
+        會用 agent 的瀏覽器、接不回來還會把卡改成要重填,所以只收 POST(_foreign 擋別的網站送來的)。"""
+        import tempfile
+        body=self._json_body()
+        if body is None: return
+        u=str(body.get('u') or '')
+        ast=run_status('apply')
+        if ast.get('running') and ast.get('url')==u:
+            # agent 正拿著這一頁在填/改/送:這時用同一段對話去截,會搶它的分頁、甚至把它那一輪收掉
+            return self._send(409,'Agent 正在處理這一張,跑完再看(進度在最上面的「🚀 填表進度」)','text/plain; charset=utf-8')
+        # 照這張卡記的那一家的門路截(chrome_door):那一家停用、移除或卡上沒記,那一頁接不回來,跟卡上講的一樣要重填
+        import chrome_door
+        try: door=chrome_door.for_card((snapshot()['fb'].get(u) or {}).get('apply'))
+        except ValueError: door=None
+        except chrome_door.Unreachable as gone:
+            if not gone.sure:                          # 設定檔讀不懂:判斷不了,卡不動
+                return self._send(503,str(gone),'text/plain; charset=utf-8')
+            failed=agent_swapped(u,str(gone))
+            if failed:
+                return self._send(404,str(gone)+f'。卡上沒改成要重填({failed}):重新整理看板,再按一次 👀。',
+                                  'text/plain; charset=utf-8')
+            return self._send(404,str(gone)+':按卡上的「▶ 讓 agent 重填這張」。','text/plain; charset=utf-8')
+        if door is None:
+            return self._send(503,'這次讀不到看板,等一下再按一次 👀。','text/plain; charset=utf-8')
+        fd,out=tempfile.mkstemp(prefix='apply-live-',suffix='.png')
+        os.close(fd)
+        try:
+            try:
+                code=_run_then_stop([sys.executable,os.path.join(HERE,'apply_tab.py'),'shot','--url',u,'--board',STATE,'--out',out],
+                                    door.live_timeout)
+                ok=bool(u) and code==0 and os.path.isfile(out)
+            except (OSError,subprocess.SubprocessError):   # 截圖程式開不起來:跟截不到同一條,下面照實說頁面不見了或接不上
+                ok=False
+            if ok:
+                with open(out,'rb') as fh: body=fh.read()
+                self.send_response(200); self.send_header('Content-Type','image/png')
+                self.send_header('X-Refresh',str(door.live_refresh))
+                self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            elif page_gone(u):
+                self._send(404,'那一頁已經不在了(agent 的 Chrome 關掉或重開過)。卡上已改成要重填:按卡上的「▶ 讓 agent 重填這張」。',
+                           'text/plain; charset=utf-8')
+            else:
+                # 程序還是填好那時候的那一個:頁面應該還在,只是這次接不上(外掛一時斷線這類),不叫他重填
+                self._send(503,'這次接不上 agent 的 Chrome 裡的那一頁,頁面應該還在。等一下再按一次 👀。',
+                           'text/plain; charset=utf-8')
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(out)
+
+    def do_POST_iv_pack(self):
+        """「預覽、匯出面試資料」:把這場的四份合成一個 PDF。排版會寫進資料夾的 面試備忘/(同公司同職稱的兩場共用檔名)、
+        開瀏覽器印,所以只收 POST;排好的留在記憶體(最近幾份),回的編號給 GET /api/iv/pack/<編號> 預覽、下載。"""
+        import iv_pack, markdown_pdf, uuid
+        body=self._json_body()
+        if body is None: return
+        job=str(body.get('job') or '')
+        snap=snapshot()
+        try:
+            pdf=iv_pack.pack_bytes(snap['parts']['data'],snap['fb'],job,cf.HOME)
+        except StopIteration:
+            return self._json(404,{'ok':False,'msg':'沒有這一場'})
+        except (markdown_pdf.RenderError,ValueError) as e:
+            return self._json(500,{'ok':False,'msg':'四份合不起來:%s'%e})
+        key=uuid.uuid4().hex
+        with _PACKS_LOCK:
+            _PACKS[key]=pdf
+            while len(_PACKS)>PACKS_KEPT: del _PACKS[next(iter(_PACKS))]   # dict 照放進去的順序,先刪最舊的
+        return self._json(200,{'ok':True,'id':key})
+
     def _do_POST(self):
         if self._foreign(True): return
+        if self.path=='/api/update/check':   # 他按「現在檢查」:當場問遠端,不等每小時那一次
+            return self._json(200,update_status(force=True))
+        if self.path=='/api/live/shot':
+            return self.do_POST_live_shot()
+        if self.path=='/api/iv/pack':
+            return self.do_POST_iv_pack()
+        if self.path=='/api/source-sync':
+            # 打開看板、切回看板分頁時頁面送來:比對一次原稿,變了就在背景先建(以前掛在 GET / 和 /api/rev?sync=1)
+            trigger_source_sync()
+            return self._json(200,{'ok':True})
         if self.path=='/api/live':
             body=self._json_body()
             if body is None:return

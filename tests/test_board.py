@@ -335,18 +335,56 @@ class Http(HttpBase):
         self.assertIn('<title>jobsalvo</title>', self.req('/')[1].decode('utf-8'))
         self.assertEqual(cf.AGENT, 'Agent')
 
-    def test_opening_board_checks_for_source_changes(self):
+    def test_source_sync_is_a_post_and_no_get_starts_it(self):
+        """打開看板、切回分頁時頁面 POST /api/source-sync 比對原稿;GET 一律不做事(別的網站一個連結就能讓你送出 GET)。"""
         with mock.patch.object(bs, 'trigger_source_sync') as sync:
-            code, _, _ = self.req('/')
-        self.assertEqual(code, 200)
-        sync.assert_called_once_with()
-
-    def test_coming_back_to_the_tab_checks_for_source_changes_but_polling_does_not(self):
-        with mock.patch.object(bs, 'trigger_source_sync') as sync:
-            self.assertEqual(self.req('/api/rev')[0], 200)
+            for path in ('/', '/api/rev', '/api/rev?sync=1'):
+                self.assertEqual(self.req(path)[0], 200, path)
             sync.assert_not_called()
-            self.assertEqual(self.req('/api/rev?sync=1')[0], 200)
+            self.assertEqual(self.req('/api/source-sync', {})[0], 200)
             sync.assert_called_once_with()
+            code, _, _ = self.req('/api/source-sync', {}, headers={'Sec-Fetch-Site': 'cross-site'})
+            self.assertEqual(code, 403)
+            sync.assert_called_once_with()
+
+    def test_the_live_page_shot_is_a_post_and_the_old_get_does_nothing(self):
+        """👀 截圖用 agent 的瀏覽器、接不回來會改卡:只收 POST /api/live/shot;舊分頁的 GET 只叫他重新整理。"""
+        with mock.patch.object(bs, '_run_then_stop') as shot, mock.patch.object(bs, 'page_gone') as gone, \
+                mock.patch.object(bs, 'agent_swapped') as swapped:
+            code, body, _ = self.req('/api/live?u=' + JOBS[0]['id'])
+            self.assertEqual(code, 409)
+            self.assertIn('重新整理', body.decode('utf-8'))
+            code, _, _ = self.req('/api/live/shot', {'u': JOBS[0]['id']}, headers={'Sec-Fetch-Site': 'cross-site'})
+            self.assertEqual(code, 403)
+        shot.assert_not_called(); gone.assert_not_called(); swapped.assert_not_called()
+
+    def test_the_interview_pack_renders_on_post_and_get_only_hands_out_that_copy(self):
+        """面試資料排版會寫進 面試備忘/、開瀏覽器:只有 POST /api/iv/pack 會排;GET 只送那一次排好的那份。"""
+        import iv_pack
+        with mock.patch.object(iv_pack, 'pack_bytes', return_value=b'%PDF-pack') as pack:
+            code, _, _ = self.req('/api/iv/pack?job=' + JOBS[0]['id'])
+            self.assertEqual(code, 409)
+            code, _, _ = self.req('/api/iv/pack', {'job': JOBS[0]['id']}, headers={'Sec-Fetch-Site': 'cross-site'})
+            self.assertEqual(code, 403)
+            pack.assert_not_called()
+            code, body, _ = self.req('/api/iv/pack', {'job': JOBS[0]['id']})
+            self.assertEqual(code, 200)
+            key = json.loads(body)['id']
+            self.assertEqual(pack.call_count, 1)
+            code, body, _ = self.req('/api/iv/pack/' + key)
+            self.assertEqual((code, body), (200, b'%PDF-pack'))
+            self.assertEqual(self.req('/api/iv/pack/not-a-key')[0], 404)
+            self.assertEqual(pack.call_count, 1)
+            # 另一個分頁又排同一場:前一個彈窗的連結照樣拿得到
+            pack.return_value = b'%PDF-again'
+            other = json.loads(self.req('/api/iv/pack', {'job': JOBS[0]['id']})[1])['id']
+            self.assertEqual(self.req('/api/iv/pack/' + key)[1], b'%PDF-pack')
+            self.assertEqual(self.req('/api/iv/pack/' + other)[1], b'%PDF-again')
+            # 只留最近幾份
+            for _ in range(bs.PACKS_KEPT):
+                self.req('/api/iv/pack', {'job': JOBS[0]['id']})
+            self.assertEqual(self.req('/api/iv/pack/' + key)[0], 404)
+            self.assertEqual(len(bs._PACKS), bs.PACKS_KEPT)
 
     def test_missing_live_board_paths_skip_source_sync(self):
         with mock.patch.object(bs, 'STATE', None), mock.patch.object(bd, 'LIVE', None), \

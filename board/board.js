@@ -905,7 +905,8 @@
   // 填表不會停在待確認的答案,擋的是「確認送出」;只算這張卡目前用到的(後台算的 ask:表單欄位加上平台履歷的專用答案,0 欄的卡也有)
   function ownAsk(j){return (nextOf(j.id).ask||[]).length;}
   function apShotHTML(x,id){
-    if(x[0]==='live')return '<a class="ap-shot" data-apshot="1" href="/api/live?u='+encodeURIComponent(id)+'" target="_blank" rel="noopener">'+esc(x[2])+'</a>';
+    // 截圖要用 agent 的瀏覽器,伺服器只收 POST:是按鈕不是連結(連結另開分頁送的是 GET)
+    if(x[0]==='live')return '<button class="ap-shot" type="button" data-livego="'+escA(id)+'">'+esc(x[2])+'</button>';
     if(x[0]==='proof')return '<figure class="ap-proof"><a href="/api/evidence?u='+encodeURIComponent(id)+'&amp;f='+encodeURIComponent(x[1])+'" target="_blank" rel="noopener"><img alt="" src="/api/evidence?u='+encodeURIComponent(id)+'&amp;f='+encodeURIComponent(x[1])+'"></a><figcaption>'+esc(x[2])+'</figcaption></figure>';
     return evLink(id,x[1],x[2]);}
   var NO_VIEW={line:[['idle','還沒拿到這張的下一步,等一下會自己更新']],buttons:[],shots:[],fill:{kind:'todo'}};
@@ -3966,8 +3967,10 @@
     // 衝突之後設成 null 想逼它重拿,結果反而跳過:那張卡的伺服器版本永遠拿不回來,
     // 他之後每改一次都再被擋一次、改的東西再被丟一次,直到重整。
     // 哪一包拿到了才記哪一包的版本;沒拿到(或還沒輪到)的那包版本不動,下一輪只重拿它,不連拿到的一起重抓
-    // back:他剛切回這個分頁(可能剛在別的程式改完母稿),請伺服器順便比對原稿、變了就在背景先建材料
-    syncPromise=fetch(back?'/api/rev?sync=1':'/api/rev').then(function(r){return r.json();}).then(function(v){
+    // back:剛打開或剛切回這個分頁(可能剛在別的程式改完母稿),先請伺服器比對原稿、變了就在背景先建材料。
+    // 比對會動手建,所以是 POST;GET 一律只讀(別的網站一個連結就能讓你送出 GET)
+    syncPromise=(back?fetch('/api/source-sync',{method:'POST'}).catch(function(){}):Promise.resolve())
+      .then(function(){return fetch('/api/rev');}).then(function(r){return r.json();}).then(function(v){
       if(v&&v.server_version){
         if(SERVER_VERSION&&SERVER_VERSION!==v.server_version)SERVER_RELOAD_PENDING=true;
         SERVER_VERSION=v.server_version;
@@ -4027,7 +4030,7 @@
         var done=rs.filter(function(x){return x.ok;}).map(function(x){return x.url;});
         var ready=a.stage==='submit'?[]:jobs.filter(function(j){return done.indexOf(j.id)>=0&&!!(nextOf(j.id).view||{}).review;});
         if(ready.length)snack(AGENT+' 填好了 '+ready.length+' 張,等你看過再確認送出',null,
-          {label:'看頁面',fn:function(){openShot(liveHref(ready[0].id),ready[0].id);}});
+          {label:'看頁面',fn:function(){openShot(ready[0].id);}});
         else snack(a.stage==='submit'?('送出 '+ok+'/'+rs.length+' 張成功'+(ok?',已搬到「已投出」':'')):
           (AGENT+' 填好 '+ok+'/'+rs.length+' 張,看過沒問題就按卡上的「確認送出」'),null,{label:'去看',fn:function(){switchTab(a.stage==='submit'&&ok?'sent':'ship');}});}
       else if(a.phase==='failed'||a.phase==='died')snack(AGENT+' 沒跑完,詳情在「可以投了」最上面');}
@@ -4049,7 +4052,7 @@
   document.addEventListener('visibilitychange',function(){if(!document.hidden)syncFromServer(true);});
   window.addEventListener('focus',function(){syncFromServer(true);});
   document.addEventListener('focusout',function(){setTimeout(maybeReloadForServerVersion,0);});   // 換版等他打完字:離開輸入框就重新整理
-  syncFromServer();
+  syncFromServer(true);   // 打開看板也是一個同步點(以前掛在 GET /)
 
   var buildGen=null, watching=false;
   function watchBuild(){
@@ -4659,29 +4662,22 @@
     if(back){custDiffShow('',back.getAttribute('data-cust-diff-back'));return;}
   });
   // 卡住的頁面由明確點選交給使用者;其他狀態在看板看程式直接截的圖。
-  document.addEventListener('click',function(e){
-    var sh=e.target.closest&&e.target.closest('a[data-apshot]'); if(!sh||e.metaKey||e.ctrlKey)return;
-    e.preventDefault();
-    var art=sh.closest('article[data-fid]'), href=sh.getAttribute('href');
-    if(/\/api\/live\?/.test(href)){var u=new URL(href,location.href).searchParams.get('u');openLive(u);}
-    else openShot(href,art&&art.getAttribute('data-fid'));
-  });
   // 「👀 看現在的頁面」:卡上、「這一頁要你處理的」那一行、填好時的通知都叫這一支,不用他去找卡
-  function liveHref(jid){return '/api/live?u='+encodeURIComponent(jid);}
   function openLive(id){
     fetch('/api/live',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({u:id})})
       .then(function(r){return r.json();}).then(function(d){if(!d.ok){snack(d.msg||'接不上頁面');return;}
-        if(d.handoff)snack(d.msg); else openShot(liveHref(id),id);})
+        if(d.handoff)snack(d.msg); else openShot(id);})
       .catch(function(){snack('接不上頁面,再試一次');});
   }
-  function openShot(href,jid){
+  // 截 agent 開著的那一頁:用 agent 的瀏覽器、接不回來會把卡改成要重填,伺服器只收 POST
+  function shotOf(jid){return fetch('/api/live/shot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({u:jid})});}
+  function openShot(jid){
     var j=jid&&jobOf(jid);
     modal('<div class="rzm-box ap-shotbox"><button class="rzm-x" type="button">'+ic('x')+' 關閉</button>'+
       '<p class="ap-shotttl">'+esc(j?cardName(j):'')+'</p><p class="ap-shotmsg" id="ap-shotmsg">'+ic('hourglass')+' 正在截 '+esc(AGENT)+' 開著的那一頁…</p></div>','');
-    var live=/\/api\/live\?/.test(href), sh={getAttribute:function(){return href;}};
     var every=4;
-    fetch(href).then(function(r){
-      if(r.status===404&&live)throw new Error('gone');
+    shotOf(jid).then(function(r){
+      if(r.status===404)throw new Error('gone');
       if(!r.ok)return r.text().then(function(t){throw new Error(t||('http '+r.status));});
       every=+(r.headers.get('X-Refresh')||4);
       return r.blob();
@@ -4691,10 +4687,10 @@
       // 「現在的頁面」開著就每幾秒重截一次:agent 還在填時看得到它填到哪(關掉彈窗就停)
       // 重截失敗時舊圖留著,但要標是幾點的畫面、之後截不到(以前舊圖一直當成「現在的頁面」);
       // 頁面不在了、或連續三次截不到就不再重截(以前每幾秒一直叫伺服器截)。再截到就拿掉標示
-      if(live&&every>0)(function(){var fails=0, at=new Date(), note=null;
+      if(every>0)(function(){var fails=0, at=new Date(), note=null;
         var hm=function(d){return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);};
         (function again(){setTimeout(function(){if(!img.isConnected)return;
-          fetch(sh.getAttribute('href')).then(function(r){
+          shotOf(jid).then(function(r){
             if(r.ok)return r.blob();
             return r.text().then(function(t){throw {gone:r.status===404,msg:t};});})
           .then(function(b2){if(!img.isConnected)return; URL.revokeObjectURL(img.src); img.src=URL.createObjectURL(b2);
@@ -5217,7 +5213,7 @@
   })();
   // now:按了「現在檢查」,不等每小時那一次,當場去問
   function cfgUpdateFill(now){var row=$('cfg-update'); if(!row)return;
-    fetch('/api/update'+(now?'?now=1':'')).then(function(r){return r.json();}).then(function(u){
+    fetch(now?'/api/update/check':'/api/update',now?{method:'POST'}:undefined).then(function(r){return r.json();}).then(function(u){
       if(now&&window.__updFill)window.__updFill();
       var cur=u.current||'讀不到', t;
       if(u.latest===null)t=esc(cur)+' · 查不到最新版(沒網路?)';
@@ -6089,18 +6085,24 @@
       ivRow('備註','<input class="cfg-in" id="ivr-note" value="'+escA(r.note)+'" placeholder="聯絡人、要帶什麼">')+
       '<div class="cfg-row end">'+(r.at?'<button class="cfg-b warn" type="button" data-ivrdel="1">'+ic('trash-2')+' 刪掉這一輪</button>':'')+
       '<button class="cfg-b go" type="button" data-ivrsave="1">'+ic('save')+' 儲存</button></div></div>','');}
-  // 面試備忘:先在這裡預覽排好的 PDF,滿意再下載(排版要幾秒,框裡先寫「排版中」)
-  function ivOpenSheet(job){var u='/api/iv/pack?job='+encodeURIComponent(job), nm=ivName(job);
+  // 面試備忘:先在這裡預覽排好的 PDF,滿意再下載。排版要幾秒(會寫進資料夾、開瀏覽器,所以是 POST),排好才給看、給下載
+  function ivOpenSheet(job){var nm=ivName(job);
     // 手機的瀏覽器不能把 PDF 嵌在框裡看(只剩一片灰),直接給大按鈕,用手機自己的 PDF 檢視器開
     var phone=window.matchMedia&&window.matchMedia('(max-width:800px),(pointer:coarse)').matches;
-    var dl='<a class="cfg-b go" href="'+escA(u)+'" download="'+escA(nm)+'-面試資料.pdf">'+ic('download')+' 下載 PDF</a>'+
-      '<a class="cfg-b'+(phone?' go':'')+'" href="'+escA(u)+'" target="_blank" rel="noopener">↗ 開啟 PDF</a>';
     modal('<div class="rzm-box iv-edit" style="width:min(1080px,96vw);max-width:none"><button class="rzm-x" type="button">'+ic('x')+' 關閉</button>'+
       '<h3>「'+esc(nm)+'」的面試資料</h3><p class="iv-sharenote">依序:自己的履歷、平台履歷、附件、面試備忘。</p>'+
-      (phone?'<p class="iv-empty">排版要幾秒鐘,按「開啟 PDF」,用手機自己的 PDF 檢視器看。</p><div class="cfg-row">'+dl+'</div>'
-        :'<div class="cfg-row">'+dl+'<span class="iv-empty" id="ivsheet-wait">排版中,幾秒鐘…</span></div>'+
-          '<iframe onload="var w=document.getElementById(\'ivsheet-wait\');w&&w.remove()" src="'+escA(u)+'#toolbar=0&navpanes=0&view=FitH" title="面試資料預覽" class="iv-sheet-frame"></iframe>')+
-      '</div>','');}
+      '<div id="ivsheet-body"><p class="iv-empty">排版中,幾秒鐘…</p></div></div>','');
+    var box=document.getElementById('ivsheet-body');
+    fetch('/api/iv/pack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job:job})})
+      .then(function(r){return r.json().catch(function(){return {};}).then(function(d){
+        if(!r.ok||!d.id)throw new Error(d.msg||('伺服器回應 '+r.status));return d.id;});})
+      .then(function(id){if(!box.isConnected)return;
+        var u='/api/iv/pack/'+encodeURIComponent(id);
+        var dl='<a class="cfg-b go" href="'+escA(u)+'" download="'+escA(nm)+'-面試資料.pdf">'+ic('download')+' 下載 PDF</a>'+
+          '<a class="cfg-b'+(phone?' go':'')+'" href="'+escA(u)+'" target="_blank" rel="noopener">↗ 開啟 PDF</a>';
+        box.innerHTML=phone?'<p class="iv-empty">按「開啟 PDF」,用手機自己的 PDF 檢視器看。</p><div class="cfg-row">'+dl+'</div>'
+          :'<div class="cfg-row">'+dl+'</div><iframe src="'+escA(u)+'#toolbar=0&navpanes=0&view=FitH" title="面試資料預覽" class="iv-sheet-frame"></iframe>';})
+      .catch(function(e){if(box.isConnected)box.innerHTML='<p class="iv-empty iv-sheet-err">'+esc(e.message)+'</p>';});}
   document.addEventListener('click',function(e){
     // 點題目那一行的狀態:跳出四站讓他直接改(不用開編輯框)
     var sg=e.target.closest&&e.target.closest('[data-ivstage]');

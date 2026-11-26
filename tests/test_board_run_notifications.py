@@ -25,7 +25,6 @@ var syncPromise=Promise.resolve(false),nextStale=false,SYNC_WAIT_MS=15000;
 var notes=[],opened=[],tabs=[],releaseNext,completed;
 function nextOf(id){return NEXT[id]||{};}
 function snack(msg,undo,next){notes.push({msg,next});}
-function liveHref(id){return '/api/live?u='+id;}
 function openShot(...args){opened.push(args);}function switchTab(id){tabs.push(id);}
 function renderAll(){}function renderFillList(){}function refreshFindUI(){}function refreshApplyUI(){}
 function refreshPrepUI(){}function checkUiVersion(){}function refreshBar(){}
@@ -51,7 +50,7 @@ const poll=syncFromServer();await new Promise(setImmediate);
 assert.equal(typeof releaseNext,'function');assert.equal(notes.length,0,'NEXT 尚未回來不能先發完成入口');
 releaseNext({'job-test':{view:{review:true}}});await poll;
 assert.equal(notes.length,1);assert.equal(notes[0].next.label,'看頁面');
-notes[0].next.fn();assert.deepEqual(opened,[['/api/live?u=job-test','job-test']]);assert.deepEqual(tabs,[]);
+notes[0].next.fn();assert.deepEqual(opened,[['job-test']]);assert.deepEqual(tabs,[]);
 assert.equal(_runDone.apply,false);runDoneNote();runDoneNote();assert.equal(notes.length,1);
 ''')
 
@@ -189,5 +188,5 @@ completed={running:false,phase:'done',stage:'fill',results:[{url:'job-new',ok:tr
 const poll=syncFromServer();await new Promise(setImmediate);
 releaseNext({'job-old':{view:{review:true}},'job-new':{view:{review:true}}});await poll;
 assert.equal(notes.length,1);assert.match(notes[0].msg,/填好了 1 張/);assert.equal(notes[0].next.label,'看頁面');
-notes[0].next.fn();assert.deepEqual(opened,[['/api/live?u=job-new','job-new']],'看頁面要開這一輪填好的那張,不是之前就在等的舊卡');
+notes[0].next.fn();assert.deepEqual(opened,[['job-new']],'看頁面要開這一輪填好的那張,不是之前就在等的舊卡');
 ''')

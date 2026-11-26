@@ -52,11 +52,11 @@ def _write_note(custom, agent, path=None):
     os.replace(tmp, path)
 
 
-def ensure_note(path=None):
-    """偏好筆記沒有兩個區塊時補上空的區塊,已有的內容照留。"""
-    path = path or PREF
+def read_note(path=None):
+    """偏好筆記全文;沒有兩個區塊時,回傳的文字補上空的區塊,已有的內容照留。
+    只讀:看設定、組 prompt 預覽都會叫,不能順手改他的檔(GET 不做事)。要把檔補齊用 ensure_note。"""
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path or PREF, encoding='utf-8') as f:
             current = f.read()
     except OSError:
         current = ''
@@ -64,12 +64,25 @@ def ensure_note(path=None):
     agent = _note_section(current, NOTE_AGENT)
     if custom is not None and agent is not None:
         return current
-    _write_note(custom or '', agent or '', path)
     return _render_note(custom or '', agent or '')
 
 
+def ensure_note(path=None):
+    """偏好筆記沒有兩個區塊時把檔案補上空的區塊(真的要派 agent 改筆記之前),已有的內容照留。"""
+    text = read_note(path)
+    try:
+        with open(path or PREF, encoding='utf-8') as f:
+            complete = f.read() == text            # 兩個區塊都在時 read_note 原樣回傳
+    except OSError:
+        complete = False
+    if not complete:
+        _write_note(_note_section(text, NOTE_CUSTOM) or '', _note_section(text, NOTE_AGENT) or '', path)
+    return text
+
+
 def note_sections(path=None):
-    text = ensure_note(path)
+    """偏好筆記的兩個區塊,沒有的回空字串。只讀(read_note)。"""
+    text = read_note(path)
     return (_note_section(text, NOTE_CUSTOM) or '', _note_section(text, NOTE_AGENT) or '')
 
 
