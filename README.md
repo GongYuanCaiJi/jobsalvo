@@ -44,8 +44,6 @@
 
 降低風險:用另一個 macOS 使用者帳號跑 jobsalvo,只在那個帳號放這套流程需要的資料和登入狀態,不要用存有私人檔案和其他重要登入狀態的日常帳號。
 
-104、LinkedIn 禁止自動化操作;Cake 禁止自動化擷取或監看平台資料;MyGreenhouse 禁止自動化存取 MyGreenhouse 本身(不一定包括各公司的 Greenhouse 申請頁);Google 禁止違反 robots.txt 等機器可讀指示的自動化存取。使用可能違反條款,帳號有被停權的風險,請自行衡量。
-
 ## 需要什麼
 
 - macOS、git(沒有的話跑 `xcode-select --install`)。
@@ -138,14 +136,10 @@ ship/              要寄的檔案:<卡名>-<網址 sha1 前 12 碼>/
   輸出要通過 PDF 與頁數檢查,等你看過收下才替換要寄的檔案;退回重寫或檢查中不能送出。直接上傳自己的 PDF 算已收下。
 - 面試題庫的正本在看板,資料夾的 `interview-bank.md` 是單向匯出。agent 寫題目、出處、面試時間一律用 `tools/iv.py`,格式與規則見 [docs/interview-bank.md](docs/interview-bank.md)。
 
-## 改了東西之後
+## 開發
 
 ```bash
-uv run python tools/reconcile.py      # 冪等:換上新的看板外殼、整理要寄的檔案、驗收、清過期夾
 uv run python -m unittest discover -s tests
-uv run python tools/board_check.py    # 開發用:在示範看板上實際點一遍;改介面時先跑 --fast,它不跑無障礙、步數、第一屏,要另跑 --only 無障礙、--only 步數、--only 第一屏
-pre-commit install                    # commit 前的檢查(.pre-commit-config.yaml,pre-commit 要另外裝);私人字串清單放 .git/info/private-words
 ```
 
-完整測試和看板檢查由 CI 在 PR 上跑。動到設定、要寄的檔案、找缺與準備的 PR,合併前跑一次 `uv run python tools/realdata_check.py`(只動真實資料的副本)。
 每支程式最上面的說明就是它的規格;要改規則,改程式,不要只改文件。
